@@ -36,7 +36,7 @@ def handler(script: str, read_only: bool = False) -> dict:
     try:
         # Python.Run executes the file but does not call run(). Its return text embeds the console
         # ACCUMULATED since the last run, so the sentinel print marks where this run's output starts.
-        script = f'print("{_RUN_SENTINEL}")\n' + script + "\nrun(None)"
+        script = _UNJAM_PRELUDE + f'print("{_RUN_SENTINEL}")\n' + script + "\nrun(None)"
 
         with tempfile.NamedTemporaryFile(mode='w', prefix='fe_mcp_script', suffix='.py',
                                          delete=False, encoding='utf-8') as f:
@@ -103,6 +103,20 @@ _CONSOLE_NOISE = re.compile(r"^MCP calling tool: .*$", re.MULTILINE)
 _TB_MARKER = "Traceback (most recent call last):"
 # Printed as the script's FIRST statement; console text before it accumulated during EARLIER calls.
 _RUN_SENTINEL = "<<FE-SCRIPT-OUTPUT>>"
+# Every MCP.Execute call wraps the interpreter's sys.stdout in a sanitizing shim it never removes,
+# so the shims NEST one per read_only call and the innermost drops every print once 1 MiB has passed
+# through it in its lifetime (measured: 15 deep, the bottom jammed). The prelude un-jams the outer.
+_UNJAM_PRELUDE = (
+    "import sys as _fe_sys\n"
+    "_fe_out = _fe_sys.stdout\n"
+    "_fe_bottom = _fe_out\n"
+    "while type(_fe_bottom).__name__ == '_NsSanitizedWriter':\n"
+    "    _fe_bottom = _fe_bottom._original\n"
+    "if _fe_out is not _fe_bottom:\n"
+    "    _fe_out._truncated = False\n"
+    "    _fe_out._written = 0\n"
+    "    _fe_out._original = _fe_bottom\n"
+)
 # What executeTextCommand reports for a text command this Fusion build does not carry.
 _NO_SUCH_COMMAND = "There is no command MCP.Execute"
 _NO_READ_ONLY_CHANNEL = (
@@ -200,8 +214,7 @@ def _error_result(text: str) -> dict:
 
 TOOL_DESCRIPTION = (
     "Execute Fusion API Python in the live Fusion session; "
-    "prefer a typed tool when one exists (sys_find_tool) - this channel has been measured dying "
-    "mid-session while the typed tools kept working.\n\n"
+    "prefer a typed tool when one exists (sys_find_tool).\n\n"
     "REQUIREMENTS:\n"
     "- MUST define `def run(context):`.\n"
     "- DO NOT show modal UI - the agent cannot dismiss it.\n"

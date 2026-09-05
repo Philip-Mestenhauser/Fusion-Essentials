@@ -18,7 +18,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import FakeOperation, _NamedCollection, load_tool
+from conftest import (FakeCAMParameter, FakeCAMParameters, FakeOperation, FakeTool,
+                      _NamedCollection, load_tool)
 
 ct = load_tool("cam_edit_tools")
 cp = load_tool("_cam_presets")          # the preset helpers cam_edit_tools' preset paths run through
@@ -27,38 +28,32 @@ cc = load_tool("_cam_common")           # the shared expression codec _quote del
 
 # ── fakes ────────────────────────────────────────────────────────────────────
 
-class _Val:
-    def __init__(self, v):
-        self.value = v
+def _val(v):
+    """A CAMParameter's `value` - whose own .value is the payload, the second hop a value read makes."""
+    return SimpleNamespace(value=v)
 
 
-class _Param:
-    """expression is a property so setting it to a quoted-string literal ("'text'") updates .value to
-    the unquoted text - mirroring live ModelParameter behavior for a string parameter set that way
+class _Param(FakeCAMParameter):
+    """Setting the expression to a quoted-string literal ("'text'") updates .value to the unquoted
+    text - mirroring live ModelParameter behavior for a string parameter set that way
     (tool_productId/tool_vendor). A plain numeric/unquoted expression leaves .value untouched, same as
     every other existing test in this file expects."""
     def __init__(self, name, expr):
-        self.name = name
-        self._expr = expr
-        self.value = _Val(expr)
+        super().__init__(name, expr, value=expr)
 
-    @property
-    def expression(self):
-        return self._expr
-
-    @expression.setter
+    @FakeCAMParameter.expression.setter
     def expression(self, v):
-        self._expr = v
+        FakeCAMParameter.expression.fset(self, v)
         if isinstance(v, str) and len(v) >= 2 and v[0] == v[-1] == "'":
-            self.value = _Val(v[1:-1])
+            self.value = _val(v[1:-1])
         elif isinstance(v, str) and v.lstrip("-").isdigit():
             # a bare integer expression evaluates into the value (mirrors a ModelParameter set that
             # way - e.g. tool_number, which cam_edit_tools sets via .expression and reads via .value)
-            self.value = _Val(int(v))
+            self.value = _val(int(v))
         elif isinstance(v, str):
             evaluated = _evaluate(v)
             if evaluated is not None:
-                self.value = _Val(evaluated)
+                self.value = _val(evaluated)
 
 
 _IN_PER_MIN = re.compile(r"^([+-]?[\d.]+)\s*in/min$")
@@ -76,16 +71,26 @@ def _evaluate(expr):
     return float(m.group(1)) * 25.4 if m else None
 
 
-class _Params:
-    def __init__(self, d):
-        self._d = {k: _Param(k, v) for k, v in d.items()}
-    def itemByName(self, name):
-        return self._d.get(name)
-    @property
-    def count(self):
-        return len(self._d)
-    def item(self, i):
-        return list(self._d.values())[i]
+def _Params(d):
+    """A tool's or preset's parameters from {name: expression}."""
+    return FakeCAMParameters([_Param(k, v) for k, v in d.items()])
+
+
+def _replace(parameters, param):
+    """Swap `param` in for the one of that name - how a test gives one parameter a scenario shape."""
+    items = parameters._coll._items
+    for i, existing in enumerate(items):
+        if existing.name == param.name:
+            items[i] = param
+            return param
+    items.append(param)
+    return param
+
+
+def _drop(parameters, name):
+    """Take one parameter out entirely - the parameter a tool does not carry at all."""
+    items = parameters._coll._items
+    items[:] = [p for p in items if p.name != name]
 
 
 # A preset's parameter set is the owning tool's cutting data, and that set varies by tool CLASS: a
@@ -101,21 +106,18 @@ class _Preset:
         self.parameters = _Params(dict(params if params is not None else _MILL_CUTTING_DATA))
 
 
-class _Presets:
+class _Presets(_NamedCollection):
     """ToolPresets: add() appends a preset carrying the owning tool's cutting-data parameters,
     remove(index) deletes by index and reports whether it deleted."""
     def __init__(self, names=(), owner=None):
         self._owner_params = dict(owner.preset_params) if owner is not None else dict(_MILL_CUTTING_DATA)
-        self._p = [_Preset(n, self._owner_params) for n in names]
-    @property
-    def count(self):
-        return len(self._p)
-    def item(self, i):
-        return self._p[i]
+        super().__init__([_Preset(n, self._owner_params) for n in names])
     def add(self):
-        p = _Preset("", self._owner_params); self._p.append(p); return p
+        p = _Preset("", self._owner_params)
+        self._items.append(p)
+        return p
     def remove(self, index):
-        del self._p[index]
+        del self._items[index]
         return True
 
 
@@ -123,33 +125,34 @@ def _preset_names(tool):
     return [tool.presets.item(i).name for i in range(tool.presets.count)]
 
 
-class _Tool:
+class _Tool(FakeTool):
+    """A library tool: the parameters every read here goes through (tool_description carries the
+    description), the presets carrying this tool's own cutting data, and toJson - the text a copy is
+    rebuilt from. `desc` is this file's shorthand for the description it was built under."""
+
     def __init__(self, desc, preset_params=None, **params):
         params.setdefault("tool_description", desc)
         params.setdefault("tool_diameter", params.get("tool_diameter", "1.0"))
         params.setdefault("tool_productId", "")
         params.setdefault("tool_vendor", "")
         params.setdefault("tool_number", params.get("tool_number", "0"))
-        self.parameters = _Params(params)
+        super().__init__(description=desc, parameters=_Params(params))
         # the cutting data this tool's presets carry (mill unless the test says otherwise)
         self.preset_params = dict(preset_params if preset_params is not None else _MILL_CUTTING_DATA)
         self.presets = _Presets(owner=self)
-        self.desc = desc
         self.holder = None      # set when a holder JSON is assigned (build via json)
+
+    @property
+    def desc(self):
+        return self.description
+
     def toJson(self):
         return json.dumps({"description": self.desc, "type": "x",
                            "holder": self.holder or {"description": "stock holder", "segments": []}})
 
 
-class _SrcLib:
+class _SrcLib(_NamedCollection):
     """A source library to copy seed tools from (referenced by url+index)."""
-    def __init__(self, tools):
-        self._t = tools
-    @property
-    def count(self):
-        return len(self._t)
-    def item(self, i):
-        return self._t[i]
 
 
 def _refetched(tool):
@@ -458,20 +461,17 @@ class TestAddRich:
         import pytest
 
         class _LockedParam(_Param):
-            @property
-            def expression(self):
-                return self._expr
-            @expression.setter
+            """A parameter whose expression setter REFUSES the write outright."""
+
+            @FakeCAMParameter.expression.setter
             def expression(self, v):
                 raise AttributeError("expression is locked")
-            def __init__(self, name, expr):
-                self.name = name
-                self._expr = expr
-                self.value = _Val(expr)
 
-        class _LockedParams(_Params):
+        class _LockedParams(FakeCAMParameters):
+            """The diameter reads as a locked parameter; every other name reads normally."""
+
             def itemByName(self, name):
-                p = self._d.get(name)
+                p = super().itemByName(name)
                 if p is not None and name == "tool_diameter":
                     return _LockedParam(p.name, p.expression)
                 return p
@@ -479,7 +479,8 @@ class TestAddRich:
         class _LockedTool(_Tool):
             def __init__(self, desc, **params):
                 super().__init__(desc, **params)
-                self.parameters = _LockedParams({"tool_diameter": "1.0", "tool_description": desc})
+                self.parameters = _LockedParams(
+                    [_Param("tool_diameter", "1.0"), _Param("tool_description", desc)])
 
         _install(monkeypatch)
         monkeypatch.setattr(ct, "_tool_from_json", lambda js: _LockedTool("sample-drill"))
@@ -553,14 +554,14 @@ class TestAddProductVendor:
         class _StaleParam(_Param):
             @property
             def expression(self):
-                return self._expr
+                return self._expression
             @expression.setter
             def expression(self, v):
-                self._expr = v          # accepted - but .value deliberately stays put
+                self._expression = v          # accepted - but .value deliberately stays put
 
         def _from_json(js):
             t = _Tool(json.loads(js).get("description", "built"))
-            t.parameters._d["tool_productId"] = _StaleParam("tool_productId", "")
+            _replace(t.parameters, _StaleParam("tool_productId", ""))
             return t
 
         monkeypatch.setattr(ct, "_tool_from_json", _from_json)
@@ -661,7 +662,7 @@ class TestAddToolNumbers:
 
         def _from_json(js):
             t = _Tool(json.loads(js).get("description", "built"))
-            del t.parameters._d["tool_number"]
+            _drop(t.parameters, "tool_number")
             return t
 
         monkeypatch.setattr(ct, "_tool_from_json", _from_json)
@@ -731,13 +732,13 @@ class TestEdit:
         class _Boom(_Param):
             @property
             def expression(self):
-                return self._expr
+                return self._expression
             @expression.setter
             def expression(self, v):
                 raise RuntimeError("locked by Fusion")
 
         tool = _Tool("EM", tool_numberOfFlutes="3")
-        tool.parameters._d["tool_coolant"] = _Boom("tool_coolant", "flood")
+        _replace(tool.parameters, _Boom("tool_coolant", "flood"))
         tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
         res = ct.handler(action="edit", scope="document", tool=0,
                          parameters={"tool_numberOfFlutes": "4", "tool_coolant": "mist"})
@@ -750,13 +751,13 @@ class TestEdit:
         class _Boom(_Param):
             @property
             def expression(self):
-                return self._expr
+                return self._expression
             @expression.setter
             def expression(self, v):
                 raise RuntimeError("locked")
 
         tool = _Tool("EM")
-        tool.parameters._d["tool_coolant"] = _Boom("tool_coolant", "flood")
+        _replace(tool.parameters, _Boom("tool_coolant", "flood"))
         tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
         res = ct.handler(action="edit", scope="document", tool=0,
                          parameters={"tool_coolant": "mist"})
@@ -770,13 +771,13 @@ class TestEdit:
         class _Norm(_Param):
             @property
             def expression(self):
-                return self._expr
+                return self._expression
             @expression.setter
             def expression(self, v):
-                self._expr = "4.000 mm"      # platform normalizes the stored expression
+                self._expression = "4.000 mm"      # platform normalizes the stored expression
 
         tool = _Tool("EM")
-        tool.parameters._d["tool_diameter"] = _Norm("tool_diameter", "1.0")
+        _replace(tool.parameters, _Norm("tool_diameter", "1.0"))
         _install(monkeypatch, _Target(tools=[tool], is_document=True))
         out = _payload(ct.handler(action="edit", scope="document", tool=0,
                                   parameters={"tool_diameter": "4 mm"}))
@@ -831,7 +832,7 @@ class TestEdit:
         # existing echo check cannot see it - only .error can (measured live: tool_diameter set to
         # 'NoSuchParamXyz * 2' returned edited:1 while Fusion held 0.0 with a parameter error).
         tool = _Tool("EM")
-        tool.parameters._d["tool_diameter"] = _BrokenParam("tool_diameter", "8.")
+        _replace(tool.parameters, _BrokenParam("tool_diameter", "8."))
         tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
         res = ct.handler(action="edit", scope="document", tool=0,
                          parameters={"tool_diameter": "NoSuchParamXyz * 2"})
@@ -845,7 +846,7 @@ class TestEdit:
         # partial application is the trap: the good parameter landed before the bad one was judged,
         # so the refusal has to restore every parameter this call touched.
         tool = _Tool("EM", tool_numberOfFlutes="3")
-        tool.parameters._d["tool_diameter"] = _BrokenParam("tool_diameter", "8.")
+        _replace(tool.parameters, _BrokenParam("tool_diameter", "8."))
         _install(monkeypatch, _Target(tools=[tool], is_document=True))
         res = ct.handler(action="edit", scope="document", tool=0,
                          parameters={"tool_numberOfFlutes": "4", "tool_diameter": "Nope * 2"})
@@ -857,13 +858,13 @@ class TestEdit:
         class _Sticky(_BrokenParam):
             @property
             def expression(self):
-                return self._expr
+                return self._expression
             @expression.setter
             def expression(self, v):
-                self._expr = "NoSuchParamXyz * 2"      # refuses to go back to its prior expression
+                self._expression = "NoSuchParamXyz * 2"      # refuses to go back to its prior expression
 
         tool = _Tool("EM")
-        tool.parameters._d["tool_diameter"] = _Sticky("tool_diameter", "8.")
+        _replace(tool.parameters, _Sticky("tool_diameter", "8."))
         _install(monkeypatch, _Target(tools=[tool], is_document=True))
         res = ct.handler(action="edit", scope="document", tool=0,
                          parameters={"tool_diameter": "NoSuchParamXyz * 2"})
@@ -873,11 +874,14 @@ class TestEdit:
     def test_a_parameter_warning_alone_never_blocks_the_edit(self, monkeypatch):
         # .warning fires on VALID expressions too, so it is carried on the row, never a refusal.
         class _Warned(_Param):
-            error = ""
-            warning = "stock is less than the model width"
+            """A parameter whose .warning fires on a valid expression."""
+
+            def __init__(self, name, expr):
+                super().__init__(name, expr)
+                self.warning = "stock is less than the model width"
 
         tool = _Tool("EM")
-        tool.parameters._d["tool_diameter"] = _Warned("tool_diameter", "8.")
+        _replace(tool.parameters, _Warned("tool_diameter", "8."))
         _install(monkeypatch, _Target(tools=[tool], is_document=True))
         out = _payload(ct.handler(action="edit", scope="document", tool=0,
                                   parameters={"tool_diameter": "10 mm"}))
@@ -970,7 +974,7 @@ class TestTargetToolIndexAlignment:
             def item(self, i):
                 if i == 1:
                     raise RuntimeError("tool read failed")
-                return self._t[i]
+                return self._items[i]
 
         return _OneToolUnreadable([_Tool("First"), _Tool("Ghost"),
                                    _Tool("Third", tool_numberOfFlutes="5")])
@@ -1002,16 +1006,16 @@ class _MutableLib(_SrcLib):
 
     def item(self, i):
         self.walks += 1
-        return self._t[i]
+        return self._items[i]
 
     def add(self, t):
-        self._t.append(t)
+        self._items.append(t)
 
     def remove(self, i):
-        del self._t[i]
+        del self._items[i]
 
     def replace(self, i, t):
-        self._t[i] = t
+        self._items[i] = t
 
 
 # ── the REAL _Target's tool list: held, and dropped by anything that changes it ──
@@ -1196,16 +1200,9 @@ class TestCreateLibrary:
 # ── a constant-surface-speed turning preset has no 'tool_spindleSpeed'); the resolver falls through ─
 # ── the candidates, and names what exists when none match instead of asserting one class's name. ────
 
-class _PParams:
-    def __init__(self, names):
-        self._names = list(names)
-    def itemByName(self, name):
-        return _Param(name, "0") if name in self._names else None
-    @property
-    def count(self):
-        return len(self._names)
-    def item(self, i):
-        return _Param(self._names[i], "0")
+def _PParams(names):
+    """A preset's parameters, `names` each holding "0"."""
+    return _Params({n: "0" for n in names})
 
 
 def _preset_with(names):
@@ -1590,7 +1587,7 @@ class TestAddPreset:
 
         class _UnnamedPresets(_Presets):
             def add(self):
-                p = _Unnamed(); self._p.append(p); return p
+                p = _Unnamed(); self._items.append(p); return p
 
         tool = _tool_with_presets("EM")
         tool.presets = _UnnamedPresets()
@@ -1608,7 +1605,7 @@ class TestAddPreset:
 
         class _BarePresets(_Presets):
             def add(self):
-                p = _Bare(); self._p.append(p); return p
+                p = _Bare(); self._items.append(p); return p
 
         tool = _tool_with_presets("EM")
         tool.presets = _BarePresets()
@@ -1687,11 +1684,11 @@ class _BrokenParam(_Param):
 
     @property
     def expression(self):
-        return self._expr
+        return self._expression
 
     @expression.setter
     def expression(self, v):
-        self._expr = v
+        self._expression = v
 
 
 class _StuckParam(_Param):
@@ -1701,12 +1698,12 @@ class _StuckParam(_Param):
 
     @property
     def expression(self):
-        return self._expr
+        return self._expression
 
     @expression.setter
     def expression(self, v):
-        self._expr = v
-        self.value = _Val(0.0)
+        self._expression = v
+        self.value = _val(0.0)
 
 
 def _preset_param_tool(cls, pname):
@@ -1716,7 +1713,7 @@ def _preset_param_tool(cls, pname):
     class _Presets2(_Presets):
         def add(self):
             p = super().add()
-            p.parameters._d[pname] = cls(pname, "0")
+            _replace(p.parameters, cls(pname, "0"))
             return p
 
     tool.presets = _Presets2(owner=tool)
@@ -1899,7 +1896,7 @@ class TestRemovePreset:
             def item(self, i):
                 if i == 1:
                     raise RuntimeError("preset read failed")
-                return self._p[i]
+                return self._items[i]
 
         tool = _tool_with_presets("EM", ["Steel", "Ghost", "Brass"])
         tool.presets = _OneUnreadable(["Steel", "Ghost", "Brass"])
@@ -2042,12 +2039,12 @@ class _TextValued(_Param):
 
     @property
     def expression(self):
-        return self._expr
+        return self._expression
 
     @expression.setter
     def expression(self, v):
-        self._expr = v
-        self.value = _Val("n/a")
+        self._expression = v
+        self.value = _val("n/a")
 
 
 class _Unnameable(_Preset):
@@ -2101,8 +2098,8 @@ class TestRealTargetReadBacks:
 class TestRealTargetMutations:
     def test_add_remove_and_update_reach_the_library(self):
         lib = _SrcLib([_Tool("A"), _Tool("B")])
-        lib.add = lib._t.append
-        lib.remove = lambda i: lib._t.pop(i)
+        lib.add = lib._items.append
+        lib.remove = lambda i: lib._items.pop(i)
         updated = []
         tgt = ct._Target(lib, is_document=True, update_tool_fn=updated.append)
         tgt.add(_Tool("C"))
@@ -2439,7 +2436,7 @@ class TestHolderJson:
 class TestToolNumberAssignment:
     def test_a_tool_without_the_parameter_has_no_number(self):
         t = _Tool("EM")
-        del t.parameters._d["tool_number"]
+        _drop(t.parameters, "tool_number")
         assert ct._read_tool_number(t) is None
 
     def test_a_number_that_is_not_an_integer_reads_as_none(self):
@@ -2451,7 +2448,7 @@ class TestToolNumberAssignment:
 
         def _from_json(js):
             t = _Tool(json.loads(js).get("description", "built"))
-            t.parameters._d["tool_number"] = _WriteProtected("tool_number", "0")
+            _replace(t.parameters, _WriteProtected("tool_number", "0"))
             return t
 
         monkeypatch.setattr(ct, "_tool_from_json", _from_json)
@@ -2465,7 +2462,7 @@ class TestToolNumberAssignment:
 
         def _from_json(js):
             t = _Tool(json.loads(js).get("description", "built"))
-            t.parameters._d["tool_number"] = _StuckParam("tool_number", "0")
+            _replace(t.parameters, _StuckParam("tool_number", "0"))
             return t
 
         monkeypatch.setattr(ct, "_tool_from_json", _from_json)
@@ -2495,9 +2492,9 @@ class TestToolNumberAssignment:
 class TestReadShapes:
     def test_a_non_scalar_parameter_value_is_reported_as_text_never_dropped(self, monkeypatch):
         tool = _Tool("EM")
-        tool.parameters._d["tool_coolant"] = SimpleNamespace(
+        _replace(tool.parameters, SimpleNamespace(
             name="tool_coolant", expression="flood",
-            value=SimpleNamespace(value=("flood", "mist")))
+            value=SimpleNamespace(value=("flood", "mist"))))
         _install(monkeypatch, _Target(tools=[tool], is_document=True))
         out = _payload(ct.handler(action="parameters", scope="document", tool=0))
         row = next(r for r in out["parameters"] if r["name"] == "tool_coolant")
@@ -2547,8 +2544,8 @@ class TestPresetValuePlumbing:
     def test_a_preset_name_the_platform_refuses_rolls_back(self, monkeypatch):
         tool = _tool_with_presets("EM")
         presets = tool.presets
-        presets.add = lambda: (presets._p.append(_Unnameable("", tool.preset_params))
-                               or presets._p[-1])
+        presets.add = lambda: (presets._items.append(_Unnameable("", tool.preset_params))
+                               or presets._items[-1])
         tgt = _install(monkeypatch, _Target(tools=[tool], is_document=True))
         res = ct.handler(action="add_preset", scope="document", tool=0, preset={"name": "Alu"})
         assert res["isError"] is True
@@ -2595,7 +2592,7 @@ class TestBuildEntryGuards:
 
         def _from_json(js):
             t = _Tool(json.loads(js).get("description", "built"))
-            t.parameters._d["tool_productId"] = _WriteProtected("tool_productId", "")
+            _replace(t.parameters, _WriteProtected("tool_productId", ""))
             return t
 
         monkeypatch.setattr(ct, "_tool_from_json", _from_json)
@@ -2611,7 +2608,7 @@ class TestBuildEntryGuards:
 
         def _from_json(js):
             t = _Tool(json.loads(js).get("description", "built"))
-            t.parameters._d["tool_vendor"] = _BrokenParam("tool_vendor", "")
+            _replace(t.parameters, _BrokenParam("tool_vendor", ""))
             return t
 
         monkeypatch.setattr(ct, "_tool_from_json", _from_json)

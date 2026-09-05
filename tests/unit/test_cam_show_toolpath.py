@@ -12,51 +12,27 @@ conftest), so the fake ops flow through unchanged.
 
 import json
 
-from conftest import Camera, Viewport, load_tool, _NamedCollection
+from conftest import (Camera, FakeApplication, FakeFusionDocument, FakeProducts, Viewport,
+                      _NamedCollection, load_tool, make_cam)
 from conftest import FakeOperation as FakeOp, FakeSetup, FakeCAMFolder as CAMFolder
 
 st = load_tool("cam_show_toolpath")
 cc = load_tool("_cam_common")   # the shared get_cam seam st.get_cam is imported from
 
 
-# ── fakes mimicking adsk.cam ───────────────────────────────────────────────
-#
-# The CAM tree itself is conftest's shared FakeSetup/FakeCAMFolder/FakeOperation trio (the measured
-# allOperations flatten lives there once). Only the app/viewport plumbing get_cam and the fit-camera
-# path read stays local.
-
-class FakeCAM:
-    def __init__(self, setups):
-        self.setups = _NamedCollection(setups)
-
-
-class FakeProducts:
-    def __init__(self, cam):
-        self._cam = cam
-
-    def itemByProductType(self, _ptype):
-        return self._cam
-
-
-class FakeDoc:
-    def __init__(self, cam):
-        self.products = FakeProducts(cam)
-
-
-class FakeApp:
-    def __init__(self, cam):
-        self.activeDocument = FakeDoc(cam)
-        self.activeViewport = Viewport()
-
+# The CAM tree, the document/product plumbing get_cam reads through and the fit camera are all
+# conftest's shared fakes; only the bulb scenarios and the per-fetch wrapper below stay local.
 
 def _install(setups):
-    cam = FakeCAM(setups)
-    fake_app = FakeApp(cam)
+    cam = make_cam(*setups)
+    fake_app = FakeApplication(
+        active_document=FakeFusionDocument(products=FakeProducts(cam=cam)))
+    fake_app.activeViewport = Viewport()
     st.app = fake_app
     cc.app = fake_app        # get_cam (in _cam_common) reads its own module's app
-    # CAM.cast is a Mock on adsk.cam; make it return our fake CAM.
+    # CAM.cast is a Mock on adsk.cam; make it return this fake CAM.
     import adsk.cam
-    adsk.cam.CAM.cast = lambda x: x if isinstance(x, FakeCAM) else None
+    adsk.cam.CAM.cast = lambda x: x if x is cam else None
     return fake_app
 
 
@@ -156,7 +132,8 @@ class _IdlessRefetched(_Refetched):
 
 
 class _RefetchSetup:
-    """A setup whose .operations mints a fresh wrapper per fetch, as the live collection does."""
+    """A setup whose .operations mints a fresh wrapper per fetch, as the live collection does -
+    which no shared fake models (FakeSetup holds one object per operation)."""
     def __init__(self, name, cells, is_active=True, wrapper=_Refetched):
         self.name = name
         self._cells = list(cells)
@@ -417,26 +394,26 @@ class TestActivateOwningSetup:
         # a flag that did not answer has not said the setup stayed inactive: the two outcomes get
         # separate sentences, so 'still reads isActive=false' is never stated off a read that
         # nothing answered.
-        class _S:
+        class _S(FakeSetup):
             @property
             def isActive(self):
                 raise RuntimeError("isActive is unreadable")
 
-            def activate(self):
+            @isActive.setter
+            def isActive(self, value):
                 pass
 
-        monkeypatch.setattr(st, "find_setup", lambda cam, n: (_S(), [], None))
+        monkeypatch.setattr(st, "find_setup", lambda cam, n: (_S("SetupA"), [], None))
         activated, warn = st._activate_owning_setup(object(), "SetupA")
         assert activated is None
         assert "UNCONFIRMED" in warn and "isActive cannot be read" in warn
         assert "isActive=false" not in warn
 
     def test_an_activate_that_raises_warns_instead_of_crashing(self, monkeypatch):
-        class _S:
-            isActive = False
+        class _S(FakeSetup):
             def activate(self):
                 raise RuntimeError("workspace refused the switch")
-        monkeypatch.setattr(st, "find_setup", lambda cam, n: (_S(), [], None))
+        monkeypatch.setattr(st, "find_setup", lambda cam, n: (_S("SetupA"), [], None))
         activated, warn = st._activate_owning_setup(object(), "SetupA")
         assert activated is None
         assert "could not be activated" in warn and "workspace refused" in warn
@@ -452,7 +429,7 @@ class TestGuards:
         assert "Unknown action" in res["message"]
 
     def test_no_active_document(self):
-        st.app = type("A", (), {"activeDocument": None})()
+        st.app = FakeApplication(active_document=None)
         cc.app = st.app
         res = st.handler(action="list")
         assert res["isError"] is True
@@ -679,8 +656,8 @@ class TestShowFolder:
         assert f_op.isLightBulbOn is False
 
     def test_show_folder_matches_camfolder_child(self):
-        # show_folder resolves a CAMFolder NESTED in a setup (not just a setup name).
-        # The tool branches on type(child).__name__ == "CAMFolder", so name the fake that.
+        # show_folder resolves a CAMFolder NESTED in a setup (not just a setup name) - the shared
+        # walk classifies it by the .folders collection it came out of, not by its type name.
         f_op = FakeOp("FOp1")
         folder = CAMFolder("Drilling", [f_op])
         setup_op = FakeOp("S1")

@@ -7,37 +7,20 @@ this whole chain exists to prevent.
 """
 
 import json
-from types import SimpleNamespace
 
-from conftest import load_tool
+import pytest
+
+from conftest import FakeOperation, FakeSetup, load_tool, make_cam
 
 ct = load_tool("cam_delete_template")
 cs = load_tool("cam_save_template")
 
+_LOCAL = ct._location_enum("local")
+
+
 def _payload(result):
     assert result["isError"] is False, result
     return json.loads(result["content"][0]["text"])
-
-
-
-class _SaveSetup:
-    def __init__(self, name, op_names):
-        self.name = name
-        self.allOperations = [SimpleNamespace(name=n) for n in op_names]
-
-
-class _SaveCAM:
-    def __init__(self, setups):
-        s = list(setups)
-        self.setups = SimpleNamespace(count=len(s), item=lambda i: s[i])
-
-
-
-# this whole chain exists to prevent.
-
-import pytest
-
-_LOCAL = ct._location_enum("local")
 
 
 class _Tmpl:
@@ -339,7 +322,7 @@ class TestDeleteTemplateEffect:
                                                                                  tlib):
         # the sweep teardown's own round trip: save into the local library, then take it back out.
         lib = tlib()
-        cam = _SaveCAM([_SaveSetup("S", ["Face1"])])
+        cam = make_cam(FakeSetup("S", ops=[FakeOperation("Face1")]))
         monkeypatch.setattr(cs, "get_cam", lambda: (cam, None))
         import adsk.cam
         adsk.cam.Operation.cast = staticmethod(lambda x: x)

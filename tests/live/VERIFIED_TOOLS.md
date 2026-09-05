@@ -29,7 +29,7 @@ recomputes the hash and fails on any difference, so a green suite cannot ride on
 run that never saw the current code or a weakened predicate. Only a run with zero
 FAIL/blocked/pass* steps rewrites this file.
 
-Stamp: source aeee9f7a5eb500a31db3b0e72a27b77b873be82284d8799bb4f44124e989a25a | Fusion 2705.1.4 | verified 2026-09-04
+Stamp: source a8f663365dafc52d49454fdfe17f2512b17dede49054eee51de272ae30556e05 | Fusion 2705.1.4 | verified 2026-09-05
 
 154 covered / 0 called / 2 refusals-only / 31 skipped(reason) / 0 pending
 

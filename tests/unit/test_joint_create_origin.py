@@ -9,17 +9,18 @@ coordinate-anchor unit scaling, and the created-origin report (frame_axes,
 name override).
 """
 
-import json
 from types import SimpleNamespace
 
-from conftest import load_tool
+import adsk.core
+import adsk.fusion
+import pytest
+
+from conftest import (BRepBody, BRepEdge, BRepFace, Cylinder, FakeInfiniteLine3D, FakeMatrix3D,
+                      FakePoint, FakeVector3D, Line3D, MakeComp, MeshBody, Plane, Sketch,
+                      _NamedCollection, _Vertex, install, load_tool, make_bbox, make_design,
+                      make_occurrence, payload as _payload)
 
 jo = load_tool("joint_create_origin")
-
-
-def _payload(result):
-    assert result["isError"] is False, result
-    return json.loads(result["content"][0]["text"])
 
 
 # ── _vec: round to 6, None passthrough ─────────────────────────────────────
@@ -136,101 +137,76 @@ class TestGeometryFromArgsValidation:
 
 # ── anchor='geometry': BRep face/edge/vertex handle (geometry-as-values) ────────────────────────
 
-class _FakeFace:
-    def __init__(self, planar):
-        import adsk.core
-        st = adsk.core.SurfaceTypes
-        stype = st.PlaneSurfaceType if planar else st.CylinderSurfaceType
-        self.geometry = type("G", (), {"surfaceType": stype})()
+def _face(planar):
+    """A face on conftest's shared BRepFace fake - the shared surface fakes hold the measured
+    surfaceType intrinsically, so a face's kind is named once here."""
+    axis = FakeVector3D(0.0, 0.0, 1.0)
+    return BRepFace(Plane(axis) if planar else Cylinder(axis))
 
 
-class _FakeEdge:
-    pass
+@pytest.fixture
+def install_geom(monkeypatch):
+    """Point the adsk entity types at conftest's shared fakes and install a design resolving the
+    geometry handles; the returned recorder names which JointGeometry factory ran."""
+    def _wire(handle_map):
+        calls = {}
 
+        class JG:
+            @staticmethod
+            def createByPlanarFace(face, edge, kp):
+                calls["kind"] = "planar_face"; return ("g", "planar")
+            @staticmethod
+            def createByNonPlanarFace(face, kp):
+                calls["kind"] = "non_planar_face"; return ("g", "nonplanar")
+            @staticmethod
+            def createByCurve(edge, kp):
+                calls["kind"] = "curve"; return ("g", "curve")
+            @staticmethod
+            def createByPoint(v):
+                calls["kind"] = "point"; return ("g", "point")
 
-class _FakeVertex:
-    pass
-
-
-def _install_geom(handle_map):
-    """Wire adsk types + a design whose findEntityByToken resolves the geometry handles."""
-    import adsk.core, adsk.fusion
-    adsk.fusion.BRepFace = _FakeFace
-    adsk.fusion.BRepEdge = _FakeEdge
-    adsk.fusion.BRepVertex = _FakeVertex
-    adsk.fusion.ConstructionPoint = type("CP", (), {})
-    adsk.fusion.SketchPoint = type("SP", (), {})
-    # JointGeometry factory records which create* was used
-    calls = {}
-    class JG:
-        @staticmethod
-        def createByPlanarFace(face, edge, kp):
-            calls["kind"] = "planar_face"; return ("g", "planar")
-        @staticmethod
-        def createByNonPlanarFace(face, kp):
-            calls["kind"] = "non_planar_face"; return ("g", "nonplanar")
-        @staticmethod
-        def createByCurve(edge, kp):
-            calls["kind"] = "curve"; return ("g", "curve")
-        @staticmethod
-        def createByPoint(v):
-            calls["kind"] = "point"; return ("g", "point")
-    adsk.fusion.JointGeometry = JG
-    class _D:
-        def findEntityByToken(self, t):
-            e = handle_map.get(t)
-            return [e] if e is not None else []
-    jo._inputs._common.design = lambda: _D()
-    return calls
+        monkeypatch.setattr(adsk.fusion, "JointGeometry", JG)
+        monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace)
+        monkeypatch.setattr(adsk.fusion, "BRepEdge", BRepEdge)
+        monkeypatch.setattr(adsk.fusion, "BRepVertex", _Vertex)
+        monkeypatch.setattr(adsk.fusion, "ConstructionPoint", type("CP", (), {}))
+        monkeypatch.setattr(adsk.fusion, "SketchPoint", type("SP", (), {}))
+        install(jo, make_design(tokens=handle_map))
+        return calls
+    return _wire
 
 
 class TestGeometryAnchor:
-    def test_planar_face_uses_createByPlanarFace(self):
-        calls = _install_geom({"F": _FakeFace(planar=True)})
+    def test_planar_face_uses_createByPlanarFace(self, install_geom):
+        calls = install_geom({"F": _face(planar=True)})
         g, desc, err = _call(anchor="geometry", geometry_handle="F")
         assert err is None and g is not None
         assert calls["kind"] == "planar_face"
         assert "normal" in desc
 
-    def test_cylinder_face_uses_nonplanar(self):
-        calls = _install_geom({"C": _FakeFace(planar=False)})
+    def test_cylinder_face_uses_nonplanar(self, install_geom):
+        calls = install_geom({"C": _face(planar=False)})
         g, desc, err = _call(anchor="geometry", geometry_handle="C")
         assert err is None and calls["kind"] == "non_planar_face"
 
-    def test_edge_uses_createByCurve(self):
-        calls = _install_geom({"E": _FakeEdge()})
+    def test_edge_uses_createByCurve(self, install_geom):
+        calls = install_geom({"E": BRepEdge(Line3D())})
         g, desc, err = _call(anchor="geometry", geometry_handle="E", keypoint=1)
         assert err is None and calls["kind"] == "curve"
         assert "edge" in desc.lower()
 
-    def test_vertex_uses_createByPoint(self):
-        calls = _install_geom({"V": _FakeVertex()})
+    def test_vertex_uses_createByPoint(self, install_geom):
+        calls = install_geom({"V": _Vertex(None)})
         g, desc, err = _call(anchor="geometry", geometry_handle="V")
         assert err is None and calls["kind"] == "point"
 
-    def test_bad_geometry_handle_errors(self):
-        _install_geom({})   # nothing resolves
+    def test_bad_geometry_handle_errors(self, install_geom):
+        install_geom({})   # nothing resolves
         g, desc, err = _call(anchor="geometry", geometry_handle="missing")
         assert g is None and err is not None
 
 
 # ── handler(): guards, coordinate-anchor scaling, and the created-origin report ─────────────────
-
-class _FakeSketchPoints:
-    def add(self, pt):
-        return SimpleNamespace(point=pt)
-
-
-class _FakeSketch:
-    def __init__(self):
-        self.name = None
-        self.sketchPoints = _FakeSketchPoints()
-
-
-class _FakeSketches:
-    def add(self, plane):
-        return _FakeSketch()
-
 
 class _FakeJointOriginInput:
     def __init__(self):
@@ -273,37 +249,34 @@ class _FakeJointOrigins:
         return origin
 
 
-class _FakeComp:
-    # entityToken, because _common.same_component compares on it: the landed-component read-back
-    # and the active-component disclosure both refuse to claim anything about a pair they cannot
-    # identify. A test that wants that state deletes the attribute.
-    def __init__(self, name="Comp1", token=None):
-        self.name = name
-        self.entityToken = token if token is not None else f"TOKEN:{name}"
-        self.sketches = _FakeSketches()
-        self.xYConstructionPlane = object()
-        self.originConstructionPoint = object()     # the stable anchor for anchor=coordinates
-        self.jointOrigins = _FakeJointOrigins(self)
-        self.allOccurrences = []                    # the root's assembly walk (occurrence resolution)
+def _comp(name="Comp1", token=None):
+    """A component on conftest's shared MakeComp, carrying the jointOrigins collection a create
+    lands in. entityToken, because _common.same_component compares on it: the landed-component
+    read-back and the active-component disclosure both refuse to claim anything about a pair they
+    cannot identify. A test that wants that state deletes the attribute."""
+    comp = MakeComp(name=name, entity_token=token if token is not None else f"TOKEN:{name}")
+    comp.xYConstructionPlane = object()
+    comp.originConstructionPoint = object()     # the stable anchor for anchor=coordinates
+    comp.jointOrigins = _FakeJointOrigins(comp)
+    return comp
 
 
-class _FakeDesign:
-    def __init__(self, occurrences=()):
-        self.rootComponent = _FakeComp()
-        self.rootComponent.allOccurrences = list(occurrences)
+def _design(occurrences=(), comp=None):
+    """A design on conftest's shared MakeDesign whose root holds `occurrences` - the assembly walk
+    an occurrence reference resolves through."""
+    root = comp if comp is not None else _comp()
+    root.allOccurrences = list(occurrences)
+    return make_design(comp=root)
 
 
 def _install_handler(monkeypatch, design=None):
     """Wire a fake design + the adsk seams _geometry_from_args/handler touch for anchor='coordinates'.
     Returns (design, point3d_calls) so a test can assert the exact cm values Point3D.create received.
     """
-    d = design if design is not None else _FakeDesign()
-    # BOTH design seams: the handler's own _common, and _inputs' _common, which OccurrenceRef
-    # resolves 'component' through.
-    monkeypatch.setattr(jo._common, "design", lambda: d)
-    monkeypatch.setattr(jo._inputs._common, "design", lambda: d)
-    import adsk.core
-    import adsk.fusion
+    # install() patches BOTH design seams: the handler's own _common, and _inputs' _common, which
+    # OccurrenceRef resolves 'component' through.
+    d = design if design is not None else _design()
+    install(jo, d)
     calls = []
 
     def _create(x, y, z):
@@ -317,6 +290,12 @@ def _install_handler(monkeypatch, design=None):
     monkeypatch.setattr(adsk.core.ValueInput, "createByReal",
                         staticmethod(lambda v: SimpleNamespace(_real=v)))
     return d, calls
+
+
+def _matrix(deg=0.0, t=(0.0, 0.0, 0.0)):
+    """An occurrence placement on conftest's shared numeric Matrix3D - asArray() is the only read
+    the placement guard makes."""
+    return FakeMatrix3D(deg, t)
 
 
 class TestHandlerGuards:
@@ -411,63 +390,56 @@ class TestHandlerCoordinateAnchor:
 
 # ── anchor='bbox_center': computed center + oriented Z (geometry-building level) ─────────────────
 
-class _FakeBBox:
-    def __init__(self, mn, mx):
-        self.minPoint = SimpleNamespace(x=mn[0], y=mn[1], z=mn[2])
-        self.maxPoint = SimpleNamespace(x=mx[0], y=mx[1], z=mx[2])
+def _body(mn, mx, name="Body1"):
+    """A body on conftest's shared BRepBody fake, carrying the world bounding box (cm) a bbox
+    anchor's centre is computed from."""
+    return BRepBody(name=name, bbox=make_bbox(mn, mx))
 
 
-class _FakeBody:
-    def __init__(self, mn, mx, name="Body1"):
-        self.boundingBox = _FakeBBox(mn, mx)
-        self.name = name
-
-
-class _CapLines:
+class _CapLines(_NamedCollection):
+    """sketchCurves.sketchLines, recording the endpoints each addByTwoPoints was handed - the
+    orientation line the bbox anchor's frame Z runs along."""
     def __init__(self, store):
+        super().__init__()
         self.store = store
 
     def addByTwoPoints(self, p1, p2):
         self.store.append((p1, p2))
-        return SimpleNamespace(kind="line")
+        line = SimpleNamespace(kind="line")
+        self._items.append(line)
+        return line
 
 
-class _CapSketch:
+class _CapSketches(_NamedCollection):
+    """component.sketches: add(plane) mints the helper sketch a computed anchor draws into. Sketches
+    has a live shape dump but no shared fake yet, so the add() half lives here."""
     def __init__(self, store):
-        self.name = None
-        self.isVisible = True
-        self.sketchCurves = SimpleNamespace(sketchLines=_CapLines(store))
-
-
-class _CapSketches:
-    def __init__(self, store):
+        super().__init__()
         self.store = store
 
     def add(self, plane):
-        return _CapSketch(self.store)
+        sketch = Sketch(name=None)
+        sketch.sketchCurves.sketchLines = _CapLines(self.store)
+        self._items.append(sketch)
+        return sketch
 
 
 def _cap_comp(store):
-    return SimpleNamespace(name="Comp1", sketches=_CapSketches(store), xYConstructionPlane=object())
+    """A component whose sketches collection captures the orientation line that gets drawn."""
+    comp = MakeComp(name="Comp1")
+    comp.sketches = _CapSketches(store)
+    comp.xYConstructionPlane = object()
+    return comp
 
 
 def _install_bbox_target(monkeypatch, body):
     """Wire the adsk types + a design whose findEntityByToken resolves the bbox_target handle to `body`,
     and record every Point3D.create call so a test can read the orientation line's endpoints."""
-    import adsk.core
-    import adsk.fusion
     # Distinct class identities so TargetRef classifies `body` as a BODY (not a face/mesh).
-    monkeypatch.setattr(adsk.fusion, "BRepFace", type("F", (), {}), raising=False)
-    monkeypatch.setattr(adsk.fusion, "MeshBody", type("M", (), {}), raising=False)
-    monkeypatch.setattr(adsk.fusion, "BRepBody", _FakeBody, raising=False)
-
-    class _D:
-        def findEntityByToken(self, t):
-            return [body]
-
-    d = _D()
-    monkeypatch.setattr(jo._inputs._common, "design", lambda: d)
-    monkeypatch.setattr(jo._common, "design", lambda: d)
+    monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace, raising=False)
+    monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+    install(jo, make_design(tokens={"BODYH": body}))
     monkeypatch.setattr(adsk.core.Point3D, "create",
                         staticmethod(lambda x, y, z: SimpleNamespace(x=x, y=y, z=z)))
     monkeypatch.setattr(adsk.fusion.JointGeometry, "createByCurve",
@@ -477,7 +449,7 @@ def _install_bbox_target(monkeypatch, body):
 
 class TestBboxCenterGeometry:
     def test_center_is_the_bbox_midpoint(self, monkeypatch):
-        body = _FakeBody((0, 0, 0), (10, 20, 30))
+        body = _body((0, 0, 0), (10, 20, 30))
         _install_bbox_target(monkeypatch, body)
         store, meta = [], {}
         g, desc, err = _call(anchor="bbox_center", comp=_cap_comp(store),
@@ -489,7 +461,7 @@ class TestBboxCenterGeometry:
         assert meta["anchor_cm"] == (5.0, 10.0, 15.0)
 
     def test_z_line_runs_along_requested_world_axis(self, monkeypatch):
-        body = _FakeBody((0, 0, 0), (10, 20, 30))
+        body = _body((0, 0, 0), (10, 20, 30))
         _install_bbox_target(monkeypatch, body)
         store = []
         _call(anchor="bbox_center", comp=_cap_comp(store), bbox_target="BODYH", orient_axis="x")
@@ -498,7 +470,7 @@ class TestBboxCenterGeometry:
         assert d == (1.0, 0.0, 0.0)          # Z aligned to world X
 
     def test_flip_reverses_the_oriented_axis(self, monkeypatch):
-        body = _FakeBody((0, 0, 0), (10, 20, 30))
+        body = _body((0, 0, 0), (10, 20, 30))
         _install_bbox_target(monkeypatch, body)
         store = []
         _call(anchor="bbox_center", comp=_cap_comp(store), bbox_target="BODYH",
@@ -512,33 +484,23 @@ class TestBboxCenterGeometry:
 # orient_axis takes a face with NO code change in joint_create_origin - the frame's Z aligns to that
 # normal. This proves the one-call parity insert-into-template's Phase 2 relies on.
 
-class _FakeOrientFace:
-    def __init__(self, normal):
-        import adsk.core
-        self.geometry = SimpleNamespace(surfaceType=adsk.core.SurfaceTypes.PlaneSurfaceType,
-                                        normal=SimpleNamespace(x=normal[0], y=normal[1], z=normal[2]))
+def _orient_face(normal):
+    """A planar face whose NORMAL is the direction AxisRef sources from it - the shared Plane fake
+    carries both that normal and the measured surfaceType."""
+    return BRepFace(Plane(FakeVector3D(*normal)))
 
 
-def _install_face_orient(monkeypatch, body, face):
+def _install_face_orient(monkeypatch, body, face, tokens=None):
     """Wire the adsk types + a design whose findEntityByToken resolves BODYH -> body and FACEH -> face,
     so bbox_target resolves a body and orient_axis (AxisRef) resolves a planar face to its normal.
     Real (non-Mock) BRepEdge/SketchLine classes so AxisRef's isinstance ladder reaches the face branch."""
-    import adsk.core
-    import adsk.fusion
-    monkeypatch.setattr(adsk.fusion, "BRepFace", _FakeOrientFace, raising=False)
-    monkeypatch.setattr(adsk.fusion, "BRepEdge", type("E", (), {}), raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepEdge", BRepEdge, raising=False)
     monkeypatch.setattr(adsk.fusion, "SketchLine", type("SL", (), {}), raising=False)
-    monkeypatch.setattr(adsk.fusion, "MeshBody", type("M", (), {}), raising=False)
-    monkeypatch.setattr(adsk.fusion, "BRepBody", _FakeBody, raising=False)
-    handles = {"BODYH": body, "FACEH": face}
-
-    class _D:
-        def findEntityByToken(self, t):
-            e = handles.get(t)
-            return [e] if e is not None else []
-    d = _D()
-    monkeypatch.setattr(jo._common, "design", lambda: d)
-    monkeypatch.setattr(jo._inputs._common, "design", lambda: d)
+    monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+    handles = {"BODYH": body, "FACEH": face} if tokens is None else tokens
+    install(jo, make_design(tokens=handles))
     monkeypatch.setattr(adsk.core.Point3D, "create",
                         staticmethod(lambda x, y, z: SimpleNamespace(x=x, y=y, z=z)))
     monkeypatch.setattr(adsk.fusion.JointGeometry, "createByCurve",
@@ -548,8 +510,8 @@ def _install_face_orient(monkeypatch, body, face):
 
 class TestOrientAxisFromFace:
     def test_planar_face_handle_aligns_z_to_the_face_normal(self, monkeypatch):
-        body = _FakeBody((0, 0, 0), (10, 20, 30))
-        face = _FakeOrientFace((0, 1, 0))                 # normal along world +Y
+        body = _body((0, 0, 0), (10, 20, 30))
+        face = _orient_face((0, 1, 0))                    # normal along world +Y
         _install_face_orient(monkeypatch, body, face)
         store = []
         g, desc, err = _call(anchor="bbox_center", comp=_cap_comp(store),
@@ -564,19 +526,14 @@ class TestOrientAxisFromFace:
         # A ConstructionAxis's geometry is an InfiniteLine3D - origin/direction, NO start/end points.
         # Reading start/end directly refuses an axis the schema advertises; the shared axis_line_of
         # reads both shapes (and lifts a datum into world space).
-        import adsk.fusion
-        body = _FakeBody((0, 0, 0), (10, 20, 30))
+        body = _body((0, 0, 0), (10, 20, 30))
         datum = SimpleNamespace(name="Spin", component=None, assemblyContext=None,
-                                geometry=SimpleNamespace(origin=SimpleNamespace(x=0, y=0, z=0),
-                                                         direction=SimpleNamespace(x=0, y=0, z=2)))
-        _install_face_orient(monkeypatch, body, _FakeOrientFace((0, 1, 0)))
-        monkeypatch.setattr(adsk.fusion, "ConstructionAxis", type(datum), raising=False)
+                                geometry=FakeInfiniteLine3D(FakePoint(0.0, 0.0, 0.0),
+                                                            FakeVector3D(0.0, 0.0, 2.0)))
         # ONE design resolving both tokens: the body for bbox_target, the datum for orient_axis.
-        handles = {"BODYH": body, "AXISH": datum}
-        design = SimpleNamespace(rootComponent=None,
-                                 findEntityByToken=lambda t: [handles[t]] if t in handles else [])
-        monkeypatch.setattr(jo._common, "design", lambda: design)
-        monkeypatch.setattr(jo._inputs._common, "design", lambda: design)
+        _install_face_orient(monkeypatch, body, _orient_face((0, 1, 0)),
+                             tokens={"BODYH": body, "AXISH": datum})
+        monkeypatch.setattr(adsk.fusion, "ConstructionAxis", type(datum), raising=False)
         store = []
         g, desc, err = _call(anchor="bbox_center", comp=_cap_comp(store),
                              bbox_target="BODYH", orient_axis="AXISH", meta={})
@@ -589,21 +546,21 @@ class TestOrientAxisFromFace:
 # ── anchor='face_center': planar face guard + normal orientation ────────────────────────────────
 
 class TestFaceCenterGeometry:
-    def test_planar_face_builds_via_planar_factory(self):
-        calls = _install_geom({"F": _FakeFace(planar=True)})
+    def test_planar_face_builds_via_planar_factory(self, install_geom):
+        calls = install_geom({"F": _face(planar=True)})
         g, desc, err = _call(anchor="face_center", geometry_handle="F")
         assert err is None and g is not None
         assert calls["kind"] == "planar_face"
         assert "normal" in desc
 
-    def test_non_planar_face_is_rejected(self):
-        _install_geom({"C": _FakeFace(planar=False)})
+    def test_non_planar_face_is_rejected(self, install_geom):
+        install_geom({"C": _face(planar=False)})
         g, desc, err = _call(anchor="face_center", geometry_handle="C")
         assert g is None
         assert "PLANAR" in err
 
-    def test_non_face_handle_is_rejected(self):
-        _install_geom({"E": _FakeEdge()})
+    def test_non_face_handle_is_rejected(self, install_geom):
+        install_geom({"E": BRepEdge(Line3D())})
         g, desc, err = _call(anchor="face_center", geometry_handle="E")
         assert g is None
         assert "not a face" in err
@@ -645,20 +602,14 @@ class _JointOriginsBbox:
 def _install_bbox_handler(monkeypatch, origin_cm, bbox=((0, 0, 0), (10, 20, 30))):
     """Full handler wiring for anchor='bbox_center': a body at `bbox`, and a created joint origin whose
     geometry.origin reads back at `origin_cm` (cm) so a test can exercise the landing-point check."""
-    import adsk.core
-    import adsk.fusion
-    body = _FakeBody(bbox[0], bbox[1])
+    body = _body(bbox[0], bbox[1])
     jo_obj = _JOWithOrigin(origin_cm)
-    store = []
-    comp = SimpleNamespace(name="Comp1", sketches=_CapSketches(store), xYConstructionPlane=object(),
-                           jointOrigins=_JointOriginsBbox(jo_obj))
-    design = SimpleNamespace(rootComponent=comp)
-    design.findEntityByToken = lambda t: [body]
-    monkeypatch.setattr(adsk.fusion, "BRepFace", type("F", (), {}), raising=False)
-    monkeypatch.setattr(adsk.fusion, "MeshBody", type("M", (), {}), raising=False)
-    monkeypatch.setattr(adsk.fusion, "BRepBody", _FakeBody, raising=False)
-    monkeypatch.setattr(jo._common, "design", lambda: design)
-    monkeypatch.setattr(jo._inputs._common, "design", lambda: design)
+    comp = _cap_comp([])
+    comp.jointOrigins = _JointOriginsBbox(jo_obj)
+    monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace, raising=False)
+    monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody, raising=False)
+    monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+    install(jo, make_design(comp=comp, tokens={"BODYH": body}))
     monkeypatch.setattr(adsk.core.Point3D, "create",
                         staticmethod(lambda x, y, z: SimpleNamespace(x=x, y=y, z=z)))
     monkeypatch.setattr(adsk.fusion.JointGeometry, "createByCurve",
@@ -698,14 +649,9 @@ class TestBboxCenterAmbiguousTarget:
     def test_ambiguous_name_is_refused(self, monkeypatch):
         # component: a real Occurrence always answers it, and the shared census reads it to tell an
         # ordinary occurrence from one whose external reference will not resolve.
-        occ1 = SimpleNamespace(fullPathName="root+Bolt:1", name="Bolt:1",
-                               component=SimpleNamespace(name="Bolt"))
-        occ2 = SimpleNamespace(fullPathName="root+Bolt:2", name="Bolt:2",
-                               component=SimpleNamespace(name="Bolt"))
-        root = SimpleNamespace(allOccurrences=[occ1, occ2])
-        design = SimpleNamespace(rootComponent=root, findEntityByToken=lambda t: [])
-        monkeypatch.setattr(jo._common, "design", lambda: design)
-        monkeypatch.setattr(jo._inputs._common, "design", lambda: design)
+        occ1 = make_occurrence(path="root+Bolt:1", component=MakeComp(name="Bolt"))
+        occ2 = make_occurrence(path="root+Bolt:2", component=MakeComp(name="Bolt"))
+        install(jo, make_design(comp=MakeComp(name="Root", occurrences=[occ1, occ2])))
         res = jo.handler(anchor="bbox_center", bbox_target="Bolt")
         assert res["isError"] is True
         assert "ambiguous" in res["message"].lower()
@@ -718,51 +664,40 @@ class TestBboxCenterAmbiguousTarget:
 # bounding-box center) is only the same number there while the component sits at the world origin
 # unrotated - anything else is refused rather than placed somewhere else.
 
-_IDENTITY = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
-
-
-def _matrix(values):
-    """A Matrix3D stand-in - asArray() is the only read the placement guard makes."""
-    return SimpleNamespace(asArray=lambda: list(values))
-
-
 def _moved(dx_cm):
-    """A transform translated dx_cm along X (row-major: translation sits in element 3)."""
-    vals = list(_IDENTITY)
-    vals[3] = dx_cm
-    return vals
+    """A placement translated dx_cm along X - the shared matrix puts it in element 3 of asArray()."""
+    return _matrix(t=(dx_cm, 0.0, 0.0))
 
 
 def _occurrence(comp, path="Sub:1", transform=None, context=None):
-    return SimpleNamespace(component=comp, fullPathName=path, name=path.split("+")[-1],
-                           transform2=_matrix(_IDENTITY if transform is None else transform),
-                           assemblyContext=context)
+    return make_occurrence(path=path, component=comp,
+                           transform2=_matrix() if transform is None else transform,
+                           assembly_context=context)
 
 
 def _install_with_sub(monkeypatch, transform=None, sub_name="Sub", path="Sub:1"):
     """A design whose root holds ONE sub-component occurrence, with the coordinate-anchor adsk seams
     wired. Returns (design, sub_component, occurrence)."""
-    sub = _FakeComp(sub_name)
+    sub = _comp(sub_name)
     occ = _occurrence(sub, path=path, transform=transform)
-    design = _FakeDesign(occurrences=[occ])
+    design = _design(occurrences=[occ])
     _install_handler(monkeypatch, design=design)
     return design, sub, occ
 
 
 class TestPlacementIdentity:
     def test_identity_matrix_reads_true(self):
-        assert jo._is_identity(_matrix(_IDENTITY)) is True
+        assert jo._is_identity(_matrix()) is True
 
     def test_a_rotation_is_not_the_identity(self):
-        vals = list(_IDENTITY)
-        vals[0], vals[1], vals[4], vals[5] = 0.0, -1.0, 1.0, 0.0   # 90 deg about Z, no translation
-        assert jo._is_identity(_matrix(vals)) is False
+        assert jo._is_identity(_matrix(deg=90.0)) is False   # 90 deg about Z, no translation
 
     def test_an_unreadable_matrix_answers_none_not_false(self):
         # None and False are different verdicts: one refuses because it cannot tell, the other
         # because it can. Coercing either to False would let an unknown placement through as "moved".
+        # A short array is no shape the shared matrix can build, so it is stood in for inline.
         assert jo._is_identity(SimpleNamespace()) is None
-        assert jo._is_identity(_matrix([1, 0, 0])) is None
+        assert jo._is_identity(SimpleNamespace(asArray=lambda: [1, 0, 0])) is None
 
 
 class TestLandingComponent:
@@ -814,18 +749,22 @@ class TestLandingComponent:
     def test_a_moved_ancestor_refuses_even_at_an_identity_leaf(self, monkeypatch):
         # a transform is relative to the PARENT component, so an identity leaf inside a moved parent
         # is still displaced in world space - the whole chain decides, not the leaf.
-        parent_comp = _FakeComp("Parent")
+        parent_comp = _comp("Parent")
         parent = _occurrence(parent_comp, path="Parent:1", transform=_moved(7.0))
-        sub = _FakeComp("Sub")
+        sub = _comp("Sub")
         leaf = _occurrence(sub, path="Parent:1+Sub:1", context=parent)
-        _install_handler(monkeypatch, design=_FakeDesign(occurrences=[parent, leaf]))
+        _install_handler(monkeypatch, design=_design(occurrences=[parent, leaf]))
         res = jo.handler(anchor="coordinates", x=10, component="Parent:1+Sub:1")
         assert res["isError"] is True and "not the identity" in res["message"]
         assert sub.jointOrigins.count == 0
 
     def test_unreadable_placement_is_refused_rather_than_assumed(self, monkeypatch):
-        _, sub, occ = _install_with_sub(monkeypatch)
-        del occ.transform2                          # no transform of any kind reads
+        # NEITHER placement matrix reads, so nothing says where the component sits
+        sub = _comp("Sub")
+        unreadable = "3 : the placement of this occurrence is unavailable"
+        occ = make_occurrence(path="Sub:1", component=sub,
+                              raises_on={"transform2": unreadable, "transform": unreadable})
+        _install_handler(monkeypatch, design=_design(occurrences=[occ]))
         res = jo.handler(anchor="coordinates", x=10, component="Sub:1")
         assert res["isError"] is True and "could not be read" in res["message"]
         assert sub.jointOrigins.count == 0
@@ -873,8 +812,8 @@ class TestActiveComponentDisclosure:
     def test_ambiguous_component_name_is_refused(self, monkeypatch):
         # two sub-assemblies each holding a "Bolt:1": no string tells them apart, so the call is
         # refused with both paths instead of one being picked.
-        a, b = _FakeComp("BoltA"), _FakeComp("BoltB")
-        design = _FakeDesign(occurrences=[_occurrence(a, path="SubA:1+Bolt:1"),
+        a, b = _comp("BoltA"), _comp("BoltB")
+        design = _design(occurrences=[_occurrence(a, path="SubA:1+Bolt:1"),
                                           _occurrence(b, path="SubB:1+Bolt:1")])
         _install_handler(monkeypatch, design=design)
         res = jo.handler(anchor="coordinates", target="origin", component="Bolt:1")
@@ -930,7 +869,7 @@ class TestActiveComponentDisclosure:
 
         def _tokenless_add(jo_input):
             origin = real_add(jo_input)
-            origin.parentComponent = _FakeComp("Sub", token=None)
+            origin.parentComponent = _comp("Sub", token=None)
             del origin.parentComponent.entityToken       # nothing identifies it
             origin.deleteMe = lambda: rolled.__setitem__("back", True) or True
             return origin

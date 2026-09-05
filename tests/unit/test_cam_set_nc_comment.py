@@ -8,52 +8,27 @@ program; an explicit non-empty comment must still go through.
 
 import json
 
-from conftest import load_tool
+from conftest import (FakeCAMParameter, FakeCAMParameters, _NamedCollection, load_tool, make_cam)
 
 nc = load_tool("cam_set_nc_comment")
 
 
-# ── fakes mimicking adsk.cam NCProgram / CAMParameters ──────────────────────
-
-class FakeParam:
-    def __init__(self, expr="'old'", editable=True):
-        self.expression = expr
-        self.isEditable = editable
-
-
-class FakeParams:
-    def __init__(self, **named):
-        self._p = named
-    def itemByName(self, name):
-        return self._p.get(name)
-
+# NCProgram has no live SHAPES dump, so it keeps a local fake; its parameters and the ncPrograms
+# walk are the shared ones.
 
 class FakeNCP:
-    def __init__(self, name, comment="'old'", editable=True):
+    """An NC program: the name a target match reads, and the two string parameters a write goes to."""
+    def __init__(self, name, comment="'old'", editable=True, parameters=None):
         self.name = name
-        self.parameters = FakeParams(
-            nc_program_comment=FakeParam(comment, editable),
-            nc_program_name=FakeParam("'" + name + "'", editable),
-        )
-
-
-class FakeNCPrograms:
-    def __init__(self, programs):
-        self._p = list(programs)
-    @property
-    def count(self):
-        return len(self._p)
-    def item(self, i):
-        return self._p[i]
-
-
-class FakeCAM:
-    def __init__(self, programs):
-        self.ncPrograms = FakeNCPrograms(programs)
+        self.parameters = parameters if parameters is not None else FakeCAMParameters([
+            FakeCAMParameter("nc_program_comment", comment, editable=editable),
+            FakeCAMParameter("nc_program_name", "'" + name + "'", editable=editable),
+        ])
 
 
 def _install(monkeypatch, programs):
-    cam = FakeCAM(programs)
+    cam = make_cam()
+    cam.ncPrograms = _NamedCollection(list(programs))
     monkeypatch.setattr(nc, "get_cam", lambda: (cam, None))
     return cam
 
@@ -216,20 +191,17 @@ class TestProgramTargeting:
 # what turns it into an error.
 
 
-class _StuckParam(FakeParam):
-    """Accepts an expression assignment after construction and keeps the one it holds."""
-    def __setattr__(self, key, value):
-        if key == "expression" and "expression" in self.__dict__:
-            return
-        object.__setattr__(self, key, value)
+class _StuckParam(FakeCAMParameter):
+    """Accepts an expression assignment and keeps the one it holds."""
+    @FakeCAMParameter.expression.setter
+    def expression(self, value):
+        pass
 
 
-class _UnreadableParam(FakeParam):
+class _UnreadableParam(FakeCAMParameter):
     """Takes the assignment; its expression cannot be READ afterwards - the write is unconfirmed,
     which is not the same as landed."""
-    def __init__(self, expr="'old'"):
-        super().__init__(expr)
-        object.__setattr__(self, "_reads", 0)
+    _reads = 0
 
     @property
     def expression(self):
@@ -237,20 +209,20 @@ class _UnreadableParam(FakeParam):
         self._reads += 1
         if self._reads > 1:
             raise RuntimeError("expression is unreadable")
-        return self.__dict__["_expr"]
+        return self._expression
 
     @expression.setter
-    def expression(self, v):
-        self.__dict__["_expr"] = v
+    def expression(self, value):
+        self._expression = value
 
 
 class _StuckNCP(FakeNCP):
+    """A program whose comment and name parameters both keep the expression they already hold."""
     def __init__(self, name, comment="'old'"):
-        super().__init__(name, comment)
-        self.parameters = FakeParams(
-            nc_program_comment=_StuckParam(comment),
-            nc_program_name=_StuckParam("'" + name + "'"),
-        )
+        super().__init__(name, comment, parameters=FakeCAMParameters([
+            _StuckParam("nc_program_comment", comment),
+            _StuckParam("nc_program_name", "'" + name + "'"),
+        ]))
 
 
 class TestStuckParameter:
@@ -274,8 +246,8 @@ class TestStuckParameter:
         # the comment write already landed on this program and this call does not undo it - an
         # isError the caller reads as "nothing happened" would be the false part.
         ncp = FakeNCP("P1", "'old'")
-        ncp.parameters = FakeParams(nc_program_comment=FakeParam("'old'"),
-                                    nc_program_name=_StuckParam("'P1'"))
+        ncp.parameters = FakeCAMParameters([FakeCAMParameter("nc_program_comment", "'old'"),
+                                            _StuckParam("nc_program_name", "'P1'")])
         _install(monkeypatch, [ncp])
         res = nc.handler(comment="Job 42", program="P1", set_name="Renamed")
         assert res["isError"] is True
@@ -286,8 +258,8 @@ class TestStuckParameter:
         # a write whose effect cannot be READ is unconfirmed; reporting set:true would state a
         # landing this call never observed.
         ncp = FakeNCP("P1")
-        ncp.parameters = FakeParams(nc_program_comment=_UnreadableParam("'old'"),
-                                    nc_program_name=FakeParam("'P1'"))
+        ncp.parameters = FakeCAMParameters([_UnreadableParam("nc_program_comment", "'old'"),
+                                            FakeCAMParameter("nc_program_name", "'P1'")])
         _install(monkeypatch, [ncp])
         res = nc.handler(comment="Job 42", program="P1")
         assert res["isError"] is True and "UNCONFIRMED" in res["message"]

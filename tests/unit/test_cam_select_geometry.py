@@ -33,6 +33,7 @@ import types
 import pytest
 
 from conftest import (load_tool, make_cam, install, make_sketch, MakeComp, MakeDesign, BRepBody,
+                      BRepEdge, BRepFace, Cylinder, FakeCAMParameter, FakeCAMParameters,
                       body_proxy, _NamedCollection)
 from conftest import FakeSetup as SharedSetup, FakeOperation as SharedOp
 
@@ -71,24 +72,26 @@ def _clean_generations():
 
 # ── fakes ────────────────────────────────────────────────────────────────────
 
-class _Cyl:
+class _Cyl(Cylinder):
+    """A cylindrical surface carrying the radius (cm) the diameter filter reads."""
     def __init__(self, radius_cm):
+        super().__init__(axis=None)
         self.radius = radius_cm
 
 
-class _Face:
-    """A BRep face; cylinder faces carry .geometry.radius (cm)."""
-    def __init__(self, radius_cm=None):
-        self.geometry = _Cyl(radius_cm) if radius_cm is not None else object()
+def _Face(radius_cm=None):
+    """A BRep face; a cylinder face carries .geometry.radius (cm), anything else carries none."""
+    return BRepFace(_Cyl(radius_cm) if radius_cm is not None else object())
 
 
-class _Edge:
-    pass
+def _Edge():
+    """A BRep edge - the geometry a chain/contour selection takes."""
+    return BRepEdge(None)
 
 
-class _Body:
-    def __init__(self, name="Body1"):
-        self.name = name
+def _Body(name="Body1"):
+    """A solid body - what a silhouette/pocket-recognition selection takes."""
+    return BRepBody(name)
 
 
 class _Path:
@@ -192,20 +195,17 @@ class _InertLoopType(_Selection):
         pass
 
 
-class _CurveSelections:
+class _CurveSelections(_NamedCollection):
+    """A CurveSelections collection: the shared counted walk plus the per-kind createNew* factories
+    and the clear() an applier runs first."""
     def __init__(self):
-        self._sels = []
+        super().__init__()
         self.cleared = 0
     def clear(self):
         self.cleared += 1
-        self._sels = []
-    @property
-    def count(self):
-        return len(self._sels)
-    def item(self, i):
-        return self._sels[i]
+        self._items = []
     def _make(self, kind):
-        s = _Selection(kind); self._sels.append(s); return s
+        s = _Selection(kind); self._items.append(s); return s
     def createNewChainSelection(self):       return self._make("chain")
     def createNewPocketSelection(self):      return self._make("pocket")
     def createNewFaceContourSelection(self): return self._make("face")
@@ -230,24 +230,43 @@ class _HoleParamValue:
         self.value = []          # set to [faces] by the handler
 
 
-class _Param:
-    def __init__(self, value, editable=True):
+class _Param(FakeCAMParameter):
+    """A CAM parameter whose .value IS the parameter-value object the appliers drive (a
+    CadObjectParameterValue), rather than the second-hop payload a plain read takes. It carries no
+    name of its own - _OpParams stamps the key it is stored under.
+
+    isEditable is read for the surface sets and the direct object sets, where a False leaves a set
+    out (the deprecated checkSurfaceSelection, flat's machiningDirections); the curve params route
+    by presence and never consult it. `expression` is the text the parameter already holds - a live
+    CAMParameter answers a string here and never None."""
+    def __init__(self, value, editable=True, expression="0 mm"):
+        super().__init__("", expression=expression, editable=editable)
         self.value = value
-        self.expression = None
-        # read for the surface sets and the direct object sets, where a False leaves a set out
-        # (the deprecated checkSurfaceSelection, flat's machiningDirections); the curve params
-        # route by presence and never consult it
-        self.isEditable = editable
 
 
-class _Params:
-    def __init__(self, d):
-        self._d = d
-    def itemByName(self, name):
-        return self._d.get(name)
-    @property
-    def count(self):
-        return len(self._d)
+class _OpParams(FakeCAMParameters):
+    """An operation's parameters, each named by the key it is stored under; `swap`/`drop` put a
+    scenario stand-in in one slot, or take a parameter the operation does not carry away."""
+    def __init__(self, mapping):
+        rows = []
+        for name, param in mapping.items():
+            param.name = name
+            rows.append(param)
+        super().__init__(rows)
+
+    def _held(self, name, verb):
+        # A miss would leave the operation exactly as built, and the test would pass on the
+        # unmodified op instead of on the stand-in it meant to drive.
+        assert self.itemByName(name) is not None, f"no parameter named {name!r} to {verb}"
+
+    def swap(self, name, param):
+        self._held(name, "swap")
+        param.name = name
+        self._coll._items = [param if p.name == name else p for p in self._coll._items]
+
+    def drop(self, name):
+        self._held(name, "drop")
+        self._coll._items = [p for p in self._coll._items if p.name != name]
 
 
 class _Future:
@@ -255,42 +274,32 @@ class _Future:
         self.isGenerationCompleted = complete
 
 
-class _Op:
+class _Op(SharedOp):
+    """A CAM operation carrying the parameter set its selection kind drives."""
     def __init__(self, name, params, has_tp=True, valid=True, warning="", strategy="contour2d"):
-        self.name = name
-        self.parameters = _Params(params)
-        self.hasToolpath = has_tp
-        self.isToolpathValid = valid
-        self.warning = warning
-        self.isGenerating = False
-        self.strategy = strategy     # what the entitlement pre-flight reads before a launch
+        super().__init__(name, has_toolpath=has_tp, valid=valid, has_warning=bool(warning),
+                         warning=warning, strategy=strategy)
+        self.parameters = _OpParams(params)
 
 
-class _Coll:
-    def __init__(self, items=()):
-        self._i = list(items)
-    @property
-    def count(self):
-        return len(self._i)
-    def item(self, i):
-        return self._i[i]
+def _Setup(ops):
+    """The one setup the resolve walks - these tests never address it by name."""
+    return SharedSetup("Setup1", ops=ops)
 
 
-class _Setup:
-    def __init__(self, ops):
-        self.operations = _Coll(ops)
-        self.folders = _Coll()
-        self.patterns = _Coll()
+def _CAM(setups, future=None):
+    """A CAM product recording each generateToolpath launch in `generated`."""
+    cam = make_cam(*setups)
+    cam.generated = []
+    fut = future if future is not None else _Future(True)
 
+    def generate_toolpath(op):
+        cam.generated.append(op)
+        return fut
 
-class _CAM:
-    def __init__(self, setups, future=None):
-        self.setups = _Coll(setups)
-        self._future = future or _Future(True)
-        self.generated = []
-    def generateToolpath(self, op):
-        self.generated.append(op)
-        return self._future
+    cam.generateToolpath = generate_toolpath
+    cam.future = fut          # the object a launch has to keep referenced, for a test to compare
+    return cam
 
 
 def _curve_op(name="2D Contour1", **kw):
@@ -448,8 +457,8 @@ class TestHandleKindRequirement:
     def _resolves_to(self, monkeypatch, entity):
         """The real handle kind, against a design whose one handle resolves to `entity`."""
         import adsk.fusion
-        adsk.fusion.BRepFace = _Face
-        adsk.fusion.BRepEdge = _Edge
+        adsk.fusion.BRepFace = BRepFace
+        adsk.fusion.BRepEdge = BRepEdge
         monkeypatch.setattr(cg._inputs, "_resolve_token_entity", lambda des, h: entity)
         monkeypatch.setattr(cg._inputs._common, "design", lambda: object())
 
@@ -460,7 +469,7 @@ class TestHandleKindRequirement:
         self._resolves_to(monkeypatch, _Face())
         res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"], generate=False)
         assert res["isError"] is True
-        assert "must be an edge" in res["message"] and "_Face" in res["message"]
+        assert "must be an edge" in res["message"] and "BRepFace" in res["message"]
         assert op.parameters.itemByName("contours").value.applied == 0   # nothing was applied
 
     def test_pocket_refuses_an_edge_handle_naming_the_type_it_got(self, monkeypatch):
@@ -470,7 +479,7 @@ class TestHandleKindRequirement:
         self._resolves_to(monkeypatch, _Edge())
         res = cg.handler(operation="2D Pocket1", selection="pocket", handles=["h"], generate=False)
         assert res["isError"] is True
-        assert "must be a face" in res["message"] and "_Edge" in res["message"]
+        assert "must be a face" in res["message"] and "BRepEdge" in res["message"]
         assert op.parameters.itemByName("contours").value.applied == 0
 
     def test_surfaces_refuses_an_edge_handle_naming_the_type_it_got(self, monkeypatch):
@@ -483,7 +492,7 @@ class TestHandleKindRequirement:
         self._resolves_to(monkeypatch, _Edge())
         res = cg.handler(operation="Geodesic1", selection="surfaces", handles=["h"], generate=False)
         assert res["isError"] is True
-        assert "must be a face" in res["message"] and "_Edge" in res["message"]
+        assert "must be a face" in res["message"] and "BRepEdge" in res["message"]
         assert op.parameters.itemByName("driveSurfaces").value.value == []
 
     def test_surfaces_takes_a_face_handle_through_the_same_kind(self, monkeypatch):
@@ -710,7 +719,7 @@ class TestPocketFilter:
         pv = op.parameters.itemByName("contours").value
         def _deaf(kind):
             sel = _DeafHoleDiameter(kind)
-            pv._cs._sels.append(sel)
+            pv._cs._items.append(sel)
             return sel
         pv._cs._make = _deaf
         res = cg.handler(operation="Adaptive1", selection="pocket_recognition", bodies=["Carrier"],
@@ -727,7 +736,7 @@ class TestPocketFilter:
         pv = op.parameters.itemByName("contours").value
         def _clamping(kind):
             sel = _ClampingDepth(kind)
-            pv._cs._sels.append(sel)
+            pv._cs._items.append(sel)
             return sel
         pv._cs._make = _clamping
         res = cg.handler(operation="Adaptive1", selection="pocket_recognition", bodies=["Carrier"],
@@ -1029,7 +1038,7 @@ class TestKnobs:
         pv = op.parameters.itemByName("contours").value
         def _inert(kind):
             sel = _InertLoopType(kind)
-            pv._cs._sels.append(sel)
+            pv._cs._items.append(sel)
             return sel
         pv._cs._make = _inert
         res = cg.handler(operation="Face1", selection="face", handles=["f"],
@@ -1128,8 +1137,9 @@ class TestHoles:
         res = cg.handler(operation="Drill1", selection="holes", handles=["a", "b"],
                          min_diameter=5.5, max_diameter=6.5, top_offset="7 mm", generate=False)
         assert res["isError"] is True and "diameter filter" in res["message"].lower()
-        assert op.parameters.itemByName("topHeight_offset").expression is None
-        assert op.parameters.itemByName("topHeight_mode").expression is None
+        # both still hold the expression they were found with - no write landed
+        assert op.parameters.itemByName("topHeight_offset").expression == "0 mm"
+        assert op.parameters.itemByName("topHeight_mode").expression == "0 mm"
 
     def test_holes_on_nonhole_op_errors(self, monkeypatch):
         op = _curve_op()                # neither holeFaces nor circularFaces
@@ -1215,8 +1225,8 @@ class TestTurningObjectSets:
         cam = _CAM([_Setup([op])])
         monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
         import adsk.fusion
-        adsk.fusion.BRepFace = _Face
-        adsk.fusion.BRepEdge = _Edge
+        adsk.fusion.BRepFace = BRepFace
+        adsk.fusion.BRepEdge = BRepEdge
         monkeypatch.setattr(cg._inputs, "_resolve_token_entity", lambda des, h: _Face(2.2))
         monkeypatch.setattr(cg._inputs._common, "design", lambda: object())
         res = cg.handler(operation="Single Groove1", selection="groove", handles=["h"],
@@ -1229,8 +1239,8 @@ class TestTurningObjectSets:
         cam = _CAM([_Setup([op])])
         monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
         import adsk.fusion
-        adsk.fusion.BRepFace = _Face
-        adsk.fusion.BRepEdge = _Edge
+        adsk.fusion.BRepFace = BRepFace
+        adsk.fusion.BRepEdge = BRepEdge
         monkeypatch.setattr(cg._inputs, "_resolve_token_entity", lambda des, h: _Edge())
         monkeypatch.setattr(cg._inputs._common, "design", lambda: object())
         res = cg.handler(operation="Thread1", selection="thread", handles=["h"], generate=False)
@@ -1415,7 +1425,7 @@ class TestHeights:
             @expression.setter
             def expression(self, v):
                 order.append("height"); self._p.expression = v
-        op.parameters._d["bottomHeight_mode"] = _Tracking(mode_param)
+        op.parameters.swap("bottomHeight_mode", _Tracking(mode_param))
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Edge()])
         cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
@@ -1449,7 +1459,7 @@ class TestHeights:
     def test_a_half_applied_height_group_names_the_half_that_landed(self, monkeypatch):
         # top lands, bottom's param is absent -> the error names the top write it kept
         op = _curve_op()
-        del op.parameters._d["bottomHeight_offset"]
+        op.parameters.drop("bottomHeight_offset")
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Edge()])
         res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
@@ -1459,7 +1469,7 @@ class TestHeights:
 
     def test_missing_height_param_errors(self, monkeypatch):
         op = _curve_op()
-        del op.parameters._d["topHeight_offset"]      # simulate an op without that height
+        op.parameters.drop("topHeight_offset")        # simulate an op without that height
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Edge()])
         res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
@@ -1550,7 +1560,7 @@ class _UnreadableHeightParam:
 class TestHeightReadBack:
     def test_a_height_the_operation_keeps_out_is_an_error(self, monkeypatch):
         op = _curve_op()
-        op.parameters._d["bottomHeight_mode"] = _StuckHeightParam("from stock top")
+        op.parameters.swap("bottomHeight_mode", _StuckHeightParam("from stock top"))
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Edge()])
         res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
@@ -1563,7 +1573,7 @@ class TestHeightReadBack:
         # cam-parameter-expressions), so a store keeping neither the prior expression nor the
         # request is caught too - and the error states the value the operation actually reads.
         op = _curve_op()
-        op.parameters._d["bottomHeight_offset"] = _ThirdValueHeightParam()
+        op.parameters.swap("bottomHeight_offset", _ThirdValueHeightParam())
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Edge()])
         res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
@@ -1584,7 +1594,7 @@ class TestHeightReadBack:
     def test_a_height_that_does_not_evaluate_is_an_error(self, monkeypatch):
         # the expression is STORED and echoed back - only .error exposes that it resolves to nothing
         op = _curve_op()
-        op.parameters._d["topHeight_offset"] = _UnevaluatedHeightParam(None)
+        op.parameters.swap("topHeight_offset", _UnevaluatedHeightParam(None))
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Edge()])
         res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
@@ -1594,7 +1604,7 @@ class TestHeightReadBack:
 
     def test_a_height_that_cannot_be_read_back_is_unconfirmed(self, monkeypatch):
         op = _curve_op()
-        op.parameters._d["topHeight_mode"] = _UnreadableHeightParam()
+        op.parameters.swap("topHeight_mode", _UnreadableHeightParam())
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Edge()])
         res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
@@ -1605,7 +1615,7 @@ class TestHeightReadBack:
         # both halves belong to ONE height group: the mode already landed when the offset is
         # refused, and an error that named neither would read as "nothing happened".
         op = _curve_op()
-        op.parameters._d["bottomHeight_offset"] = _StuckHeightParam("0 mm")
+        op.parameters.swap("bottomHeight_offset", _StuckHeightParam("0 mm"))
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Edge()])
         res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
@@ -1619,7 +1629,7 @@ class TestHeightReadBack:
         # is a string parameter written here unquoted, so the compare goes through the shared codec
         # - a byte compare would refuse this whole call and call a landed write a no-take.
         op = _curve_op()
-        op.parameters._d["bottomHeight_mode"] = _QuotedStoreHeightParam()
+        op.parameters.swap("bottomHeight_mode", _QuotedStoreHeightParam())
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Edge()])
         out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
@@ -1631,7 +1641,7 @@ class TestHeightReadBack:
         # The codec strips the wrapper, not the comparison: a store that quotes AND keeps the
         # expression it already held is the swallowed write, and it stays convicted.
         op = _curve_op()
-        op.parameters._d["bottomHeight_mode"] = _StuckHeightParam("'from stock top'")
+        op.parameters.swap("bottomHeight_mode", _StuckHeightParam("'from stock top'"))
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Edge()])
         res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
@@ -1643,7 +1653,7 @@ class TestHeightReadBack:
         # the gate is "the read-back is the expression written", and a caller re-asserting the value
         # the operation already carries reads it back - the state they asked for.
         op = _curve_op()
-        op.parameters._d["bottomHeight_mode"] = _StuckHeightParam("from contour")
+        op.parameters.swap("bottomHeight_mode", _StuckHeightParam("from contour"))
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Edge()])
         out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
@@ -1678,7 +1688,7 @@ class TestGenerate:
         _install(monkeypatch, cam, [_Edge()])
         out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"]))
         entry = _cam._GENERATIONS[out["handle"]]
-        assert entry["future"] is cam._future
+        assert entry["future"] is cam.future
         assert entry["scope"] == "operation" and "2D Contour1" in entry["target"]
 
     def test_note_teaches_the_cam_get_status_target_read(self, monkeypatch):
@@ -2021,7 +2031,7 @@ class TestQuotingMatchesWhatTheParameterStores:
 
     def test_a_refused_height_names_the_expression_that_was_WRITTEN(self, monkeypatch):
         op = _curve_op()
-        op.parameters._d["bottomHeight_mode"] = _RefusingEnumerationHeight("'from stock top'")
+        op.parameters.swap("bottomHeight_mode", _RefusingEnumerationHeight("'from stock top'"))
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Edge()])
         res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
@@ -2050,7 +2060,7 @@ class TestQuotingMatchesWhatTheParameterStores:
         op = _curve_op()
         held = _Param(None)
         held.expression = "'from stock top'"
-        op.parameters._d["bottomHeight_mode"] = held
+        op.parameters.swap("bottomHeight_mode", held)
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Edge()])
         out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
@@ -2377,7 +2387,7 @@ class TestSwarfRailPair:
             for i in range(cs.count):
                 rail = _UnreadableOpenRail(cs.item(i).kind)
                 rail.inputGeometry = cs.item(i).inputGeometry
-                swapped._sels.append(rail)
+                swapped._items.append(rail)
             pv._cs = swapped
         pv.applyCurveSelections = _swap_in_unreadable_rails
         out = _payload(cg.handler(operation="Swarf1", selection="chain", handles=["lo", "hi"],

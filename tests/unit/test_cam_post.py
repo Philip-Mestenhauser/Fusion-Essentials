@@ -18,7 +18,8 @@ import json
 import os
 import types
 
-from conftest import load_tool, _NamedCollection
+from conftest import (FakeCAMParameter, FakeCAMParameters, FakeOperation, FakeSetup,
+                      _NamedCollection, _make_object_collection, load_tool, make_cam)
 
 cp = load_tool("cam_post")
 cc = load_tool("_cam_common")   # the readiness sentence the note is measured against is ITS build
@@ -33,50 +34,29 @@ def _unq(expr):
     return s
 
 
-class _StrParam:
-    def __init__(self, name):
-        self.name = name
-        self.expression = ""
-
-
-class _ValParam:
-    def __init__(self, name, value=None):
-        self.name = name
-        self.value = types.SimpleNamespace(value=value)
-
-
-class _ChoiceParam:
+class _ChoiceParam(FakeCAMParameter):
     """A ChoiceParameterValue-shaped param: getChoices() -> (ok, names, values) out-params, and
     .value legal only as one of those values (the live binding rejects anything else)."""
     def __init__(self, name, names, values, current):
-        self.name = name
+        super().__init__(name, value=current)
         legal = list(values)
-        cv = types.SimpleNamespace(value=current)
-        cv.getChoices = lambda: (True, list(names), legal)
-        self.value = cv
+        self.value.getChoices = lambda: (True, list(names), legal)
 
 
 def _make_params(missing=()):
     """The output parameters an NC program exposes. `missing` drops names to simulate a program that
     lacks a parameter (e.g. no output-folder param)."""
     params = {
-        "nc_program_name": _StrParam("nc_program_name"),
-        "nc_program_output_folder": _StrParam("nc_program_output_folder"),
-        "nc_program_comment": _StrParam("nc_program_comment"),
-        "nc_program_openInEditor": _ValParam("nc_program_openInEditor", True),
+        "nc_program_name": FakeCAMParameter("nc_program_name"),
+        "nc_program_output_folder": FakeCAMParameter("nc_program_output_folder"),
+        "nc_program_comment": FakeCAMParameter("nc_program_comment"),
+        "nc_program_openInEditor": FakeCAMParameter("nc_program_openInEditor", value=True),
         "nc_program_unit": _ChoiceParam("nc_program_unit", ["Document unit", "Inches", "Millimeters"],
                                         ["$doc", "$in", "$mm"], "$doc"),
     }
     for n in missing:
         params.pop(n, None)
-    return _Params(params)
-
-
-class _Params:
-    def __init__(self, mapping):
-        self._p = mapping
-    def itemByName(self, name):
-        return self._p.get(name)
+    return FakeCAMParameters(list(params.values()))
 
 
 class _NCInput:
@@ -103,7 +83,8 @@ class _NCProgram:
     def filteredOperations(self):
         out = []
         for it in (self.operations or []):
-            out.extend(getattr(it, "_ops", [it]))
+            nested = getattr(it, "allOperations", None)
+            out.extend([it] if nested is None else list(nested))
         return out
     def postProcess(self, options):
         return self._cam._do_post(self)
@@ -170,25 +151,16 @@ class _SurvivesDeleteProgram(_NCProgram):
         return True
 
 
-class _NCPrograms:
+class _NCPrograms(_NamedCollection):
+    """cam.ncPrograms: the shared counted/by-name walk plus createInput/add."""
     def __init__(self, cam, missing=(), has_error=False, program_class=None):
+        super().__init__()
         self._cam = cam
-        self._items = []
         self._missing = missing
         self._has_error = has_error
         self._class = program_class or _NCProgram
         self.create_calls = 0
         self.add_calls = 0
-    @property
-    def count(self):
-        return len(self._items)
-    def item(self, i):
-        return self._items[i]
-    def itemByName(self, name):
-        for p in self._items:
-            if p.name == name:
-                return p
-        return None
     def createInput(self):
         self.create_calls += 1
         return _NCInput(self._missing)
@@ -201,22 +173,17 @@ class _NCPrograms:
         return prog
 
 
-class _Op:
-    """An Operation. operationId is the identity the overwrite guard compares on - the SHAPES table
-    lists it on Operation, which carries no entityToken. These fakes hold the guard's own premise:
-    distinct objects sharing one operationId - the shape the guard is built against; the live
+class _Op(FakeOperation):
+    """An Operation carrying operationId - the identity the overwrite guard compares on. These
+    fakes hold the guard's own premise: distinct objects sharing one operationId; the live
     stability of that id across fetches is CAM-1's measurement."""
     _seq = itertools.count(1)
 
     def __init__(self, name, operation_id=None, has_toolpath=True):
-        self.name = name
         # what the post EMITS: an operation in the program's scope with no toolpath is held and
         # not written out (measured - four held ops, one operation block in the file)
-        self.hasToolpath = has_toolpath
-        if operation_id is not None:
-            self.operationId = operation_id
-        else:
-            self.operationId = next(self._seq)
+        super().__init__(name, has_toolpath=has_toolpath)
+        self.operationId = next(self._seq) if operation_id is None else operation_id
 
 
 class _ToolpathlessOp(_Op):
@@ -243,62 +210,46 @@ class _IdlessOp(_Op):
         pass
 
 
-class _Setup:
-    def __init__(self, name, ops=()):
-        self.name = name
-        self._ops = list(ops)
-    @property
-    def allOperations(self):
-        return _NamedCollection(self._ops)
+def _Setup(name, ops=()):
+    """A setup as the post's scope walk reads it."""
+    return FakeSetup(name, ops=ops)
 
 
-class _Setups:
-    def __init__(self, setups):
-        self._s = setups
-    @property
-    def count(self):
-        return len(self._s)
-    def item(self, i):
-        return self._s[i]
+def _CAM(setups, writes=True, returns=True, existing=(), missing=(),
+         program_error=False, program_class=None):
+    """A CAM product whose ncPrograms post into the output folder the handler wrote onto the
+    program's own parameters. `writes` False lands no file; 'failed' lands the post's own stub."""
+    cam = make_cam(*setups)
+    cam.personalPostFolder = "C:/nonexistent/personal"
+    cam.genericPostFolder = "C:/nonexistent/generic"
+    cam.posted = []
 
-
-class _CAM:
-    def __init__(self, setups, writes=True, returns=True, existing=(), missing=(),
-                 program_error=False, program_class=None):
-        self.setups = _Setups(setups)
-        self.personalPostFolder = "C:/nonexistent/personal"
-        self.genericPostFolder = "C:/nonexistent/generic"
-        self._writes = writes
-        self._returns = returns
-        self.ncPrograms = _NCPrograms(self, missing, program_error, program_class)
-        for name in existing:
-            self.ncPrograms._items.append(
-                (program_class or _NCProgram)(name, self, missing, has_error=program_error))
-        self.posted = []
-    def _do_post(self, program):
-        self.posted.append(program)
+    def _do_post(program):
+        cam.posted.append(program)
         folder = _unq(program.parameters.itemByName("nc_program_output_folder").expression)
         name = _unq(program.parameters.itemByName("nc_program_name").expression)
-        if self._writes == "failed":
-            # a failed post leaves only a '.failed' stub in the output folder (the real error is in the
-            # post log, elsewhere) and postProcess returns False.
+        if writes == "failed":
+            # a failed post leaves only a '.failed' stub in the output folder (the real error is in
+            # the post log, elsewhere) and postProcess returns False.
             with open(os.path.join(folder, str(name) + ".nc.failed"), "w") as f:
                 f.write("%\n!Error: Failed to post data. See log for details.\n")
             return False
-        if self._writes:
+        if writes:
             with open(os.path.join(folder, str(name) + ".nc"), "w") as f:
                 f.write("%\nO1000\nG0 X0 Y0\nM30\n%\n")
-        return self._returns
-    def _remove(self, program):
-        if program in self.ncPrograms._items:
-            self.ncPrograms._items.remove(program)
+        return returns
 
+    def _remove(program):
+        if program in cam.ncPrograms._items:
+            cam.ncPrograms._items.remove(program)
 
-class _OC:
-    def __init__(self):
-        self.items = []
-    def add(self, x):
-        self.items.append(x)
+    cam._do_post = _do_post
+    cam._remove = _remove
+    cam.ncPrograms = _NCPrograms(cam, missing, program_error, program_class)
+    for name in existing:
+        cam.ncPrograms._items.append(
+            (program_class or _NCProgram)(name, cam, missing, has_error=program_error))
+    return cam
 
 
 class _URL:
@@ -358,7 +309,7 @@ def _install(monkeypatch, cam, valid=1):
     monkeypatch.setattr(cp.adsk.cam.NCProgramPostProcessOptions, "create",
                         lambda: object(), raising=False)
     monkeypatch.setattr(cp.adsk.core.ObjectCollection, "create",
-                        lambda: _OC(), raising=False)
+                        _make_object_collection, raising=False)
     return cam
 
 
@@ -806,7 +757,7 @@ class TestOverwriteGuard:
         cam = _install(monkeypatch, _CAM([s1], existing=["JOB1"]))
         prog = cam.ncPrograms.itemByName("JOB1")
         stored = _Op("Face1", operation_id=42)
-        assert stored is not s1._ops[0]
+        assert stored is not s1.operations.item(0)
         prog.operations = [stored]
         data = _payload(cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
                                    program_name="JOB1"))
@@ -973,13 +924,13 @@ class TestPostWritesFile:
 
 class TestUnitParam:
     def test_missing_unit_param_is_no_note(self):
-        val, note = cp._set_unit_param(_Params({}), "mm")
+        val, note = cp._set_unit_param(FakeCAMParameters(), "mm")
         assert val is cp._MISSING and note is None
 
     def test_no_choices_exposed_is_error_note_not_wrong_typed_set(self):
         # a value with no getChoices() must NOT be set blind (the platform rejects a bare int with a
         # std::string type error) - surface the error + note instead.
-        params = _Params({"nc_program_unit": _ValParam("nc_program_unit", 0)})
+        params = FakeCAMParameters([FakeCAMParameter("nc_program_unit", value=0)])
         val, note = cp._set_unit_param(params, "mm")
         assert isinstance(val, str) and "error" in val
         assert note and "units" in note.lower()
@@ -990,7 +941,8 @@ class TestUnitParam:
         cv = types.SimpleNamespace(value="$doc")
         cv.getChoices = lambda: (True, ["Document unit", "Inches", "Millimeters"],
                                  ["$doc", "$in", "$mm"])
-        params = _Params({"nc_program_unit": types.SimpleNamespace(name="nc_program_unit", value=cv)})
+        params = FakeCAMParameters(
+            [types.SimpleNamespace(name="nc_program_unit", value=cv)])
         val, note = cp._set_unit_param(params, "mm")
         assert note is None and cv.value == "$mm"
 
@@ -1007,7 +959,8 @@ class TestUnitParam:
             def value(self, v):
                 raise RuntimeError("error in ChoiceParameterValue__set_value")
 
-        params = _Params({"nc_program_unit": types.SimpleNamespace(name="nc_program_unit", value=_Reject())})
+        params = FakeCAMParameters(
+            [types.SimpleNamespace(name="nc_program_unit", value=_Reject())])
         val, note = cp._set_unit_param(params, "mm")
         assert isinstance(val, str) and "error" in val
         assert note and "units" in note.lower()

@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 187  |  **description breadcrumbs:** 394  |  **note/error breadcrumbs:** 471
+**Tools:** 187  |  **description breadcrumbs:** 394  |  **note/error breadcrumbs:** 468
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -17,8 +17,8 @@ close orphans, factor duplicated guards into shared helpers.
 **Read/Acquire (5)** - higher concern, a check-your-work tool nothing points to:
   `cam_compare_operations`, `cam_inspect_toolpaths`, `drawing_get`, `model_compute_holder`, `sys_get_api_doc`
 
-**Edit (46)** - usually leaf actions, scan for genuine gaps:
-  `assembly_edit_contacts`, `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_configure`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_update`, `joint_create_as_built`, `mesh_delete`, `mesh_generate_face_groups`, `mesh_plane_cut`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_edit_curve`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
+**Edit (47)** - usually leaf actions, scan for genuine gaps:
+  `assembly_edit_contacts`, `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_configure`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_update`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_generate_face_groups`, `mesh_plane_cut`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_edit_curve`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
 - **50x** across 50 module(s): "No active design. Create or open a document first (see doc_new)."
@@ -841,11 +841,15 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No active design. Create or open a document first (see doc_new).
 - Occurrence.activate() returned false for '
 - ' - could not make it the active edit target.
-- activate() returned true but the active component still reads '
-- ') - the activation did not take.
+- activate() returned true for '
+- ' but the design reads activeOccurrence=
+- and isRootComponentActive=
+- - the activation is not confirmed on that instance.
 - This component is now the active edit target - sketch_create / model_extrude / sketch_dimension build into it. Activate 'root' (or '') to return to the root.
-- Activation was accepted but the active component still reads '
-- ' - the edit target did not return to root.
+- Design.activateRootComponent() returned false - the edit target did not return to the root component.
+- activateRootComponent() returned true but the design reads isRootComponentActive=
+- and activeOccurrence=
+- - the edit target is not confirmed at the root.
 - Root component is the active edit target - new geometry builds at the root.
 
 ### `design_add_instance`
@@ -1718,8 +1722,9 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Mesh body removed. (design_delete_feature / design_delete_occurrence don't reach mesh bodies - this is the mesh-side delete.)
 - This design has no meshRemoveFeatures collection (parametric mesh delete unavailable here).
 - meshRemoveFeatures.createInput returned nothing.
-- deleteMe() declined for mesh '
-- ' - it was NOT deleted (it may still be referenced by a downstream mesh_to_brep/mesh_reduce/mesh_combine feature).
+- deleteMe() answered false for mesh '
+- ' - it was NOT deleted (
+- ' resolve in component '
 - Could not create the mesh-remove input:
 - Mesh delete failed (meshRemoveFeatures.add raised):
 
@@ -1745,10 +1750,11 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Could not create output directory '
 
 ### `mesh_generate_face_groups`
-- Face groups generated. mesh_to_brep(method='prismatic') now works on this mesh - prismatic convert REQUIRES face groups (it merges each flat group into one BRep face).
+- Face-group generation ran -
+- . Convert with mesh_to_brep(method='prismatic').
 - No active design. Open or create a document first (see doc_new).
 - This design has no meshGenerateFaceGroupsFeatures collection (generate face groups unavailable here).
-- mesh_generate_face_groups reported no error, but the mesh has no face groups afterward (add() returned nothing and face_group_count is 0). Treating this as a failure - no face groups were generated.
+- mesh_generate_face_groups reported no error, but add() returned no feature and neither the mesh's face group count nor its group ids read before or after - nothing observed what this generation did.
 - meshGenerateFaceGroupsFeatures.createInput returned nothing.
 - adsk.fusion.MeshGenerateFaceGroupsMethodTypes is unavailable on this Fusion version.
 - Could not create the face-groups input:

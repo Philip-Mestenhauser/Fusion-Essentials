@@ -9,21 +9,22 @@ moving an entity relative to itself).
 
 import json
 
-from conftest import load_tool
+from conftest import (FakeCAMFolder, FakeOperation, FakeSetup, _NamedCollection, load_tool,
+                      make_cam)
 
 cr = load_tool("cam_reorder")
 
 
-# ── fakes ────────────────────────────────────────────────────────────────────
+# ── the movable scenario layer over the shared CAM tree fakes ────────────────
 
-class _Entity:
+class _Movable:
     """A CAM tree item that really MOVES: moveBefore/moveAfter re-seat it in the destination
     parent's own child list, which is what the tool re-reads the order off."""
 
     _COLL = "operations"     # the parent collection this kind of item lives in
 
-    def __init__(self, name, allow=True):
-        self.name = name
+    def __init__(self, *args, allow=True, **kwargs):
+        super().__init__(*args, **kwargs)
         self._allow = allow
         self.moved = None    # ('before'|'after', other)
         self._home = None    # the python list its parent collection holds
@@ -35,7 +36,7 @@ class _Entity:
         self.moved = ("before" if before else "after", other)
         if self._home is not None:
             self._home.remove(self)
-        dest = getattr(other._parent, self._COLL)._i
+        dest = getattr(other._parent, self._COLL)._items
         if dest is other._home:
             at = dest.index(other)
             dest.insert(at if before else at + 1, self)
@@ -52,61 +53,34 @@ class _Entity:
         return self._relocate(other, False)
 
 
-class _Coll:
-    def __init__(self, items):
-        self._i = list(items)
-    @property
-    def count(self):
-        return len(self._i)
-    def item(self, i):
-        return self._i[i]
+class _Container(_Movable):
+    """Wires every child to the list its collection holds, so a move can re-seat it there."""
 
-
-class _Parent(_Entity):
-    def __init__(self, name, ops=(), folders=(), patterns=(), allow=True):
-        super().__init__(name, allow)
-        self.operations = _Coll(ops)
-        self.folders = _Coll(folders)
-        self.patterns = _Coll(patterns)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         for coll in (self.operations, self.folders, self.patterns):
-            for child in coll._i:
-                child._home, child._parent = coll._i, self
+            for child in coll:
+                child._home, child._parent = coll._items, self
 
 
-class Operation(_Entity):
+class Operation(_Movable, FakeOperation):
     pass
 
 
-class Setup(_Parent):
+class Setup(_Container, FakeSetup):
     pass
 
 
-class CAMFolder(_Parent):
+class CAMFolder(_Container, FakeCAMFolder):
     _COLL = "folders"
-
-
-class _Setups:
-    def __init__(self, s):
-        self._s = s
-    @property
-    def count(self):
-        return len(self._s)
-    def item(self, i):
-        return self._s[i]
-
-
-class _CAM:
-    def __init__(self, setups):
-        self.setups = _Setups(setups)
 
 
 def _install(monkeypatch, setups=None):
     if setups is None:
         ops = [Operation("Face1"), Operation("Adaptive1"), Operation("Drill1")]
         fol = CAMFolder("Holes", ops=[Operation("Bore1")])
-        s = Setup("Setup1", ops=ops, folders=[fol])
-        setups = [s]
-    cam = _CAM(setups)
+        setups = [Setup("Setup1", ops=ops, folders=[fol])]
+    cam = make_cam(*setups)
     monkeypatch.setattr(cr, "get_cam", lambda: (cam, None))
     return cam
 
@@ -119,15 +93,14 @@ def _payload(result):
 def _named(cam, name):
     # helper to fetch an entity for assertions
     s = cam.setups.item(0)
-    for o in s.operations._i:
-        if o.name == name:
-            return o
-    for f in s.folders._i:
-        if f.name == name:
-            return f
-        for o in f.operations._i:
-            if o.name == name:
-                return o
+    for coll in (s.operations, s.folders):
+        hit = coll.itemByName(name)
+        if hit is not None:
+            return hit
+    for f in s.folders:
+        hit = f.operations.itemByName(name)
+        if hit is not None:
+            return hit
     return None
 
 
@@ -217,17 +190,19 @@ class _VanishingMover(Operation):
         return True
 
 
-class _AllOperationsOnly(_Entity):
+class _AllOperationsOnly(_Movable):
     """A container that answers only allOperations - the walk's degraded path. Its children are in
-    the tree, but the parent exposes no per-kind collection to re-read an order off."""
+    the tree, but the parent exposes no per-kind collection to re-read an order off, which no
+    shared CAM fake models (FakeCAMFolder always answers all three)."""
 
     _COLL = "patterns"
 
     def __init__(self, name, ops=()):
-        super().__init__(name)
-        self.allOperations = _Coll(ops)
-        for child in self.allOperations._i:
-            child._home, child._parent = self.allOperations._i, self
+        super().__init__()
+        self.name = name
+        self.allOperations = _NamedCollection(list(ops))
+        for child in self.allOperations:
+            child._home, child._parent = self.allOperations._items, self
 
 
 class TestLyingMove:

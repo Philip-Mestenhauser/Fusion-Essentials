@@ -10,13 +10,15 @@ import pytest
 import live_api_facts as _api_facts
 from conftest import (FakeApplication, FakeBaseFeature, FakeBaseFeatures, FakeCAMParameter,
                       FakeDataFile, FakeDataFolder,
-                      FakeDocumentReference, FakeFeature, FakeFeatures, FakeJoints, FakeMachine,
-                      FakeMotionLink, FakeMotionLinks, FakeRigidGroup, FakeRigidGroups,
+                      FakeDocumentReference, FakeFeature, FakeFeatures, FakeJoint, FakeJoints,
+                      FakeMachine, FakeMatrix3D,
+                      FakeMotionLink, FakeMotionLinks, FakePoint, FakeRigidGroup, FakeRigidGroups,
                       FakeSelection, FakeSetups, FakeTimeline, FakeTimelineObject, FakeTool,
-                      FakeUserParameter,
-                      FakeUserParameters, _MotionLimits, make_cam_parameters, make_data_tree,
-                      make_design, make_joint, make_document_world, make_sketch, make_sketch_curve,
-                      make_timeline)
+                      FakeUserParameter, FakeVector3D,
+                      FakeUserParameters, MakeComp, _MotionLimits, make_cam_parameters,
+                      make_data_tree,
+                      make_design, make_joint, make_document_world, make_occurrence, make_sketch,
+                      make_sketch_curve, make_timeline)
 
 
 class TestDocumentWorld:
@@ -199,14 +201,37 @@ class TestJointMotionWorld:
         assert not hasattr(FakeMotionLink(), "motionOne")
         assert FakeMotionLink(motion_one="rotate", motion_two="slide").motionOne == "rotate"
 
+    def test_a_motion_that_stores_nothing_takes_the_write_and_keeps_the_old_value(self):
+        # The swallowed write: distinct from a limit refusal, and only a read-back catches it.
+        motion = make_joint(kind="revolute", rotation=math.radians(5.0), stores=False).jointMotion
+        motion.rotationValue = math.radians(30.0)
+        assert round(math.degrees(motion.rotationValue), 4) == 5.0
+        slider = make_joint(kind="slider", slide=1.0, stores=False).jointMotion
+        slider.slideValue = 9.0
+        assert slider.slideValue == 1.0
+
+    def test_a_joint_whose_health_will_not_read_raises_rather_than_reading_healthy(self):
+        # An unreadable state must not degrade to a confident verdict - the caller publishes null.
+        with pytest.raises(RuntimeError, match="health state"):
+            FakeJoint(health_readable=False).healthState
+        assert FakeJoint(health=7).healthState == 7
+
+    def test_a_motion_setter_answers_its_bool_and_records_what_it_was_given(self):
+        joint = FakeJoint(motion_set_ok=False)
+        assert joint.setAsRevoluteJointMotion(2) is False
+        assert joint.setAsRigidJointMotion() is False
+        assert joint._motion_calls == [("revolute", (2,)), ("rigid", ())]
+
     def test_a_rigid_group_reads_back_the_membership_setoccurrences_landed(self):
         groups = FakeRigidGroups()
         group = groups.add(["occ1", "occ2"])
         assert group.occurrences.count == 2
-        assert group.setOccurrences(["occ1"]) is True
+        # Both arguments are required live, and includeChildren travels with the membership.
+        assert group.setOccurrences(["occ1"], True) is True
         assert groups.itemByName(group.name).occurrences.count == 1
+        assert group._sets[-1] == (["occ1"], True)
         stubborn = FakeRigidGroup(occurrences=["occ1"], set_ok=False)
-        assert stubborn.setOccurrences([]) is False and stubborn.occurrences.count == 1
+        assert stubborn.setOccurrences([], False) is False and stubborn.occurrences.count == 1
 
 
 class TestCamJobWorld:
@@ -265,6 +290,99 @@ class TestDataWorld:
         part = root.dataFiles.item(0)
         assert part.move(FakeDataFolder("Archive")) is False
         assert part.parentFolder is root
+
+
+class TestPlacementMatrix:
+    def test_a_rotation_about_a_pivot_leaves_that_point_where_it_was(self):
+        # setToRotation bakes the pivot correction into the translation column - a rotation that
+        # dropped it would swing the part about the WORLD origin instead of its own.
+        m = FakeMatrix3D()
+        assert m.setToRotation(math.pi / 2, FakeVector3D(0.0, 0.0, 1.0),
+                               FakePoint(10.0, 0.0, 0.0)) is True
+        assert [round(v, 6) for v in m._apply_point(10.0, 0.0, 0.0)] == [10.0, 0.0, 0.0]
+
+    def test_a_composed_move_accumulates_so_a_second_identical_move_is_not_a_no_op(self):
+        base, step = FakeMatrix3D(), FakeMatrix3D(t=(5.0, 0.0, 0.0))
+        assert base.transformBy(step) is True and base.asArray()[3] == 5.0
+        base.transformBy(step)
+        assert base.asArray()[3] == 10.0
+
+    def test_two_composed_rotations_apply_the_argument_second(self):
+        # Measured: rotX(90).transformBy(rotZ(90)) sends +X to +Y. The ROTATION product is what this
+        # pins - the translation column alone cannot tell self*other from other*self, and the
+        # swapped product sends +X to +Z instead.
+        x90, z90 = FakeMatrix3D(), FakeMatrix3D()
+        x90.setToRotation(math.pi / 2, FakeVector3D(1.0, 0.0, 0.0), FakePoint())
+        z90.setToRotation(math.pi / 2, FakeVector3D(0.0, 0.0, 1.0), FakePoint())
+        assert x90.transformBy(z90) is True
+        assert [round(v, 6) for v in x90._apply_vector(1.0, 0.0, 0.0)] == [0.0, 1.0, 0.0]
+        rows = [[round(v, 6) for v in x90.asArray()[i:i + 3]] for i in (0, 4, 8)]
+        assert rows == [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+
+    def test_a_translation_assigned_after_a_rotation_is_recorded_as_the_pivot_clobber(self):
+        m = FakeMatrix3D()
+        m.setToRotation(math.pi / 2, FakeVector3D(0.0, 0.0, 1.0), FakePoint(10.0, 0.0, 0.0))
+        assert m._direct_translation is False
+        m.translation = FakeVector3D(1.0, 2.0, 3.0)
+        assert m._direct_translation is True
+
+    def test_a_translation_read_is_a_fresh_vector_and_none_is_refused(self):
+        # Measured: the object read back is never the one assigned, so mutating a read result moves
+        # nothing; and None RAISES rather than clearing the column.
+        m, v = FakeMatrix3D(), FakeVector3D(1.0, 2.0, 3.0)
+        m.translation = v
+        read = m.translation
+        assert read is not v
+        assert (read.x, read.y, read.z) == (1.0, 2.0, 3.0)
+        read.x = 99.0
+        assert m.translation.x == 1.0
+        with pytest.raises(RuntimeError, match="invalid argument value"):
+            m.translation = None
+
+    def test_the_translation_column_takes_a_vector_and_nothing_else(self):
+        # Measured: None answers "3 : invalid argument value" while a Point3D/tuple/int answers a
+        # TYPE error - so a duck-typed x/y/z check would accept the Point3D the live member refuses.
+        m = FakeMatrix3D()
+        for wrong in (FakePoint(1.0, 2.0, 3.0), (1.0, 2.0, 3.0), [1.0, 2.0, 3.0], 5):
+            with pytest.raises(TypeError):
+                m.translation = wrong
+        assert (m.translation.x, m.translation.y, m.translation.z) == (0.0, 0.0, 0.0)
+
+    def test_an_unassigned_matrix_reports_its_own_offset_and_its_axes(self):
+        m = FakeMatrix3D(t=(1.0, 2.0, 3.0))
+        assert (m.translation.x, m.translation.y, m.translation.z) == (1.0, 2.0, 3.0)
+        origin, x_axis, _y, _z = m.getAsCoordinateSystem()
+        assert (origin.x, origin.y, origin.z) == (1.0, 2.0, 3.0)
+        assert (round(x_axis.x, 6), round(x_axis.y, 6)) == (1.0, 0.0)
+
+
+class TestAssemblyPlacement:
+    def test_a_plain_occurrence_reads_local_with_two_empty_collections(self):
+        # Measured: absence is not a live state for any of the three - a plain local occurrence
+        # answers False and two EMPTY walks, so a default that dropped the member would teach a
+        # shape Fusion never presents.
+        occ = make_occurrence("Bracket:1")
+        assert occ.isReferencedComponent is False
+        assert occ.joints.count == 0 and occ.bRepBodies.count == 0
+
+    def test_one_read_can_decline_while_the_rest_still_answer(self):
+        occ = make_occurrence("Bracket:1",
+                              raises_on={"isReferencedComponent": "3 : read declined"})
+        with pytest.raises(RuntimeError, match="read declined"):
+            occ.isReferencedComponent
+        assert occ.joints.count == 0 and occ.name == "Bracket:1"
+
+    def test_the_placement_walk_matches_on_token_because_identity_never_answers(self):
+        # Measured elsewhere: two reads of ONE component hand back different Python objects sharing
+        # one entityToken, so an identity compare finds none of the placements.
+        one, two = MakeComp("Bolt", entity_token="TOK"), MakeComp("Bolt", entity_token="TOK")
+        occs = [make_occurrence("Bolt:1", component=one), make_occurrence("Bolt:2", component=two)]
+        root = MakeComp("Root", occurrences=occs)
+        found = root.allOccurrencesByComponent(MakeComp("Bolt", entity_token="TOK"))
+        assert found.count == 2
+        assert root.allOccurrencesByComponent(MakeComp("Other", entity_token="OTHER")).count == 0
+        # A component carrying no token cannot be matched at all - that is not "placed nowhere".
+        assert root.allOccurrencesByComponent(MakeComp("Untokened")).count == 0
 
 
 class TestSketchWorld:

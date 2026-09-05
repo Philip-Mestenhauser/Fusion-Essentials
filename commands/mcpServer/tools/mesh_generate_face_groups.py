@@ -25,6 +25,13 @@ _FG_METHOD = _inputs.Choice("method", ["fast", "accurate"], default="accurate",
                             description="Segmentation method - 'accurate' is slower and cleaner.")
 
 
+def _group_ids(mb):
+    """The face groups' tempIds - a per-GROUP read, so it costs the group count, not the triangles."""
+    groups = safe(lambda: mb.faceGroups)
+    return None if groups is None else safe(
+        lambda: [groups.item(i).tempId for i in range(groups.count)])
+
+
 def handler(mesh: str = "", method: str = "accurate") -> dict:
     """Segment a MeshBody into planar face groups - the required pre-step for a prismatic mesh_to_brep."""
     design = _common.design()
@@ -45,6 +52,8 @@ def handler(mesh: str = "", method: str = "accurate") -> dict:
     # base-feature edit scope is open, and add() returns nothing INSIDE that scope even in a
     # parametric design - so the returned feature is no evidence of the design's mode.
     design_mode = _inputs.current_design_type(design)
+    before = safe(lambda: mb.faceGroups.count)
+    before_ids = _group_ids(mb)
 
     def inner_op(base_feature):
         # createInput -> set method -> add, all INSIDE the (possibly open) base-feature scope.
@@ -84,16 +93,26 @@ def handler(mesh: str = "", method: str = "accurate") -> dict:
     feat = result["feat"]   # a MeshGenerateFaceGroupsFeature, or None inside a base-feature scope
     bf_name = result["base_feature_name"]
     group_count = safe(lambda: mb.faceGroups.count)
-    # A returned feature IS proof the add() succeeded. A None feature (non-parametric) is only proof
-    # of success if the mesh actually carries face groups afterward - a None with zero groups is a
-    # silent no-op, not a success.
-    if feat is None and not group_count:
-        return error("mesh_generate_face_groups reported no error, but the mesh has no face groups "
-                     "afterward (add() returned nothing and face_group_count is 0). Treating this as "
-                     "a failure - no face groups were generated.")
-    note = ("Face groups generated. mesh_to_brep(method='prismatic') now works on this mesh - "
-            "prismatic convert REQUIRES face groups (it merges each flat group into one BRep "
-            "face).")
+    after_ids = _group_ids(mb)
+    changed = None if group_count is None or before is None else group_count != before
+    ids_changed = None if after_ids is None or before_ids is None else after_ids != before_ids
+    # Measured: neither read carries a verdict. A landed generation can leave the count at 1 (a mesh
+    # whose whole surface is one flat region) and can leave the group ids where they stood (a repeat
+    # pass reproducing them), so both are reported as observations and neither refuses.
+    if feat is None and changed is None and ids_changed is None:
+        return error("mesh_generate_face_groups reported no error, but add() returned no feature and "
+                     "neither the mesh's face group count nor its group ids read before or after - "
+                     "nothing observed what this generation did.")
+    if changed is None:
+        seen = "the face group count did not read before or after"
+    elif changed:
+        seen = f"the face group count moved from {before} to {group_count}"
+    else:
+        ids_seen = {True: "; the group ids moved", False: " and the group ids stood with it",
+                    None: " (the group ids did not read)"}[ids_changed]
+        seen = (f"the face group count reads {group_count}, where it stood before this "
+                f"generation{ids_seen}")
+    note = f"Face-group generation ran - {seen}. Convert with mesh_to_brep(method='prismatic')."
     if feat is None:
         note += " " + _common.null_feature_note(design, feat, bf_name, "face-group generation")
 
@@ -104,7 +123,10 @@ def handler(mesh: str = "", method: str = "accurate") -> dict:
         "feature": safe(lambda: feat.name) if feat else None,
         "design_mode": design_mode,
         "base_feature": bf_name,
-        "face_group_count": group_count,       # the observable side effect proving it applied
+        "face_group_count": group_count,
+        "face_group_count_before": before,
+        "changed": changed,                    # count moved; null where either read failed
+        "face_group_ids_changed": ids_changed,  # the groups' tempIds moved; null where either failed
         "note": note,
     })
 
@@ -127,7 +149,7 @@ item = Item.create_tool_item(
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_mesh_generate_face_groups.py::TestFaceGroups"
-                      "::test_none_feature_with_zero_face_groups_is_a_failure"))
+                      "::test_a_null_feature_with_no_readable_readback_is_a_failure"))
 
 
 def register_tool():

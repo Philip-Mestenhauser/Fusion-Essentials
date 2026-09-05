@@ -14,50 +14,27 @@ import pytest
 
 import adsk.fusion
 
-from conftest import load_tool
+from conftest import (FakeJoint, FakeMotionLink, FakeOccurrence, FakeTimelineObject, MakeComp,
+                      MakeDesign, _NamedCollection, load_tool, make_design, make_occurrence)
 
 jt = load_tool("_joints")
-
-
-class _Coll:
-    """A Fusion collection: count/item (the walk) plus itemByName, and ITERABLE - design.allComponents
-    is counted and iterable alike (measure_api allcomponents-design-only); the shared component walk
-    under both joint walks reads it with count/item."""
-
-    def __init__(self, items):
-        self._i = list(items)
-
-    @property
-    def count(self):
-        return len(self._i)
-
-    def item(self, i):
-        return self._i[i]
-
-    def itemByName(self, name):
-        return next((x for x in self._i if x.name == name), None)
-
-    def __iter__(self):
-        return iter(self._i)
 
 
 def _joint(name, token, comp_name):
     """A joint the way the live walk reads one: its own entityToken (the key that collapses the two
     root proxies) and the parentComponent whose name a refusal names."""
-    return type("J", (), {"name": name, "entityToken": token,
-                          "parentComponent": type("C", (), {"name": comp_name})()})()
+    return FakeJoint(name, entity_token=token, parent_component=MakeComp(name=comp_name))
 
 
 def _comp(joints=(), asbuilt=(), origins=()):
-    return type("Comp", (), {"joints": _Coll(joints), "asBuiltJoints": _Coll(asbuilt),
-                             "jointOrigins": _Coll(origins)})()
+    return MakeComp(name="Comp", joints=joints, as_built_joints=asbuilt, joint_origins=origins)
 
 
 def _design(root, subs=()):
     # allComponents lives on the DESIGN, is a COUNTED collection, and CARRIES THE ROOT - the live
     # shape the walks read. A bare list models neither, and a collection without the root would let a
     # root-only walk pass here while under-reporting every joint on a live design.
-    return type("D", (), {"rootComponent": root, "allComponents": _Coll([root] + list(subs))})()
+    return make_design(comp=root, all_components=[root] + list(subs))
 
 
 # ── find_joints_by_name: the list form (never grab the first) ────────────────
@@ -122,14 +99,13 @@ class TestFindJoint:
         assert "3 joints" in err and "'R1' in C" in err
 
     def test_an_unreadable_owning_component_is_named_as_unreadable(self):
-        class _Blind:
-            name = "R1"
-            entityToken = "t2"
-
+        class _Blind(FakeJoint):
+            """A joint whose owning component will not read - the row a refusal still has to name."""
             @property
             def parentComponent(self):
                 raise RuntimeError("no component")
-        des = _design(_comp([_joint("R1", "t1", "Arm")]), [_comp([_Blind()])])
+        des = _design(_comp([_joint("R1", "t1", "Arm")]),
+                      [_comp([_Blind("R1", entity_token="t2")])])
         _j, err = jt.find_joint(des, "R1")
         assert "(unreadable component)" in err and "Arm" in err
 
@@ -144,14 +120,12 @@ class TestFindJoint:
 
 # ── all_joints: the identity key that runs when entityToken does not read ───
 
-class _TokenlessJoint:
+class _TokenlessJoint(FakeJoint):
     """A joint whose entityToken read RAISES - the state a SUPPRESSED joint degrades toward - so the
     walk keys it on (name, objectType, owning component) instead."""
 
     def __init__(self, name, comp_name, obj_type="adsk::fusion::Joint"):
-        self.name = name
-        self.objectType = obj_type
-        self.parentComponent = type("C", (), {"name": comp_name})()
+        super().__init__(name, object_type=obj_type, parent_component=MakeComp(name=comp_name))
 
     @property
     def entityToken(self):
@@ -183,49 +157,36 @@ class TestAllJointsFallbackKey:
 # SUPPRESSED or compute-failed transmits nothing; a state that does not READ is neither, so every
 # field is a tri-state a consumer branches on with `is`.
 
-class _Linked:
-    """A joint the record reads: its name plus the motionLinks SEQUENCE the platform hands over
-    (a MotionLinkVector - a plain list, no count/item)."""
-
-    def __init__(self, name, links=()):
-        self.name = name
-        self.motionLinks = list(links)
+def _Linked(name, links=()):
+    """A joint the record reads: its name plus the motionLinks the platform hands over."""
+    return FakeJoint(name, links=links)
 
 
-class _Blind:
+def _Blind(name):
     """A joint whose motionLinks membership RAISES - 'could not be asked', which the record must not
     report as 'in no link'."""
-
-    def __init__(self, name):
-        self.name = name
-
-    @property
-    def motionLinks(self):
-        raise RuntimeError("membership unreadable")
+    joint = FakeJoint(name)
+    joint.motionLinks = _NamedCollection(raises="membership unreadable")
+    return joint
 
 
-class _Link:
+def _Link(one, two, name="MotionLink1", suppressed=False,
+          health=adsk.fusion.FeatureHealthStates.HealthyFeatureHealthState,
+          value_one=1.0, value_two=2.0, reversed_=False, timeline=None, own_health=True):
     """A MotionLink: the two joints it couples, its own suppression and compute state, the two
-    ModelParameter values whose ratio IS the coupling, and the reversed flag. `health` is a
-    FeatureHealthStates member; `timeline` is the TimelineObject beside the link, the second source
-    the record asks for a health state and for a suppression an entity's own flag does not carry."""
-
-    def __init__(self, one, two, name="MotionLink1", suppressed=False,
-                 health=adsk.fusion.FeatureHealthStates.HealthyFeatureHealthState,
-                 value_one=1.0, value_two=2.0, reversed_=False, timeline=None, own_health=True):
-        self.jointOne, self.jointTwo = one, two
-        self.name = name
-        self.isSuppressed = suppressed
-        if own_health:
-            self.healthState = health
-            self.errorOrWarningMessage = (
-                "" if health == adsk.fusion.FeatureHealthStates.HealthyFeatureHealthState
-                else "linked joints conflict")
-        if timeline is not None:
-            self.timelineObject = timeline
-        self.valueOne = type("P", (), {"value": value_one})()
-        self.valueTwo = type("P", (), {"value": value_two})()
-        self.isReversed = reversed_
+    ModelParameter values whose ratio IS the coupling, and the reversed flag. `timeline` is the
+    TimelineObject beside the link, the second source the record asks for a health state and for a
+    suppression an entity's own flag does not carry; `own_health` False DELETES the link's own pair,
+    the state where only that second source can answer."""
+    link = FakeMotionLink(name=name, joint_one=one, joint_two=two, suppressed=suppressed,
+                          health=health, value_one=value_one, value_two=value_two,
+                          reversed_link=reversed_, timeline_object=timeline,
+                          message=("" if health == adsk.fusion.FeatureHealthStates
+                                   .HealthyFeatureHealthState else "linked joints conflict"))
+    if not own_health:
+        del link.healthState
+        del link.errorOrWarningMessage
+    return link
 
 
 class TestMotionLinkRecord:
@@ -267,9 +228,8 @@ class TestMotionLinkRecord:
         # the measured shape for relation-like objects: the entity answers no state at all while the
         # TimelineObject beside it does. Asking the entity alone would report a failed link as fine.
         me, partner = _Linked("Rack"), _Linked("Pinion")
-        tl = type("T", (), {
-            "healthState": adsk.fusion.FeatureHealthStates.ErrorFeatureHealthState,
-            "errorOrWarningMessage": "linked joints conflict"})()
+        tl = FakeTimelineObject(health=adsk.fusion.FeatureHealthStates.ErrorFeatureHealthState,
+                                message="linked joints conflict")
         me.motionLinks = [_Link(me, partner, own_health=False, timeline=tl)]
         assert jt.motion_link_record(me)["broken"] is True
 
@@ -285,7 +245,7 @@ class TestMotionLinkRecord:
         # alone reports a suppressed link as a working one, which is the reading that lets a
         # receipt claim it moved the partner.
         me, partner = _Linked("Rack"), _Linked("Pinion")
-        tl = type("T", (), {"isSuppressed": True})()
+        tl = FakeTimelineObject(suppressed=True)
         me.motionLinks = [_Link(me, partner, suppressed=False, timeline=tl)]
         assert jt.motion_link_record(me)["suppressed"] is True
 
@@ -293,7 +253,7 @@ class TestMotionLinkRecord:
         # the second source answers alone, the way it does for the health state of an entity that
         # carries none of its own.
         me, partner = _Linked("Rack"), _Linked("Pinion")
-        link = _Link(me, partner, timeline=type("T", (), {"isSuppressed": True})())
+        link = _Link(me, partner, timeline=FakeTimelineObject(suppressed=True))
         del link.isSuppressed
         me.motionLinks = [link]
         assert jt.motion_link_record(me)["suppressed"] is True
@@ -302,7 +262,7 @@ class TestMotionLinkRecord:
         # False is an ANSWER: one source reading it settles the state, so a link with a silent own
         # flag is reported unsuppressed rather than unknown.
         me, partner = _Linked("Rack"), _Linked("Pinion")
-        link = _Link(me, partner, timeline=type("T", (), {"isSuppressed": False})())
+        link = _Link(me, partner, timeline=FakeTimelineObject(suppressed=False))
         del link.isSuppressed
         me.motionLinks = [link]
         assert jt.motion_link_record(me)["suppressed"] is False
@@ -590,7 +550,7 @@ class TestAllJointOrigins:
         # pair: a JO whose token does not read keys on id(), which two wrappers never share. Asking
         # only the collection is what keeps the row single.
         root, mirror = _comp(origins=[_JO()]), _comp(origins=[_JO()])
-        des = type("D", (), {"rootComponent": root, "allComponents": _Coll([mirror])})()
+        des = MakeDesign(comp=root, all_components=[mirror])
         assert len(jt.all_joint_origins(des)) == 1
 
     def test_an_unreadable_component_collection_still_reaches_the_root_s_JOs(self):
@@ -600,13 +560,12 @@ class TestAllJointOrigins:
         jo = _JO("Frame", token="JO1")
         root = _comp(origins=[jo])
 
-        class _Blind:
-            rootComponent = root
-
+        class _BlindComponents(MakeDesign):
+            """A design whose allComponents will not read at all."""
             @property
             def allComponents(self):
                 raise RuntimeError("collection unavailable")
-        assert jt.all_joint_origins(_Blind()) == [(jo, root)]
+        assert jt.all_joint_origins(_BlindComponents(comp=root)) == [(jo, root)]
 
     def test_the_resolve_one_over_the_walk_sees_ONE_hit_through_both_root_proxies(self):
         # the consumer of this walk (the JointOriginRef kind) REFUSES at two hits, so a root JO the
@@ -619,21 +578,17 @@ class TestAllJointOrigins:
 
 # ── the root test behind the JO leaf ops (same_component, not a name compare) ─
 
-def _occ(path):
-    return type("Occ", (), {"fullPathName": path, "name": path.split("+")[-1]})()
+def _sub(name="Arm", token="ARM"):
+    """A sub-component: the NAME a wrong root test compares and the entityToken the right one does."""
+    return MakeComp(name=name, entity_token=token)
 
 
-class _Root:
-    """A root component wrapper: a name, an entityToken, and the by-component occurrence lookup the
-    JO leaf ops proxy through."""
-
-    def __init__(self, occs=(), name="Root", token="ROOT"):
-        self.name = name
-        self.entityToken = token
-        self._occs = list(occs)
-
-    def allOccurrencesByComponent(self, _c):
-        return self._occs
+def _root_comp(by_component=None, occurrences=None):
+    """The ROOT component the leaf ops test against: its entityToken is what same_component compares,
+    and the by-component lookup answers from `by_component` (keyed by component name) or by walking
+    `occurrences` for the ones placing that component."""
+    return MakeComp(name="Root", entity_token="ROOT", occurrences_by_component=by_component,
+                    all_occurrences=occurrences)
 
 
 class TestJointOriginRootTest:
@@ -641,20 +596,20 @@ class TestJointOriginRootTest:
         # Component wrappers are never identity-stable: design.rootComponent and the component a JO
         # reports are two objects sharing ONE entityToken. The JO is already in assembly context, so
         # it is returned as-is - no occurrence proxy, no refusal.
-        des = type("D", (), {"rootComponent": _Root()})()
+        des = MakeDesign(comp=_root_comp())
         jo = _JO()
-        assert jt.jo_assembly_proxy(des, jo, _Root()) == (jo, None)
+        assert jt.jo_assembly_proxy(des, jo, _root_comp()) == (jo, None)
         assert jo.context is None
-        assert jt.jo_reference_names(des, jo, _Root()) == ["Frame"]
+        assert jt.jo_reference_names(des, jo, _root_comp()) == ["Frame"]
 
     def test_a_sub_component_carrying_the_root_s_NAME_is_not_the_root(self):
         # A component named like the document's root component (renaming a part after the document
         # is the everyday way to get one) shares the NAME but not the entityToken. Comparing names
         # calls it the root and hands back the NATIVE JO, which Fusion answers with "Provided input
         # paths for joint are not valid"; comparing tokens proxies it into its occurrence.
-        occ = _occ("Root:1")
-        des = type("D", (), {"rootComponent": _Root([occ])})()
-        twin = type("Sub", (), {"name": "Root", "entityToken": "TWIN"})()
+        occ = make_occurrence("Root:1")
+        des = MakeDesign(comp=_root_comp({"Root": [occ]}))
+        twin = _sub(name="Root", token="TWIN")
         jo = _JO()
         assert jt.jo_assembly_proxy(des, jo, twin) == (("proxy", occ), None)
         assert jt.jo_reference_names(des, jo, twin) == ["Root:1:Frame"]
@@ -662,20 +617,18 @@ class TestJointOriginRootTest:
     def test_a_sub_component_jo_is_proxied_into_its_single_occurrence(self):
         # A DIFFERENT token means a different component: the native JO is refused by Fusion, so it
         # must be proxied into the occurrence that carries the frame.
-        occ = _occ("Arm:1")
-        des = type("D", (), {"rootComponent": _Root([occ])})()
-        sub = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
+        occ = make_occurrence("Arm:1")
+        des = MakeDesign(comp=_root_comp({"Arm": [occ]}))
         jo = _JO()
-        assert jt.jo_assembly_proxy(des, jo, sub) == (("proxy", occ), None)
-        assert jt.jo_reference_names(des, jo, sub) == ["Arm:1:Frame"]
+        assert jt.jo_assembly_proxy(des, jo, _sub()) == (("proxy", occ), None)
+        assert jt.jo_reference_names(des, jo, _sub()) == ["Arm:1:Frame"]
 
     def test_a_component_instanced_twice_is_refused_with_both_qualified_names(self):
-        occs = [_occ("Arm:1"), _occ("Arm:2")]
-        des = type("D", (), {"rootComponent": _Root(occs)})()
-        sub = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
-        obj, err = jt.jo_assembly_proxy(des, _JO(), sub)
+        occs = [make_occurrence("Arm:1"), make_occurrence("Arm:2")]
+        des = MakeDesign(comp=_root_comp({"Arm": occs}))
+        obj, err = jt.jo_assembly_proxy(des, _JO(), _sub())
         assert obj is None and "instanced 2 times" in err
-        assert jt.jo_reference_names(des, _JO(), sub) == ["Arm:1:Frame", "Arm:2:Frame"]
+        assert jt.jo_reference_names(des, _JO(), _sub()) == ["Arm:1:Frame", "Arm:2:Frame"]
 
 
 # ── component_world_matrix: which transform carries a component's own frame into world ─────────────
@@ -683,9 +636,7 @@ class TestJointOriginRootTest:
 def _placed(path, comp, matrix, context=None):
     """An occurrence placing `comp`: transform2 (the COMPOSED component-to-world matrix) and the
     assemblyContext that makes a nested one reachable from its parent."""
-    return type("Occ", (), {"fullPathName": path, "name": path.split("+")[-1],
-                            "component": comp, "transform2": matrix,
-                            "assemblyContext": context})()
+    return make_occurrence(path, component=comp, transform2=matrix, assembly_context=context)
 
 
 class TestComponentWorldMatrix:
@@ -695,7 +646,7 @@ class TestComponentWorldMatrix:
     part against another instance's orientation."""
 
     def _des(self, root):
-        return type("D", (), {"rootComponent": root})()
+        return MakeDesign(comp=root)
 
     def test_the_root_components_frame_is_world(self, monkeypatch):
         # identity, not None: the root frame IS world, so a root-owned frame needs no lift and must
@@ -703,90 +654,77 @@ class TestComponentWorldMatrix:
         import adsk.core
         monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(lambda: "IDENTITY"),
                             raising=False)
-        root = _Root()
-        assert jt.component_world_matrix(self._des(root), _Root()) == "IDENTITY"
+        assert jt.component_world_matrix(self._des(_root_comp()), _root_comp()) == "IDENTITY"
 
     def test_a_component_placed_once_answers_with_that_occurrences_transform(self):
-        sub = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
-        root = _Root([_placed("Arm:1", sub, "M1")])
+        sub = _sub()
+        root = _root_comp(occurrences=[_placed("Arm:1", sub, "M1")])
         assert jt.component_world_matrix(self._des(root), sub) == "M1"
 
     def test_a_component_placed_twice_answers_None_with_no_context(self):
         # two placements, two orientations, and nothing in hand says which one is being measured -
         # picking either would publish one instance's frame under the other's name.
-        sub = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
-        root = _Root([_placed("Arm:1", sub, "M1"), _placed("Arm:2", sub, "M2")])
+        sub = _sub()
+        root = _root_comp(occurrences=[_placed("Arm:1", sub, "M1"), _placed("Arm:2", sub, "M2")])
         assert jt.component_world_matrix(self._des(root), sub) is None
 
     def test_a_context_occurrence_picks_ITS_instance_out_of_several(self):
-        sub = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
+        sub = _sub()
         first, second = _placed("Arm:1", sub, "M1"), _placed("Arm:2", sub, "M2")
-        root = _Root([first, second])
+        root = _root_comp(occurrences=[first, second])
         assert jt.component_world_matrix(self._des(root), sub, second) == "M2"
 
     def test_the_context_walk_climbs_to_an_ANCESTOR_occurrence(self):
         # a nested proxy's assemblyContext is the INNERMOST occurrence; the component whose frame is
         # wanted may sit further up the path, and only the chain reaches it.
-        arm = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
-        boss = type("Sub", (), {"name": "Boss", "entityToken": "BOSS"})()
+        arm, boss = _sub(), _sub(name="Boss", token="BOSS")
         outer = _placed("Arm:1", arm, "M1")
         inner = _placed("Arm:1+Boss:1", boss, "M2", context=outer)
-        root = _Root([])                              # the by-component lookup answers nothing
+        root = _root_comp()                           # the by-component lookup answers nothing
         assert jt.component_world_matrix(self._des(root), arm, inner) == "M1"
 
     def test_a_context_that_places_a_different_component_does_not_answer_for_it(self):
         # the chain is a lookup, not a fallback: an unrelated occurrence's transform would lift the
         # axes into a frame nothing in the request named.
-        arm = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
-        other = type("Sub", (), {"name": "Plate", "entityToken": "PLATE"})()
-        root = _Root([_placed("Arm:1", arm, "M1"), _placed("Arm:2", arm, "M2")])
+        arm, other = _sub(), _sub(name="Plate", token="PLATE")
+        root = _root_comp(occurrences=[_placed("Arm:1", arm, "M1"), _placed("Arm:2", arm, "M2")])
         assert jt.component_world_matrix(self._des(root), arm, _placed("Plate:1", other, "MX")) is None
 
     def test_a_component_not_placed_at_all_answers_None(self):
-        sub = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
-        assert jt.component_world_matrix(self._des(_Root([])), sub) is None
+        assert jt.component_world_matrix(self._des(_root_comp()), _sub()) is None
 
     def test_a_missing_component_or_design_answers_None(self):
-        sub = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
-        assert jt.component_world_matrix(self._des(_Root([])), None) is None
-        assert jt.component_world_matrix(type("D", (), {"rootComponent": None})(), sub) is None
+        assert jt.component_world_matrix(self._des(_root_comp()), None) is None
+        assert jt.component_world_matrix(MakeDesign(comp=None), _sub()) is None
 
     def test_the_COMPOSED_transform2_is_the_matrix_read_not_the_LOCAL_one(self):
         # transform2 is the composed component-to-world matrix; transform is the LOCAL one and
         # composes no parent. They agree only while every ancestor is identity - exactly the case
         # a fixture defining just one of them cannot tell apart - and the nested-occurrence lift
         # this helper feeds is where they differ.
-        sub = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
-        occ = type("Occ", (), {"name": "Arm:1", "fullPathName": "Arm:1", "component": sub,
-                               "assemblyContext": None,
-                               "transform2": "COMPOSED", "transform": "LOCAL"})()
-        assert jt.component_world_matrix(self._des(_Root([occ])), sub) == "COMPOSED"
-        assert jt.component_world_matrix(self._des(_Root([])), sub, occ) == "COMPOSED"
+        sub = _sub()
+        occ = make_occurrence("Arm:1", component=sub, transform2="COMPOSED", transform="LOCAL")
+        assert jt.component_world_matrix(self._des(_root_comp(occurrences=[occ])), sub) == "COMPOSED"
+        assert jt.component_world_matrix(self._des(_root_comp()), sub, occ) == "COMPOSED"
 
     def test_an_UNREADABLE_transform2_answers_None_and_does_not_fall_back_to_the_local_matrix(self):
         # The contract is "no single placement answers" -> None, and the caller reads None as
         # "refuse" or "make no judgement". transform composes no parent, so on a nested occurrence
         # it names a DIFFERENT frame: handing it back answers with a matrix this function's own
         # docstring calls wrong, in a slot a caller trusts as world. Both legs must hold it.
-        sub = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
-
-        class _Occ:
-            name = fullPathName = "Arm:1"
-            component = sub
-            assemblyContext = None
-            transform = "LOCAL"
-
-            @property
-            def transform2(self):
-                raise RuntimeError("transform2 unavailable")
-        occ = _Occ()
-        assert jt.component_world_matrix(self._des(_Root([occ])), sub) is None   # placed-once leg
-        assert jt.component_world_matrix(self._des(_Root([])), sub, occ) is None  # context leg
+        sub = _sub()
+        occ = make_occurrence("Arm:1", component=sub, transform="LOCAL",
+                              raises_on={"transform2": "transform2 unavailable"})
+        assert jt.component_world_matrix(self._des(_root_comp(occurrences=[occ])), sub) is None
+        assert jt.component_world_matrix(self._des(_root_comp()), sub, occ) is None
 
     def test_a_context_chain_that_loops_still_terminates(self):
         # assemblyContext is read off a live proxy; a cycle there would hang the read that every
         # oriented measurement makes.
-        arm = type("Sub", (), {"name": "Arm", "entityToken": "ARM"})()
-        looper = type("Occ", (), {"name": "L", "component": None})()
-        looper.assemblyContext = looper
-        assert jt.component_world_matrix(self._des(_Root([])), arm, looper) is None
+        class _SelfNesting(FakeOccurrence):
+            """An occurrence whose assemblyContext is ITSELF - the cycle the walk must terminate on."""
+            @property
+            def assemblyContext(self):
+                return self
+        assert jt.component_world_matrix(self._des(_root_comp()), _sub(),
+                                         _SelfNesting("L")) is None

@@ -11,120 +11,83 @@ is folders + moving existing ops, and says so.
 
 import json
 
-from conftest import load_tool
+from conftest import FakeCAMFolder, FakeOperation, FakeSetup, _NamedCollection, load_tool, make_cam
 
 cf = load_tool("cam_edit_folders")
 
 
-# ── fakes ────────────────────────────────────────────────────────────────────
+# ── the movable CAM tree ─────────────────────────────────────────────────────
 
-class _OpBase:
-    """A CAM item that really MOVES: moveInto takes it out of the list it sits in and adds it to the
-    destination's matching child list, which is the membership the tool reads back."""
+def _adopt(*collections):
+    """Tell each child which collection it currently sits in, so a move can take it out again."""
+    for coll in collections:
+        for child in coll:
+            child._home = coll._items
+
+
+class _Movable:
+    """A CAM item that really MOVES: moveInto takes it out of the collection it sits in and adds it
+    to the destination's matching child collection, which is the membership the tool reads back."""
 
     _COLL = "operations"     # the destination collection this kind of item joins
 
-    def __init__(self, name):
-        self.name = name
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.moved_into = None
-        self._home = None    # the python list its current parent collection holds
+        self._home = None
 
     def moveInto(self, parent):
         self.moved_into = parent
         if self._home is not None:
             self._home.remove(self)
-        self._home = getattr(parent, self._COLL)._i
+        self._home = getattr(parent, self._COLL)._items
         self._home.append(self)
         return True
 
 
-class _Coll:
-    def __init__(self, items):
-        self._i = list(items)
-    @property
-    def count(self):
-        return len(self._i)
-    def item(self, i):
-        return self._i[i]
-    def itemByName(self, name):
-        return next((x for x in self._i if x.name == name), None)
+class _Op(_Movable, FakeOperation):
+    pass
 
 
-class _Folder(_OpBase):
+class _Folder(_Movable, FakeCAMFolder):
     _COLL = "folders"
 
     def __init__(self, name, ops=(), patterns=(), folders=()):
-        super().__init__(name)
-        self.operations = _Coll(ops)
-        self.patterns = _Coll(patterns)
-        self.folders = _Coll(folders)
-        for coll in (self.operations, self.patterns, self.folders):
-            for child in coll._i:
-                child._home = coll._i
+        super().__init__(name, ops=ops, patterns=patterns, folders=folders)
+        _adopt(self.operations, self.patterns, self.folders)
 
 
-class _Folders:
-    def __init__(self, folders):
-        self._f = list(folders)
+class _Folders(_NamedCollection):
+    """A setup's CAMFolders: the shared walk plus addFolder, which appends the new folder and hands
+    it back - `added` is the mutation record."""
+
+    def __init__(self, folders=()):
+        super().__init__(folders)
         self.added = []
-    @property
-    def count(self):
-        return len(self._f)
-    def item(self, i):
-        return self._f[i]
-    def itemByName(self, name):
-        return next((f for f in self._f if f.name == name), None)
+
     def addFolder(self, name):
         f = _Folder(name)
-        self._f.append(f); self.added.append(f)
-        f._home = self._f
+        self._items.append(f)
+        self.added.append(f)
+        f._home = self._items
         return f
 
 
-class _Setup:
+class _Setup(FakeSetup):
+    """A setup whose folders collection takes addFolder, and whose children know where they sit."""
+
     def __init__(self, name, ops=(), folders=()):
-        self.name = name
-        self.operations = _Coll(ops)
+        super().__init__(name, ops=ops)
         self.folders = _Folders(folders)
-        self.patterns = _Coll(())
-        for child in self.operations._i:
-            child._home = self.operations._i
-        for child in self.folders._f:
-            child._home = self.folders._f
-    # allOperations: flatten ops + folder ops (enough for the move-target lookup)
-    @property
-    def allOperations(self):
-        items = list(self.operations._i)
-        for f in self.folders._f:
-            items.extend(f.operations._i)
-        return _Coll(items)
+        _adopt(self.operations, self.folders)
 
 
-class _Setups:
-    def __init__(self, setups):
-        self._s = setups
-    @property
-    def count(self):
-        return len(self._s)
-    def item(self, i):
-        return self._s[i]
-
-
-class _CAM:
-    def __init__(self, setups):
-        self.setups = _Setups(setups)
-
-
-def _install(monkeypatch, setup_specs=None):
+def _install(monkeypatch, setups=None):
     # default: one setup with 2 loose ops and 1 folder containing 1 op
-    if setup_specs is None:
-        op1, op2 = _OpBase("Face1"), _OpBase("Adaptive1")
-        fop = _OpBase("Drill1")
-        folder = _Folder("Holes", ops=[fop])
-        setup = _Setup("Setup1", ops=[op1, op2], folders=[folder])
-        cam = _CAM([setup])
-    else:
-        cam = _CAM(setup_specs)
+    if setups is None:
+        folder = _Folder("Holes", ops=[_Op("Drill1")])
+        setups = [_Setup("Setup1", ops=[_Op("Face1"), _Op("Adaptive1")], folders=[folder])]
+    cam = make_cam(*setups)
     monkeypatch.setattr(cf, "get_cam", lambda: (cam, None))
     return cam
 
@@ -223,11 +186,11 @@ class TestMove:
     def test_duplicate_move_target_name_is_refused(self, monkeypatch):
         # "Drill1" exists in TWO folders of the same setup - moving by that name must REFUSE with
         # both paths, never silently move whichever the walk met first.
-        f1 = _Folder("Rough", ops=[_OpBase("Drill1")])
-        f2 = _Folder("Finish", ops=[_OpBase("Drill1")])
+        f1 = _Folder("Rough", ops=[_Op("Drill1")])
+        f2 = _Folder("Finish", ops=[_Op("Drill1")])
         dest = _Folder("Holes")
         setup = _Setup("Setup1", ops=[], folders=[f1, f2, dest])
-        monkeypatch.setattr(cf, "get_cam", lambda: (_CAM([setup]), None))
+        monkeypatch.setattr(cf, "get_cam", lambda: (make_cam(setup), None))
         res = cf.handler(action="move", setup="Setup1", folder="Holes", operations=["Drill1"])
         assert res["isError"] is True and "ambiguous" in res["message"].lower()
         assert "Setup1 / Rough / Drill1" in res["message"]
@@ -239,7 +202,7 @@ class TestMove:
         inner = _Folder("Inner")
         outer = _Folder("Outer")
         setup = _Setup("Setup1", ops=[], folders=[inner, outer])
-        cam = _CAM([setup])
+        cam = make_cam(setup)
         monkeypatch.setattr(cf, "get_cam", lambda: (cam, None))
         out = _payload(cf.handler(action="move", setup="Setup1", folder="Outer",
                                   operations=["Inner"]))
@@ -247,7 +210,7 @@ class TestMove:
         assert inner.moved_into is outer
 
 
-class _RefusingOp(_OpBase):
+class _RefusingOp(_Op):
     """moveInto() returns False - Fusion refused the move (e.g. not allowed for this op type)."""
     def moveInto(self, parent):
         return False
@@ -258,17 +221,17 @@ class TestMoveRefused:
         refusing = _RefusingOp("Locked1")
         folder = _Folder("Holes")
         setup = _Setup("Setup1", ops=[refusing], folders=[folder])
-        cam = _CAM([setup])
+        cam = make_cam(setup)
         monkeypatch.setattr(cf, "get_cam", lambda: (cam, None))
         res = cf.handler(action="move", setup="Setup1", folder="Holes", operations=["Locked1"])
         assert res["isError"] is True and "Locked1" in res["message"]
 
     def test_moves_completed_before_a_refusal_are_reported_and_kept(self, monkeypatch):
-        moved_ok = _OpBase("Face1")
+        moved_ok = _Op("Face1")
         refusing = _RefusingOp("Locked1")
         folder = _Folder("Holes")
         setup = _Setup("Setup1", ops=[moved_ok, refusing], folders=[folder])
-        cam = _CAM([setup])
+        cam = make_cam(setup)
         monkeypatch.setattr(cf, "get_cam", lambda: (cam, None))
         res = cf.handler(action="move", setup="Setup1", folder="Holes",
                          operations=["Face1", "Locked1"])
@@ -279,7 +242,7 @@ class TestMoveRefused:
 
 # ── the create and the move are READ BACK off the collection ─────────────────
 
-class _StuckOp(_OpBase):
+class _StuckOp(_Op):
     """moveInto answers TRUE and the item stays exactly where it was - the swallowed move that only
     a re-read of the destination's membership catches."""
     def moveInto(self, parent):
@@ -313,7 +276,7 @@ class _DedupingFolders(_Folders):
     """addFolder hands back the folder that already carries that name (matched without case) rather
     than making a new one, so the collection does not grow."""
     def addFolder(self, name):
-        existing = next((f for f in self._f if f.name.lower() == name.lower()), None)
+        existing = next((f for f in self if f.name.lower() == name.lower()), None)
         return existing if existing is not None else super().addFolder(name)
 
 
@@ -331,7 +294,7 @@ class TestLyingReturns:
         # re-list this is a published created:true over a setup with no new folder.
         setup = _Setup("Setup1")
         setup.folders = _StrandedFolders([])
-        monkeypatch.setattr(cf, "get_cam", lambda: (_CAM([setup]), None))
+        monkeypatch.setattr(cf, "get_cam", lambda: (make_cam(setup), None))
         res = cf.handler(action="create", setup="Setup1", name="Milling")
         assert res["isError"] is True
         assert "did not take" in res["message"]
@@ -340,7 +303,7 @@ class TestLyingReturns:
     def test_a_create_whose_folder_has_no_readable_name_errors(self, monkeypatch):
         setup = _Setup("Setup1")
         setup.folders = _NamelessFolders([])
-        monkeypatch.setattr(cf, "get_cam", lambda: (_CAM([setup]), None))
+        monkeypatch.setattr(cf, "get_cam", lambda: (make_cam(setup), None))
         res = cf.handler(action="create", setup="Setup1", name="Milling")
         assert res["isError"] is True and "reads back as None" in res["message"]
 
@@ -350,7 +313,7 @@ class TestLyingReturns:
         # is not among the names the setup re-lists, and the payload publishes that name.
         setup = _Setup("Setup1")
         setup.folders = _SwappingFolders([])
-        monkeypatch.setattr(cf, "get_cam", lambda: (_CAM([setup]), None))
+        monkeypatch.setattr(cf, "get_cam", lambda: (make_cam(setup), None))
         res = cf.handler(action="create", setup="Setup1", name="Milling")
         assert res["isError"] is True and "did not take" in res["message"]
         assert "reads back as 'Milling_stray'" in res["message"]
@@ -362,7 +325,7 @@ class TestLyingReturns:
         # already there - without the count this reports created:true over a folder it did not make.
         setup = _Setup("Setup1")
         setup.folders = _DedupingFolders([_Folder("Milling")])
-        monkeypatch.setattr(cf, "get_cam", lambda: (_CAM([setup]), None))
+        monkeypatch.setattr(cf, "get_cam", lambda: (make_cam(setup), None))
         res = cf.handler(action="create", setup="Setup1", name="milling")
         assert res["isError"] is True and "did not take" in res["message"]
         assert "re-lists 1 folder(s)" in res["message"] and "against 1 before" in res["message"]
@@ -378,7 +341,7 @@ class TestLyingReturns:
     def test_the_published_folder_name_is_the_setups_own(self, monkeypatch):
         setup = _Setup("Setup1")
         setup.folders = _RenamingFolders([])
-        monkeypatch.setattr(cf, "get_cam", lambda: (_CAM([setup]), None))
+        monkeypatch.setattr(cf, "get_cam", lambda: (make_cam(setup), None))
         out = _payload(cf.handler(action="create", setup="Setup1", name="Milling"))
         assert out["folder"] == "Milling_1", "the name the folder landed under, not the request"
 
@@ -387,7 +350,7 @@ class TestLyingReturns:
         stuck = _StuckOp("Face1")
         folder = _Folder("Holes")
         setup = _Setup("Setup1", ops=[stuck], folders=[folder])
-        monkeypatch.setattr(cf, "get_cam", lambda: (_CAM([setup]), None))
+        monkeypatch.setattr(cf, "get_cam", lambda: (make_cam(setup), None))
         res = cf.handler(action="move", setup="Setup1", folder="Holes", operations=["Face1"])
         assert res["isError"] is True
         assert "did not take" in res["message"]
@@ -397,8 +360,8 @@ class TestLyingReturns:
         # the same name listed twice in one call: the second moveInto answers true over an
         # operation the first one already put in the folder, and the folder holds no more under
         # that name than it did - without that compare 'moved' counts one operation twice.
-        setup = _Setup("Setup1", ops=[_OpBase("Face1")], folders=[_Folder("Holes")])
-        monkeypatch.setattr(cf, "get_cam", lambda: (_CAM([setup]), None))
+        setup = _Setup("Setup1", ops=[_Op("Face1")], folders=[_Folder("Holes")])
+        monkeypatch.setattr(cf, "get_cam", lambda: (make_cam(setup), None))
         out = _payload(cf.handler(action="move", setup="Setup1", folder="Holes",
                                   operations=["Face1", "Face1"]))
         assert out["moved"] == 1 and out["operations"] == ["Face1"]
@@ -408,9 +371,9 @@ class TestLyingReturns:
         # the destination already carries an operation named 'Drill1' and the one being moved is
         # another: the folder holding that NAME is not the item being moved, so what says the move
         # landed is that the folder now holds one MORE item under it.
-        loose = _OpBase("Drill1")
-        setup = _Setup("Setup1", ops=[loose], folders=[_Folder("Holes", ops=[_OpBase("Drill1")])])
-        monkeypatch.setattr(cf, "get_cam", lambda: (_CAM([setup]), None))
+        loose = _Op("Drill1")
+        setup = _Setup("Setup1", ops=[loose], folders=[_Folder("Holes", ops=[_Op("Drill1")])])
+        monkeypatch.setattr(cf, "get_cam", lambda: (make_cam(setup), None))
         out = _payload(cf.handler(action="move", setup="Setup1", folder="Holes",
                                   operations=["Drill1#1"]))
         assert out["moved"] == 1 and out["operations"] == ["Drill1"]
@@ -421,8 +384,8 @@ class TestLyingReturns:
         # the requested end state already holds: the operation is in 'Holes' before the call and
         # reads back there after it. Nothing joined the folder, so nothing is counted as moved -
         # but calling that a no-take would refuse exactly what was asked for.
-        setup = _Setup("Setup1", folders=[_Folder("Holes", ops=[_OpBase("Face1")])])
-        monkeypatch.setattr(cf, "get_cam", lambda: (_CAM([setup]), None))
+        setup = _Setup("Setup1", folders=[_Folder("Holes", ops=[_Op("Face1")])])
+        monkeypatch.setattr(cf, "get_cam", lambda: (make_cam(setup), None))
         out = _payload(cf.handler(action="move", setup="Setup1", folder="Holes",
                                   operations=["Face1"]))
         assert out["moved"] == 0 and out["operations"] == []
@@ -437,9 +400,9 @@ class TestLyingReturns:
         # was already in the folder reads. The membership cannot say which of the two happened, so
         # the payload discloses that rather than publishing an end state it did not measure.
         stuck = _StuckOp("Drill1")
-        holes = _Folder("Holes", ops=[_OpBase("Drill1")])
+        holes = _Folder("Holes", ops=[_Op("Drill1")])
         setup = _Setup("Setup1", ops=[stuck], folders=[holes])
-        monkeypatch.setattr(cf, "get_cam", lambda: (_CAM([setup]), None))
+        monkeypatch.setattr(cf, "get_cam", lambda: (make_cam(setup), None))
         out = _payload(cf.handler(action="move", setup="Setup1", folder="Holes",
                                   operations=["Drill1#1"]))
         assert out["moved"] == 0 and out["operations"] == []
@@ -452,10 +415,10 @@ class TestLyingReturns:
 
     def test_a_move_that_stalls_partway_names_what_had_landed(self, monkeypatch):
         # the first op really moves, the second is swallowed: the error must credit the first
-        real, stuck = _OpBase("Face1"), _StuckOp("Adaptive1")
+        real, stuck = _Op("Face1"), _StuckOp("Adaptive1")
         folder = _Folder("Holes")
         setup = _Setup("Setup1", ops=[real, stuck], folders=[folder])
-        monkeypatch.setattr(cf, "get_cam", lambda: (_CAM([setup]), None))
+        monkeypatch.setattr(cf, "get_cam", lambda: (make_cam(setup), None))
         res = cf.handler(action="move", setup="Setup1", folder="Holes",
                          operations=["Face1", "Adaptive1"])
         assert res["isError"] is True

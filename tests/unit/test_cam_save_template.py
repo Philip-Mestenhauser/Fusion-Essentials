@@ -9,7 +9,7 @@ a saved template.
 import json
 from types import SimpleNamespace
 
-from conftest import load_tool
+from conftest import FakeOperation, FakeSetup, _NamedCollection, load_tool, make_cam
 
 ct = load_tool("cam_save_template")
 
@@ -43,16 +43,6 @@ def _patch_cast(monkey_is_template):
         lambda x: x if monkey_is_template(x) else None)
 
 
-class _Coll:
-    def __init__(self, items):
-        self._i = list(items)
-    @property
-    def count(self):
-        return len(self._i)
-    def item(self, i):
-        return self._i[i]
-
-
 class TestAsCamTemplate:
     def test_passthrough_when_already_a_template(self):
         t = _FakeTemplate("Slot Mill")
@@ -68,7 +58,7 @@ class TestAsCamTemplate:
     def test_recovers_template_from_a_collection_result(self):
         t = _FakeTemplate("Bundle")
         _patch_cast(lambda x: isinstance(x, _FakeTemplate))
-        assert ct._as_cam_template(_Coll([t])) is t
+        assert ct._as_cam_template(_NamedCollection([t])) is t
 
     def test_returns_none_when_no_template_present(self):
         # a pure list of non-template operations -> None (caller reports it instead of crashing)
@@ -85,16 +75,9 @@ def _payload(result):
     return json.loads(result["content"][0]["text"])
 
 
-class _SaveSetup:
-    def __init__(self, name, op_names):
-        self.name = name
-        self.allOperations = [SimpleNamespace(name=n) for n in op_names]
-
-
-class _SaveCAM:
-    def __init__(self, setups):
-        s = list(setups)
-        self.setups = SimpleNamespace(count=len(s), item=lambda i: s[i])
+def _setup(name, op_names):
+    """A setup whose allOperations answers the named operations."""
+    return FakeSetup(name, ops=[FakeOperation(n) for n in op_names])
 
 
 def _wire_save(monkeypatch, cam):
@@ -114,13 +97,13 @@ class TestSaveOperationsValidation:
         assert res["isError"] is True and "operations" in res["message"]
 
     def test_setup_not_found_lists_available(self, monkeypatch):
-        _wire_save(monkeypatch, _SaveCAM([_SaveSetup("Roughing", ["a"])]))
+        _wire_save(monkeypatch, make_cam(_setup("Roughing", ["a"])))
         res = ct.handler(
             template_name="T", operations="a", setup="Ghost")
         assert res["isError"] is True and "Roughing" in res["message"]
 
     def test_missing_operations_named_in_error(self, monkeypatch):
-        _wire_save(monkeypatch, _SaveCAM([_SaveSetup("S", ["Face1", "Contour"])]))
+        _wire_save(monkeypatch, make_cam(_setup("S", ["Face1", "Contour"])))
         res = ct.handler(
             template_name="T", operations="Face1, Ghost, AlsoGone", setup="S")
         assert res["isError"] is True
@@ -148,7 +131,7 @@ class TestSaveTemplateRename:
     """Rename/description mutations must raise rather than silently save under the original name."""
 
     def _wire_full_save(self, monkeypatch, template_obj):
-        cam = _SaveCAM([_SaveSetup("S", ["Face1"])])
+        cam = make_cam(_setup("S", ["Face1"]))
         monkeypatch.setattr(ct, "get_cam", lambda: (cam, None))
         lib = SimpleNamespace(urlByLocation=lambda loc: "root://", childFolderURLs=lambda u: [],
                               importTemplate=lambda t, d: _Url("root://T1.f3dhsm-template"),

@@ -12,7 +12,7 @@ JointGeometry factory calls + createForAssemblyContext proxying are live-only an
 exercised against the running session separately.
 """
 
-from conftest import load_tool
+from conftest import BRepFace, Cylinder, Plane, _NamedCollection, load_tool, make_bbox
 
 jt = load_tool("_joint_inputs")
 
@@ -49,122 +49,95 @@ class TestParseSnap:
 
 
 # ── _pick_face: directional faces (top/bottom/left/right/front/back) + center ──
+#
+# A face is identified by OBJECT IDENTITY here: BRepFace has no name live, so a labelled fake
+# would assert on a member the picks could never read.
 
-class _Pt:
-    def __init__(self, x=0.0, y=0.0, z=0.0):
-        self.x, self.y, self.z = x, y, z
-
-
-class _BBox:
-    def __init__(self, mn, mx):
-        self.minPoint = _Pt(*mn)
-        self.maxPoint = _Pt(*mx)
+def _face(mn, mx, area=1.0, planar=True):
+    """One face: its bounding box (cm), its area, and a planar or cylindrical surface."""
+    return BRepFace(Plane(None) if planar else Cylinder(None), area=area,
+                    bounding_box=make_bbox(mn, mx))
 
 
-class _Face:
-    """Z-only convenience ctor kept for existing tests; full-XYZ via from_box()."""
-    def __init__(self, name, zmin, zmax, area=1.0, is_planar=True):
-        self.name = name
-        self.boundingBox = _BBox((0.0, 0.0, zmin), (0.0, 0.0, zmax))
-        self.area = area
-        self.geometry = type("G", (), {"surfaceType": 0 if is_planar else 5})()
-
-    @classmethod
-    def from_box(cls, name, mn, mx, area=1.0, is_planar=True):
-        f = cls.__new__(cls)
-        f.name = name
-        f.boundingBox = _BBox(mn, mx)
-        f.area = area
-        f.geometry = type("G", (), {"surfaceType": 0 if is_planar else 5})()
-        return f
-
-
-class _Faces:
-    def __init__(self, faces):
-        self._f = list(faces)
-
-    @property
-    def count(self):
-        return len(self._f)
-
-    def item(self, i):
-        return self._f[i]
-
-    def __iter__(self):
-        return iter(self._f)
+def _z_face(zmin, zmax, area=1.0, planar=True):
+    """A face spanning zmin..zmax with no x/y extent - what the top/bottom picks rank on."""
+    return _face((0.0, 0.0, zmin), (0.0, 0.0, zmax), area=area, planar=planar)
 
 
 class TestPickFace:
     def _body(self):
-        return _Faces([
-            _Face("bottom", 0.0, 0.0, area=4.0),
-            _Face("top", 2.0, 2.0, area=4.0),
-            _Face("side", 0.0, 2.0, area=8.0),
-        ])
+        """(faces, bottom cap, top cap) plus a taller side face between them."""
+        bottom = _z_face(0.0, 0.0, area=4.0)
+        top = _z_face(2.0, 2.0, area=4.0)
+        side = _z_face(0.0, 2.0, area=8.0)
+        return _NamedCollection([bottom, top, side]), bottom, top
 
     def test_top_picks_highest_face(self):
-        f = jt._pick_face(self._body(), "top")
-        assert f is not None and f.name == "top"
+        body, _bottom, top = self._body()
+        assert jt._pick_face(body, "top") is top
 
     def test_bottom_picks_lowest_face(self):
-        f = jt._pick_face(self._body(), "bottom")
-        assert f is not None and f.name == "bottom"
+        body, bottom, _top = self._body()
+        assert jt._pick_face(body, "bottom") is bottom
 
     def test_center_picks_largest_planar_face(self):
-        # 'center' uses the largest planar face; here the side (area 8) is largest...
-        # but 'side' is planar in this fake. Use a body where the largest is non-planar:
-        body = _Faces([
-            _Face("cap", 0.0, 0.0, area=3.0, is_planar=True),
-            _Face("wall", 0.0, 2.0, area=9.0, is_planar=False),
-        ])
-        f = jt._pick_face(body, "center")
-        assert f is not None and f.name == "cap"   # skips the bigger non-planar wall
+        # 'center' uses the largest planar face, so the bigger non-planar wall is skipped.
+        cap = _z_face(0.0, 0.0, area=3.0)
+        wall = _z_face(0.0, 2.0, area=9.0, planar=False)
+        assert jt._pick_face(_NamedCollection([cap, wall]), "center") is cap
 
     def test_top_bottom_skip_nonplanar_cylinder_wall(self):
         # The curved-wall trap: a cylinder's curved side wall spans the whole height, so by raw
         # Z it would beat the flat end caps for both top and bottom — but createByPlanarFace
         # needs a PLANAR face, so top/bottom must skip the non-planar wall.
-        body = _Faces([
-            _Face("bottom_cap", 0.0, 0.0, area=1.0, is_planar=True),
-            _Face("top_cap", 5.0, 5.0, area=1.0, is_planar=True),
-            _Face("wall", -0.5, 5.5, area=20.0, is_planar=False),  # extends beyond both caps
-        ])
-        assert jt._pick_face(body, "top").name == "top_cap"
-        assert jt._pick_face(body, "bottom").name == "bottom_cap"
+        bottom_cap = _z_face(0.0, 0.0, area=1.0)
+        top_cap = _z_face(5.0, 5.0, area=1.0)
+        wall = _z_face(-0.5, 5.5, area=20.0, planar=False)   # extends beyond both caps
+        body = _NamedCollection([bottom_cap, top_cap, wall])
+        assert jt._pick_face(body, "top") is top_cap
+        assert jt._pick_face(body, "bottom") is bottom_cap
 
 
 class TestDirectionalFaces:
     """The 6 box faces by normal direction — needed to fully locate a part with constraints."""
 
     def _box(self):
-        # a 10x10x10 box centered at origin; six axis-aligned faces.
-        B = _Face.from_box
-        return _Faces([
-            B("right",  (5, -5, -5),  (5, 5, 5),   area=100),   # +X
-            B("left",   (-5, -5, -5), (-5, 5, 5),   area=100),   # -X
-            B("back",   (-5, 5, -5),  (5, 5, 5),    area=100),   # +Y
-            B("front",  (-5, -5, -5), (5, -5, 5),   area=100),   # -Y
-            B("top",    (-5, -5, 5),  (5, 5, 5),    area=100),   # +Z
-            B("bottom", (-5, -5, -5), (5, 5, -5),   area=100),   # -Z
-        ])
+        """A 10x10x10 box centered at origin: its six axis-aligned planar faces by direction."""
+        return {
+            "right": _face((5, -5, -5), (5, 5, 5), area=100),      # +X
+            "left": _face((-5, -5, -5), (-5, 5, 5), area=100),     # -X
+            "back": _face((-5, 5, -5), (5, 5, 5), area=100),       # +Y
+            "front": _face((-5, -5, -5), (5, -5, 5), area=100),    # -Y
+            "top": _face((-5, -5, 5), (5, 5, 5), area=100),        # +Z
+            "bottom": _face((-5, -5, -5), (5, 5, -5), area=100),   # -Z
+        }
+
+    def _pick(self, faces, snap):
+        return jt._pick_face(_NamedCollection(list(faces.values())), snap)
 
     def test_right_is_max_x(self):
-        assert jt._pick_face(self._box(), "right").name == "right"
+        faces = self._box()
+        assert self._pick(faces, "right") is faces["right"]
 
     def test_left_is_min_x(self):
-        assert jt._pick_face(self._box(), "left").name == "left"
+        faces = self._box()
+        assert self._pick(faces, "left") is faces["left"]
 
     def test_back_is_max_y(self):
-        assert jt._pick_face(self._box(), "back").name == "back"
+        faces = self._box()
+        assert self._pick(faces, "back") is faces["back"]
 
     def test_front_is_min_y(self):
-        assert jt._pick_face(self._box(), "front").name == "front"
+        faces = self._box()
+        assert self._pick(faces, "front") is faces["front"]
 
     def test_top_is_max_z(self):
-        assert jt._pick_face(self._box(), "top").name == "top"
+        faces = self._box()
+        assert self._pick(faces, "top") is faces["top"]
 
     def test_bottom_is_min_z(self):
-        assert jt._pick_face(self._box(), "bottom").name == "bottom"
+        faces = self._box()
+        assert self._pick(faces, "bottom") is faces["bottom"]
 
     def test_directional_snaps_parse(self):
         for kw in ("left", "right", "front", "back"):
@@ -172,4 +145,4 @@ class TestDirectionalFaces:
             assert occ == "Part:1" and snap == kw
 
     def test_empty_body_returns_none(self):
-        assert jt._pick_face(_Faces([]), "top") is None
+        assert jt._pick_face(_NamedCollection([]), "top") is None

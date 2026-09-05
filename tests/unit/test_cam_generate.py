@@ -11,7 +11,7 @@ import json
 from types import SimpleNamespace
 
 
-from conftest import load_tool, make_cam, _NamedCollection
+from conftest import FakeMachine, load_tool, make_cam
 from conftest import FakeSetup as SharedSetup, FakeCAMFolder as SharedFolder, FakeOperation as SharedOp
 
 gen = load_tool("cam_generate")
@@ -30,46 +30,40 @@ def _payload(result):
 
 # ── target resolution (via the shared _cam_common.resolve_cam_node) ─────────────────────────────────
 
-class _FakeCAM:
-    def __init__(self, setups, machining_times=None):
-        s = list(setups)
-        self.setups = SimpleNamespace(count=len(s), item=lambda i: s[i])
-        self.generate_calls = []
-        # The EMPTY class's second signal: an operation whose toolpath generated empty reads
-        # hasToolpath True and only its machining time answers. The answer is the SHARED one
-        # (conftest.make_cam), borrowed rather than re-rolled.
-        self.getMachiningTime = make_cam(machining_times=machining_times).getMachiningTime
+def _FakeCAM(setups, machining_times=None):
+    """A CAM product that RECORDS its launches: generate_calls holds ('target', obj) / ('all',
+    skip_valid) in order. The machining-time answer is the shared one, borrowed not re-rolled."""
+    cam = make_cam(*setups, machining_times=machining_times)
+    cam.generate_calls = []
 
-    def generateToolpath(self, tgt):
-        self.generate_calls.append(("target", tgt))
+    def generate_toolpath(tgt):
+        cam.generate_calls.append(("target", tgt))
         return SimpleNamespace(numberOfOperations=1)
 
-    def generateAllToolpaths(self, skip_valid):
-        self.generate_calls.append(("all", skip_valid))
+    def generate_all(skip_valid):
+        cam.generate_calls.append(("all", skip_valid))
         return SimpleNamespace(numberOfOperations=3)
 
-
-class _DocHandle:
-    """A Document wrapper. The same open document reads as a NEW wrapper on every
-    app.activeDocument access - `is` answers False across two reads while `==` answers True
-    (measured) - so two of them are compared by EQUALITY, and a fake that models identity only
-    would pass a comparison the live objects fail."""
-
-    def __init__(self, ident):
-        self._ident = ident
-
-    def __eq__(self, other):
-        return isinstance(other, _DocHandle) and other._ident == self._ident
-
-    def __hash__(self):
-        return hash(self._ident)
+    cam.generateToolpath = generate_toolpath
+    cam.generateAllToolpaths = generate_all
+    return cam
 
 
-def _setup(name, ops=(), machine=SimpleNamespace(description="Haas VF-2")):
-    """A setup as the poll walks it. It carries an assigned machine by default: the scoped verdict
-    reads _cam_common.setup_blockers off Setup.machine, so a machine-less fake is a setup blocked by
-    no_machine_selected, not a clean one."""
-    return SimpleNamespace(name=name, allOperations=_NamedCollection(ops), machine=machine)
+_MACHINE = FakeMachine(description="Haas VF-2")
+
+
+class _MachinedSetup(SharedSetup):
+    """A setup carrying an assigned machine: the scoped verdict reads _cam_common.setup_blockers off
+    Setup.machine, so a machine-less setup is one blocked by no_machine_selected, not a clean one."""
+
+    def __init__(self, name, ops=(), machine=_MACHINE):
+        super().__init__(name, ops=ops)
+        self.machine = machine
+
+
+def _setup(name, ops=(), machine=_MACHINE):
+    """A setup as the poll walks it, machine assigned unless a test takes it away."""
+    return _MachinedSetup(name, ops=ops, machine=machine)
 
 
 class TestTargetResolution:
@@ -142,7 +136,7 @@ class TestGenerateHandler:
         assert cam.generate_calls[0][0] == "all"
 
     def test_target_not_found_errors(self, monkeypatch):
-        cam = _FakeCAM([_setup("S", [SimpleNamespace(name="Face1")])])
+        cam = _FakeCAM([_setup("S", [SharedOp("Face1")])])
         import adsk.cam
         monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
@@ -151,7 +145,7 @@ class TestGenerateHandler:
         assert res["isError"] is True and "Ghost" in res["message"]
 
     def test_skip_valid_short_circuits_already_valid_operation(self, monkeypatch):
-        op = SimpleNamespace(name="Face1", operationState=0)   # 0 = valid/up-to-date
+        op = SharedOp("Face1", operation_state=0)              # 0 = valid/up-to-date
         cam = _FakeCAM([_setup("S", [op])])
         import adsk.cam
         monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))
@@ -162,7 +156,7 @@ class TestGenerateHandler:
         assert cam.generate_calls == []          # never launched a generation
 
     def test_skip_valid_false_forces_regen_of_valid_op(self, monkeypatch):
-        op = SimpleNamespace(name="Face1", operationState=0)
+        op = SharedOp("Face1", operation_state=0)
         cam = _FakeCAM([_setup("S", [op])])
         import adsk.cam
         monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))

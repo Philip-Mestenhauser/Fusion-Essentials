@@ -12,7 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, error_message
+from conftest import (FakeCAMFolder, FakeCAMParameter, FakeCAMParameters, FakeOperation,
+                      FakeSetup, _NamedCollection, error_message, load_tool, make_cam)
 
 cg = load_tool("cam_get")
 
@@ -23,9 +24,9 @@ def _payload(result):
 
 
 def _named_op(name):
-    """The bare Operation a by-name RESOLVE needs: the walk classifies nodes structurally and reads
-    only .name, so nothing else has to be modelled for a resolution test."""
-    return SimpleNamespace(name=name)
+    """The Operation a by-name RESOLVE needs: the walk classifies nodes structurally and reads
+    only .name."""
+    return FakeOperation(name)
 
 
 @pytest.fixture
@@ -778,23 +779,14 @@ class TestDeepZoom:
         assert "operation" in error_message(res).lower()
 
     def test_grouped_visible_params_sections_and_filters(self):
-        # a fake param collection: group sentinels open sections; invisible/disabled are dropped.
-        class _P:
-            def __init__(s, name, title, expr="", vis=True, en=True, val=None):
-                s.name, s.title, s.expression, s.isVisible, s.isEnabled, s.value = name, title, expr, vis, en, val
-                s.isEditable = True                          # a settable parameter's live read
-        class _Coll:
-            def __init__(s, items): s._i = items
-            @property
-            def count(s): return len(s._i)
-            def item(s, i): return s._i[i]
-        coll = _Coll([
-            _P("group_feedspeed", "Feed & Speed", val=True),
-            _P("tool_feedCutting", "Cutting Feedrate", "5252.1"),
-            _P("tool_spindleSpeed", "Spindle Speed", "12000"),
-            _P("hidden", "Hidden", "x", vis=False),          # dropped (not visible)
-            _P("group_geometry", "Geometry", val=True),
-            _P("boundaryOffset", "Additional Offset", "50mm"),
+        # group sentinels open sections; invisible/disabled are dropped.
+        coll = FakeCAMParameters([
+            FakeCAMParameter("group_feedspeed", title="Feed & Speed", value=True),
+            FakeCAMParameter("tool_feedCutting", "5252.1", title="Cutting Feedrate"),
+            FakeCAMParameter("tool_spindleSpeed", "12000", title="Spindle Speed"),
+            FakeCAMParameter("hidden", "x", title="Hidden", visible=False),   # dropped
+            FakeCAMParameter("group_geometry", title="Geometry", value=True),
+            FakeCAMParameter("boundaryOffset", "50mm", title="Additional Offset"),
         ])
         g = cg._grouped_visible_params(coll)
         assert g["Feed & Speed"] == [
@@ -831,7 +823,6 @@ class TestDuplicateOperationName:
     def test_true_miss_stays_not_found_listing_names(self, monkeypatch, stub_slices):
         # a name NO operation carries is worded by the shared resolver over the real tree, so the
         # available list is the walk's own - not a second census this tool keeps.
-        from conftest import FakeSetup, make_cam
         cam = make_cam(FakeSetup("Setup1", ops=[_named_op("Face1"), _named_op("Adaptive1")]))
         monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
         msg = error_message(cg.handler(include=["parameters"], operation="Drill1"))
@@ -863,7 +854,6 @@ class TestDuplicateOperationName:
         # refuse all over again - so that value is never printed. What IS performable is the shared
         # resolver's '<name>#<n>' address, which this same 'operation' input reads back.
         # The reachable shape: one operation per FOLDER, since names collide across parents.
-        from conftest import FakeCAMFolder, FakeSetup, make_cam
         cam = make_cam(FakeSetup("Setup1", folders=[
             FakeCAMFolder("Roughing", ops=[_named_op("Drill1")]),
             FakeCAMFolder("Finishing", ops=[_named_op("Drill1")])]))
@@ -921,7 +911,6 @@ class TestOnePoolForResolveAndRemedy:
     one operation pool. Two separate lookups agree only by construction, and nothing asserted it."""
 
     def _cam(self, monkeypatch):
-        from conftest import FakeSetup, make_cam
         cam = make_cam(FakeSetup("Top", ops=[_named_op("Drill1"), _named_op("TopOnly")]),
                        FakeSetup("Bottom", ops=[_named_op("Drill1")]))
         monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
@@ -957,14 +946,13 @@ class TestOperationScopedBySetup:
     so a resolver that ignored the scope, or took the first hit, reads the wrong op's values."""
 
     def _cam(self, monkeypatch):
-        from conftest import FakeSetup, make_cam
 
         def _op(name, feed):
             return type("O", (), {
                 "name": name, "strategy": "adaptive",
-                "parameters": _SetupParams([_Param("tool_feedCutting", "Feed", feed)]),
+                "parameters": _SetupParams([FakeCAMParameter("tool_feedCutting", feed, title="Feed")]),
                 "tool": type("T", (), {"description": f"{feed} cutter",
-                                       "presets": _PresetColl([])})(),
+                                       "presets": _NamedCollection([])})(),
                 "toolPreset": None})()
 
         top = FakeSetup("Top", ops=[_op("Shared", "3000"), _op("TopOnly", "10")])
@@ -1043,12 +1031,11 @@ class TestOperationScopedBySetup:
         # end to end through the REAL resolvers: both duplicates live in 'Top', so no setup= value
         # can separate them. The refusal must offer none - and the scoped retry it would have
         # advertised does refuse, which is why it may not be printed.
-        from conftest import FakeSetup, make_cam
 
         def _op(feed):
             return type("O", (), {
                 "name": "Twin", "strategy": "adaptive",
-                "parameters": _SetupParams([_Param("tool_feedCutting", "Feed", feed)])})()
+                "parameters": _SetupParams([FakeCAMParameter("tool_feedCutting", feed, title="Feed")])})()
 
         cam = make_cam(FakeSetup("Top", ops=[_op("3000"), _op("800")]))
         monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
@@ -1060,19 +1047,14 @@ class TestOperationScopedBySetup:
         assert err2 is not None and "ambiguous" in err2["message"].lower()
 
 
-class _PresetColl:
-    """A ToolPresets collection (count/item), the shape _slice_tool walks for preset names."""
-    def __init__(self, items): self._i = items
-    @property
-    def count(self): return len(self._i)
-    def item(self, i): return self._i[i]
-
-
 class _Preset:
+    """A ToolPreset - the name a drill resolves and the parameter expressions it carries.
+    ToolPreset has no live SHAPES dump, so it has no shared fake to land on."""
+
     def __init__(self, name, exprs):
         self.name = name
-        self.parameters = _PresetColl(
-            [type("PP", (), {"name": k, "expression": v})() for k, v in exprs.items()])
+        self.parameters = FakeCAMParameters(
+            [FakeCAMParameter(k, v) for k, v in exprs.items()])
 
 
 class TestToolSlicePresets:
@@ -1083,8 +1065,7 @@ class TestToolSlicePresets:
     def _wire(self, monkeypatch, presets, active=None):
         """A real one-setup CAM tree holding the operation - the resolve runs over the shared walk,
         so a stubbed resolve_operation would no longer be the seam that answers. Returns the cam."""
-        from conftest import FakeSetup, make_cam
-        tool = type("T", (), {"description": "6mm flat", "presets": _PresetColl(presets)})()
+        tool = type("T", (), {"description": "6mm flat", "presets": _NamedCollection(presets)})()
         op = type("O", (), {"name": "Adaptive1", "tool": tool, "toolPreset": active})()
         return make_cam(FakeSetup("Setup1", ops=[op]))
 
@@ -1186,16 +1167,15 @@ class TestToolSliceDimensions:
 
     def _wire(self, params):
         """A one-setup CAM tree whose operation carries a tool with 'params' (a _SetupParams)."""
-        from conftest import FakeSetup, make_cam
         tool = type("T", (), {"description": "6mm flat", "presets": None, "parameters": params})()
         op = type("O", (), {"name": "Adaptive1", "tool": tool, "toolPreset": None})()
         return make_cam(FakeSetup("Setup1", ops=[op]))
 
     def _full(self):
-        return _SetupParams([_Param("tool_diameter", value=0.6),
-                             _Param("tool_fluteLength", value=2.5),
-                             _Param("tool_cornerRadius", value=0.05),
-                             _Param("tool_overallLength", value=5.0)])
+        return _SetupParams([FakeCAMParameter("tool_diameter", value=0.6),
+                             FakeCAMParameter("tool_fluteLength", value=2.5),
+                             FakeCAMParameter("tool_cornerRadius", value=0.05),
+                             FakeCAMParameter("tool_overallLength", value=5.0)])
 
     def test_the_four_dimensions_land_scaled_into_the_named_unit(self):
         out, err = cg._slice_tool(self._wire(self._full()), "Adaptive1", "")
@@ -1214,7 +1194,7 @@ class TestToolSliceDimensions:
         # a square-ended tool carries no corner radius; publishing 0 would read as a measured
         # sharp corner rather than "this tool does not carry the parameter".
         out, err = cg._slice_tool(
-            self._wire(_SetupParams([_Param("tool_diameter", value=0.6)])), "Adaptive1", "")
+            self._wire(_SetupParams([FakeCAMParameter("tool_diameter", value=0.6)])), "Adaptive1", "")
         assert err is None
         assert out["dimensions"]["diameter"] == 6.0
         assert out["dimensions"]["corner_radius"] is None
@@ -1242,10 +1222,9 @@ class TestToolSliceDimensions:
         # copy note rather than replacing it - and the composition stays inside the wire budget.
         params = self._full()
         tool = type("T", (), {"description": "6mm flat", "parameters": params,
-                              "presets": _PresetColl([_Preset("Alu Rough", {}),
+                              "presets": _NamedCollection([_Preset("Alu Rough", {}),
                                                       _Preset("Alu Rough", {})])})()
         op = type("O", (), {"name": "Adaptive1", "tool": tool, "toolPreset": None})()
-        from conftest import FakeSetup, make_cam
         out, err = cg._slice_tool(make_cam(FakeSetup("Setup1", ops=[op])), "Adaptive1", "Alu Rough")
         assert err is None
         assert "own copy" in out["note"] and "2 presets" in out["note"]
@@ -1298,42 +1277,20 @@ class TestMachineSlice:
         assert seen == {"setup": "Op1", "units": "in"}
 
 
-class _SetupParams:
-    """Setup.parameters: the visible rows the grouping keeps, plus the computed extents that read
+class _SetupParams(FakeCAMParameters):
+    """Setup.parameters: the visible rows the grouping walks, plus the computed extents that read
     isVisible false and are reachable only by name."""
 
     def __init__(self, visible=(), hidden=None):
-        self._items = list(visible)
+        super().__init__(visible)
         self._hidden = dict(hidden or {})
 
-    @property
-    def count(self):
-        return len(self._items)
-
-    def item(self, i):
-        return self._items[i]
-
     def itemByName(self, name):
-        for p in self._items:
-            if p.name == name:
-                return p
-        return self._hidden.get(name)
+        hit = super().itemByName(name)
+        return self._hidden.get(name) if hit is None else hit
 
 
-class _Param:
-    def __init__(self, name, title=None, expression="", visible=True, enabled=True, value=None,
-                 editable=True):
-        self.name = name
-        self.title = title or name
-        self.expression = expression
-        self.isVisible = visible
-        self.isEnabled = enabled
-        self.value = type("V", (), {"value": value})()
-        # A CAMParameter answers isEditable; a settable one reads True.
-        self.isEditable = editable
-
-
-class _UnreadableEditableParam(_Param):
+class _UnreadableEditableParam(FakeCAMParameter):
     """isEditable does not answer at all - the read that may not publish a verdict."""
 
     @property
@@ -1356,13 +1313,14 @@ class TestSetupParameterSlice:
 
     def _params(self):
         return _SetupParams(
-            visible=[_Param("group_job", "Job", value=True),
-                     _Param("job_stockMode", "Mode", "'solid'"),
-                     _Param("job_stockInfoDimensionX", "Stock Width (X)", "stockXHigh - stockXLow")],
+            visible=[FakeCAMParameter("group_job", title="Job", value=True),
+                     FakeCAMParameter("job_stockMode", "'solid'", title="Mode"),
+                     FakeCAMParameter("job_stockInfoDimensionX", "stockXHigh - stockXLow",
+                            title="Stock Width (X)")],
             # value = Fusion's internal CM, expression = the document's mm display text (measured)
-            hidden={"stockXLow": _Param("stockXLow", expression="-176.3", visible=False,
+            hidden={"stockXLow": FakeCAMParameter("stockXLow", expression="-176.3", visible=False,
                                         value=-17.63),
-                    "stockXHigh": _Param("stockXHigh", expression="-62.0", visible=False,
+                    "stockXHigh": FakeCAMParameter("stockXHigh", expression="-62.0", visible=False,
                                          value=-6.2)})
 
     def test_setup_alone_reads_that_setups_parameters(self, monkeypatch):
@@ -1384,7 +1342,7 @@ class TestSetupParameterSlice:
         # (Fusion's internal cm) and "-176.3" through .expression (the display unit). Publishing
         # them as one unit understates the stock tenfold.
         self._wire(monkeypatch, _SetupParams(hidden={
-            "stockXLow": _Param("stockXLow", expression="-176.3", visible=False, value=-17.63)}))
+            "stockXLow": FakeCAMParameter("stockXLow", expression="-176.3", visible=False, value=-17.63)}))
         out, _err = cg._slice_parameters(object(), "", "Op1")
         row = out["stock_extents"]["stockXLow"]
         assert row["value"] == -176.3                      # -17.63 cm -> mm
@@ -1393,7 +1351,7 @@ class TestSetupParameterSlice:
 
     def test_the_extent_value_follows_the_units_input(self, monkeypatch):
         self._wire(monkeypatch, _SetupParams(hidden={
-            "stockXLow": _Param("stockXLow", expression="-176.3", visible=False, value=-17.63)}))
+            "stockXLow": FakeCAMParameter("stockXLow", expression="-176.3", visible=False, value=-17.63)}))
         out, _err = cg._slice_parameters(object(), "", "Op1", "in")
         assert out["stock_extents"]["stockXLow"]["value"] == -6.940945    # -17.63 cm in inches
         assert out["stock_extents"]["stockXLow"]["expression"] == "-176.3"
@@ -1402,7 +1360,7 @@ class TestSetupParameterSlice:
     def test_an_expression_that_is_not_a_number_is_never_converted(self, monkeypatch):
         # a computed extent's expression can be an EXPRESSION; scaling it would be nonsense
         self._wire(monkeypatch, _SetupParams(hidden={
-            "stockZLow": _Param("stockZLow", expression="stockZHigh - 38.1", visible=False,
+            "stockZLow": FakeCAMParameter("stockZLow", expression="stockZHigh - 38.1", visible=False,
                                 value=-1.905)}))
         out, _err = cg._slice_parameters(object(), "", "Op1")
         assert out["stock_extents"]["stockZLow"] == {"value": -19.05,
@@ -1422,7 +1380,8 @@ class TestSetupParameterSlice:
         # with an operation named, the OPERATION is the target - 'setup' scopes WHICH operation of
         # that name is read (see TestOperationScopedBySetup), never the setup-parameters payload.
         op = type("O", (), {"name": "Adaptive1", "strategy": "adaptive",
-                            "parameters": _SetupParams([_Param("tool_feedCutting", "Feed", "3000")])})()
+                            "parameters": _SetupParams(
+                                [FakeCAMParameter("tool_feedCutting", "3000", title="Feed")])})()
         setup = type("S", (), {"name": "Op1"})()
         monkeypatch.setattr(cg, "find_setup", lambda cam, name: (setup, ["Op1"], None))
         monkeypatch.setattr(cg, "resolve_cam_node",
@@ -1461,7 +1420,7 @@ class TestSetupParameterSlice:
                 raise RuntimeError("expression cannot be read")
 
         self._wire(monkeypatch, _SetupParams(hidden={"stockXLow": _Unreadable(),
-                                                     "stockXHigh": _Param("stockXHigh",
+                                                     "stockXHigh": FakeCAMParameter("stockXHigh",
                                                                           expression="-62.0",
                                                                           visible=False,
                                                                           value=-6.2)}))
@@ -1474,7 +1433,7 @@ class TestSetupParameterSlice:
         # a computed extent whose numeric value does not read but whose expression does is a real
         # answer - the row carries the half that read.
         self._wire(monkeypatch, _SetupParams(hidden={
-            "stockZLow": _Param("stockZLow", expression="stockZHigh - 38.1", visible=False)}))
+            "stockZLow": FakeCAMParameter("stockZLow", expression="stockZHigh - 38.1", visible=False)}))
         out, _err = cg._slice_parameters(object(), "", "Op1")
         assert out["stock_extents"]["stockZLow"] == {"value": None,
                                                      "expression": "stockZHigh - 38.1"}
@@ -1487,25 +1446,25 @@ class TestParameterEditableFlag:
 
     def test_a_row_that_refuses_a_write_is_marked_editable_false(self):
         g = cg._grouped_visible_params(
-            _SetupParams([_Param("tool_diameter", "Diameter", "10.", editable=False)]))
+            _SetupParams([FakeCAMParameter("tool_diameter", "10.", title="Diameter", editable=False)]))
         assert g["General"][0]["editable"] is False
 
     def test_a_writable_row_carries_no_editable_key(self):
         # the quiet default: most rows an agent reads are settable, and a key on every one of them
         # is 300 rows of noise.
-        g = cg._grouped_visible_params(_SetupParams([_Param("tolerance", "Tolerance", "0.01")]))
+        g = cg._grouped_visible_params(_SetupParams([FakeCAMParameter("tolerance", "0.01", title="Tolerance")]))
         assert g["General"][0] == {"name": "tolerance", "title": "Tolerance",
                                    "expression": "0.01"}
 
     def test_an_unreadable_flag_publishes_null_and_never_false(self):
         # a flag that did not answer is not a refusal - false here would name a row the write takes.
         g = cg._grouped_visible_params(
-            _SetupParams([_UnreadableEditableParam("tolerance", "Tolerance", "0.01")]))
+            _SetupParams([_UnreadableEditableParam("tolerance", "0.01", title="Tolerance")]))
         assert g["General"][0]["editable"] is None
 
     def test_the_operation_slice_note_says_which_rows_refuse_a_write(self, monkeypatch):
         op = type("O", (), {"name": "Adaptive1", "strategy": "adaptive", "parameters": _SetupParams(
-            [_Param("tool_diameter", "Diameter", "10.", editable=False)])})()
+            [FakeCAMParameter("tool_diameter", "10.", title="Diameter", editable=False)])})()
         monkeypatch.setattr(cg, "resolve_operation",
                             lambda cam, name, label="operation": (SimpleNamespace(obj=op), None, []))
         out, err = cg._slice_parameters(object(), "Adaptive1", "")
@@ -1514,7 +1473,7 @@ class TestParameterEditableFlag:
 
     def test_the_setup_slice_note_carries_it_beside_the_units_sentence(self, monkeypatch):
         setup = type("S", (), {"name": "Op1", "parameters": _SetupParams(
-            [_Param("surfaceZHigh", "Top", "0.0", editable=False)])})()
+            [FakeCAMParameter("surfaceZHigh", "0.0", title="Top", editable=False)])})()
         monkeypatch.setattr(cg, "find_setup", lambda cam, name: (setup, ["Op1"], None))
         out, _err = cg._slice_parameters(object(), "", "Op1")
         assert out["sections"]["General"][0]["editable"] is False

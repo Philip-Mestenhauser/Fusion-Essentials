@@ -13,74 +13,49 @@ import adsk.cam
 import adsk.core
 import pytest
 
-from conftest import load_tool
+from conftest import FakeSetup, load_tool, make_cam
 
 gs = load_tool("cam_generate_setup_sheet")
 
 # The SHIPPED bound, read before any test shortens it.
 _PUMP_SECONDS_SHIPPED = gs._PUMP_SECONDS
 
-
-class FakeSetup:
-    def __init__(self, name):
-        self.name = name
-
-
-_QUIET, _PARTIAL, _FINAL = 0, 120, 800
-
-
-class FakeCAM:
-    """generateSetupSheet answers True at once; the FILE is written only as the pump runs, one
-    `sizes` stage per doEvents cycle. Measured: the sheet APPEARS at 0 bytes and is written after.
-    The non-zero PARTIAL stage is not a measurement - it is a size a write still in flight can be
-    sampled at, which the landing gate must not mistake for the deliverable. When the stages run
-    out the file stops changing, which is what a finished write looks like from outside."""
-
-    def __init__(self, out_writer, result=True, quiet_pumps=1, sizes=(0, _PARTIAL, _FINAL)):
-        self.calls = []
-        self.result = result
-        self.quiet_left = quiet_pumps
-        self._sizes = iter(sizes)
-        self._writer = out_writer            # callable(folder, size_bytes) -> writes the sheet file
-        self.written = []
-        self.folder = None
-
-    def generateSetupSheet(self, target, fmt, folder, open_doc):
-        self.calls.append(("one", target, fmt, folder, open_doc))
-        if self.result:
-            self.folder = folder
-        return self.result
-
-    def generateAllSetupSheets(self, fmt, folder, open_doc):
-        self.calls.append(("all", None, fmt, folder, open_doc))
-        if self.result:
-            self.folder = folder
-        return self.result
-
-    def pump(self):
-        if self.folder is None:
-            return
-        if self.quiet_left > 0:                      # generation is still working; nothing on disk
-            self.quiet_left -= 1
-            return
-        size = next(self._sizes, None)
-        if size is None:                             # the write is done - the file stops changing
-            return
-        self._writer(self.folder, size)
-        self.written.append(size)
+_PARTIAL, _FINAL = 120, 800
 
 
 @pytest.fixture
 def rig(monkeypatch, tmp_path):
-    """Wire a CAM product with one setup; doEvents advances the fake's async write."""
+    """Wire a CAM product with one setup; doEvents advances the sheet's async write."""
     def _make(result=True, quiet_pumps=1, sizes=(0, _PARTIAL, _FINAL), sheet_name="Untitled.html"):
-        out = {}
-
-        def writer(folder, size):
-            (tmp_path / sheet_name).write_text("x" * size)
-
-        cam = FakeCAM(writer, result=result, quiet_pumps=quiet_pumps, sizes=sizes)
         setup = FakeSetup("SheetSetup")
+        cam = make_cam(setup)
+        cam.calls, cam.written = [], []
+        state = {"folder": None, "quiet_left": quiet_pumps, "sizes": iter(sizes)}
+
+        def generate(kind, target, fmt, folder, open_doc):
+            cam.calls.append((kind, target, fmt, folder, open_doc))
+            if result:
+                state["folder"] = folder
+            return result
+
+        cam.generateSetupSheet = lambda t, f, d, o: generate("one", t, f, d, o)
+        cam.generateAllSetupSheets = lambda f, d, o: generate("all", None, f, d, o)
+
+        def pump():
+            # The bool answers True at once; the FILE is written one `sizes` stage per doEvents
+            # cycle. Measured: the sheet appears at 0 bytes and is written after; the non-zero
+            # PARTIAL stage is a size a write still in flight can be sampled at.
+            if state["folder"] is None:
+                return
+            if state["quiet_left"] > 0:              # generation is still working; nothing on disk
+                state["quiet_left"] -= 1
+                return
+            size = next(state["sizes"], None)
+            if size is None:                         # the write is done - the file stops changing
+                return
+            (tmp_path / sheet_name).write_text("x" * size)
+            cam.written.append(size)
+
         monkeypatch.setattr(gs, "get_cam", lambda: (cam, None))
 
         def fake_resolve(c, want, kinds, label):
@@ -88,12 +63,11 @@ def rig(monkeypatch, tmp_path):
                 return types.SimpleNamespace(obj=setup, kind="setup"), None
             return None, f"No CAM setup/folder/operation named '{want}'."
         monkeypatch.setattr(gs, "resolve_cam_node", fake_resolve)
-        monkeypatch.setattr(adsk, "doEvents", cam.pump, raising=False)
+        monkeypatch.setattr(adsk, "doEvents", pump, raising=False)
         monkeypatch.setattr(gs.time, "sleep", lambda s: None)
         monkeypatch.setattr(adsk.cam.SetupSheetFormats, "HTMLFormat", "HTML_ENUM", raising=False)
         monkeypatch.setattr(adsk.cam.SetupSheetFormats, "ExcelFormat", "EXCEL_ENUM", raising=False)
-        out["cam"], out["setup"] = cam, setup
-        return out
+        return {"cam": cam, "setup": setup}
     return _make
 
 

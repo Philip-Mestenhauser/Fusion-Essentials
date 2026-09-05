@@ -16,42 +16,19 @@ import pytest
 import adsk.core
 import adsk.fusion
 
-from conftest import (BRepBody, error_message, install, load_tool, make_design, MakeComp,
-                      MakeDesign, payload)
+from conftest import (BRepBody, error_message, FakeOccurrence, install, load_tool, make_design,
+                      make_occurrence, MakeComp, MakeDesign, MeshBody, payload)
 
 ec = load_tool("assembly_edit_contacts")
 
 
+def _occ(path):
+    """An assembly occurrence at `path` - what TargetRefList resolves a name to."""
+    return make_occurrence(path=path, component=MakeComp(name=path.split("+")[-1].split(":")[0]),
+                           entity_token=f"OCC:{path}")
+
+
 # ── the platform objects (the surface measured on the installed bindings) ────────────────────────
-
-class _Occ:
-    """An assembly occurrence: what TargetRefList resolves a name to, and what a contact set member
-    names itself back through Occurrence.cast."""
-
-    def __init__(self, path):
-        self.fullPathName = path
-        self.name = path.split("+")[-1]
-        self.entityToken = f"OCC:{path}"
-        # A real Occurrence always answers `component`; a read that RAISES is the
-        # unresolved-external-reference signal the shared occurrence census filters on.
-        self.component = type("C", (), {"name": self.name.split(":")[0]})()
-
-
-class _OccType:
-    """adsk.fusion.Occurrence - only its cast is used, by the member read-back."""
-
-    @staticmethod
-    def cast(x):
-        return x if isinstance(x, _Occ) else None
-
-
-class _MeshType:
-    """adsk.fusion.MeshBody - a DIFFERENT type from BRepBody, which is why a contact set refuses it."""
-
-    def __init__(self, name):
-        self.name = name
-        self.entityToken = f"MESH:{name}"
-
 
 class _Raw:
     """What a BODY member of a contact set reads back as: an object neither Occurrence.cast nor
@@ -285,7 +262,7 @@ def world(monkeypatch):
     (both design seams - TargetRefList resolves through _inputs' own _common)."""
     def _build(sets=None, occurrences=(), bodies=(), tokens=None, enabled=False, use_sets=False,
                design_cls=None):
-        root = MakeComp(name="Root", bodies=list(bodies), occurrences=[_Occ(p) for p in occurrences])
+        root = MakeComp(name="Root", bodies=list(bodies), occurrences=[_occ(p) for p in occurrences])
         if design_cls is None:
             design = make_design(comp=root, tokens=tokens)
             design.isContactAnalysisEnabled = enabled
@@ -293,12 +270,15 @@ def world(monkeypatch):
         else:
             design = design_cls(root, enabled, use_sets)
         design.contactSets = sets if sets is not None else _ContactSets()
-        monkeypatch.setattr(adsk.fusion, "Occurrence", _OccType, raising=False)
-        monkeypatch.setattr(adsk.fusion, "MeshBody", _MeshType, raising=False)
+        monkeypatch.setattr(adsk.fusion, "Occurrence", FakeOccurrence, raising=False)
+        monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody, raising=False)
         monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
-        monkeypatch.setattr(BRepBody, "cast",
-                            staticmethod(lambda x: x if isinstance(x, BRepBody) else None),
-                            raising=False)
+        # The member read-back names an occurrence through Occurrence.cast and a body through
+        # BRepBody.cast; neither shared fake carries one, so each gets the isinstance pass-through.
+        for kind in (FakeOccurrence, BRepBody, MeshBody):
+            monkeypatch.setattr(kind, "cast",
+                                staticmethod(lambda x, k=kind: x if isinstance(x, k) else None),
+                                raising=False)
         install(ec, design)
         return design
     return _build
@@ -339,7 +319,7 @@ class TestGuards:
 
     def test_a_mesh_member_is_refused_by_name(self, world):
         # the API takes Occurrence or BRepBody objects; a MeshBody is neither.
-        mesh = _MeshType("ScanData")
+        mesh = MeshBody(name="ScanData", token="MESH:ScanData")
         design = world(occurrences=["A:1"], tokens={"MESH:ScanData": mesh})
         msg = error_message(ec.handler(action="create", members=["A:1", "MESH:ScanData"]))
         assert "('ScanData') is a MESH body" in msg
@@ -502,7 +482,7 @@ class TestSetMembers:
     def test_members_are_replaced_through_the_misspelled_property_and_read_back(self, world):
         # occurencesAndBodies (ONE 'r') IS the property; writing the correctly spelled name lands on
         # a dead attribute and changes nothing, which this fake reproduces.
-        cs = _ContactSet("ContactSet1", members=[_Occ("A:1"), _Occ("B:1")])
+        cs = _ContactSet("ContactSet1", members=[_occ("A:1"), _occ("B:1")])
         world(sets=_ContactSets([cs]), occurrences=["A:1", "B:1", "C:1"])
         out = payload(ec.handler(action="set_members", name="ContactSet1", members=["A:1", "C:1"]))
         assert [m.fullPathName for m in cs._members] == ["A:1", "C:1"]
@@ -511,7 +491,7 @@ class TestSetMembers:
 
     def test_a_swallowed_member_write_is_an_error_not_a_false_ok(self, world):
         # the same COUNT with the wrong members is what a count-only check would wave through.
-        cs = _StickyMembers("ContactSet1", members=[_Occ("A:1"), _Occ("B:1")])
+        cs = _StickyMembers("ContactSet1", members=[_occ("A:1"), _occ("B:1")])
         world(sets=_ContactSets([cs]), occurrences=["A:1", "B:1", "C:1"])
         msg = error_message(ec.handler(action="set_members", name="ContactSet1",
                                        members=["A:1", "C:1"]))
@@ -519,13 +499,13 @@ class TestSetMembers:
         assert [m.fullPathName for m in cs._members] == ["A:1", "B:1"]
 
     def test_a_membership_that_lost_a_member_is_an_error(self, world):
-        cs = _DropsAMember("ContactSet1", members=[_Occ("A:1"), _Occ("B:1")])
+        cs = _DropsAMember("ContactSet1", members=[_occ("A:1"), _occ("B:1")])
         world(sets=_ContactSets([cs]), occurrences=["A:1", "B:1", "C:1"])
         assert "not the 2 requested" in error_message(
             ec.handler(action="set_members", name="ContactSet1", members=["A:1", "C:1"]))
 
     def test_set_members_also_enforces_two_distinct_members(self, world):
-        cs = _ContactSet("ContactSet1", members=[_Occ("A:1"), _Occ("B:1")])
+        cs = _ContactSet("ContactSet1", members=[_occ("A:1"), _occ("B:1")])
         world(sets=_ContactSets([cs]), occurrences=["A:1", "B:1"])
         assert "2 DISTINCT" in error_message(
             ec.handler(action="set_members", name="ContactSet1", members=["A:1"]))
@@ -534,7 +514,7 @@ class TestSetMembers:
         # the read-back a body member takes here is create's: an object both casts reject counts
         # toward member_count and is disclosed as unreadable, rather than dropped from the
         # membership the caller is being told the set now holds.
-        cs = _ContactSet("ContactSet1", members=[_Occ("A:1"), _Occ("B:1")])
+        cs = _ContactSet("ContactSet1", members=[_occ("A:1"), _occ("B:1")])
         world(sets=_ContactSets([cs]), occurrences=["A:1"], bodies=["Block"])
         out = payload(ec.handler(action="set_members", name="ContactSet1",
                                  members=["A:1", "Block"]))
@@ -546,7 +526,7 @@ class TestSetMembers:
         # the other arm of create's pin, on the second action publishing the key: withholding it at
         # zero has to hold here too, or a fully named replacement membership tells the caller it
         # landed members the set cannot name.
-        cs = _ContactSet("ContactSet1", members=[_Occ("A:1"), _Occ("B:1")])
+        cs = _ContactSet("ContactSet1", members=[_occ("A:1"), _occ("B:1")])
         world(sets=_ContactSets([cs]), occurrences=["A:1", "B:1", "C:1"])
         out = payload(ec.handler(action="set_members", name="ContactSet1", members=["A:1", "C:1"]))
         assert "members_unreadable" not in out

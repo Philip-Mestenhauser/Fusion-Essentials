@@ -26,8 +26,10 @@ from types import SimpleNamespace
 import adsk.cam
 import pytest
 
-from conftest import _Strategy, load_tool, make_cam, strategy_factory, wcs_params
-from conftest import FakeSetup, FakeCAMFolder, FakeOperation
+from conftest import (_FakeObjectCollection, _NamedCollection, _Strategy, _make_object_collection,
+                      load_tool, make_cam, strategy_factory, wcs_params)
+from conftest import (FakeApplication, FakeCAMParameter, FakeCAMParameters, FakeMachine, FakeSetup,
+                      FakeCAMFolder, FakeOperation, FakeTool)
 
 cc = load_tool("_cam_common")
 cr = load_tool("_cam_read")
@@ -38,26 +40,9 @@ def _payload(result):
     return json.loads(result["content"][0]["text"])
 
 
-class _Coll:
-    def __init__(self, items):
-        self._items = list(items)
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def item(self, i):
-        return self._items[i]
-
-    def __iter__(self):
-        return iter(self._items)
-
-
-class FakeCAM:
-    def __init__(self, setups, machining_times=None):
-        self.setups = _Coll(setups)
-        # The EMPTY class's second signal, borrowed from the shared fake rather than re-rolled.
-        self.getMachiningTime = make_cam(machining_times=machining_times).getMachiningTime
+def FakeCAM(setups, machining_times=None):
+    """A CAM product carrying `setups`, with the shared machining-time answer."""
+    return make_cam(*setups, machining_times=machining_times)
 
 
 @pytest.fixture
@@ -107,12 +92,17 @@ class TestSetupsCap:
 # ── get_cam_setups_handler: per-setup 'model_lists_truncated' (selected_models/fixtures/stock) ────
 
 class _ModelStub:
+    """One entry of a setup's model/fixture/stock list, read for its name alone. The lists hold
+    Occurrences AND BRepBodies, so no one shared fake stands for the row."""
     def __init__(self, name):
         self.name = name
 
 
-class _Setup:
-    def __init__(self, models=(), fixtures=(), stock=()):
+class _Setup(FakeSetup):
+    """A setup carrying the three model collections the setups and references slices read - the
+    shared setup fake models the operation tree, not the selection lists."""
+    def __init__(self, models=(), fixtures=(), stock=(), name="Setup1"):
+        super().__init__(name)
         self.models = list(models)
         self.fixtures = list(fixtures)
         self.stockSolids = list(stock)
@@ -137,12 +127,13 @@ class TestModelListsCap:
         assert len(rec["selected_models"]) == cr._MAX_ITEMS
 
 
-class _RaisingSetup:
+class _RaisingSetup(FakeSetup):
     """A setup whose named model collections RAISE on the PROPERTY read - measured: Setup.models
     raises "3 : input is null" on a setup whose selected occurrence was removed by
     doc_insert_occurrence(remove_existing=...)."""
 
-    def __init__(self, raising=("models",), models=(), fixtures=(), stock=()):
+    def __init__(self, raising=("models",), models=(), fixtures=(), stock=(), name="Setup1"):
+        super().__init__(name)
         self._raising = set(raising)
         self._lists = {"models": list(models), "fixtures": list(fixtures),
                        "stockSolids": list(stock)}
@@ -223,10 +214,9 @@ class TestUnreadableModelLists:
 
 # ── get_cam_operations_handler: per-setup 'operations_truncated' ─────────────────────────────────
 
-class _OpSetup:
-    def __init__(self, name, ops):
-        self.name = name
-        self.allOperations = _Coll(ops)
+def _OpSetup(name, ops):
+    """A setup holding `ops` - what the operations slice walks."""
+    return FakeSetup(name, ops=ops)
 
 
 class TestOperationsCap:
@@ -347,18 +337,18 @@ class TestErroredOpNeverReadsValid:
 # ── get_setup_references_handler: per-setup 'references_truncated' ──────────────────────────────
 
 class _RefOcc:
+    """An X-ref occurrence as the references walk reads it. The shared occurrence fake carries no
+    isReferencedComponent/documentReference pair, so this one stays local."""
     def __init__(self, name):
         self.name = name
         self.isReferencedComponent = True
         self.documentReference = None
 
 
-class _RefSetup:
+class _RefSetup(_Setup):
+    """The same model-carrying setup, addressed by NAME - what the references filter resolves over."""
     def __init__(self, name, models=()):
-        self.name = name
-        self.models = list(models)
-        self.fixtures = []
-        self.stockSolids = []
+        super().__init__(models=models, name=name)
 
 
 class TestReferencesFilterNamedBranch:
@@ -451,18 +441,15 @@ class TestInvalidationReasons:
 # shares) rather than a live op, so each test builds the raw op then reads it through op_state_facts
 # first - exercising the two functions exactly as every real caller composes them.
 
-class _RaisingFlagOp:
+class _RaisingFlagOp(FakeOperation):
     """An operation whose toolpath flags RAISE - the read that must answer None, not False."""
 
+    _raising = ()
+    _values = {"hasToolpath": True, "isToolpathValid": True}
+
     def __init__(self, name="Op", raising=("hasToolpath", "isToolpathValid")):
-        self.name = name
-        self.hasError = False
-        self.hasWarning = False
-        self.isSuppressed = False
-        self.isGenerating = False
-        self.operationState = adsk.cam.OperationStates.IsValidOperationState
+        super().__init__(name, operation_state=adsk.cam.OperationStates.IsValidOperationState)
         self._raising = set(raising)
-        self._values = {"hasToolpath": True, "isToolpathValid": True}
 
     def _read(self, name):
         if name in self._raising:
@@ -473,9 +460,17 @@ class _RaisingFlagOp:
     def hasToolpath(self):
         return self._read("hasToolpath")
 
+    @hasToolpath.setter
+    def hasToolpath(self, value):
+        pass
+
     @property
     def isToolpathValid(self):
         return self._read("isToolpathValid")
+
+    @isToolpathValid.setter
+    def isToolpathValid(self, value):
+        pass
 
 
 class TestOpStateFactsToolpathFlags:
@@ -731,7 +726,7 @@ class TestOpStateFactsMachiningTime:
         assert cam.machining_time_calls[0][1] == (100.0, 10.58, 1.5)
 
 
-class _UnreadableSuppressionFlagOp:
+class _UnreadableSuppressionFlagOp(FakeOperation):
     """A warned operation whose isSuppressed read RAISES while operationState reads Suppressed.
     op_state_facts reads that flag through safe(read, False), so the facts it hands on carry
     is_suppressed False beside operation_state 2 - the one shape only the state half answers for.
@@ -740,19 +735,19 @@ class _UnreadableSuppressionFlagOp:
     Suppressed state must not reach any other field on the row."""
 
     def __init__(self, has_error=False):
-        self.name = "Chamfer1"
-        self.hasError = has_error
-        self.error = "Drive Surfaces: No valid drive surfaces selected." if has_error else ""
-        self.hasWarning = True
-        self.isGenerating = False
-        self.operationState = adsk.cam.OperationStates.SuppressedOperationState
-        self.generatingProgress = None
-        self.hasToolpath = False
-        self.isToolpathValid = False
+        super().__init__("Chamfer1", has_toolpath=False, valid=False,
+                         operation_state=adsk.cam.OperationStates.SuppressedOperationState,
+                         has_error=has_error, has_warning=True,
+                         error=("Drive Surfaces: No valid drive surfaces selected."
+                                if has_error else ""))
 
     @property
     def isSuppressed(self):
         raise RuntimeError("isSuppressed cannot be read on this operation")
+
+    @isSuppressed.setter
+    def isSuppressed(self, value):
+        pass
 
 
 class TestOpIsSuppressed:
@@ -1077,63 +1072,49 @@ class _MTResult:
         self.rapidDistance = rapid_distance
 
 
-class _MTOp:
-    def __init__(self, name="Op", valid=True, suppressed=False, has_toolpath=True):
-        self.name = name
-        self.isToolpathValid = valid
-        self.isSuppressed = suppressed
-        self.hasToolpath = has_toolpath
-        self.hasError = False
-        self.hasWarning = False
-        self.isGenerating = False
-        self.operationState = (adsk.cam.OperationStates.SuppressedOperationState if suppressed
-                               else adsk.cam.OperationStates.IsValidOperationState)
+def _MTOp(name="Op", valid=True, suppressed=False, has_toolpath=True):
+    """One operation as the machining-time walk reads it."""
+    return FakeOperation(
+        name, has_toolpath=has_toolpath, valid=valid, suppressed=suppressed,
+        operation_state=(adsk.cam.OperationStates.SuppressedOperationState if suppressed
+                         else adsk.cam.OperationStates.IsValidOperationState))
 
 
-class _MTSetup:
-    def __init__(self, name, has_valid_toolpath=True, ops=None):
-        self.name = name
-        rows = ops if ops is not None else [_MTOp(name + " op", valid=has_valid_toolpath)]
-        self.allOperations = _Coll(rows)
+def _MTSetup(name, has_valid_toolpath=True, ops=None):
+    """A setup holding the operations the estimate times."""
+    rows = ops if ops is not None else [_MTOp(name + " op", valid=has_valid_toolpath)]
+    return FakeSetup(name, ops=rows)
 
 
-class _MTCam:
-    def __init__(self, setups, seconds=120.0, per_op=60.0, per_op_by_name=None):
-        self.setups = _Coll(list(setups))
-        self.calls = []
-        self._seconds = seconds
-        self._per_op = per_op
-        # per-operation seconds for a NAMED operation - 0.0 is the EMPTY class's second shape,
-        # an operation that generated a toolpath and cuts nothing
-        self._per_op_by_name = dict(per_op_by_name or {})
+def _MTCam(setups, seconds=120.0, per_op=60.0, per_op_by_name=None):
+    """A CAM product whose getMachiningTime answers a full MachiningTime and RECORDS every call in
+    `calls`. `per_op_by_name` gives a NAMED operation its own seconds - 0.0 is the EMPTY class's
+    second shape, an operation that generated a toolpath and cuts nothing."""
+    cam = make_cam(*setups)
+    cam.calls = []
+    by_name = dict(per_op_by_name or {})
 
-    def getMachiningTime(self, obj, feed_scale, rapid_feed, tool_change):
-        self.calls.append((obj, feed_scale, rapid_feed, tool_change))
-        if isinstance(obj, _MTOp):                    # a per-OPERATION call
-            secs = self._per_op_by_name.get(obj.name, self._per_op)
-            return _MTResult(secs, feed_distance=100.0, rapid_distance=25.0)
-        return _MTResult(self._seconds, feed_distance=1000.0, rapid_distance=250.0,
-                         tool_changes=17)
+    def get_machining_time(obj, feed_scale, rapid_feed, tool_change):
+        cam.calls.append((obj, feed_scale, rapid_feed, tool_change))
+        if isinstance(obj, FakeOperation):             # a per-OPERATION call
+            return _MTResult(by_name.get(obj.name, per_op), feed_distance=100.0,
+                             rapid_distance=25.0)
+        return _MTResult(seconds, feed_distance=1000.0, rapid_distance=250.0, tool_changes=17)
 
-    @property
-    def aggregate_calls(self):
-        """Only the whole-collection calls - the per-operation ones are a different question."""
-        return [c for c in self.calls if not isinstance(c[0], _MTOp)]
+    cam.getMachiningTime = get_machining_time
+    return cam
 
 
-class _RecordingCollection:
-    """An adsk.core.ObjectCollection stand-in: add() answers whether the item went in, which is
-    what the handler counts to know the collection really holds what it is about to time."""
+def _aggregate_calls(cam):
+    """Only the whole-collection calls - the per-operation ones are a different question."""
+    return [c for c in cam.calls if not isinstance(c[0], FakeOperation)]
 
-    def __init__(self, accept=True):
-        self.items = []
-        self._accept = accept
+
+class _RefusingCollection(_FakeObjectCollection):
+    """An ObjectCollection whose add() takes nothing - the False the handler counts."""
 
     def add(self, item):
-        if not self._accept:
-            return False
-        self.items.append(item)
-        return True
+        return False
 
 
 @pytest.fixture
@@ -1144,7 +1125,7 @@ def object_collection(monkeypatch):
     made = []
 
     def _create():
-        made.append(_RecordingCollection())
+        made.append(_make_object_collection())
         return made[-1]
     monkeypatch.setattr(adsk.core.ObjectCollection, "create", _create)
     return made
@@ -1201,11 +1182,9 @@ class TestMachiningTimeConstants:
 # ── tool_holder: a CAM tool's assigned HOLDER identity, read from its JSON (adsk.cam.Tool has no ──
 # ── holder accessor). Shared by cam_get(include=['tool']) and the cam_edit_tools library listing. ──
 
-class _HolderTool:
-    def __init__(self, json_str):
-        self._j = json_str
-    def toJson(self):
-        return self._j
+def _HolderTool(json_str):
+    """A CAM tool whose toJson() is where the holder identity is read from."""
+    return FakeTool(json_text=json_str)
 
 
 class TestToolHolder:
@@ -2222,11 +2201,11 @@ def _tally_op(name, state=0, error=False, warning=False, suppressed=False, gener
               error_text="Toolpath is empty"):
     """One operation as the tally reads it. The warning default is the measured live text a
     geometry-less 2D Contour carries while its state still reads valid."""
-    return SimpleNamespace(name=name, operationState=state, hasError=error,
-                           error=error_text if error else "",
-                           hasWarning=warning, warning=warning_text if warning else "",
-                           isSuppressed=suppressed, isGenerating=generating,
-                           generatingProgress=None)
+    op = FakeOperation(name, operation_state=state, suppressed=suppressed,
+                       has_error=error, error=error_text if error else "",
+                       has_warning=warning, warning=warning_text if warning else "")
+    op.isGenerating = generating
+    return op
 
 
 class TestWarningOverlayTally:
@@ -2272,16 +2251,29 @@ class TestWarningOverlayTally:
         assert t["out_of_date"] == 1 and t["warnings"] == 1
 
 
-# A setup carrying an assigned machine - setup_blockers reads Setup.machine through machine_label,
-# so a fake with no machine is a setup blocked by no_machine_selected, not a clean one.
-def _machined_setup(ops, name="Setup1", machine=SimpleNamespace(description="Haas VF-2")):
-    return SimpleNamespace(allOperations=_Coll(list(ops)), name=name, hasError=False, error="",
-                           machine=machine)
+class _MachinedSetup(FakeSetup):
+    """A setup carrying the machine setup_blockers reads (through machine_label) and the fault pair
+    the rollup reads - neither of which the shared setup fake models."""
+
+    def __init__(self, name="Setup1", ops=(), machine=None, has_error=False, error=""):
+        super().__init__(name, ops=ops)
+        self.machine = machine
+        self.hasError = has_error
+        self.error = error
+
+
+_HAAS = FakeMachine(description="Haas VF-2")
+
+
+def _machined_setup(ops, name="Setup1", machine=_HAAS):
+    """A setup with an assigned machine: setup_blockers reads Setup.machine, so machine=None is a
+    setup blocked by no_machine_selected, not a clean one."""
+    return _MachinedSetup(name, ops=ops, machine=machine)
 
 
 class TestLiveReadinessEdges:
     def _cam(self, ops):
-        return SimpleNamespace(setups=_Coll([_machined_setup(ops)]), ncPrograms=_Coll([]))
+        return SimpleNamespace(setups=_NamedCollection([_machined_setup(ops)]), ncPrograms=_NamedCollection([]))
 
     def test_a_document_with_no_active_ops_gives_no_verdict(self, monkeypatch,
                                                             operation_cast_passthrough):
@@ -2315,8 +2307,8 @@ class TestReadinessWarningVerdict:
     reports the count and names the first warning."""
 
     def _sig(self, monkeypatch, ops, machine=SimpleNamespace(description="Haas VF-2")):
-        cam = SimpleNamespace(setups=_Coll([_machined_setup(ops, machine=machine)]),
-                              ncPrograms=_Coll([]))
+        cam = SimpleNamespace(setups=_NamedCollection([_machined_setup(ops, machine=machine)]),
+                              ncPrograms=_NamedCollection([]))
         monkeypatch.setattr(cc, "get_cam", lambda: (cam, None))
         sig, err = cc.live_readiness()
         assert err is None
@@ -2465,7 +2457,8 @@ class TestSharedReadyVerdict:
 # and no machine: a verdict reading only the op tally says "ready to post" on it.
 
 def _machine(description="Haas VF-2"):
-    return SimpleNamespace(description=description)
+    """A machine off a setup - machine_label reads its description."""
+    return FakeMachine(description=description)
 
 
 class TestSetupBlockers:
@@ -2475,12 +2468,12 @@ class TestSetupBlockers:
         assert cc.setup_blockers(SimpleNamespace(machine=None)) == ["no_machine_selected"]
 
     def test_a_setup_whose_machine_property_raises_is_blocked_not_cleared(self):
-        class _Raises:
+        class _Raises(FakeSetup):
             @property
             def machine(self):
                 raise RuntimeError("machine cannot be read")
         # an unreadable machine is not a read machine - it may never clear the block by default
-        assert cc.setup_blockers(_Raises()) == ["no_machine_selected"]
+        assert cc.setup_blockers(_Raises("Setup1")) == ["no_machine_selected"]
 
     def test_an_assigned_machine_clears_the_block(self):
         assert cc.setup_blockers(SimpleNamespace(machine=_machine())) == []
@@ -2574,7 +2567,7 @@ class TestLiveReadinessConsumesSetupBlockers:
     """live_readiness and cam_get's setups projection answer 'is this postable' off ONE input set."""
 
     def _cam(self, setups):
-        return SimpleNamespace(setups=_Coll(setups), ncPrograms=_Coll([]))
+        return SimpleNamespace(setups=_NamedCollection(setups), ncPrograms=_NamedCollection([]))
 
     def _sig(self, monkeypatch, setups):
         monkeypatch.setattr(cc, "get_cam", lambda: (self._cam(setups), None))
@@ -2702,9 +2695,10 @@ class TestOwningSetup:
 # --- _attach_setup_invalidation: the per-setup op_states rollup + WHY the setup is stale ---
 
 def _rollup_op(name, state=0, warning=False, log=""):
-    return SimpleNamespace(name=name, operationState=state, hasError=False, hasWarning=warning,
-                           isSuppressed=False, isGenerating=False, generatingProgress=None,
-                           messageLog=log)
+    """One operation as the per-setup rollup reads it - messageLog is where the WHY is parsed from."""
+    op = FakeOperation(name, operation_state=state, has_warning=warning)
+    op.messageLog = log
+    return op
 
 
 class TestSetupInvalidationRollup:
@@ -3035,14 +3029,17 @@ class TestOperationSummaryDisclosure:
 # --- the operation row's WHERE and WHAT-IT-ASKS-FOR: folder path, preset, spindle vs machine ---
 
 def _row_op(name, rpm=None, preset=None, suppressed=False):
-    return SimpleNamespace(
-        name=name, tool=SimpleNamespace(description="flat 10mm"), strategy="adaptive",
-        operationState=(adsk.cam.OperationStates.SuppressedOperationState if suppressed
-                        else adsk.cam.OperationStates.IsValidOperationState),
-        hasWarning=False, hasError=False, hasToolpath=True, isToolpathValid=True,
-        isGenerating=False, isSuppressed=suppressed, isOptional=False,
-        toolPreset=(SimpleNamespace(name=preset) if preset else None),
-        parameters=_SpindleParams(rpm))
+    """One operation as the operations row reads it: its tool, the preset it runs, and the spindle
+    speed it asks for."""
+    op = FakeOperation(
+        name, strategy="adaptive", suppressed=suppressed,
+        operation_state=(adsk.cam.OperationStates.SuppressedOperationState if suppressed
+                         else adsk.cam.OperationStates.IsValidOperationState))
+    op.tool = FakeTool(description="flat 10mm")
+    op.isOptional = False
+    op.toolPreset = SimpleNamespace(name=preset) if preset else None
+    op.parameters = _SpindleParams(rpm)
+    return op
 
 
 class TestOperationRowContext:
@@ -3471,9 +3468,9 @@ class TestNcPrograms:
             name="Main", machine=SimpleNamespace(description="Haas VF-2"),
             postConfiguration=SimpleNamespace(description="haas next generation"),
             operations=[object(), object(), object()],
-            postParameters=_Coll([SimpleNamespace(name="metric", title="Use metric",
+            postParameters=_NamedCollection([SimpleNamespace(name="metric", title="Use metric",
                                                   expression="true")]))
-        install(SimpleNamespace(ncPrograms=_Coll([nc])))
+        install(SimpleNamespace(ncPrograms=_NamedCollection([nc])))
         out = _payload(cr.get_nc_programs_handler())
         assert out["nc_program_count"] == 1
         entry = out["nc_programs"][0]
@@ -3487,7 +3484,7 @@ class TestNcPrograms:
 
     def test_an_unassigned_program_reads_nulls_not_fabricated_values(self, install):
         # operation_count especially: an unreadable count must not report 0 operations.
-        install(SimpleNamespace(ncPrograms=_Coll([SimpleNamespace(
+        install(SimpleNamespace(ncPrograms=_NamedCollection([SimpleNamespace(
             name="Setup1", machine=None, postConfiguration=None, postParameters=None)])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["machine"] is None and entry["post"] is None
@@ -3497,7 +3494,7 @@ class TestNcPrograms:
     def test_a_broken_post_parameter_does_not_sink_the_program_list(self, install):
         nc = SimpleNamespace(name="Main", machine=None, postConfiguration=None, operations=[],
                              postParameters=SimpleNamespace(count=1, item=_unreadable_item))
-        install(SimpleNamespace(ncPrograms=_Coll([nc])))
+        install(SimpleNamespace(ncPrograms=_NamedCollection([nc])))
         out = _payload(cr.get_nc_programs_handler())
         assert out["nc_program_count"] == 1
         assert out["nc_programs"][0]["name"] == "Main"
@@ -3524,7 +3521,7 @@ class TestNcProgramPostedOperations:
     def test_the_posted_list_is_counted_beside_the_operations_property(self, install,
                                                                        operation_cast_passthrough):
         posted = [_row_op("Cut"), _row_op("Rough")]
-        install(SimpleNamespace(ncPrograms=_Coll([self._program(posted)])))
+        install(SimpleNamespace(ncPrograms=_NamedCollection([self._program(posted)])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         # MEASURED: NCProgram.operations holds the setups/folders - so it is the ITEM count, and
         # the operations figure is the filtered read that says what the program holds.
@@ -3538,7 +3535,7 @@ class TestNcProgramPostedOperations:
         # the partition this slice exists to publish: four operations in the program's scope, one
         # operation block in the file it posts.
         held = [_row_op("FaceLeg")] + [self._empty(n) for n in ("Chamfer1", "Drill1", "Drill2")]
-        install(SimpleNamespace(ncPrograms=_Coll([self._program(held)])))
+        install(SimpleNamespace(ncPrograms=_NamedCollection([self._program(held)])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["operation_count"] == 4 and entry["posted_operations"] == 1
         assert "toolpath_unread" not in entry
@@ -3547,7 +3544,7 @@ class TestNcProgramPostedOperations:
             self, install, operation_cast_passthrough):
         mystery = _row_op("Mystery")
         del mystery.hasToolpath
-        install(SimpleNamespace(ncPrograms=_Coll([self._program([_row_op("Cut"), mystery])])))
+        install(SimpleNamespace(ncPrograms=_NamedCollection([self._program([_row_op("Cut"), mystery])])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["operation_count"] == 2
         assert entry["posted_operations"] == 1 and entry["toolpath_unread"] == 1
@@ -3556,7 +3553,7 @@ class TestNcProgramPostedOperations:
             self, install, operation_cast_passthrough):
         empty = _row_op("Rest Wall Finishing 1")
         empty.hasToolpath = False
-        install(SimpleNamespace(ncPrograms=_Coll([self._program([_row_op("Cut"), empty])])))
+        install(SimpleNamespace(ncPrograms=_NamedCollection([self._program([_row_op("Cut"), empty])])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["empty_toolpath_count"] == 1
         assert entry["empty_toolpaths"] == ["Rest Wall Finishing 1"]
@@ -3568,7 +3565,7 @@ class TestNcProgramPostedOperations:
         # alone read it as the cutting operation beside it.
         posted = [_row_op("Cut"), _row_op("Swarf1")]
         install(SimpleNamespace(
-            ncPrograms=_Coll([self._program(posted)]),
+            ncPrograms=_NamedCollection([self._program(posted)]),
             getMachiningTime=make_cam(
                 machining_times={"Cut": 4.193083, "Swarf1": 0.0}).getMachiningTime))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
@@ -3583,14 +3580,14 @@ class TestNcProgramPostedOperations:
             op = _row_op(f"Empty{i}")
             op.hasToolpath = False
             empties.append(op)
-        install(SimpleNamespace(ncPrograms=_Coll([self._program(empties)])))
+        install(SimpleNamespace(ncPrograms=_NamedCollection([self._program(empties)])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["empty_toolpath_count"] == 5 and len(entry["empty_toolpaths"]) == 2
 
     def test_a_non_operation_entry_is_skipped(self, install, monkeypatch):
         monkeypatch.setattr(adsk.cam.Operation, "cast",
                             lambda x: x if getattr(x, "name", "") != "folder" else None)
-        install(SimpleNamespace(ncPrograms=_Coll([
+        install(SimpleNamespace(ncPrograms=_NamedCollection([
             self._program([SimpleNamespace(name="folder"), _row_op("Cut")])])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["operation_count"] == 2 and entry["empty_toolpath_count"] == 0
@@ -3599,14 +3596,14 @@ class TestNcProgramPostedOperations:
 
     def test_an_unreadable_posted_list_claims_nothing(self, install):
         # no filteredOperations at all: the keys are absent rather than reported as zero
-        install(SimpleNamespace(ncPrograms=_Coll([SimpleNamespace(
+        install(SimpleNamespace(ncPrograms=_NamedCollection([SimpleNamespace(
             name="Main", machine=None, postConfiguration=None, operations=[],
             postParameters=None)])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert "posted_operations" not in entry and "empty_toolpath_count" not in entry
 
     def test_the_note_tells_the_two_lists_apart(self, install):
-        install(SimpleNamespace(ncPrograms=_Coll([])))
+        install(SimpleNamespace(ncPrograms=_NamedCollection([])))
         note = _payload(cr.get_nc_programs_handler())["note"]
         assert "filteredOperations" in note and "empty_toolpath_count" in note
 
@@ -3620,7 +3617,7 @@ class TestNcProgramPostedOperations:
         # A program's held list can draw operations from several setups and an operation name is
         # unique only within one, so a bare name printed twice addresses two operations and
         # separates neither. The position is the fact this read holds.
-        install(SimpleNamespace(ncPrograms=_Coll([self._program(
+        install(SimpleNamespace(ncPrograms=_NamedCollection([self._program(
             [self._empty("Rough"), _row_op("Cut"), self._empty("Rough")])])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["empty_toolpaths"] == ["Rough (operation 1)",
@@ -3631,7 +3628,7 @@ class TestNcProgramPostedOperations:
             self, install, operation_cast_passthrough):
         # The spelling a caller passes to cam_get/cam_generate crosses unchanged where it already
         # identifies one row - a position there separates nothing that was not already separate.
-        install(SimpleNamespace(ncPrograms=_Coll([self._program(
+        install(SimpleNamespace(ncPrograms=_NamedCollection([self._program(
             [self._empty("Bore"), self._empty("Face")])])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["empty_toolpaths"] == ["Bore", "Face"]
@@ -3640,7 +3637,7 @@ class TestNcProgramPostedOperations:
             self, install, operation_cast_passthrough):
         # The discriminator has to address the HELD list, which is what a reader is looking at;
         # numbering the empty rows instead would print '2' for the fourth held operation.
-        install(SimpleNamespace(ncPrograms=_Coll([self._program(
+        install(SimpleNamespace(ncPrograms=_NamedCollection([self._program(
             [self._empty("Rough"), _row_op("Cut"), _row_op("Drill"),
              self._empty("Rough")])])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
@@ -3653,7 +3650,7 @@ class TestNcProgramPostedOperations:
         # the index into filteredOperations, which is the list a reader counts along.
         monkeypatch.setattr(adsk.cam.Operation, "cast",
                             lambda x: x if getattr(x, "name", "") != "folder" else None)
-        install(SimpleNamespace(ncPrograms=_Coll([self._program(
+        install(SimpleNamespace(ncPrograms=_NamedCollection([self._program(
             [self._empty("Rough"), SimpleNamespace(name="folder"),
              self._empty("Rough")])])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
@@ -3665,7 +3662,7 @@ class TestNcProgramPostedOperations:
         # The cap is applied AFTER the substitution, or the visible list would print an address
         # that reaches two operations while looking unique.
         monkeypatch.setattr(cr, "_NC_EMPTY_NAME_CAP", 2)
-        install(SimpleNamespace(ncPrograms=_Coll([self._program(
+        install(SimpleNamespace(ncPrograms=_NamedCollection([self._program(
             [self._empty("Dup"), self._empty("Solo"), self._empty("Dup")])])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["empty_toolpaths"] == ["Dup (operation 1)", "Solo"]
@@ -3676,7 +3673,7 @@ class TestNcProgramPostedOperations:
         # An empty discriminator is not a label: told_apart keeps the row's own name, so a nameless
         # operation never renders as a bare position with nothing in front of it.
         nameless = self._empty(None)
-        install(SimpleNamespace(ncPrograms=_Coll([self._program([nameless])])))
+        install(SimpleNamespace(ncPrograms=_NamedCollection([self._program([nameless])])))
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["empty_toolpaths"] == [None]
 
@@ -3685,7 +3682,7 @@ class TestNcProgramPostedOperations:
         # The note and the label have to agree on ONE shape: the row KEEPS the operation's name and
         # carries the position BESIDE it. A note saying the position replaces the name sends a
         # reader hunting for a name that is still sitting there.
-        install(SimpleNamespace(ncPrograms=_Coll([self._program(
+        install(SimpleNamespace(ncPrograms=_NamedCollection([self._program(
             [self._empty("Rough"), self._empty("Rough")])])))
         out = _payload(cr.get_nc_programs_handler())
         rows = out["nc_programs"][0]["empty_toolpaths"]
@@ -3703,8 +3700,8 @@ class TestMachiningTimeScope:
         out = _payload(cr.get_machining_time_handler(setup="s2"))    # case-insensitive exact
         assert out["setup_count"] == 1 and out["setups"][0]["setup"] == "S2"
         assert out["total_machining_time_seconds"] == 120.0
-        assert len(cam.aggregate_calls) == 1                          # S1 was never timed
-        assert [op.name for op in object_collection[0].items] == ["S2 op"]
+        assert len(_aggregate_calls(cam)) == 1                          # S1 was never timed
+        assert [op.name for op in object_collection[0]] == ["S2 op"]
 
     def test_a_duplicated_setup_name_is_refused(self, install, operation_cast_passthrough):
         install(_MTCam([_MTSetup("Dup"), _MTSetup("Dup")]))
@@ -3769,7 +3766,7 @@ class TestMachiningTimeExcludesSuppressed:
         rows = {r["operation"]: r for r in out["setups"][0]["operations"]}
         assert rows["Swarf1"] == {"operation": "Swarf1", "empty_toolpath": True}
         assert rows["Cut"]["machining_time_seconds"] == 60.0
-        assert [c[0].name for c in cam.calls if isinstance(c[0], _MTOp)] == ["Cut", "Swarf1"]
+        assert [c[0].name for c in cam.calls if isinstance(c[0], FakeOperation)] == ["Cut", "Swarf1"]
         # the empty row carries no figure, so it is out of the summed count
         assert out["setups"][0]["operations_time_summed"] == 1
         assert out["setups"][0]["operations_time_sum_seconds"] == 60.0
@@ -3780,11 +3777,11 @@ class TestMachiningTimeExcludesSuppressed:
                                   _MTOp("Parked", valid=False, suppressed=True),
                                   _MTOp("AlsoParked", valid=False, suppressed=True)])
         out = _payload(cr.get_machining_time_handler())
-        assert [op.name for op in object_collection[0].items] == ["Cut"]
+        assert [op.name for op in object_collection[0]] == ["Cut"]
         assert out["setups"][0]["excluded_suppressed"] == 2
         assert out["setups"][0]["timed_operations"] == 1
         # the SETUP object itself is never the target - that is the shape that fails live
-        assert not any(isinstance(c[0], _MTSetup) for c in cam.calls)
+        assert not any(isinstance(c[0], FakeSetup) for c in cam.calls)
 
     def test_empty_toolpath_ops_stay_in_the_collection(self, install, object_collection,
                                                        operation_cast_passthrough):
@@ -3792,7 +3789,7 @@ class TestMachiningTimeExcludesSuppressed:
         # so excluding it would understate the job for no reason.
         self._cam(install, [_MTOp("Cut", valid=True), _MTOp("Empty", valid=True)])
         out = _payload(cr.get_machining_time_handler())
-        assert [op.name for op in object_collection[0].items] == ["Cut", "Empty"]
+        assert [op.name for op in object_collection[0]] == ["Cut", "Empty"]
         assert out["setups"][0]["excluded_suppressed"] == 0
 
     def test_a_setup_of_only_suppressed_ops_reports_the_precondition(self, install,
@@ -3808,7 +3805,7 @@ class TestMachiningTimeExcludesSuppressed:
             self, install, monkeypatch, operation_cast_passthrough):
         import adsk.core
         monkeypatch.setattr(adsk.core.ObjectCollection, "create",
-                            lambda: _RecordingCollection(accept=False))
+                            lambda: _RefusingCollection())
         cam = self._cam(install, [_MTOp("Cut", valid=True)])
         out = _payload(cr.get_machining_time_handler())
         assert "0 of 1" in out["setups"][0]["error"]
@@ -3827,9 +3824,9 @@ class TestMachiningTimeExcludesSuppressed:
         assert "machining_time_seconds" not in rows["Empty"]
         assert rows["Cut"]["machining_time_seconds"] == 60.0
         # the doomed call is never made: only the op holding a toolpath was timed per-op
-        assert [c[0].name for c in cam.calls if isinstance(c[0], _MTOp)] == ["Cut"]
+        assert [c[0].name for c in cam.calls if isinstance(c[0], FakeOperation)] == ["Cut"]
         # ...and the empty op still rides in the setup's collection, which times fine
-        assert [op.name for op in object_collection[0].items] == ["Cut", "Empty"]
+        assert [op.name for op in object_collection[0]] == ["Cut", "Empty"]
 
     def test_the_empty_rows_count_against_the_cap(self, install, object_collection,
                                                   operation_cast_passthrough, monkeypatch):
@@ -3903,7 +3900,7 @@ class TestMachiningTimeExcludesSuppressed:
         real = cam.getMachiningTime
 
         def _boom(obj, *a):
-            if isinstance(obj, _MTOp):
+            if isinstance(obj, FakeOperation):
                 raise RuntimeError("per-op estimate unavailable")
             return real(obj, *a)
         monkeypatch.setattr(cam, "getMachiningTime", _boom)
@@ -3952,7 +3949,7 @@ class TestMachiningTimeExcludesSuppressed:
         real = cam.getMachiningTime
 
         def _boom(obj, *a):
-            if isinstance(obj, _MTOp):
+            if isinstance(obj, FakeOperation):
                 raise RuntimeError("per-op estimate unavailable")
             return real(obj, *a)
         monkeypatch.setattr(cam, "getMachiningTime", _boom)
@@ -3972,7 +3969,7 @@ class TestMachiningTimeExcludesSuppressed:
                                            _MTOp("Cut", valid=True)])])
         install(cam)
         _payload(cr.get_machining_time_handler())
-        assert [op.name for op in object_collection[0].items] == ["Cut"]
+        assert [op.name for op in object_collection[0]] == ["Cut"]
 
     def test_an_uncreatable_collection_is_an_error_not_a_setup_object_fallback(
             self, install, monkeypatch, operation_cast_passthrough):
@@ -4049,10 +4046,14 @@ class TestRegisterFuture:
                                                                             registry):
         # None, never a raise out of the launch: the entry then compares on its key alone, which is
         # what it did before there was a handle to keep.
-        class _NoActiveDocument:
+        class _NoActiveDocument(FakeApplication):
             @property
             def activeDocument(self):
                 raise RuntimeError("no active document")
+
+            @activeDocument.setter
+            def activeDocument(self, value):
+                pass
 
         monkeypatch.setattr(cc, "app", _NoActiveDocument())
         handle, _total = cc.register_future(SimpleNamespace(numberOfOperations=1), "whole document",
@@ -4582,12 +4583,9 @@ def _dying_after(items):
     return _gen()
 
 
-class _DyingCollection:
+class _DyingCollection(_NamedCollection):
     """A count/item collection that promises one more item than item() will hand over - the
     mid-walk failure in the protocol iter_collection actually reads."""
-
-    def __init__(self, items):
-        self._items = list(items)
 
     @property
     def count(self):
@@ -4596,7 +4594,7 @@ class _DyingCollection:
     def item(self, i):
         if i >= len(self._items):
             raise RuntimeError("collection died mid-walk")
-        return self._items[i]
+        return super().item(i)
 
 
 class TestPartialReadsAreFlaggedIncomplete:
@@ -4894,14 +4892,14 @@ class _MachPart:
         self.axis = axis
         self.spindle = spindle
         self.toolStation = station
-        self.children = _Coll(list(children))
+        self.children = _NamedCollection(list(children))
 
 
 class _MachElements:
     """MachineElements: the type-filtered accessors a caller reaches the kinematics element by."""
 
     def __init__(self, parts, has_kinematics=True, default_answers=True):
-        self._parts = _Coll(list(parts))
+        self._parts = _NamedCollection(list(parts))
         self._has = has_kinematics
         self._default_answers = default_answers
         self.asked = []
@@ -4918,15 +4916,16 @@ class _MachElements:
         return [self._element()] if self._has else []
 
 
-class _Machine:
+class _Machine(FakeMachine):
+    """A machine whose kinematics route - the one the bindings flag "not officially supported" -
+    COUNTS every read, so a test can prove it is never taken."""
+
     def __init__(self, elements, description="Haas with A-axis"):
-        self.elements = elements
-        self.description = description
+        super().__init__(description=description, elements=elements)
         self.unsupported_reads = 0
 
     @property
     def kinematics(self):
-        # the route the bindings flag "not officially supported" - reading it is the defect
         self.unsupported_reads += 1
         return None
 
@@ -4943,10 +4942,9 @@ def _haas():
     return _Machine(_MachElements([_MachPart(), z_axis, y_axis]))
 
 
-class _MachineSetup:
-    def __init__(self, name, machine=None):
-        self.name = name
-        self.machine = machine
+def _MachineSetup(name, machine=None):
+    """A setup whose assigned machine the limits read walks."""
+    return _MachinedSetup(name, machine=machine)
 
 
 class TestMachineLimits:
@@ -5065,27 +5063,25 @@ class TestMachineLimits:
 
     def test_the_parts_walk_is_depth_bounded(self):
         deep = _MachPart()
-        deep.children = _Coll([deep])                       # a self-referencing tree
+        deep.children = _NamedCollection([deep])                       # a self-referencing tree
         machine = _Machine(_MachElements([deep]))
         assert len(cc.kinematics_parts(machine)) == cc._MACHINE_PART_DEPTH + 1
 
 
 # ── the per-operation "does it ask for more than the machine allows" comparison ──────────────────
 
-class _SpindleParams:
-    def __init__(self, rpm):
-        self._rpm = rpm
-
-    def itemByName(self, name):
-        if name != "tool_spindleSpeed" or self._rpm is None:
-            return None
-        return SimpleNamespace(value=SimpleNamespace(value=self._rpm))
+def _SpindleParams(rpm):
+    """The parameters the spindle check reads - rpm None is an operation carrying no
+    tool_spindleSpeed at all."""
+    return FakeCAMParameters(
+        [] if rpm is None else [FakeCAMParameter("tool_spindleSpeed", value=rpm)])
 
 
-class _SpindleOp:
-    def __init__(self, rpm=None, name="Op"):
-        self.name = name
-        self.parameters = _SpindleParams(rpm)
+def _SpindleOp(rpm=None, name="Op"):
+    """An operation whose requested spindle speed the machine maximum is compared against."""
+    op = FakeOperation(name)
+    op.parameters = _SpindleParams(rpm)
+    return op
 
 
 class TestSpindleCheck:
@@ -5223,7 +5219,7 @@ class TestUnfinishedVerdictNamesTheBlockedOps:
                             strategy_factory({"chamfer": False, "face": True}))
         ops = [_tally_op("Cham", state=1), _tally_op("Face1")]
         ops[0].strategy, ops[1].strategy = "chamfer", "face"
-        cam = SimpleNamespace(setups=_Coll([_machined_setup(ops)]), ncPrograms=_Coll([]))
+        cam = SimpleNamespace(setups=_NamedCollection([_machined_setup(ops)]), ncPrograms=_NamedCollection([]))
         monkeypatch.setattr(cc, "get_cam", lambda: (cam, None))
         sig, err = cc.live_readiness()
         assert err is None and sig["out_of_date"] == 1

@@ -116,7 +116,9 @@ class TestDirectDelete:
 
     def test_a_declined_delete_is_an_error(self, rig):
         rig.mesh._deletes = False
-        assert "declined" in error_message(md.handler(mesh="H"))
+        msg = error_message(md.handler(mesh="H"))
+        # the survivor count is READ back, not asserted from the false answer
+        assert "answered false" in msg and "1 mesh(es) named 'Scan1'" in msg
         # nothing changed - the mesh is still in the collection
         assert rig.mesh in rig.comp.meshBodies._items
 

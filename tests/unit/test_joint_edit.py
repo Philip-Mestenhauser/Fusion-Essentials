@@ -21,47 +21,20 @@ import json
 import math
 from types import SimpleNamespace
 
-from conftest import load_tool, _NamedCollection
+import adsk.fusion
+
+from conftest import (FakeJoint, FakeTimeline, FakeTimelineObject, MakeComp, RevoluteJointMotion,
+                      SliderJointMotion, _MotionLimits, _NamedCollection, install, load_tool,
+                      make_design)
+from conftest import payload as _payload
 
 jt = load_tool("joint_edit")
-ji = load_tool("_joint_inputs")
-jcreate = load_tool("joint_create")   # the create half of the shared partial-success rule
+
+_JD = adsk.fusion.JointDirections
+_HEALTH = adsk.fusion.FeatureHealthStates
 
 
 # ── fakes ───────────────────────────────────────────────────────────────────
-
-class FakeTimelineObject:
-    def __init__(self):
-        self.rolls = []
-
-    def rollTo(self, rollBefore):
-        self.rolls.append(bool(rollBefore))
-        return True
-
-
-class FakeLimits:
-    def __init__(self):
-        self.isMinimumValueEnabled = False
-        self.isMaximumValueEnabled = False
-        self.isRestValueEnabled = False
-        self.minimumValue = None
-        self.maximumValue = None
-        self.restValue = None
-
-
-class RevoluteJointMotion:
-    """Named to match the real adsk class so _current_joint_type maps it to 'revolute'."""
-    def __init__(self):
-        self.rotationValue = 0.0
-        self.rotationLimits = FakeLimits()
-
-
-class SliderJointMotion:
-    """Linear motion: limits live on slideLimits, values in CENTIMETERS."""
-    def __init__(self):
-        self.slideValue = 0.0
-        self.slideLimits = FakeLimits()
-
 
 # The unit an expression may carry -> its factor into Fusion's DATABASE units (cm for a length,
 # radians for an angle), which is what Parameter.value reads in whatever the expression said.
@@ -70,7 +43,8 @@ _EXPRESSION_UNITS = {"mm": 0.1, "cm": 1.0, "in": 2.54, "deg": math.pi / 180.0}
 
 class FakeModelParameter:
     """Matches Joint.offset / Joint.angle - a ModelParameter whose `expression` is settable in
-    display units and whose `value` reads back in DATABASE units (cm / radians)."""
+    display units and whose `value` reads back in DATABASE units (cm / radians). Bespoke: there is
+    no ModelParameter SHAPES dump to sweep a shared fake against."""
     def __init__(self):
         self._expression = None
         self.value = None
@@ -86,121 +60,46 @@ class FakeModelParameter:
         self.value = float(number) * _EXPRESSION_UNITS[unit]
 
 
-class FakeJoint:
-    def __init__(self, name):
-        self.name = name
-        self.timelineObject = FakeTimelineObject()
-        self.geometryOrOriginOne = "OLD1"
-        self.geometryOrOriginTwo = "OLD2"
-        self.isFlipped = False
-        self.jointMotion = RevoluteJointMotion()
-        self.offset = FakeModelParameter()
-        self.angle = FakeModelParameter()
-        self.motion_calls = []
-
-    # motion setters record what was requested (custom world axis entity is optional 2nd arg)
-    def setAsRevoluteJointMotion(self, axis, custom=None):
-        self.motion_calls.append(("revolute", axis, custom))
-        return True
-
-    def setAsSliderJointMotion(self, axis, custom=None):
-        self.motion_calls.append(("slider", axis, custom))
-        return True
-
-    def setAsRigidJointMotion(self):
-        self.motion_calls.append(("rigid", None, None))
-        return True
-
-    def setAsCylindricalJointMotion(self, axis, custom=None):
-        self.motion_calls.append(("cylindrical", axis, custom))
-        return True
-
-    def setAsPlanarJointMotion(self, axis, custom=None):
-        self.motion_calls.append(("planar", axis, custom))
-        return True
-
-    def setAsBallJointMotion(self, a, b):
-        self.motion_calls.append(("ball", (a, b), None))
-        return True
+def _jo(name):
+    """One JointOrigin by name - JointOrigin has no SHAPES dump, so it stays a name-only bag."""
+    return SimpleNamespace(name=name)
 
 
-class FakeJoints:
-    def __init__(self, joints):
-        self._j = list(joints)
-
-    @property
-    def count(self):
-        return len(self._j)
-
-    def item(self, i):
-        return self._j[i]
-
-    def itemByName(self, name):
-        for j in self._j:
-            if j.name == name:
-                return j
-        return None
+def _joint(name="BoomPivot", cls=FakeJoint, motion=None, **kw):
+    """One editable Joint: a motion, its own offset/angle parameters and a timeline item."""
+    return cls(name=name, motion=RevoluteJointMotion() if motion is None else motion,
+               timeline_object=FakeTimelineObject(name=name),
+               geometry_one="OLD1", geometry_two="OLD2",
+               offset=FakeModelParameter(), angle=FakeModelParameter(), **kw)
 
 
-class FakeRoot:
-    def __init__(self, joints, as_built=()):
-        self.joints = FakeJoints(joints)
-        # asBuiltJoints is a SEPARATE collection from joints - find_joint searches both
-        self.asBuiltJoints = FakeJoints(as_built)
-        self.allOccurrences = []
-        self.xConstructionAxis = "WAXIS_X"
-        self.yConstructionAxis = "WAXIS_Y"
-        self.zConstructionAxis = "WAXIS_Z"
+def _rolls(joint):
+    """The rollTo(bool) calls the joint's timeline item recorded."""
+    return joint.timelineObject._rolls
 
 
-class _FakeTLItem:
-    def __init__(self, name, health=0):
-        self.name = name
-        self.healthState = health
-
-
-class _FakeTimeline:
-    def __init__(self, items):
-        self._i = list(items)
-        self.markerPosition = 1   # somewhere mid-history to start; the edit must restore it to count
-    @property
-    def count(self):
-        return len(self._i)
-    def item(self, i):
-        return self._i[i]
-
-
-class FakeDesign:
-    def __init__(self, joints, timeline_items=None, as_built=()):
-        self.rootComponent = FakeRoot(joints, as_built)
-        self.computeAll_called = False
-        # ONE stable timeline instance so the handler's markerPosition restore is observable.
-        self._timeline = _FakeTimeline(timeline_items or [_FakeTLItem("Joint1", 0), _FakeTLItem("Pattern1", 0)])
-
-    def computeAll(self):
-        self.computeAll_called = True
-
-    @property
-    def timeline(self):
-        return self._timeline
+def _root(joints=(), as_built=()):
+    """The root component an edit reads: both joint collections plus the world construction axes.
+    asBuiltJoints is a SEPARATE collection from joints - find_joint searches both."""
+    comp = MakeComp(name="Root", joints=list(joints), as_built_joints=list(as_built))
+    comp.xConstructionAxis = "WAXIS_X"
+    comp.yConstructionAxis = "WAXIS_Y"
+    comp.zConstructionAxis = "WAXIS_Z"
+    return comp
 
 
 def _install_joints(joints, timeline_items=None):
     """Wire a design holding these joint objects into the tool module."""
-    design = FakeDesign(joints, timeline_items=timeline_items)
-    jt.app = type("A", (), {"activeProduct": design})()
-    jt._common.app = jt.app
-    import adsk.fusion, adsk.core
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-    adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
-    return design
+    items = timeline_items or [FakeTimelineObject(name="Joint1", index=0),
+                               FakeTimelineObject(name="Pattern1", index=1)]
+    # marker=1 is mid-history, so the edit's restore to the timeline END is observable.
+    return install(jt, make_design(comp=_root(joints), timeline=FakeTimeline(items, marker=1)))
 
 
 def _install(joint_names=("BoomPivot",), motion="revolute", timeline_items=None):
-    joints = [FakeJoint(n) for n in joint_names]
-    if motion == "slider":
-        for j in joints:
-            j.jointMotion = SliderJointMotion()
+    joints = [_joint(name=n, motion=(SliderJointMotion() if motion == "slider"
+                                     else RevoluteJointMotion()))
+              for n in joint_names]
     return _install_joints(joints, timeline_items), joints[0]
 
 
@@ -209,25 +108,13 @@ def _install_as_built(monkeypatch, name="Slider_R"):
     NO offset/angle attribute at all - api_surface lists neither on fusion.AsBuiltJoint - and
     adsk.fusion.AsBuiltJoint is patched to a real class so is_as_built_joint is a genuine isinstance
     check rather than the degrade-to-False path a Mock type takes."""
-    import adsk.fusion, adsk.core
     cls = type("AsBuiltJoint", (), {})
     monkeypatch.setattr(adsk.fusion, "AsBuiltJoint", cls)
     joint = cls()
     joint.name = name
-    joint.timelineObject = FakeTimelineObject()
+    joint.timelineObject = FakeTimelineObject(name=name)
     joint.jointMotion = SliderJointMotion()
-    design = FakeDesign([], as_built=[joint])
-    # the tool has no module-level 'app' - it reads the design through _common
-    monkeypatch.setattr(jt._common, "app", type("A", (), {"activeProduct": design})())
-    monkeypatch.setattr(adsk.fusion.Design, "cast",
-                        lambda x: x if isinstance(x, FakeDesign) else None)
-    monkeypatch.setattr(adsk.core.ValueInput, "createByReal", staticmethod(lambda v: ("real", v)))
-    return design, joint
-
-
-def _payload(result):
-    assert result["isError"] is False, result
-    return json.loads(result["content"][0]["text"])
+    return install(jt, make_design(comp=_root(as_built=[joint]))), joint
 
 
 # ── find / guards ────────────────────────────────────────────────────────────
@@ -247,9 +134,8 @@ class TestFindAndGuards:
     def test_a_name_two_joints_carry_is_refused_with_both_owners(self):
         # a joint name is only unique within a component, so editing by a shared name would target
         # an arbitrary assembly's joint - the resolver's refusal is returned, naming both owners
-        a, b = FakeJoint("Revolute1"), FakeJoint("Revolute1")
-        a.parentComponent = type("C", (), {"name": "ArmA"})()
-        b.parentComponent = type("C", (), {"name": "ArmB"})()
+        a = _joint(name="Revolute1", parent_component=MakeComp(name="ArmA"))
+        b = _joint(name="Revolute1", parent_component=MakeComp(name="ArmB"))
         _install_joints([a, b])
         res = jt.handler(joint_name="Revolute1", flip=True)
         assert res["isError"] is True
@@ -265,7 +151,7 @@ class TestRollTo:
         design, joint = _install(["BoomPivot"])
         _payload(jt.handler(joint_name="BoomPivot", flip=True))
         # rolls the marker BEFORE the joint to edit its geometry...
-        assert joint.timelineObject.rolls[0] is True
+        assert _rolls(joint)[0] is True
         # ...then restores the marker to the TIMELINE END (markerPosition = count), NOT rollTo(False)
         # which stops just past the joint and leaves downstream features (Pattern1) rolled out.
         assert design.timeline.markerPosition == design.timeline.count
@@ -294,12 +180,12 @@ class TestMotion:
         _, joint = _install(["BoomPivot"])
         _payload(jt.handler(joint_name="BoomPivot", joint_type="slider", axis="x"))
         # frame-relative axis (no custom world entity)
-        assert ("slider", 0, None) in joint.motion_calls   # XAxisJointDirection == 0
+        assert ("slider", (0,)) in joint._motion_calls   # XAxisJointDirection == 0
 
     def test_change_to_rigid(self):
         _, joint = _install(["BoomPivot"])
         _payload(jt.handler(joint_name="BoomPivot", joint_type="rigid"))
-        assert ("rigid", None, None) in joint.motion_calls
+        assert ("rigid", ()) in joint._motion_calls
 
     def test_unknown_joint_type_errors(self):
         _install(["BoomPivot"])
@@ -354,7 +240,6 @@ class TestOffsetAngle:
     def test_a_regular_joint_without_an_offset_keeps_the_generic_refusal(self, monkeypatch):
         # the as-built branch must not swallow the ordinary case: a real Joint whose offset is
         # absent is still "rigid/inferred or already 0-DOF", not an as-built joint
-        import adsk.fusion
         monkeypatch.setattr(adsk.fusion, "AsBuiltJoint", type("AsBuiltJoint", (), {}))
         _, joint = _install(["BoomPivot"])
         del joint.offset
@@ -372,7 +257,6 @@ class TestOffsetAngle:
         assert res["message"] != "This joint has no angle parameter."
 
     def test_a_regular_joint_without_an_angle_keeps_the_generic_refusal(self, monkeypatch):
-        import adsk.fusion
         monkeypatch.setattr(adsk.fusion, "AsBuiltJoint", type("AsBuiltJoint", (), {}))
         _, joint = _install(["BoomPivot"])
         del joint.angle
@@ -382,9 +266,6 @@ class TestOffsetAngle:
 
 
 # ── joint limits: rotation (deg/rad) AND linear (mm/cm) + rest ──────────────
-
-import math
-
 
 class TestLimits:
     def test_rotation_limits_enable_and_set_radians(self):
@@ -516,7 +397,7 @@ class _DriftingParameter(FakeModelParameter):
 
 class TestSwallowedSets:
     def test_a_flip_that_did_not_take_errors_naming_it(self):
-        _install_joints([_StuckFlipJoint("BoomPivot")])
+        _install_joints([_joint(cls=_StuckFlipJoint)])
         res = jt.handler(joint_name="BoomPivot", flip=True)
         assert res["isError"] is True
         assert "flip did not take" in res["message"]
@@ -524,7 +405,7 @@ class TestSwallowedSets:
         assert "it read False before the set" in res["message"]
 
     def test_an_unreadable_flip_publishes_null_and_the_marker(self):
-        _install_joints([_BlindFlipJoint("BoomPivot")])
+        _install_joints([_joint(cls=_BlindFlipJoint)])
         out = _payload(jt.handler(joint_name="BoomPivot", flip=True))
         assert out["flipped"] is None and out["changes"]["flipped"] is None
         assert out["edits_unverified"] == ["flipped"]
@@ -537,7 +418,7 @@ class TestSwallowedSets:
         assert "edits_unverified" not in out and "Published null" not in out["note"]
 
     def test_an_offset_that_did_not_take_errors_naming_it(self):
-        joint = FakeJoint("BoomPivot")
+        joint = _joint()
         joint.offset = _StuckParameter(value=0.0)
         _install_joints([joint])
         res = jt.handler(joint_name="BoomPivot", offset=-200, units="mm")
@@ -547,7 +428,7 @@ class TestSwallowedSets:
         assert "reads back 0.0 in the same units" in res["message"]
 
     def test_an_angle_that_did_not_take_errors_naming_it(self):
-        joint = FakeJoint("BoomPivot")
+        joint = _joint()
         joint.angle = _StuckParameter(value=0.0)
         _install_joints([joint])
         res = jt.handler(joint_name="BoomPivot", angle=30)
@@ -556,7 +437,7 @@ class TestSwallowedSets:
 
     def test_a_swallowed_offset_names_the_edits_that_had_landed(self):
         # PARTIAL SUCCESS: the flip before it really took, and a bare refusal would hide that
-        joint = FakeJoint("BoomPivot")
+        joint = _joint()
         joint.offset = _StuckParameter(value=0.0)
         _install_joints([joint])
         res = jt.handler(joint_name="BoomPivot", flip=True, offset=5)
@@ -565,7 +446,7 @@ class TestSwallowedSets:
         assert joint.isFlipped is True
 
     def test_an_unreadable_offset_publishes_null_and_the_marker(self):
-        joint = FakeJoint("BoomPivot")
+        joint = _joint()
         joint.offset = _BlindParameter()
         _install_joints([joint])
         out = _payload(jt.handler(joint_name="BoomPivot", offset=5, units="mm"))
@@ -576,7 +457,7 @@ class TestSwallowedSets:
         assert out["changes"]["units"] == "mm"
 
     def test_an_unreadable_angle_publishes_null_and_the_marker(self):
-        joint = FakeJoint("BoomPivot")
+        joint = _joint()
         joint.angle = _BlindParameter()
         _install_joints([joint])
         out = _payload(jt.handler(joint_name="BoomPivot", angle=30))
@@ -587,7 +468,7 @@ class TestSwallowedSets:
     def test_the_published_offset_is_the_parameters_own_value(self):
         # 0.0009 mm off the request - inside the band, so it lands; what is PUBLISHED is the
         # parameter's own read-back, not the 5 that was asked for.
-        joint = FakeJoint("BoomPivot")
+        joint = _joint()
         joint.offset = _DriftingParameter(9e-5)      # cm, the parameter's own unit
         _install_joints([joint])
         out = _payload(jt.handler(joint_name="BoomPivot", offset=5, units="mm"))
@@ -595,7 +476,7 @@ class TestSwallowedSets:
 
     def test_a_read_back_past_the_band_does_not_land(self):
         # the other side of that boundary: 0.0011 mm off is past _LIMIT_BAND and is a no-take
-        joint = FakeJoint("BoomPivot")
+        joint = _joint()
         joint.offset = _DriftingParameter(1.1e-4)
         _install_joints([joint])
         res = jt.handler(joint_name="BoomPivot", offset=5, units="mm")
@@ -611,7 +492,7 @@ class TestSwallowedSets:
         assert out["offset"] == 2.0
 
 
-class _DeafLimits(FakeLimits):
+class _DeafLimits(_MotionLimits):
     """A JointLimits that accepts every value assignment and keeps 0.0 - the swallowed write."""
     def __setattr__(self, name, value):
         if name in ("minimumValue", "maximumValue", "restValue"):
@@ -619,7 +500,7 @@ class _DeafLimits(FakeLimits):
         return object.__setattr__(self, name, value)
 
 
-class _BlindLimits(FakeLimits):
+class _BlindLimits(_MotionLimits):
     """A JointLimits whose value read RAISES - the re-read that cannot be taken."""
     def __getattribute__(self, name):
         if name in ("minimumValue", "maximumValue", "restValue"):
@@ -632,13 +513,13 @@ class _BlindLimits(FakeLimits):
 class TestWorldAxis:
     def test_world_axis_uses_custom_construction_axis(self):
         _, joint = _install(["BoomPivot"])
-        # joint's current motion is revolute (FakeRevoluteMotion); world_axis=z should re-apply
-        # revolute with CustomJointDirection + the root's zConstructionAxis ('WAXIS_Z').
+        # joint's current motion is revolute, so world_axis=z re-applies revolute with
+        # CustomJointDirection + the root's zConstructionAxis ('WAXIS_Z').
         _payload(jt.handler(joint_name="BoomPivot", world_axis="z"))
         # the recorded call carries the custom world axis entity, not a frame-relative enum
-        kinds = [c for c in joint.motion_calls if c[0] == "revolute"]
+        kinds = [c for c in joint._motion_calls if c[0] == "revolute"]
         assert kinds, "revolute motion should have been re-applied"
-        assert kinds[-1][2] == "WAXIS_Z"     # custom entity = world Z construction axis
+        assert kinds[-1][1][-1] == "WAXIS_Z"     # custom entity = world Z construction axis
 
     def test_world_axis_without_type_reuses_current(self):
         _, joint = _install(["BoomPivot"])
@@ -670,26 +551,10 @@ class TestRotationDriveRedirect:
 
 class TestReselectInputs:
     def test_reselect_joint_origin_name_inputs(self):
-        # When input_one/input_two resolve (here as JO names via a stubbed resolver),
-        # they are assigned to geometryOrOriginOne/Two.
+        # When input_one/input_two resolve (here as JO names via the JointOriginRef kind, which
+        # walks the collection by count/item), they are assigned to geometryOrOriginOne/Two.
         design, joint = _install(["BoomPivot"])
-
-        # add named joint origins the resolver can find - the JO-name path (JointOriginRef) walks the
-        # collection by count/item, so the fake must expose those (not just itemByName).
-        class _JO:
-            def __init__(self, name): self.name = name
-        class _JOs:
-            def __init__(self, items): self._i = items
-            @property
-            def count(self): return len(self._i)
-            def item(self, i): return self._i[i]
-            def itemByName(self, n):
-                for j in self._i:
-                    if j.name == n:
-                        return j
-                return None
-        design.rootComponent.jointOrigins = _JOs([_JO("A"), _JO("B")])
-
+        design.rootComponent.jointOrigins = _NamedCollection([_jo("A"), _jo("B")])
         out = _payload(jt.handler(joint_name="BoomPivot", input_one="A", input_two="B"))
         assert joint.geometryOrOriginOne.name == "A"
         assert joint.geometryOrOriginTwo.name == "B"
@@ -705,14 +570,17 @@ class TestAutoRecompute:
     def test_edit_runs_computeAll(self):
         design, _ = _install(["BoomPivot"])
         out = _payload(jt.handler(joint_name="BoomPivot", flip=True))
-        assert design.computeAll_called is True
+        assert design._computes == 1
         assert out["recomputed"] is True
         assert "timeline_errors_after" not in out      # healthy timeline -> no error list
 
     def test_reports_downstream_errors_after_recompute(self):
-        # a downstream feature ends up errored (healthState 2) -> surfaced, not silently hidden
-        design, _ = _install(["BoomPivot"],
-                             timeline_items=[_FakeTLItem("Joint1", 0), _FakeTLItem("Pattern1", 2)])
+        # a downstream feature ends up errored -> surfaced, not silently hidden
+        design, _ = _install(
+            ["BoomPivot"],
+            timeline_items=[FakeTimelineObject(name="Joint1", index=0),
+                            FakeTimelineObject(name="Pattern1", index=1,
+                                               health=_HEALTH.ErrorFeatureHealthState)])
         out = _payload(jt.handler(joint_name="BoomPivot", offset=5, units="mm"))
         assert out["recomputed"] is True
         assert out["timeline_errors_after"] == ["Pattern1"]
@@ -727,7 +595,7 @@ class TestEditIsNotPendingGuarded:
     lands with the flag set, and only the create tools refuse."""
 
     def _pending(self, design):
-        design.snapshots = type("S", (), {"hasPendingSnapshot": True})()
+        design.snapshots = SimpleNamespace(hasPendingSnapshot=True)
         return design
 
     def test_flip_still_lands_while_a_move_is_pending(self):
@@ -750,113 +618,13 @@ class TestEditIsNotPendingGuarded:
         assert "would silently revert" not in json.dumps(res)
 
 
-import adsk.fusion as _adsk_fusion
-
-_JD = _adsk_fusion.JointDirections
-
-
-import math as _math
-
-
-class _Lim:
-    def __init__(self):
-        self.isMinimumValueEnabled = False
-        self.isMaximumValueEnabled = False
-        self.isRestValueEnabled = False
-        self.minimumValue = None
-        self.maximumValue = None
-        self.restValue = None
-
-
-class _RevMotion:
-    def __init__(self):
-        self.rotationLimits = _Lim()
-        self.slideLimits = None   # revolute has no slide limits
-
-
-class _JOCollection:
-    """A JointOrigins collection exposing BOTH the walk protocol (count/item) and itemByName."""
-    def __init__(self, by_name):
-        self._by_name = dict(by_name)
-        self._items = list(by_name.values())
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def item(self, i):
-        return self._items[i]
-
-    def itemByName(self, name):
-        return self._by_name.get(name)
-
-
-class _CreateJointInput:
-    def __init__(self):
-        self.called = None
-        self.offset = None
-        self.angle = None
-        self.isFlipped = False
-    def setAsRigidJointMotion(self):
-        self.called = ("rigid",); return True
-    def setAsRevoluteJointMotion(self, ax, *rest):
-        self.called = ("revolute", ax) + rest; return True
-    def setAsSliderJointMotion(self, ax, *rest):
-        self.called = ("slider", ax) + rest; return True
-    def setAsCylindricalJointMotion(self, ax, *rest):
-        self.called = ("cylindrical", ax) + rest; return True
-    def setAsPlanarJointMotion(self, ax, *rest):
-        self.called = ("planar", ax) + rest; return True
-    def setAsBallJointMotion(self, a, b):
-        self.called = ("ball", a, b); return True
-
-
-class _CreateJoints:
-    def __init__(self):
-        self.last_input = None
-        self.added = None
-    def createInput(self, a, b):
-        self.last_input = _CreateJointInput(); return self.last_input
-    def add(self, ji):
-        self.added = ji
-        return SimpleNamespace(name="Joint1", jointMotion=None)
-
-
-def _install_create(monkeypatch, jo_names=("JO_A", "JO_B")):
-    import adsk.fusion, adsk.core
-    jos = {n: SimpleNamespace(name=n) for n in jo_names}
-    joints_coll = _CreateJoints()
-    # No allComponents on the COMPONENT: that collection is a Design property in the live API.
-    root = SimpleNamespace(name="Root", jointOrigins=_JOCollection(jos), joints=joints_coll,
-                           allOccurrences=[])
-
-    class FakeDesign:
-        def __init__(self):
-            self.rootComponent = root
-            # counted, and carrying the root - the collection _common.all_components walks.
-            self.allComponents = _NamedCollection([root])
-        def findEntityByToken(self, h):
-            return []
-    d = FakeDesign()
-    # Dual-seam: the JO-name inputs resolve through the JointOriginRef kind (jt._inputs._common).
-    monkeypatch.setattr(jt._common, "design", lambda: d)
-    monkeypatch.setattr(jt._inputs._common, "design", lambda: d)
-    monkeypatch.setattr(adsk.core.ValueInput, "createByReal", staticmethod(lambda v: ("real", v)))
-    return d, joints_coll
-
-
-def _raise_refusal(*_a, **_k):
-    """A platform call that refuses - injected where the handler must report, not swallow."""
-    raise RuntimeError("7 : the platform refused")
-
-
 # ── edit_handler: posing is joint_drive's job ──────────────────────────────
 
 class TestEditRotationRedirect:
     def test_rotation_deg_redirects_to_joint_drive(self, monkeypatch):
         monkeypatch.setattr(jt._common, "design", lambda: SimpleNamespace())
         # find_joint answers (jt, ambiguity_error_or_None) - a name several joints share refuses.
-        monkeypatch.setattr(jt, "_find_joint", lambda design, name: (SimpleNamespace(name="J"), None))
+        monkeypatch.setattr(jt, "_find_joint", lambda design, name: (FakeJoint(name="J"), None))
         out = jt.handler(joint_name="J", rotation_deg=45)
         assert out["isError"] is True
         msg = out["content"][0]["text"]
@@ -884,20 +652,16 @@ class TestFmtNum:
 
 class TestWorldAxisEntity:
     def test_picks_axis_by_index(self):
-        root = SimpleNamespace(xConstructionAxis="WX", yConstructionAxis="WY", zConstructionAxis="WZ")
-        design = SimpleNamespace(rootComponent=root)
-        assert jt._world_axis_entity(design, 0) == "WX"
-        assert jt._world_axis_entity(design, 1) == "WY"
-        assert jt._world_axis_entity(design, 2) == "WZ"
+        design = make_design(comp=_root())
+        assert jt._world_axis_entity(design, 0) == "WAXIS_X"
+        assert jt._world_axis_entity(design, 1) == "WAXIS_Y"
+        assert jt._world_axis_entity(design, 2) == "WAXIS_Z"
 
 
 class TestSuppressedEditDisclosure:
     def _rig(self, monkeypatch, suppressed):
-        j = SimpleNamespace(name="J", isFlipped=False, isSuppressed=suppressed,
-                            motionLinks=[], jointMotion=None, timelineObject=None)
-        design = SimpleNamespace(computeAll=lambda: None, timeline=None)
-        monkeypatch.setattr(jt._common, "design", lambda: design)
-        monkeypatch.setattr(jt, "_find_joint", lambda d, n: (j, None))
+        j = FakeJoint(name="J", motion=None, suppressed=suppressed)
+        _edit_rig(monkeypatch, j)
         return j
 
     def test_suppressed_joint_edit_is_disclosed_as_inert(self, monkeypatch):
@@ -916,35 +680,35 @@ class TestSuppressedEditDisclosure:
 
 # ── edit handler: guards, rewiring order, and the failure wordings ───────────────────────────────
 
-def _edit_joint(tl_index=None, **over):
-    """A minimal editable jt: records rollTo, carries no motion/params unless overridden."""
-    j = SimpleNamespace(name="J", isFlipped=False, jointMotion=None)
-    j.rolls = []
-    j.timelineObject = SimpleNamespace(
-        index=tl_index, rollTo=lambda before: j.rolls.append(bool(before)) or True)
-    for k, v in over.items():
-        setattr(j, k, v)
-    return j
+def _edit_joint(tl_index=None, cls=FakeJoint, motion=None, **kw):
+    """A minimal editable joint: a timeline item, and no motion or parameters unless given."""
+    return cls(name="J", motion=motion,
+               timeline_object=FakeTimelineObject(name="J", index=tl_index), **kw)
+
+
+class _RefusingJoint(FakeJoint):
+    """A joint whose ATTR assignment raises - the shape of a platform refusal mid-edit."""
+    def __init__(self, attr, exc, **kw):
+        object.__setattr__(self, "_refusal", (None, None))
+        super().__init__(**kw)
+        object.__setattr__(self, "_refusal", (attr, exc))
+
+    def __setattr__(self, name, value):
+        attr, exc = object.__getattribute__(self, "_refusal")
+        if name == attr:
+            raise exc
+        object.__setattr__(self, name, value)
 
 
 def _joint_raising_on(attr, exc, tl_index=None):
-    """A jt whose ATTR assignment raises - the shape of a platform refusal mid-edit."""
-    def _setter(self, value):
-        raise exc
-    j = type("_RefusingJoint", (), {attr: property(lambda self: None, _setter)})()
-    j.name = "J"
-    j.jointMotion = None
-    j.rolls = []
-    j.timelineObject = SimpleNamespace(
-        index=tl_index, rollTo=lambda before: j.rolls.append(bool(before)) or True)
-    return j
+    """A joint whose ATTR assignment raises - the shape of a platform refusal mid-edit."""
+    return _edit_joint(tl_index=tl_index, cls=_RefusingJoint, attr=attr, exc=exc)
 
 
 def _edit_rig(monkeypatch, j, design=None):
     """Point BOTH design seams at one design and hand the edit handler `j` as the named jt."""
-    d = design if design is not None else SimpleNamespace(computeAll=lambda: None, timeline=None)
-    monkeypatch.setattr(jt._common, "design", lambda: d)
-    monkeypatch.setattr(jt._inputs._common, "design", lambda: d)
+    d = make_design(comp=_root()) if design is None else design
+    install(jt, d)
     monkeypatch.setattr(jt, "_find_joint", lambda des, n: (j, None))
     return d
 
@@ -962,33 +726,32 @@ class TestEditGuards:
         _edit_rig(monkeypatch, j)
         res = jt.handler(joint_name="J", world_axis="z")
         assert res["isError"] is True and "not axis-based" in res["message"]
-        assert j.rolls == []                           # refused before the timeline moved
+        assert _rolls(j) == []                          # refused before the timeline moved
 
     def test_an_unknown_axis_is_refused_before_the_timeline_moves(self, monkeypatch):
         j = _edit_joint()
         _edit_rig(monkeypatch, j)
         res = jt.handler(joint_name="J", joint_type="revolute", axis="q")
         assert res["isError"] is True and "Unknown axis 'q'" in res["message"]
-        assert j.rolls == []
+        assert _rolls(j) == []
 
     def test_pin_slot_slide_axis_equal_to_the_rotation_axis_is_refused(self, monkeypatch):
         j = _edit_joint()
         _edit_rig(monkeypatch, j)
         res = jt.handler(joint_name="J", joint_type="pin_slot", axis="y", slide_axis="y")
         assert res["isError"] is True and "differ" in res["message"]
-        assert j.rolls == []
+        assert _rolls(j) == []
 
 
 class TestEditPinSlot:
     def test_pin_slot_reports_the_effective_slide_axis(self, monkeypatch):
-        calls = []
-        j = _edit_joint(setAsPinSlotJointMotion=lambda rot, slide, *rest:
-                        calls.append((rot, slide)) or True)
+        j = _edit_joint()
         _edit_rig(monkeypatch, j)
         out = _payload(jt.handler(joint_name="J", joint_type="pin_slot", axis="z"))
         assert out["joint_type"] == "pin_slot" and out["axis"] == "z"
         assert out["slide_axis"] == "x"                # default = the next frame axis
-        assert calls == [(_JD.ZAxisJointDirection, _JD.XAxisJointDirection)]
+        assert j._motion_calls == [("pin_slot", (_JD.ZAxisJointDirection,
+                                                 _JD.XAxisJointDirection))]
 
 
 class TestEditInputResolution:
@@ -999,7 +762,7 @@ class TestEditInputResolution:
                             lambda d, spec: (None, spec, f"no '{spec}' here"))
         res = jt.handler(joint_name="J", input_one="Ghost")
         assert res["isError"] is True and "no 'Ghost' here" in res["message"]
-        assert j.rolls == []
+        assert _rolls(j) == []
 
     def test_a_bad_input_two_fails_before_the_timeline_moves(self, monkeypatch):
         j = _edit_joint()
@@ -1010,7 +773,7 @@ class TestEditInputResolution:
             else (None, spec, f"no '{spec}' here"))
         res = jt.handler(joint_name="J", input_one="A", input_two="Ghost")
         assert res["isError"] is True and "no 'Ghost' here" in res["message"]
-        assert j.rolls == []
+        assert _rolls(j) == []
 
 
 class TestEditRewireTimelineOrder:
@@ -1018,10 +781,9 @@ class TestEditRewireTimelineOrder:
     the platform answers a bare findObjectPath there, so the order is checked before rolling."""
 
     def _rig(self, monkeypatch, jo_index, joint_index):
-        import adsk.fusion
         monkeypatch.setattr(adsk.fusion, "JointOrigin", type("JointOrigin", (), {}))
         jo = adsk.fusion.JointOrigin()
-        jo.timelineObject = SimpleNamespace(index=jo_index)
+        jo.timelineObject = FakeTimelineObject(name="JO", index=jo_index)
         j = _edit_joint(tl_index=joint_index)
         _edit_rig(monkeypatch, j)
         monkeypatch.setattr(jt, "_resolve_input", lambda d, spec: (jo, spec, None))
@@ -1033,7 +795,7 @@ class TestEditRewireTimelineOrder:
         assert res["isError"] is True
         assert "position 9" in res["message"] and "position 4" in res["message"]
         assert "joint_create" in res["message"]
-        assert j.rolls == []                           # refused BEFORE the timeline is rolled
+        assert _rolls(j) == []                         # refused BEFORE the timeline is rolled
 
     def test_a_joint_origin_at_the_joints_own_position_is_refused(self, monkeypatch):
         # Equal index is still "not yet built" at the rolled-back marker, so the guard is >=.
@@ -1045,12 +807,12 @@ class TestEditRewireTimelineOrder:
         j = self._rig(monkeypatch, jo_index=1, joint_index=4)
         out = _payload(jt.handler(joint_name="J", input_one="EarlyJO"))
         assert out["input_one"] == "EarlyJO"
-        assert j.rolls[0] is True                      # the edit did roll the marker
+        assert _rolls(j)[0] is True                    # the edit did roll the marker
 
 
 class TestEditMotionFailure:
     def test_a_setter_returning_false_is_reported_not_claimed_as_edited(self, monkeypatch):
-        j = _edit_joint(setAsRevoluteJointMotion=lambda ax, *rest: False)
+        j = _edit_joint(motion_set_ok=False)
         _edit_rig(monkeypatch, j)
         res = jt.handler(joint_name="J", joint_type="revolute", axis="z")
         assert res["isError"] is True and "Could not set revolute motion" in res["message"]
@@ -1086,14 +848,17 @@ class TestEditFailureReporting:
         j = _joint_raising_on("isFlipped", RuntimeError("refused"))
         _edit_rig(monkeypatch, j)
         jt.handler(joint_name="J", flip=True)
-        assert j.rolls == [True, False]                # rolled before the jt, then back
+        assert _rolls(j) == [True, False]              # rolled before the jt, then back
 
 
 class TestEditRecomputeFailure:
+    def _raising(self):
+        """A design whose full recompute RAISES, and whose timeline does not read."""
+        return make_design(comp=_root(), compute_raises="7 : the platform refused")
+
     def test_a_failing_recompute_does_not_sink_the_edit(self, monkeypatch):
         j = _edit_joint()
-        _edit_rig(monkeypatch, j,
-                  design=SimpleNamespace(computeAll=_raise_refusal, timeline=None))
+        _edit_rig(monkeypatch, j, design=self._raising())
         out = _payload(jt.handler(joint_name="J", flip=True))
         assert out["edited"] is True and out["flipped"] is True and j.isFlipped is True
         assert "timeline_errors_after" not in out
@@ -1102,8 +867,7 @@ class TestEditRecomputeFailure:
         # computeAll raising means the model was NOT settled - the payload says so instead of
         # claiming a recompute that never ran.
         j = _edit_joint()
-        _edit_rig(monkeypatch, j,
-                  design=SimpleNamespace(computeAll=_raise_refusal, timeline=None))
+        _edit_rig(monkeypatch, j, design=self._raising())
         out = _payload(jt.handler(joint_name="J", flip=True))
         assert out["recomputed"] is False
         assert "recompute RAISED" in out["note"] and "design_recompute" in out["note"]
@@ -1116,23 +880,8 @@ class TestEditRecomputeFailure:
 
 
 class TestLimitsPartialSuccessDisclosure:
-    def test_create_limit_failure_names_the_created_joint_and_the_landed_limits(self, monkeypatch):
-        # The jt EXISTS and min_deg landed before max_mm failed - a bare error would invite a
-        # duplicate re-create; the message names the jt, what landed, and the two ways forward.
-        _, coll = _install_create(monkeypatch)
-        motion = _RevMotion()
-        coll.add = lambda ji, _m=motion: SimpleNamespace(name="Pivot", jointMotion=_m)
-        res = jcreate.handler(occurrence_one="JO_A", occurrence_two="JO_B",
-                            joint_type="revolute", min_deg=-45, max_mm=100)
-        assert res["isError"] is True
-        msg = res["content"][0]["text"]
-        assert "'Pivot' WAS CREATED" in msg
-        assert "min_deg=-45" in msg
-        assert "do NOT re-create" in msg
-        assert abs(motion.rotationLimits.minimumValue - _math.radians(-45)) < 1e-9
-
     def test_edit_limit_failure_names_the_edits_that_landed(self, monkeypatch):
-        j = _edit_joint(jointMotion=_RevMotion())
+        j = _edit_joint(motion=RevoluteJointMotion())
         _edit_rig(monkeypatch, j)
         res = jt.handler(joint_name="J", flip=True, min_deg=-30, max_mm=50)
         assert res["isError"] is True

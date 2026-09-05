@@ -25,7 +25,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool
+from conftest import FakeMachine, load_tool
 
 ccm = load_tool("cam_create_machine")
 cdm = load_tool("cam_delete_machine")
@@ -39,28 +39,45 @@ def _payload(res):
     return json.loads(res["content"][0]["text"])
 
 
-class _Mach:
-    """A Machine: the three settable identity fields plus the read-only facts the payload
-    publishes. ``sticky=False`` models a setter the platform accepts and silently drops."""
+def _mach(description="Generic 3-axis", vendor="Autodesk", model="Generic 3-axis Mill",
+          machine_id="4f29e005-4946", has_sim=False, cls=FakeMachine):
+    """A library machine carrying the capability flags the payload's kind list is read from."""
+    return cls(description=description, vendor=vendor, model=model, machine_id=machine_id,
+               has_simulation_model=has_sim,
+               capabilities=SimpleNamespace(isMillingSupported=True, isTurningSupported=False,
+                                            isCuttingSupported=False, isAdditiveSupported=False))
 
-    def __init__(self, description="Generic 3-axis", vendor="Autodesk",
-                 model="Generic 3-axis Mill", machine_id="4f29e005-4946", has_sim=False,
-                 sticky=True):
-        self._f = {"description": description, "vendor": vendor, "model": model}
-        self._sticky = sticky
-        self.id = machine_id
-        self.hasPost = False
-        self.hasSimulationModel = has_sim
-        self.capabilities = SimpleNamespace(isMillingSupported=True, isTurningSupported=False,
-                                            isCuttingSupported=False, isAdditiveSupported=False)
 
-    def _set(self, key, value):
-        if self._sticky:
-            self._f[key] = value
+class _DroppedWrites(FakeMachine):
+    """A machine whose identity setters take a write and drop it - the swallowed no-op the
+    write-and-read-back gate exists for."""
 
-    description = property(lambda s: s._f["description"], lambda s, v: s._set("description", v))
-    vendor = property(lambda s: s._f["vendor"], lambda s, v: s._set("vendor", v))
-    model = property(lambda s: s._f["model"], lambda s, v: s._set("model", v))
+    _built = False
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._built = True
+
+    def __setattr__(self, name, value):
+        if self._built and name in ("description", "vendor", "model"):
+            return
+        object.__setattr__(self, name, value)
+
+
+class _RefusedWrite(FakeMachine):
+    """A machine whose description setter RAISES - a platform no, which is a different failure from
+    a write it accepts and drops."""
+
+    _built = False
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._built = True
+
+    def __setattr__(self, name, value):
+        if self._built and name == "description":
+            raise RuntimeError("description is read-only")
+        object.__setattr__(self, name, value)
 
 
 class _MachUrl:
@@ -155,7 +172,7 @@ class _MachLib:
             return None
         # The library keeps its OWN copy of the machine, with its own id: the object handed in is
         # not the object an assignment later resolves, so a payload read off it is a request echo.
-        copy = _Mach(description=machine.description, vendor=machine.vendor, model=machine.model,
+        copy = _mach(description=machine.description, vendor=machine.vendor, model=machine.model,
                      machine_id=str(machine.id) + "-stored", has_sim=machine.hasSimulationModel)
         # The stored asset's leafName carries the '.mch' EXTENSION while the machine's name does
         # not - the live shape, and the one a leafName-equals-name match cannot find.
@@ -185,7 +202,7 @@ def env(monkeypatch):
         monkeypatch.setattr(ccm.adsk.cam, "MachineTemplate",
                             SimpleNamespace(**{m: m for m in ccm._TEMPLATES.values()}),
                             raising=False)
-        made = machine if machine is not None else _Mach()
+        made = machine if machine is not None else _mach()
         asked = []
 
         def _from_template(member):
@@ -219,7 +236,7 @@ class TestRefusals:
         # Compared case-insensitively and EXACTLY: 'sweep3axis' collides with 'Sweep3Axis' (a
         # machine this tool itself created carries its name on the model field too, which is what
         # makes it reachable by the assignment query the clash check runs).
-        e = env(local=[_Mach(description="Sweep3Axis", vendor="SweepCo", model="Sweep3Axis")])
+        e = env(local=[_mach(description="Sweep3Axis", vendor="SweepCo", model="Sweep3Axis")])
         res = ccm.handler(name="sweep3axis")
         assert res["isError"] is True
         assert "Sweep3Axis" in res["message"] and "local" in res["message"]
@@ -229,7 +246,7 @@ class TestRefusals:
     def test_a_name_matching_an_existing_MODEL_is_refused(self, env):
         # The name lands on Machine.model, so taking 'VF-2' retargets every
         # cam_edit_setup(machine='VF-2') that reaches the Haas by its model rung.
-        e = env(f360=[_Mach(description="Haas VF-2", vendor="Haas", model="VF-2")])
+        e = env(f360=[_mach(description="Haas VF-2", vendor="Haas", model="VF-2")])
         res = ccm.handler(name="vf-2")
         assert res["isError"] is True
         assert "matches that machine's model" in res["message"] and "Haas VF-2" in res["message"]
@@ -237,7 +254,7 @@ class TestRefusals:
 
     def test_a_name_matching_an_existing_VENDOR_MODEL_is_refused(self, env):
         # 'Haas VF-2' as a vendor|model pair is the second rung the exact match selects on.
-        e = env(f360=[_Mach(description="The Big One", vendor="Haas", model="VF-2")])
+        e = env(f360=[_mach(description="The Big One", vendor="Haas", model="VF-2")])
         res = ccm.handler(name="Haas VF-2")
         assert res["isError"] is True
         assert "matches that machine's vendor model" in res["message"]
@@ -246,7 +263,7 @@ class TestRefusals:
 
     def test_a_fusion360_name_collision_is_refused_too(self, env):
         # The catalog covers BOTH locations - a bundled machine's name is just as unusable.
-        e = env(f360=[_Mach(description="Haas VF-2", vendor="Haas", model="VF-2")])
+        e = env(f360=[_mach(description="Haas VF-2", vendor="Haas", model="VF-2")])
         res = ccm.handler(name="Haas VF-2")
         assert res["isError"] is True
         assert "fusion360" in res["message"]
@@ -254,7 +271,7 @@ class TestRefusals:
 
     def test_a_longer_existing_name_is_not_a_collision(self, env):
         # 'Sweep3Axis Mk2' merely CONTAINS the requested name; a substring check would refuse it.
-        e = env(local=[_Mach(description="Sweep3Axis Mk2", vendor="SweepCo", model="S3")])
+        e = env(local=[_mach(description="Sweep3Axis Mk2", vendor="SweepCo", model="S3")])
         out = _payload(ccm.handler(name="Sweep3Axis"))
         assert out["created"] is True and out["name"] == "Sweep3Axis"
         assert len(e.lib.imported) == 1
@@ -276,7 +293,7 @@ class TestRefusals:
 
 class TestFieldWrites:
     def test_a_dropped_name_write_errors_before_the_library_is_touched(self, env):
-        e = env(machine=_Mach(sticky=False))
+        e = env(machine=_mach(cls=_DroppedWrites))
         res = ccm.handler(name="Sweep3Axis")
         assert res["isError"] is True
         assert "Machine.description" in res["message"] and "did not land" in res["message"]
@@ -285,16 +302,7 @@ class TestFieldWrites:
     def test_a_field_write_that_RAISES_is_reported_before_the_library_is_touched(self, env):
         # a setter the platform REFUSES is a different failure from one it silently drops, and
         # both must stop the create before anything reaches the library.
-        class _RaisingField(_Mach):
-            @property
-            def description(self):
-                return self._f["description"]
-
-            @description.setter
-            def description(self, value):
-                raise RuntimeError("description is read-only")
-
-        e = env(machine=_RaisingField())
+        e = env(machine=_mach(cls=_RefusedWrite))
         res = ccm.handler(name="Sweep3Axis")
         assert res["isError"] is True
         assert "Could not set Machine.description" in res["message"]
@@ -404,7 +412,7 @@ class TestStoreAndGate:
         # "free" so the create proceeds, the second is the wrong machine the gate must catch.
         env()
         answers = [(None, None, "No machine matches 'Sweep3Axis'."),
-                   (_Mach(description="Someone Else"), "Someone Else", None)]
+                   (_mach(description="Someone Else"), "Someone Else", None)]
         monkeypatch.setattr(ccm, "resolve_machine", lambda name: answers.pop(0))
         res = ccm.handler(name="Sweep3Axis")
         assert res["isError"] is True
@@ -413,7 +421,7 @@ class TestStoreAndGate:
     def test_the_created_machine_is_reported_from_the_stored_copy_not_the_request(self, env):
         # Every published fact comes off the copy the library kept (its id carries '-stored'), so a
         # payload assembled from the in-memory object the request built cannot pass.
-        e = env(local=[_Mach(description="Haas VF-2", vendor="Haas", model="VF-2")])
+        e = env(local=[_mach(description="Haas VF-2", vendor="Haas", model="VF-2")])
         out = _payload(ccm.handler(name="Sweep3Axis", vendor="SweepCo"))
         assert out["created"] is True
         assert out["name"] == "Sweep3Axis"                  # the label the resolver hands back
@@ -437,7 +445,7 @@ class TestStoreAndGate:
             assert e.asked == [member] and out["template"] == wire
 
     def test_a_simulation_ready_machine_note_names_the_strip_flag(self, env):
-        env(machine=_Mach(has_sim=True))
+        env(machine=_mach(has_sim=True))
         out = _payload(ccm.handler(name="Sweep3Axis"))
         assert out["has_simulation_model"] is True
         assert "machine_strip_simulation=true" in out["note"]
@@ -453,7 +461,7 @@ class TestStoreAndGate:
 def _local(name="SweepMach", vendor="SweepCo"):
     """A machine as this tool stores one: the name on BOTH description and model, which is what
     makes it reachable by the assignment query."""
-    return _Mach(description=name, vendor=vendor, model=name, machine_id="id-" + name)
+    return _mach(description=name, vendor=vendor, model=name, machine_id="id-" + name)
 
 
 def _label_not_model(description="Shop Mill #3", vendor="SweepCo", model="VF-2"):
@@ -461,10 +469,10 @@ def _label_not_model(description="Shop Mill #3", vendor="SweepCo", model="VF-2")
     query is keyed on (vendor, model) and does not reach it by that description - so the name it
     resolves BY ('VF-2'), the label it resolves TO ('Shop Mill #3') and its asset's leaf name are
     three different strings, and a read-back keyed on the wrong one of them answers nothing."""
-    return _Mach(description=description, vendor=vendor, model=model, machine_id="id-" + model)
+    return _mach(description=description, vendor=vendor, model=model, machine_id="id-" + model)
 
 
-class _NoIdMach(_Mach):
+class _NoIdMach(FakeMachine):
     """A machine whose id cannot be read - the comparison that tells two machines apart is itself
     the read that failed."""
 
@@ -540,7 +548,7 @@ class TestDeleteMachineGuards:
         # delete must fail CLOSED there, exactly as it does on a positively fusion360 machine.
         # (The machine sits in the bundled pool so the resolver, which skips a raising location,
         # still reaches it - the gate is what has to refuse, not the resolve.)
-        m = _Mach(description="SweepMach", vendor="SweepCo", model="SweepMach")
+        m = _mach(description="SweepMach", vendor="SweepCo", model="SweepMach")
         e = env(f360=[m], assets=[("SweepMach.mch", m)], local_query_raises=True)
         res = cdm.handler(name="SweepMach", confirm_name="SweepMach")
         assert res["isError"] is True
@@ -551,7 +559,7 @@ class TestDeleteMachineGuards:
     def test_a_bundled_fusion360_machine_is_refused(self, env):
         # The Local library is the only one this tool deletes from - a machine reached from the
         # bundled location is refused by the location read, before any asset is addressed.
-        e = env(f360=[_Mach(description="Haas VF-2", vendor="Haas", model="VF-2")])
+        e = env(f360=[_mach(description="Haas VF-2", vendor="Haas", model="VF-2")])
         res = cdm.handler(name="Haas VF-2", confirm_name="Haas VF-2")
         assert res["isError"] is True
         assert "fusion360 machine library" in res["message"]
@@ -570,7 +578,7 @@ class TestDeleteMachineGuards:
         # The machine answers the query but no ASSET carries its name - the delete has nothing to
         # address, and the refusal names the assets that are actually there.
         m = _local()
-        e = env(local=[m], assets=[("OtherMachine.mch", _Mach()), ("ThirdMachine.mch", _Mach())])
+        e = env(local=[m], assets=[("OtherMachine.mch", _mach()), ("ThirdMachine.mch", _mach())])
         res = cdm.handler(name="SweepMach", confirm_name="SweepMach")
         assert res["isError"] is True
         assert "No asset in the Local machine library is named 'SweepMach'" in res["message"]
@@ -585,7 +593,7 @@ class TestDeleteMachineGuards:
         # the name is a different asset and must survive untouched.
         m = _local()
         e = env(local=[m], assets=[("SweepMach.mch", m),
-                                   ("SweepMach extra.mch", _Mach(description="SweepMach extra"))])
+                                   ("SweepMach extra.mch", _mach(description="SweepMach extra"))])
         out = _payload(cdm.handler(name="SweepMach", confirm_name="SweepMach"))
         assert out["asset_name"] == "SweepMach.mch"
         assert e.lib.deleted == ["machine://local/SweepMach.mch"]
@@ -614,7 +622,7 @@ class TestDeleteMachineGuards:
     def test_an_asset_whose_name_merely_CONTAINS_the_machine_name_is_not_it(self, env):
         # 'SweepMach Mk2' is another machine's asset; a substring match here deletes the wrong file.
         m = _local()
-        e = env(local=[m], assets=[("SweepMach Mk2.mch", _Mach(description="SweepMach Mk2"))])
+        e = env(local=[m], assets=[("SweepMach Mk2.mch", _mach(description="SweepMach Mk2"))])
         res = cdm.handler(name="SweepMach", confirm_name="SweepMach")
         assert res["isError"] is True
         assert "No asset in the Local machine library is named 'SweepMach'" in res["message"]
@@ -634,7 +642,7 @@ class TestDeleteMachineGuards:
         # The leaf NAME matched but the asset loads another machine - deleting it would remove a
         # machine the caller never confirmed.
         m = _local()
-        e = env(local=[m], assets=[("SweepMach.mch", _Mach(description="Someone Else"))])
+        e = env(local=[m], assets=[("SweepMach.mch", _mach(description="Someone Else"))])
         res = cdm.handler(name="SweepMach", confirm_name="SweepMach")
         assert res["isError"] is True
         assert "holds the machine 'Someone Else'" in res["message"]
@@ -652,7 +660,7 @@ class TestDeleteMachineGuards:
 
     def test_a_zero_hit_search_discloses_an_incomplete_walk(self, env):
         m = _local()
-        e = env(local=[m], assets=[("OtherMachine.mch", _Mach())], folder_depth=8)
+        e = env(local=[m], assets=[("OtherMachine.mch", _mach())], folder_depth=8)
         res = cdm.handler(name="SweepMach", confirm_name="SweepMach")
         assert res["isError"] is True
         assert "No asset in the Local machine library is named" in res["message"]
@@ -774,7 +782,7 @@ class TestDeleteMachineEffect:
         assert e.lib.deleted == ["machine://local/SweepMach.mch"]   # the delete DID fire
 
     def test_an_unreadable_id_on_both_sides_is_unconfirmed_not_a_delete(self, env):
-        m = _NoIdMach(description="SweepMach", vendor="SweepCo", model="SweepMach")
+        m = _mach(description="SweepMach", vendor="SweepCo", model="SweepMach", cls=_NoIdMach)
         env(local=[m], assets=[("SweepMach.mch", m)], delete_mode="keeps_machine")
         res = cdm.handler(name="SweepMach", confirm_name="SweepMach")
         assert res["isError"] is True
@@ -784,7 +792,7 @@ class TestDeleteMachineEffect:
         # A bundled machine wearing the same name takes the name over once the local one goes; the
         # delete stands, and the note says which machine an assignment reaches from here on.
         m = _local()
-        other = _Mach(description="SweepMach", vendor="Haas", model="SweepMach",
+        other = _mach(description="SweepMach", vendor="Haas", model="SweepMach",
                       machine_id="id-bundled")
         e = env(local=[m], f360=[other], assets=[("SweepMach.mch", m)])
         out = _payload(cdm.handler(name="SweepMach", confirm_name="SweepMach"))

@@ -65,12 +65,22 @@ class _LockedComponent(MakeComp):
 
 
 class FakeMatrix(FakeMatrix3D):
-    """Matrix3D.create()'s product, recording what the handler wrote: the rotation triple
-    setToRotation was called with, and the translation vector assigned after it."""
+    """Matrix3D.create()'s product, recording what the handler wrote in this file's own `_assigned`
+    and `rotation` rather than through the shared translation column."""
+    # The recorder is private plumbing because the shared property answers a FRESH Vector3D each
+    # read (measured), so it can never hand back this file's ('vec', x, y, z) stand-in.
     def __init__(self):
         super().__init__()
-        self.translation = None
+        self._assigned = None
         self.rotation = None
+
+    @property
+    def translation(self):
+        return self._assigned
+
+    @translation.setter
+    def translation(self, vec):
+        self._assigned = vec
 
     def setToRotation(self, angle, axis, origin):
         self.rotation = (angle, axis, origin)

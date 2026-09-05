@@ -5,7 +5,7 @@ from these values, so the mocks carry measured data, not hand-typed claims. Each
 owned by the measurement row of the same name in tests/live/VERIFIED_API_FACTS.md."""
 
 FUSION_VERSION = "2705.1.4"
-VERIFIED_ON = "2026-09-04"
+VERIFIED_ON = "2026-09-05"
 
 # '<adsk namespace>.<Class>' -> {member: int} - seeded onto the mock adsk modules.
 ENUMS = {
@@ -526,6 +526,7 @@ NOT_ENUMS = [
 BEHAVIOR = {
     "alloperations_drops_folder_objects": True,
     "alloperations_flattens_folder_children": True,
+    "cam_bad_reference_error_text": 'Failed to evaluate expression.',
     "cam_locked_parameter_write_lands": True,
     "camera_view_extents_follows_limiting_axis": True,
     "camera_view_extents_is_linear": True,

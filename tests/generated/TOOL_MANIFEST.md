@@ -308,7 +308,11 @@ PRODUCES:
 | | Tool | Summary |
 |---|---|---|
 | · | `sys_capability_map` | GETTING STARTED / overview / start here / help: LIST every tool FAMILY this server has - each with a one-line summary, its entry-point tool, and tool count |
-| ⚠ | `sys_execute_script` | Execute Fusion API Python in the live Fusion session; prefer a typed tool when one exists (sys_find_tool) - this channel has been measured dying mid-session whi... |
+| ⚠ | `sys_execute_script` | Execute Fusion API Python in the live Fusion session; prefer a typed tool when one exists (sys_find_tool).
+
+REQUIREMENTS:
+- MUST define `def run(context):`.
+- D... |
 | · | `sys_find_tool` | SEARCH this server's tools by keyword when you do not know which tool does a job |
 | · | `sys_get_api_doc` | Search the LIVE Fusion API documentation (classes, methods, properties, enum values) by regex, returning names, signatures, and docstrings - read from the adsk.... |
 | · | `sys_get_guidance` | Read this server's packaged CAD DESIGN GUIDANCE: task-agnostic practice for building a part or an assembly - what to settle before the first feature, how design... |

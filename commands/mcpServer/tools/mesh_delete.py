@@ -80,8 +80,10 @@ def handler(mesh: str = "") -> dict:
         except Exception as e:
             return error(f"deleteMe() failed: {e}")
         if not did:
-            return error(f"deleteMe() declined for mesh '{name}' - it was NOT deleted (it may still be "
-                         "referenced by a downstream mesh_to_brep/mesh_reduce/mesh_combine feature).")
+            n_now = _count_named_in_component(design, comp_name, name)
+            return error(f"deleteMe() answered false for mesh '{name}' - it was NOT deleted "
+                         f"({n_now} mesh(es) named '{name}' resolve in component '{comp_name}' "
+                         f"now, {n_before} before the call).")
         deleted_via = "MeshBody.deleteMe"
         feature_name = None
 

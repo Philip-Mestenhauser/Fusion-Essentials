@@ -132,6 +132,8 @@ def _all_enums_body():
 # Each row script is self-contained: emit() prints one verdict line per check, and make_box()
 # builds a 10 mm cube (1.0 in Fusion's internal cm) for rows that need real geometry. Rows that set
 # need_box get it bound to `body` before their own lines run.
+# A row that PROVOKES an API raise sets read_only: measured, a caught adsk error still takes the
+# whole Python.Run down in a design-mutating context, while the same body survives read-only.
 _TEMPLATE = '''import adsk.core, adsk.fusion, adsk.cam, adsk.drawing
 
 def emit(ok, detail):
@@ -1072,9 +1074,27 @@ ROWS = [
     },
     {
         "id": "meshbody-facegroups-counted-before-generation",
-        "claim": "MeshBody.faceGroups answers a FaceGroups collection - never None, the read never raises - whose count is a plain int reading 1, NOT 0, on a mesh straight from addByTriangleMeshData, before any MeshGenerateFaceGroupsFeature has run; that holds for an open one-triangle mesh and for a closed tetrahedron alike, and the single group items() answers is a FaceGroup",
-        "encoded_in": "tests/conftest.py MeshBody's `face_groups` knob (the counted collection a mesh publishes); mesh_generate_face_groups.py's faceGroups.count read-back and tests/live/verify_acts_mesh.py's >= 1 predicate",
+        "claim": "MeshBody.faceGroups answers a FaceGroups collection - never None, the read never raises - whose count is a plain int reading 1, NOT 0, on a mesh straight from addByTriangleMeshData, before any MeshGenerateFaceGroupsFeature has run; that holds for an open one-triangle mesh and for a closed tetrahedron alike, and the single group items() answers is a FaceGroup. An STL IMPORTED through meshBodies.add reads that same 1 before generation, and an accurate generation on its four facets moves the count to 4",
+        "encoded_in": "tests/conftest.py MeshBody's `face_groups` knob, defaulting to the measured 1 a mesh already publishes; mesh_generate_face_groups.py's before/after faceGroups.count read-back and tests/live/verify_acts_mesh.py's observed-read-back predicate",
         "body": """
+    import os, tempfile
+    NL = chr(10)
+    facets = [((0.0, 0.0, -1.0), ((0, 0, 0), (0, 10, 0), (10, 0, 0))),
+              ((0.0, -1.0, 0.0), ((0, 0, 0), (10, 0, 0), (0, 0, 10))),
+              ((-1.0, 0.0, 0.0), ((0, 0, 0), (0, 0, 10), (0, 10, 0))),
+              ((0.5773503, 0.5773503, 0.5773503), ((10, 0, 0), (0, 10, 0), (0, 0, 10)))]
+    text = ["solid t"]
+    for nrm, tri in facets:
+        text.append("facet normal %g %g %g" % nrm)
+        text.append("outer loop")
+        for v in tri:
+            text.append("vertex %g %g %g" % v)
+        text += ["endloop", "endfacet"]
+    text.append("endsolid t")
+    stl_path = os.path.join(tempfile.gettempdir(), "fe_measure_tetra.stl")
+    fh = open(stl_path, "w")
+    fh.write(NL.join(text) + NL)
+    fh.close()
     tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
     try:
         des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
@@ -1088,13 +1108,86 @@ ROWS = [
         f_groups, t_groups = flat.faceGroups, tet.faceGroups
         f_n, t_n = f_groups.count, t_groups.count
         item_type = type(f_groups.item(0)).__name__ if f_n else "NONE"
+        stl = root.meshBodies.add(
+            stl_path, adsk.fusion.MeshUnits.MillimeterMeshUnit, None).item(0)
+        i_before = stl.faceGroups.count
+        fg_in = root.features.meshGenerateFaceGroupsFeatures.createInput(stl)
+        fg_in.meshGenerateFaceGroupsMethodType = \\
+            adsk.fusion.MeshGenerateFaceGroupsMethodTypes.AccurateGenerateFaceGroupsType
+        root.features.meshGenerateFaceGroupsFeatures.add(fg_in)
+        i_after = stl.faceGroups.count
         emit(f_groups is not None and t_groups is not None
              and type(f_n) is int and type(t_n) is int and f_n == 1 and t_n == 1
-             and item_type == "FaceGroup",
+             and item_type == "FaceGroup" and i_before == 1 and i_after == 4,
              "meshbody-facegroups-counted-before-generation: open mesh isClosed="
              + str(flat.isClosed) + " count=" + repr(f_n)
              + "; closed mesh isClosed=" + str(tet.isClosed) + " count=" + repr(t_n)
-             + "; item(0) type=" + item_type)
+             + "; item(0) type=" + item_type
+             + "; imported STL count before=" + repr(i_before)
+             + " after an accurate generation=" + repr(i_after))
+    finally:
+        tmp.close(False)
+        try:
+            os.remove(stl_path)
+        except Exception:
+            pass
+""",
+    },
+    {
+        "id": "facegroup-generation-reads-carry-no-verdict",
+        "claim": "A face-group generation that LANDED can leave both observable reads standing still: on a coplanar 2-triangle mesh an accurate MeshGenerateFaceGroupsFeature returns no feature and leaves faceGroups.count at 1 - the count an unsegmented mesh already reads - while the groups' tempIds move [0] -> [1]. A FAST re-generation of an already-segmented tetrahedron leaves the count at 4 AND both id reads identical (FaceGroup.tempId [1,2,3,4] and PolygonMesh.triangleFaceGroupTempIds alike), while an ACCURATE re-generation of the same mesh holds the count at 4 and moves the group tempIds to [5,6,7,8]. So neither the count nor the tempIds tells a generation that did nothing from one that landed, and a tool must report the pair rather than judge it",
+        "encoded_in": "mesh_generate_face_groups.py, which publishes face_group_count_before / face_group_count / changed / face_group_ids_changed off FaceGroup.tempId and refuses ONLY when no read-back answers at all; tests/live/verify_acts_mesh.py's count-moved predicate on a box mesh",
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        des.designType = adsk.fusion.DesignTypes.DirectDesignType
+        root = des.rootComponent
+        feats = root.features.meshGenerateFaceGroupsFeatures
+        MT = adsk.fusion.MeshGenerateFaceGroupsMethodTypes
+
+        def group_ids(mb):
+            g = mb.faceGroups
+            return [g.item(i).tempId for i in range(g.count)]
+
+        def generate(mb, fast):
+            inp = feats.createInput(mb)
+            inp.meshGenerateFaceGroupsMethodType = (MT.FastGenerateFaceGroupsType if fast
+                                                    else MT.AccurateGenerateFaceGroupsType)
+            return feats.add(inp)
+
+        flat = root.meshBodies.addByTriangleMeshData(
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+            [0, 1, 2, 0, 2, 3], [], [])
+        f_before, f_ids_before = flat.faceGroups.count, group_ids(flat)
+        f_feat = generate(flat, False)
+        f_after, f_ids_after = flat.faceGroups.count, group_ids(flat)
+
+        tet = root.meshBodies.addByTriangleMeshData(
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            [0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3], [], [])
+        generate(tet, True)
+        t_first, t_ids_first = tet.faceGroups.count, group_ids(tet)
+        t_tri_first = list(tet.mesh.triangleFaceGroupTempIds)
+        t_feat = generate(tet, True)
+        t_again, t_ids_again = tet.faceGroups.count, group_ids(tet)
+        t_tri_again = list(tet.mesh.triangleFaceGroupTempIds)
+        a_feat = generate(tet, False)
+        t_acc, t_ids_acc = tet.faceGroups.count, group_ids(tet)
+        emit(f_feat is None and f_before == 1 and f_after == 1
+             and f_ids_before == [0] and f_ids_after == [1]
+             and t_feat is None and t_first == 4 and t_again == 4
+             and t_ids_first == [1, 2, 3, 4] and t_ids_again == t_ids_first
+             and t_tri_first == [1, 2, 3, 4] and t_tri_again == t_tri_first
+             and a_feat is None and t_acc == 4 and t_ids_acc == [5, 6, 7, 8],
+             "facegroup-generation-reads-carry-no-verdict: coplanar mesh feat=" + repr(f_feat)
+             + " count " + repr(f_before) + "->" + repr(f_after)
+             + " group tempIds " + repr(f_ids_before) + "->" + repr(f_ids_after)
+             + "; tetrahedron FAST re-run count " + repr(t_first) + "->" + repr(t_again)
+             + " group tempIds " + repr(t_ids_first) + "->" + repr(t_ids_again)
+             + " triangle tempIds " + repr(t_tri_first) + "->" + repr(t_tri_again)
+             + "; ACCURATE re-run count " + repr(t_acc) + " group tempIds "
+             + repr(t_ids_again) + "->" + repr(t_ids_acc))
     finally:
         tmp.close(False)
 """,
@@ -2088,6 +2181,135 @@ ROWS = [
     emit(bool(ok_set) and r is True and corrupted,
          "matrix3d-invert-singular-answers-true-and-corrupts: setWithArray=" + str(ok_set)
          + " invert_returned=" + str(r) + " corrupted_to_nan_inf=" + str(corrupted))
+""",
+    },
+    {
+        "id": "matrix3d-transformby-applies-the-argument-after-self",
+        "claim": ("Matrix3D.transformBy(other) applies `other` AFTER this matrix in world "
+                  "coordinates: a 90 deg Z rotation transformed by a (5,0,0) translation reads "
+                  "translation (5,0,0), while the same translation transformed by the rotation "
+                  "reads (0,5,0) - so the composition is other*self, and a caller composing a "
+                  "translation matrix onto a rotation keeps the offset unrotated. The ROTATION "
+                  "product follows the same order: rotX(90).transformBy(rotZ(90)) sends +X to +Y "
+                  "with asArray rows (0,0,1)/(1,0,0)/(0,1,0), where the swapped product would send "
+                  "+X to +Z"),
+        "encoded_in": ("commands/mcpServer/tools/assembly_move.py translation compose; "
+                       "tests/conftest.py FakeMatrix3D.transformBy"),
+        "body": """
+    import math
+    a = adsk.core.Matrix3D.create()
+    a.setToRotation(math.pi / 2.0, adsk.core.Vector3D.create(0.0, 0.0, 1.0),
+                    adsk.core.Point3D.create(0.0, 0.0, 0.0))
+    b = adsk.core.Matrix3D.create()
+    b.translation = adsk.core.Vector3D.create(5.0, 0.0, 0.0)
+    a.transformBy(b)
+    fwd = a.translation
+    c = adsk.core.Matrix3D.create()
+    c.translation = adsk.core.Vector3D.create(5.0, 0.0, 0.0)
+    d = adsk.core.Matrix3D.create()
+    d.setToRotation(math.pi / 2.0, adsk.core.Vector3D.create(0.0, 0.0, 1.0),
+                    adsk.core.Point3D.create(0.0, 0.0, 0.0))
+    c.transformBy(d)
+    rev = c.translation
+    x90 = adsk.core.Matrix3D.create()
+    x90.setToRotation(math.pi / 2.0, adsk.core.Vector3D.create(1.0, 0.0, 0.0),
+                      adsk.core.Point3D.create(0.0, 0.0, 0.0))
+    z90 = adsk.core.Matrix3D.create()
+    z90.setToRotation(math.pi / 2.0, adsk.core.Vector3D.create(0.0, 0.0, 1.0),
+                      adsk.core.Point3D.create(0.0, 0.0, 0.0))
+    x90.transformBy(z90)
+    a = [round(v, 6) for v in x90.asArray()]
+    rows = [a[0:3], a[4:7], a[8:11]]
+    spun = adsk.core.Vector3D.create(1.0, 0.0, 0.0)
+    spun.transformBy(x90)
+    emit(abs(fwd.x - 5.0) < 1e-9 and abs(fwd.y) < 1e-9
+         and abs(rev.x) < 1e-9 and abs(rev.y - 5.0) < 1e-9
+         and rows == [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+         and abs(spun.y - 1.0) < 1e-9 and abs(spun.z) < 1e-9,
+         "matrix3d-transformby-applies-the-argument-after-self: rot.transformBy(trans)=("
+         + str(fwd.x) + "," + str(fwd.y) + ") expect (5,0) | trans.transformBy(rot)=("
+         + str(rev.x) + "," + str(rev.y) + ") expect (0,5) | rotX.transformBy(rotZ) rows="
+         + str(rows) + " expect [[0,0,1],[1,0,0],[0,1,0]] | +X spins to ("
+         + str(round(spun.x, 6)) + "," + str(round(spun.y, 6)) + ","
+         + str(round(spun.z, 6)) + ") expect (0,1,0)")
+""",
+    },
+    {
+        "id": "matrix3d-asarray-row-major-translation-3-7-11",
+        "claim": ("Matrix3D.asArray() returns the 16 cells ROW-MAJOR with the translation in "
+                  "elements 3, 7 and 11 - a column-major read would find the offset at 12/13/14 "
+                  "and mis-report every position built from it"),
+        "encoded_in": ("commands/mcpServer/tools/assembly_move.py before/after asArray compare; "
+                       "tests/conftest.py FakeMatrix3D.asArray"),
+        "body": """
+    m = adsk.core.Matrix3D.create()
+    m.translation = adsk.core.Vector3D.create(1.0, 2.0, 3.0)
+    a = list(m.asArray())
+    emit(len(a) == 16 and a[3] == 1.0 and a[7] == 2.0 and a[11] == 3.0
+         and a[12] == 0.0 and a[13] == 0.0 and a[14] == 0.0,
+         "matrix3d-asarray-row-major-translation-3-7-11: [3,7,11]=("
+         + str(a[3]) + "," + str(a[7]) + "," + str(a[11]) + ") expect (1,2,3) | [12,13,14]=("
+         + str(a[12]) + "," + str(a[13]) + "," + str(a[14]) + ") expect (0,0,0)")
+""",
+    },
+    {
+        "id": "matrix3d-translation-copies-and-refuses-none",
+        "claim": ("Matrix3D.translation hands back a FRESH Vector3D on every read - the object "
+                  "read is never the one assigned, so mutating a read result moves nothing - and "
+                  "assigning None RAISES '3 : invalid argument value' rather than clearing the "
+                  "column, so the member takes a Vector3D and nothing else"),
+        "encoded_in": "tests/conftest.py FakeMatrix3D.translation property and its setter",
+        # The None assignment RAISES, and a caught adsk error still takes the whole Python.Run down
+        # outside a read-only context; the matrix here is a value object, so nothing is given up.
+        "read_only": True,
+        "body": """
+    m = adsk.core.Matrix3D.create()
+    v = adsk.core.Vector3D.create(1.0, 2.0, 3.0)
+    m.translation = v
+    read = m.translation
+    is_same = read is v
+    round_trips = read.x == 1.0 and read.y == 2.0 and read.z == 3.0
+    refused = False
+    try:
+        m.translation = None
+    except Exception as e:
+        refused = "invalid argument value" in str(e)
+    # The member is TYPED, not duck-typed: a Point3D carries the same x/y/z and is still refused.
+    wrong = []
+    for label, bad in (("Point3D", adsk.core.Point3D.create(1.0, 2.0, 3.0)),
+                       ("tuple", (1.0, 2.0, 3.0)), ("int", 5)):
+        try:
+            m.translation = bad
+            wrong.append(label + "=ACCEPTED")
+        except Exception as e:
+            wrong.append(label + "=" + type(e).__name__)
+    typed = all("ACCEPTED" not in w for w in wrong)
+    emit(is_same is False and round_trips and refused and typed,
+         "matrix3d-translation-copies-and-refuses-none: read_is_assigned=" + str(is_same)
+         + " (expect False) round_trips=" + str(round_trips)
+         + " none_refused=" + str(refused) + " non_vector=" + ",".join(wrong))
+""",
+    },
+    {
+        "id": "occurrence-plain-reads-referenced-false-empty-collections",
+        "claim": ("A plain LOCAL occurrence answers isReferencedComponent False and EMPTY joints "
+                  "and bRepBodies collections - absence is not a live state for any of the three, "
+                  "so a fake that drops the member teaches an API shape Fusion never presents"),
+        "encoded_in": "tests/conftest.py FakeOccurrence joints/bRepBodies/isReferencedComponent",
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        occ = d.rootComponent.occurrences.addNewComponent(adsk.core.Matrix3D.create())
+        referenced = occ.isReferencedComponent
+        n_joints = occ.joints.count
+        n_bodies = occ.bRepBodies.count
+        emit(referenced is False and n_joints == 0 and n_bodies == 0,
+             "occurrence-plain-reads-referenced-false-empty-collections: isReferencedComponent="
+             + str(referenced) + " joints.count=" + str(n_joints)
+             + " bRepBodies.count=" + str(n_bodies) + " (expect False/0/0)")
+    finally:
+        tmp.close(False)
 """,
     },
     {
@@ -3244,7 +3466,7 @@ ROWS = [
     {
         "id": "cam-alloperations-shape",
         "claim": "Setup.allOperations FLATTENS folder-nested ops into the collection and DROPS the folder objects; counted and iterable. setup.operations holds only top-level ops; folders hang off setup.folders",
-        "encoded_in": "tests/unit/test_cam_delete.py (matches); test_cam_show_toolpath.py + test_cam_edit_folders.py (contradictory encodings); _cam_common.walk_operations",
+        "encoded_in": "tests/conftest.py FakeCAMFolder / FakeSetup (the shared flatten every CAM test drives); tests/unit/test_cam_delete.py; _cam_common.walk_operations",
         "needs": "cam",
         "facts_on_pass": {"behavior.alloperations_flattens_folder_children": True,
                           "behavior.alloperations_drops_folder_objects": True},
@@ -3345,6 +3567,52 @@ ROWS = [
          "cam-parameter-locked-write-lands: advancedMode (isEditable False) " + repr(held)
          + " -> " + repr(after) + " value " + repr(vheld) + " -> " + repr(vafter)
          + " | restored " + repr(back) + "/" + repr(vback) + " | "
+         + ("raised " + raised if raised else "no raise"))
+""",
+    },
+    {
+        "id": "cam-parameter-bad-reference",
+        "claim": ("an expression naming a parameter that does NOT exist is taken silently: no "
+                  "raise, expression echoes the text verbatim, value.value still reads a finite "
+                  "number, and .error is the only channel that names the failure - reading "
+                  "'Failed to evaluate expression.'"),
+        "encoded_in": ("tests/conftest.py FakeCAMParameter.error, which answers that text for a "
+                       "stored expression naming a missing parameter; the rollback arms of "
+                       "cam_edit_operation.py and cam_edit_setup.py gate on it"),
+        "needs": "cam",
+        "facts_on_pass": {"behavior.cam_bad_reference_error_text": "Failed to evaluate expression."},
+        "body": """
+    cam, setup = cam_measure_setup()
+    if setup is None:
+        emit(False, "cam-parameter-bad-reference: the harness MeasureSetup is not here")
+        return
+    op = adsk.cam.Operation.cast(setup.allOperations.item(0))
+    p = op.parameters.itemByName("tool_feedCutting")
+    if p is None or p.isEditable is not True:
+        emit(False, "cam-parameter-bad-reference: '" + op.name + "' carries no EDITABLE "
+             "tool_feedCutting (present=" + str(p is not None) + " isEditable="
+             + repr(None if p is None else p.isEditable) + ")")
+        return
+    held = p.expression
+    raised = ""
+    after = value = err = None
+    try:
+        try:
+            p.expression = "NoSuchParamXyz * 2"
+        except Exception as e:
+            raised = type(e).__name__ + ": " + str(e)[:60]
+        after = p.expression
+        value = p.value.value
+        err = p.error
+    finally:
+        p.expression = held
+    finite = (isinstance(value, (int, float)) and not isinstance(value, bool)
+              and value == value and abs(value) != float("inf"))
+    emit(not raised and after == "NoSuchParamXyz * 2" and finite
+         and err == "Failed to evaluate expression." and p.expression == held,
+         "cam-parameter-bad-reference: tool_feedCutting " + repr(held)
+         + " -> " + repr(after) + " value=" + repr(value) + " finite=" + str(finite)
+         + " error=" + repr(err) + " | restored " + repr(p.expression) + " | "
          + ("raised " + raised if raised else "no raise"))
 """,
     },
@@ -3484,7 +3752,7 @@ ROWS = [
     {
         "id": "cam-children-tree",
         "claim": "Setup.children interleaves top-level Operations and folder objects whose type name is 'CAMFolder'; folder.allOperations and folder.children expose the folder's contents",
-        "encoded_in": "tests/unit/test_cam_show_toolpath.py FakeSetup/CAMFolder; the tools walk _cam_common.CHILD_COLLECTIONS (operations/folders/patterns) and never read children, so only that test fake leans on this",
+        "encoded_in": "no fake: the tools walk _cam_common.CHILD_COLLECTIONS (operations/folders/patterns) and never read children, and tests/conftest.py's FakeCAMFolder / FakeSetup carry no children member",
         "needs": "cam",
         "body": """
     cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
@@ -5041,6 +5309,42 @@ ROWS = [
 """,
     },
     {
+        "id": "design-activate-root-reads-back",
+        "claim": ("Occurrence.activate() answers True and the design then reads activeOccurrence = "
+                  "that occurrence with isRootComponentActive False; Design.activateRootComponent() "
+                  "answers True and the design reads activeOccurrence None with "
+                  "isRootComponentActive True. Occurrence carries NO deactivate member - activate() "
+                  "and isActive are its whole activation surface"),
+        "encoded_in": ("design_activate_component.py's return-to-root read-back "
+                       "(isRootComponentActive / activeOccurrence); tests/unit/"
+                       "test_design_activate_component.py's design knobs for both reads"),
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        des = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        occ = des.rootComponent.occurrences.addNewComponent(adsk.core.Matrix3D.create())
+        start = (des.isRootComponentActive, des.activeOccurrence)
+        went = occ.activate()
+        on_child, child_root = des.activeOccurrence, des.isRootComponentActive
+        came = des.activateRootComponent()
+        back, back_root = des.activeOccurrence, des.isRootComponentActive
+        emit(start == (True, None) and went is True
+             and on_child is not None and on_child.fullPathName == occ.fullPathName
+             and child_root is False and came is True
+             and back is None and back_root is True and not hasattr(occ, "deactivate"),
+             "design-activate-root-reads-back: start=" + repr(start)
+             + "; occ.activate() -> " + repr(went) + " activeOccurrence="
+             + repr(on_child.fullPathName if on_child else None)
+             + " isRootComponentActive=" + repr(child_root)
+             + "; activateRootComponent() -> " + repr(came) + " activeOccurrence="
+             + repr(back.fullPathName if back else None)
+             + " isRootComponentActive=" + repr(back_root)
+             + "; Occurrence.deactivate present=" + repr(hasattr(occ, "deactivate")))
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
         "id": "direct-design-timeline-raises",
         "claim": ("In a DIRECT design the timeline read RAISES '3 : this is not a parametric "
                   "design' - it does not answer None and the attribute is not absent, so a guard "
@@ -5063,6 +5367,39 @@ ROWS = [
              "direct-design-timeline-raises: raised=" + str(raised) + " message=" + repr(message))
     finally:
         tmp.close(False)
+""",
+    },
+    {
+        "id": "python-run-stdout-shims-nest-per-mcp-execute",
+        "claim": ("Inside a Python.Run script sys.stdout bottoms out at Fusion's CatchOut, and every "
+                  "MCP.Execute call wraps it in one more __main__._NsSanitizedWriter shim (a 1 MiB "
+                  "lifetime cap on each) that nothing removes: the chain is one shim deeper after a "
+                  "trivial MCP.Execute run from inside the script. The tool's prelude has already "
+                  "pointed the outer shim straight at CatchOut with its counter reset, which is what "
+                  "keeps this row's own prints reaching the returned text"),
+        "encoded_in": ("sys_execute_script._UNJAM_PRELUDE (prepended to every script) and "
+                       "tests/unit/test_sys_execute_script.py's jammed-chain test"),
+        "body": """
+    import sys as _s
+    import json as _j
+    def chain(out):
+        layers = []
+        while type(out).__name__ == "_NsSanitizedWriter":
+            layers.append(out)
+            out = out._original
+        return layers, out
+    before, bottom = chain(_s.stdout)
+    outer_ok = (not before) or (before[0]._original is bottom and before[0]._truncated is False)
+    payload = _j.dumps({"featureType": "script",
+                        "object": {"readOnly": True, "script": "def run(_c):\\n    pass\\n"}},
+                       separators=(",", ":"))
+    app.executeTextCommand('MCP.Execute "' + payload.replace('"', '\\\\"') + '"')
+    after, bottom2 = chain(_s.stdout)
+    emit(type(bottom).__name__ == "CatchOut" and bottom2 is bottom and outer_ok
+         and len(after) == len(before) + 1,
+         "python-run-stdout-shims-nest-per-mcp-execute: bottom=" + type(bottom).__name__
+         + " shims before=" + str(len(before)) + " after one MCP.Execute=" + str(len(after))
+         + " outer points at bottom=" + str(outer_ok))
 """,
     },
 ]
@@ -5345,7 +5682,9 @@ def write_api_facts(facts, fusion_version, stamp_date, shapes=None):
         "BEHAVIOR = {",
     ]
     for key in sorted(behavior):
-        lines.append('    "{0}": {1},'.format(key, behavior[key]))
+        # repr: a measured STRING (an error text) lands quoted; str() would emit it bare and the
+        # module would not import.
+        lines.append('    "{0}": {1!r},'.format(key, behavior[key]))
     lines += [
         "}",
         "",
@@ -5375,8 +5714,8 @@ def write_ledger(results, fusion_version, stamp_date):
         "behaved as the claim states on that run. It does NOT mean every fake named in 'encoded in'",
         "agrees with the claim: a fixture may encode the OPPOSITE on purpose, to keep a consumer",
         "that must not depend on the real semantics under stress - camera-returns-copy names a fake",
-        "modelling a shared mutable camera, and cam-alloperations-shape names two CAM test files",
-        "whose encodings contradict each other. Each such cell says so in its own words, so the",
+        "modelling a shared mutable camera, and cam-children-tree names no fake at all because",
+        "no tool reads children. Each such cell says so in its own words, so the",
         "'encoded in' text is what tells you which kind of row you are reading.",
         "",
         "A non-PASS row means the CLAIM no longer holds: update the fakes and their consumers, then",
@@ -5455,7 +5794,10 @@ def run_measurements(write_json, only=None):
                 results.append((row, "ERROR", "cam world: " + cam_world["err"]))
                 print("  {0:6} {1:28} {2}".format("ERROR", row["id"], "cam world: " + cam_world["err"][:70]))
                 continue
-            is_error, payload = call("sys_execute_script", {"script": _compose(row)})
+            script_args = {"script": _compose(row)}
+            if row.get("read_only"):
+                script_args["read_only"] = True
+            is_error, payload = call("sys_execute_script", script_args)
             status, detail = _judge(row, is_error, payload)
             if status == "PASS":
                 facts.update(row.get("facts_on_pass") or {})

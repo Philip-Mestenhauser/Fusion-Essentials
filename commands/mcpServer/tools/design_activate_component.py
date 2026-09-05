@@ -13,15 +13,9 @@ from . import _inputs
 _OCCURRENCE = _inputs.OccurrenceRef("occurrence",
         description="Occurrence to activate; '' or 'root' is the root.")
 
-
-def _active_occurrence(design):
-    """The currently active-edit occurrence, if any (isActive == True). None if root is active."""
-    # The shared census, not a bare root.allOccurrences: that property RAISES on a design holding an
-    # unresolved external reference, and an empty walk would report "root is active" - a wrong answer.
-    for o in _common.all_occurrences(design):
-        if safe(lambda o=o: o.isActive, False):
-            return o
-    return None
+# A read that DECLINED, kept apart from the None the design answers at the root: safe() collapses
+# both to None, and only one of them confirms anything.
+_UNREAD = object()
 
 
 def handler(occurrence: str = "") -> dict:
@@ -33,24 +27,29 @@ def handler(occurrence: str = "") -> dict:
 
     want = (occurrence or "").strip()
 
-    # Return to root: activating the root deactivates any occurrence edit target.
+    # Return to root: activating the root clears any occurrence edit target. Occurrence carries no
+    # deactivate() - activate() and isActive are its whole activation surface - so the root is
+    # reached through the design, and the design's own two reads are what the write is judged by.
     if want == "" or want.lower() == "root":
-        root = safe(lambda: design.rootComponent)
-        # Design.activateRootComponent() is not on every build, so an absent one falls back to
-        # deactivating the active occurrence.
-        did = safe(lambda: design.activateRootComponent(), None)
-        if did is None:
-            active_occ = safe(lambda: _active_occurrence(design))
-            if active_occ is not None:
-                active_occ.deactivate()
-        now = safe(lambda: design.activeComponent.name)
-        root_name = safe(lambda: root.name)
-        if now is not None and root_name is not None and now != root_name:
-            return error(f"Activation was accepted but the active component still reads '{now}' - "
-                         "the edit target did not return to root.")
+        did = bool(safe(lambda: design.activateRootComponent(), False))
+        if not did:
+            return error("Design.activateRootComponent() returned false - the edit target did not "
+                         "return to the root component.")
+        at_root = safe(lambda: design.isRootComponentActive)
+        still = safe(lambda: design.activeOccurrence, _UNREAD)
+        # An unreadable read-back confirms nothing, so anything but a True here refuses.
+        if at_root is not True or still is not None:
+            held = ("unread" if still is _UNREAD
+                    else safe(lambda: still.fullPathName) if still is not None else None)
+            return error("activateRootComponent() returned true but the design reads "
+                         f"isRootComponentActive={at_root} and activeOccurrence={held!r} - "
+                         "the edit target is not confirmed at the root.")
         return ok({
         "activated": "root",
-        "active_component": now,
+        "active_component": safe(lambda: design.activeComponent.name),
+        "is_root_component_active": at_root,
+        # the None the DESIGN answered (a read that declined never reaches here), never a literal
+        "active_occurrence": None if still is None else safe(lambda: still.fullPathName),
         "note": "Root component is the active edit target - new geometry builds at the root.",
         })
 
@@ -62,14 +61,20 @@ def handler(occurrence: str = "") -> dict:
     if not did:
         return error(f"Occurrence.activate() returned false for '{occurrence}' - could not make it the "
                      "active edit target.")
-    now = safe(lambda: design.activeComponent.name)
-    want_comp = safe(lambda: occ.component.name)
-    if now is not None and want_comp is not None and now != want_comp:
-        return error(f"activate() returned true but the active component still reads '{now}' "
-                     f"(expected '{want_comp}') - the activation did not take.")
+    # Two occurrences of ONE component read the same activeComponent.name, so the component name
+    # cannot tell them apart - the INSTANCE the design reports is what confirms this activation.
+    active = safe(lambda: design.activeOccurrence)
+    now_path = safe(lambda: active.fullPathName) if active is not None else None
+    want_path = safe(lambda: occ.fullPathName)
+    at_root = safe(lambda: design.isRootComponentActive)
+    if at_root is not False or now_path is None or now_path != want_path:
+        return error(f"activate() returned true for '{occurrence}' but the design reads "
+                     f"activeOccurrence={now_path!r} and isRootComponentActive={at_root} - the "
+                     "activation is not confirmed on that instance.")
     return ok({
     "activated": safe(lambda: occ.name),
     "component": safe(lambda: occ.component.name),
+    "active_occurrence": now_path,
     "active_component": safe(lambda: design.activeComponent.name),
     "note": ("This component is now the active edit target - sketch_create / model_extrude / "
             "sketch_dimension build into it. Activate 'root' (or '') to return to the root."),

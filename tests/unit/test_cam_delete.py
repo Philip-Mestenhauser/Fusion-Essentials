@@ -9,109 +9,73 @@ design_delete_feature/_occurrence (timeline-only) do NOT cover CAM entities.
 
 import json
 
-from conftest import load_tool
+from conftest import FakeCAMFolder, FakeOperation, FakeSetup, _NamedCollection, load_tool, make_cam
 
 cd = load_tool("cam_delete")
 
 
-# ── fakes ────────────────────────────────────────────────────────────────────
+# ── the deletable CAM tree ───────────────────────────────────────────────────
 
-class _Entity:
-    def __init__(self, name, kind, can_delete=True):
-        self.name = name
-        self._kind = kind            # for the reported entity_type via type name
+class _LiveCollection(_NamedCollection):
+    """A CAM collection whose enumeration DROPS deleted entities - the live contract the
+    verify-gone re-resolve depends on (a deleted node stops resolving; reading it raises)."""
+
+    @property
+    def _items(self):
+        return [x for x in self._all if not getattr(x, "deleted", False)]
+
+    @_items.setter
+    def _items(self, items):
+        self._all = list(items)
+
+
+class _Deletable:
+    """deleteMe() as a CAM node answers it: the bool the caller gates on, and only a true one takes
+    the node out of its parent's enumeration."""
+
+    def __init__(self, *args, can_delete=True, **kwargs):
+        super().__init__(*args, **kwargs)
         self._can = can_delete
         self.deleted = False
+
     def deleteMe(self):
         if self._can:
             self.deleted = True
         return self._can
 
 
-# distinct classes so the tool can report a sensible entity_type from type(x).__name__
+class _Container(_Deletable):
+    """A setup/folder/pattern: the shared container protocol with drop-on-delete child collections."""
 
-class _Coll:
-    """A CAM collection whose enumeration DROPS deleted entities - the live contract the
-    verify-gone re-resolve depends on (a deleted node stops resolving; reading it raises)."""
-    def __init__(self, items):
-        self._i = list(items)
-    @property
-    def _live(self):
-        return [x for x in self._i if not getattr(x, "deleted", False)]
-    @property
-    def count(self):
-        return len(self._live)
-    def item(self, i):
-        return self._live[i]
-
-
-class _Parent:
-    """A setup/folder/pattern parent: has operations / folders / patterns collections. CRITICAL: allOperations
-    returns ONLY operations (NOT folders/patterns) — modelling the live behavior the tool must work around."""
-    def __init__(self, ops=(), folders=(), patterns=()):
-        self.operations = _Coll(list(ops))
-        self.folders = _Coll(list(folders))
-        self.patterns = _Coll(list(patterns))
-    @property
-    def allOperations(self):
-        # flattens nested operations, but DROPS folders/patterns (the real API gap)
-        flat = list(self.operations._live)
-        for f in self.folders._live:
-            flat.extend(getattr(f, "operations", _Coll([]))._live)
-        return _Coll(flat)
-
-
-class Setup(_Entity, _Parent):
     def __init__(self, name, ops=(), folders=(), patterns=(), can_delete=True):
-        _Entity.__init__(self, name, "setup", can_delete)
-        _Parent.__init__(self, ops, folders, patterns)
+        super().__init__(name, ops=ops, folders=folders, patterns=patterns, can_delete=can_delete)
+        self.operations = _LiveCollection(ops)
+        self.folders = _LiveCollection(folders)
+        self.patterns = _LiveCollection(patterns)
 
 
-class Operation(_Entity):
-    def __init__(self, name, can_delete=True):
-        super().__init__(name, "operation", can_delete)
+class Operation(_Deletable, FakeOperation):
+    pass
 
 
-class CAMFolder(_Entity, _Parent):
-    def __init__(self, name, ops=(), folders=(), patterns=(), can_delete=True):
-        _Entity.__init__(self, name, "folder", can_delete)
-        _Parent.__init__(self, ops, folders, patterns)
+class Setup(_Container, FakeSetup):
+    pass
 
 
-class CAMPattern(_Entity, _Parent):
-    def __init__(self, name, ops=(), folders=(), patterns=(), can_delete=True):
-        _Entity.__init__(self, name, "pattern", can_delete)
-        _Parent.__init__(self, ops, folders, patterns)
-
-
-class _Setups:
-    def __init__(self, setups):
-        self._s = setups
-    @property
-    def _live(self):
-        return [s for s in self._s if not getattr(s, "deleted", False)]
-    @property
-    def count(self):
-        return len(self._live)
-    def item(self, i):
-        return self._live[i]
-
-
-class _CAM:
-    def __init__(self, setups):
-        self.setups = _Setups(setups)
+class CAMFolder(_Container, FakeCAMFolder):
+    pass
 
 
 def _install(monkeypatch, setups=None):
     if setups is None:
-        # a folder with a nested op + a nested pattern, plus two loose ops — folder/pattern are NOT in
-        # allOperations, so the tool must walk .folders/.patterns to reach them.
-        nested_op = Operation("Drill1")
-        pat = CAMPattern("Pattern1", ops=[Operation("Bore1")])
-        fol = CAMFolder("Holes", ops=[nested_op], patterns=[pat])
+        # a folder with a nested op + a nested pattern, plus two loose ops - the folder and the
+        # pattern are NOT in allOperations, so the tool must walk .folders/.patterns to reach them.
+        pat = CAMFolder("Pattern1", ops=[Operation("Bore1")])
+        fol = CAMFolder("Holes", ops=[Operation("Drill1")], patterns=[pat])
         s = Setup("Setup1", ops=[Operation("Face1"), Operation("Adaptive1")], folders=[fol])
         setups = [s]
-    cam = _CAM(setups)
+    cam = make_cam(*setups)
+    cam.setups = _LiveCollection(setups)   # a deleted setup leaves the walk too
     monkeypatch.setattr(cd, "get_cam", lambda: (cam, None))
     return cam
 
@@ -199,8 +163,10 @@ class TestDelete:
         # (measured: a genuinely deleted node RAISES on a same-transaction read, so a clean
         # resolve means the platform lied) converts the false success into an error.
         class _Liar(Operation):
+            """deleteMe answers true and takes nothing out of the tree."""
+
             def deleteMe(self):
-                return True                                  # claims success, removes nothing
+                return True
         s = Setup("Setup1", ops=[_Liar("Sticky")])
         _install(monkeypatch, [s])
         res = cd.handler(entity="Sticky")

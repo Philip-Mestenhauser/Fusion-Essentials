@@ -7,69 +7,29 @@ import json
 
 import pytest
 
-from conftest import load_tool, _NamedCollection
+from conftest import (FakeCAMParameter, FakeCAMParameters, FakeOperation, FakeSetup, FakeTool,
+                      load_tool, make_cam, make_cam_parameters)
 
 cc = load_tool("cam_compare_operations")
 
 
-class FakeParam:
-    def __init__(self, title, expression, name=None):
-        self.title = title
-        self.name = name if name is not None else title
-        self.expression = expression
+def _titled(rows, title="Offset"):
+    """Parameters that all share one TITLE and differ only by name."""
+    return FakeCAMParameters([FakeCAMParameter(n, e, title=title) for n, e in rows])
 
 
-class FakeParams:
-    def __init__(self, params):
-        self._p = list(params)
-
-    @property
-    def count(self):
-        return len(self._p)
-
-    def item(self, i):
-        return self._p[i]
-
-
-class FakeTool:
-    def __init__(self, desc):
-        self.description = desc
-
-
-class FakeOperation:
-    def __init__(self, name, params, tool_desc="Tool1"):
-        self.name = name
-        self.parameters = FakeParams([FakeParam(k, v) for k, v in params.items()])
-        self.tool = FakeTool(tool_desc)
-
-
-class FakeSetup:
-    def __init__(self, ops):
-        self.allOperations = _NamedCollection(ops)
-
-
-class FakeSetups:
-    def __init__(self, setups):
-        self._s = list(setups)
-
-    @property
-    def count(self):
-        return len(self._s)
-
-    def item(self, i):
-        return self._s[i]
-
-
-class FakeCAM:
-    def __init__(self, setups):
-        self.setups = FakeSetups(setups)
+def _op(name, params, tool_desc="Tool1"):
+    """An operation whose parameters are `params` ({name: expression}) and whose tool carries
+    `tool_desc`."""
+    return FakeOperation(name, parameters=make_cam_parameters(*params.items()),
+                         tool=FakeTool(description=tool_desc))
 
 
 @pytest.fixture
 def install(monkeypatch):
     """Wire a set of operations into the tool's get_cam seam; patches undo themselves."""
     def _install(operations):
-        cam = FakeCAM([FakeSetup(operations)])
+        cam = make_cam(FakeSetup("Setup1", ops=operations))
         monkeypatch.setattr(cc, "get_cam", lambda: (cam, None))
         return cam
     return _install
@@ -93,7 +53,7 @@ class TestGuards:
         assert "no CAM (Manufacture) data" in res["message"]
 
     def test_operation_not_found_errors(self, install):
-        install([FakeOperation("Op1", {"p1": "1"})])
+        install([_op("Op1", {"p1": "1"})])
         res = cc.handler(operation_a="Op1", operation_b="Ghost")
         assert res["isError"] is True and "Ghost" in res["message"]
         assert "ambiguous" not in res["message"].lower()     # a true miss stays not-found
@@ -102,7 +62,7 @@ class TestGuards:
         # the shared resolver's not-found reaches this tool's callers, so every name it prints has
         # to be a spelling this same input takes back: the list is capped by NAME COUNT with the
         # remainder counted, never cut mid-name at a character budget.
-        install([FakeOperation(f"Operation-{i:02d}-LongEnoughToTruncate", {"p": "1"})
+        install([_op(f"Operation-{i:02d}-LongEnoughToTruncate", {"p": "1"})
                  for i in range(20)])
         res = cc.handler(operation_a="Ghost", operation_b="Operation-00")
         assert res["isError"] is True
@@ -118,9 +78,8 @@ class TestGuards:
         # one separates the candidates. The resolver does word a rename elsewhere - the two-readings
         # branch, where no address separates the readings at all (_common._RENAME_REMEDY is the same
         # trade) - but no tool here renames a CAM operation, so it is never offered in its place.
-        from conftest import FakeSetup, make_cam
-        cam = make_cam(FakeSetup("Setup1", ops=[FakeOperation("Drill1", {"p": "1"})]),
-                       FakeSetup("Setup2", ops=[FakeOperation("Drill1", {"p": "2"})]))
+        cam = make_cam(FakeSetup("Setup1", ops=[_op("Drill1", {"p": "1"})]),
+                       FakeSetup("Setup2", ops=[_op("Drill1", {"p": "2"})]))
         monkeypatch.setattr(cc, "get_cam", lambda: (cam, None))
         res = cc.handler(operation_a="Drill1", operation_b="Drill1")
         assert res["isError"] is True
@@ -131,9 +90,8 @@ class TestGuards:
     def test_an_ordinal_address_resolves_the_operation_it_names(self, monkeypatch):
         # the address the refusal above hands back must actually resolve on this input, or the
         # remedy is decoration: '#2' picks the SECOND setup's Drill1, whose parameter differs.
-        from conftest import FakeSetup, make_cam
-        cam = make_cam(FakeSetup("Setup1", ops=[FakeOperation("Drill1", {"feed": "100"})]),
-                       FakeSetup("Setup2", ops=[FakeOperation("Drill1", {"feed": "900"})]))
+        cam = make_cam(FakeSetup("Setup1", ops=[_op("Drill1", {"feed": "100"})]),
+                       FakeSetup("Setup2", ops=[_op("Drill1", {"feed": "900"})]))
         monkeypatch.setattr(cc, "get_cam", lambda: (cam, None))
         out = _payload(cc.handler(operation_a="Drill1#1", operation_b="Drill1#2"))
         assert out["difference_count"] == 1
@@ -143,30 +101,30 @@ class TestGuards:
 
 class TestDiffLogic:
     def test_matching_parameters_are_not_differences(self, install):
-        install([FakeOperation("A", {"feed": "100", "speed": "5000"}),
-                 FakeOperation("B", {"feed": "100", "speed": "5000"})])
+        install([_op("A", {"feed": "100", "speed": "5000"}),
+                 _op("B", {"feed": "100", "speed": "5000"})])
         out = _payload(cc.handler(operation_a="A", operation_b="B"))
         assert out["difference_count"] == 0
         assert out["same_parameter_count"] == 2
         assert out["differences"] == []
 
     def test_differing_value_reported_on_both_sides(self, install):
-        install([FakeOperation("A", {"feed": "100"}), FakeOperation("B", {"feed": "200"})])
+        install([_op("A", {"feed": "100"}), _op("B", {"feed": "200"})])
         out = _payload(cc.handler(operation_a="A", operation_b="B"))
         assert out["difference_count"] == 1
         d = out["differences"][0]
         assert d["parameter"] == "feed" and d["operation_a"] == "100" and d["operation_b"] == "200"
 
     def test_parameter_only_on_one_side_reported_as_not_present(self, install):
-        install([FakeOperation("A", {"feed": "100", "onlyA": "x"}),
-                 FakeOperation("B", {"feed": "100"})])
+        install([_op("A", {"feed": "100", "onlyA": "x"}),
+                 _op("B", {"feed": "100"})])
         out = _payload(cc.handler(operation_a="A", operation_b="B"))
         d = next(d for d in out["differences"] if d["parameter"] == "onlyA")
         assert d["operation_a"] == "x" and d["operation_b"] == "(not present)"
 
     def test_reports_tool_descriptions(self, install):
-        install([FakeOperation("A", {}, tool_desc="Ball 6mm"),
-                 FakeOperation("B", {}, tool_desc="Flat 10mm")])
+        install([_op("A", {}, tool_desc="Ball 6mm"),
+                 _op("B", {}, tool_desc="Flat 10mm")])
         out = _payload(cc.handler(operation_a="A", operation_b="B"))
         assert out["tool_a"] == "Ball 6mm" and out["tool_b"] == "Flat 10mm"
 
@@ -174,13 +132,11 @@ class TestDiffLogic:
         # two parameters share a TITLE ("Offset") but differ by NAME - keying the diff by title would
         # let one overwrite the other and MASK a real difference. Keyed by name, BOTH surface: the
         # matching topOffset is same, the differing bottomOffset is a difference. Title rides for display.
-        cam = install([FakeOperation("A", {}), FakeOperation("B", {})])
+        cam = install([_op("A", {}), _op("B", {})])
         op_a = cam.setups.item(0).allOperations.item(0)
         op_b = cam.setups.item(0).allOperations.item(1)
-        op_a.parameters = FakeParams([FakeParam("Offset", "1", name="topOffset"),
-                                      FakeParam("Offset", "2", name="bottomOffset")])
-        op_b.parameters = FakeParams([FakeParam("Offset", "1", name="topOffset"),
-                                      FakeParam("Offset", "9", name="bottomOffset")])
+        op_a.parameters = _titled([("topOffset", "1"), ("bottomOffset", "2")])
+        op_b.parameters = _titled([("topOffset", "1"), ("bottomOffset", "9")])
         out = _payload(cc.handler(operation_a="A", operation_b="B"))
         assert out["same_parameter_count"] == 1        # topOffset matched (not masked by the collision)
         assert out["difference_count"] == 1
@@ -190,37 +146,42 @@ class TestDiffLogic:
         assert d["operation_a"] == "2" and d["operation_b"] == "9"
 
 
-class _UnnamedParam:
-    """A CAMParameter whose NAME will not read. The diff is keyed by name, so there is no key to
+class _UnnamedParam(FakeCAMParameter):
+    """A CAM parameter whose NAME will not read. The diff is keyed by name, so there is no key to
     file this one under - and keying it on the unreadable read would collide every such parameter
     onto one row."""
-    title = "Anon"
-    expression = "7"
 
     @property
     def name(self):
         raise RuntimeError("3 : name unavailable")
 
+    @name.setter
+    def name(self, value):
+        pass
 
-class _OpWithUnreadableParameters:
+
+class _OpWithUnreadableParameters(FakeOperation):
     """An operation that resolved but whose parameter collection raises."""
-    name = "B"
-    tool = FakeTool("Flat 10mm")
 
     @property
     def parameters(self):
         raise RuntimeError("3 : parameters unavailable")
 
+    @parameters.setter
+    def parameters(self, value):
+        pass
 
-class _OpWithUnreadableTool:
+
+class _OpWithUnreadableTool(FakeOperation):
     """An operation that resolved and reads its parameters, but whose .tool raises."""
-    def __init__(self, params):
-        self.name = "B"
-        self.parameters = FakeParams([FakeParam(k, v) for k, v in params.items()])
 
     @property
     def tool(self):
         raise RuntimeError("3 : no tool")
+
+    @tool.setter
+    def tool(self, value):
+        pass
 
 
 class TestUnreadableReads:
@@ -229,20 +190,23 @@ class TestUnreadableReads:
     resolved, and everything that DID read is still worth reporting."""
 
     def test_a_parameter_with_no_readable_name_is_skipped(self, install):
-        cam = install([FakeOperation("A", {}), FakeOperation("B", {})])
+        cam = install([_op("A", {}), _op("B", {})])
         op_a = cam.setups.item(0).allOperations.item(0)
-        op_a.parameters = FakeParams([FakeParam("Feed", "100", name="feed"), _UnnamedParam()])
+        op_a.parameters = FakeCAMParameters([FakeCAMParameter("feed", "100", title="Feed"),
+                                             _UnnamedParam("anon", "7", title="Anon")])
         out = _payload(cc.handler(operation_a="A", operation_b="B"))
         assert [d["parameter"] for d in out["differences"]] == ["feed"]
 
     def test_an_unreadable_parameter_collection_leaves_that_side_empty(self, install):
-        install([FakeOperation("A", {"feed": "100"}), _OpWithUnreadableParameters()])
+        install([_op("A", {"feed": "100"}),
+                 _OpWithUnreadableParameters("B", tool=FakeTool(description="Flat 10mm"))])
         out = _payload(cc.handler(operation_a="A", operation_b="B"))
         assert out["difference_count"] == 1
         assert out["differences"][0]["operation_b"] == "(not present)"
 
     def test_an_unreadable_tool_reports_null_rather_than_failing_the_diff(self, install):
-        install([FakeOperation("A", {"feed": "100"}), _OpWithUnreadableTool({"feed": "100"})])
+        install([_op("A", {"feed": "100"}),
+                 _OpWithUnreadableTool("B", parameters=make_cam_parameters(("feed", "100")))])
         out = _payload(cc.handler(operation_a="A", operation_b="B"))
         assert out["tool_b"] is None
         assert out["same_parameter_count"] == 1
@@ -254,7 +218,7 @@ class TestCaps:
     def test_under_cap_untruncated_and_unchanged(self, install):
         params_a = {f"p{i}": "a" for i in range(5)}
         params_b = {f"p{i}": "b" for i in range(5)}
-        install([FakeOperation("A", params_a), FakeOperation("B", params_b)])
+        install([_op("A", params_a), _op("B", params_b)])
         out = _payload(cc.handler(operation_a="A", operation_b="B"))
         assert out["truncated"] is False
         assert len(out["differences"]) == 5
@@ -264,7 +228,7 @@ class TestCaps:
         n = cc._DIFFERENCES_CAP + 30
         params_a = {f"p{i}": "a" for i in range(n)}
         params_b = {f"p{i}": "b" for i in range(n)}
-        install([FakeOperation("A", params_a), FakeOperation("B", params_b)])
+        install([_op("A", params_a), _op("B", params_b)])
         out = _payload(cc.handler(operation_a="A", operation_b="B",
                                                        max_results=cc._DIFFERENCES_CAP))
         assert out["truncated"] is True
@@ -278,7 +242,7 @@ class TestCaps:
         n = cc._DIFFERENCES_CEILING + 25
         params_a = {f"p{i:04d}": "a" for i in range(n)}
         params_b = {f"p{i:04d}": "b" for i in range(n)}
-        install([FakeOperation("A", params_a), FakeOperation("B", params_b)])
+        install([_op("A", params_a), _op("B", params_b)])
         out = _payload(cc.handler(operation_a="A", operation_b="B",
                                                      max_results=999999))
         assert len(out["differences"]) == cc._DIFFERENCES_CEILING
@@ -288,7 +252,7 @@ class TestCaps:
         # the wire types it integer, but the clamp must not raise on a junk value either
         params_a = {f"p{i}": "a" for i in range(3)}
         params_b = {f"p{i}": "b" for i in range(3)}
-        install([FakeOperation("A", params_a), FakeOperation("B", params_b)])
+        install([_op("A", params_a), _op("B", params_b)])
         out = _payload(cc.handler(operation_a="A", operation_b="B",
                                                      max_results="lots"))
         assert len(out["differences"]) == 3 and out["truncated"] is False

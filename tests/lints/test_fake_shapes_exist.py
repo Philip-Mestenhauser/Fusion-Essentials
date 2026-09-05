@@ -129,9 +129,16 @@ def _unmapped_fakes(class_names, shapes, manual, allowlist, live_names=None):
             and n not in manual and n not in auto and n not in allowlist]
 
 
-def _public_surface(cls_node):
-    """Public attribute names a fake class exposes: methods, class-level assigns, and
-    self.<name> assignments anywhere in its methods."""
+def _conftest_bases(cls_node, classes):
+    """The bases of a fake that are themselves conftest classes - their members are inherited
+    and so are exposed too."""
+    return [classes[b.id] for b in cls_node.bases
+            if isinstance(b, ast.Name) and b.id in classes and classes[b.id] is not cls_node]
+
+
+def _public_surface(cls_node, classes=None):
+    """Public attribute names a fake class exposes: methods, class-level assigns, self.<name>
+    assignments anywhere in its methods, and everything a conftest base hands down."""
     names = set()
     for node in cls_node.body:
         if isinstance(node, ast.FunctionDef) and not node.name.startswith("_"):
@@ -151,6 +158,9 @@ def _public_surface(cls_node):
                 if (isinstance(el, ast.Attribute) and isinstance(el.value, ast.Name)
                         and el.value.id == "self" and not el.attr.startswith("_")):
                     names.add(el.attr)
+    if classes:
+        for base in _conftest_bases(cls_node, classes):
+            names |= _public_surface(base, classes)
     return names
 
 
@@ -172,7 +182,7 @@ class TestSharedFakeShapesExist:
             assert shape, (
                 f"SHAPES has no '{live}' - add it to a shape-dump measurement row and regenerate "
                 "(py -3 tests/live/measure_api.py with Fusion up)")
-            for attr in sorted(_public_surface(classes[fake])):
+            for attr in sorted(_public_surface(classes[fake], classes)):
                 if attr in shape or f"{fake}.{attr}" in _ALLOWLIST:
                     continue
                 offenders.append(f"{fake}.{attr} does not exist on live {live}")
@@ -234,7 +244,7 @@ class TestSharedFakeShapesExist:
         for key, reason in _ALLOWLIST.items():
             assert reason.strip(), f"{key} allowlist entry needs a plain-English reason"
             fake, attr = key.split(".", 1)
-            if fake not in classes or attr not in _public_surface(classes[fake]):
+            if fake not in classes or attr not in _public_surface(classes[fake], classes):
                 stale.append(f"{key}: the fake no longer exposes it - remove the entry")
             elif attr in live_api_facts.SHAPES.get(_effective_map(classes).get(fake, ""), ()):
                 stale.append(f"{key}: the attribute exists live - remove the entry")

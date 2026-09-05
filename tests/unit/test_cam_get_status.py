@@ -13,8 +13,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, make_cam, _NamedCollection
+from conftest import FakeCAMParameter, FakeCAMParameters, FakeMachine, load_tool, make_cam
 from conftest import FakeSetup as SharedSetup, FakeCAMFolder as SharedFolder
+from conftest import FakeOperation as SharedOp
 
 st = load_tool("cam_get_status")
 
@@ -26,23 +27,23 @@ def _payload(result):
 
 # ── target resolution (via the shared _cam_common.resolve_cam_node) ─────────────────────────────────
 
-class _FakeCAM:
-    def __init__(self, setups, machining_times=None):
-        s = list(setups)
-        self.setups = SimpleNamespace(count=len(s), item=lambda i: s[i])
-        self.generate_calls = []
-        # The EMPTY class's second signal: an operation whose toolpath generated empty reads
-        # hasToolpath True and only its machining time answers. The answer is the SHARED one
-        # (conftest.make_cam), borrowed rather than re-rolled.
-        self.getMachiningTime = make_cam(machining_times=machining_times).getMachiningTime
+def _FakeCAM(setups, machining_times=None):
+    """A CAM product that RECORDS its launches: generate_calls holds ('target', obj) / ('all',
+    skip_valid) in order. The machining-time answer is the shared one, borrowed not re-rolled."""
+    cam = make_cam(*setups, machining_times=machining_times)
+    cam.generate_calls = []
 
-    def generateToolpath(self, tgt):
-        self.generate_calls.append(("target", tgt))
+    def generate_toolpath(tgt):
+        cam.generate_calls.append(("target", tgt))
         return SimpleNamespace(numberOfOperations=1)
 
-    def generateAllToolpaths(self, skip_valid):
-        self.generate_calls.append(("all", skip_valid))
+    def generate_all(skip_valid):
+        cam.generate_calls.append(("all", skip_valid))
         return SimpleNamespace(numberOfOperations=3)
+
+    cam.generateToolpath = generate_toolpath
+    cam.generateAllToolpaths = generate_all
+    return cam
 
 
 class _DocHandle:
@@ -61,11 +62,21 @@ class _DocHandle:
         return hash(self._ident)
 
 
-def _setup(name, ops=(), machine=SimpleNamespace(description="Haas VF-2")):
-    """A setup as the poll walks it. It carries an assigned machine by default: the scoped verdict
-    reads _cam_common.setup_blockers off Setup.machine, so a machine-less fake is a setup blocked by
-    no_machine_selected, not a clean one."""
-    return SimpleNamespace(name=name, allOperations=_NamedCollection(ops), machine=machine)
+_MACHINE = FakeMachine(description="Haas VF-2")
+
+
+class _MachinedSetup(SharedSetup):
+    """A setup carrying an assigned machine: the scoped verdict reads _cam_common.setup_blockers off
+    Setup.machine, so a machine-less setup is one blocked by no_machine_selected, not a clean one."""
+
+    def __init__(self, name, ops=(), machine=_MACHINE):
+        super().__init__(name, ops=ops)
+        self.machine = machine
+
+
+def _setup(name, ops=(), machine=_MACHINE):
+    """A setup as the poll walks it, machine assigned unless a test takes it away."""
+    return _MachinedSetup(name, ops=ops, machine=machine)
 
 
 # ── _collect_op_health: warnings / errors / empty derivation ────────────────────────────────────────
@@ -77,17 +88,14 @@ _RAIL_PARAM = st._cam_common.SWARF_CONTOURS_PARAM
 
 def _op(name, warning=None, error=None, has_toolpath=True, toolpath_valid=True,
         suppressed=False, state=0, rail=False):
-    op = SimpleNamespace(
-        name=name,
-        hasWarning=warning is not None, warning=warning or "",
-        hasError=error is not None, error=error or "",
-        hasToolpath=has_toolpath, isToolpathValid=toolpath_valid,
-        isSuppressed=suppressed, isGenerating=False, operationState=state,
-    )
+    """One operation as the health collector reads it."""
+    op = SharedOp(name, has_toolpath=has_toolpath, valid=toolpath_valid, suppressed=suppressed,
+                  operation_state=state,
+                  has_error=error is not None, error=error or "",
+                  has_warning=warning is not None, warning=warning or "")
     # A rail-driven strategy is the one that carries the rail-PAIR drive parameter, read from its
     # ONE home; every other operation answers None, the way a collection answers an absent name.
-    op.parameters = SimpleNamespace(
-        itemByName=lambda nm: object() if (rail and nm == _RAIL_PARAM) else None)
+    op.parameters = FakeCAMParameters([FakeCAMParameter(_RAIL_PARAM)] if rail else [])
     return op
 
 
@@ -1053,18 +1061,20 @@ class TestSameDocumentIdentity:
 # ── status_handler live-poll path: NO cam_generate handle (inline / UI generation) ──────────────────
 
 def _live_op(name, state=0, generating=False, error=False):
-    return SimpleNamespace(name=name, operationState=state, isGenerating=generating,
-                           hasError=error, error="broken" if error else "")
+    """One op as the live tally reads it - `generating` is the flag the poll waits on."""
+    op = SharedOp(name, operation_state=state, has_error=error,
+                  error="broken" if error else "")
+    op.isGenerating = generating
+    return op
 
 
 def _warn_op(name, state=0, warning="Contour Selection: contours are missing selections.",
              error=False, suppressed=False):
     """One op as the SCOPED tally reads it. The warning default is the measured live shape of a
     geometry-less 2D Contour: hasWarning True while operationState still reads 0."""
-    return SimpleNamespace(name=name, operationState=state, isGenerating=False,
-                           hasError=error, error="broken" if error else "",
-                           hasWarning=bool(warning), warning=warning or "",
-                           isSuppressed=suppressed)
+    return SharedOp(name, operation_state=state, suppressed=suppressed,
+                    has_error=error, error="broken" if error else "",
+                    has_warning=bool(warning), warning=warning or "")
 
 
 class TestScopedReadinessWarningVerdict:
@@ -1156,7 +1166,7 @@ class TestScopedReadinessSetupBlockers:
     def test_an_assigned_machine_restores_the_plain_scoped_verdict(self, monkeypatch):
         # the other side of the boundary - the demotion must key on the blocker, not on being scoped
         out = self._out(monkeypatch, "Roughing",
-                        machine=SimpleNamespace(description="Haas VF-2"))
+                        machine=_MACHINE)
         assert out["live_states"]["setups_blocked"] == []
         assert out["live_states"]["readiness"] == "2 of 2 active ops valid - ready to post."
 
@@ -1171,7 +1181,7 @@ class TestScopedReadinessSetupBlockers:
 
     def test_a_folder_under_a_machined_setup_stays_plainly_ready(self, monkeypatch):
         out = self._out(monkeypatch, "Finishing ops", folder="Finishing ops",
-                        machine=SimpleNamespace(description="Haas VF-2"))
+                        machine=_MACHINE)
         assert out["live_states"]["readiness"] == "2 of 2 active ops valid - ready to post."
 
 
@@ -1215,7 +1225,7 @@ class TestScopedHealthLists:
             _op("Finish clean", has_toolpath=False),
             _op("Rough clean", has_toolpath=False)])
         for s in (roughing, finishing):
-            s.machine = SimpleNamespace(description="Haas VF-2")
+            s.machine = _MACHINE
         cam = _FakeCAM([roughing, finishing])
         monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
         return cam
@@ -1316,7 +1326,7 @@ class TestScopedHealthLists:
             _op("Rough clean 2", has_toolpath=False)])
         setup = SharedSetup("WindowFrame", ops=[_op("Contour21", warning="outside the folder")],
                             folders=[folder])
-        setup.machine = SimpleNamespace(description="Haas VF-2")
+        setup.machine = _MACHINE
         monkeypatch.setattr(st._cam_common, "get_cam", lambda: (_FakeCAM([setup]), None))
         out = _payload(st.handler(target="WindowFrame Roughing"))
         assert out["health_scope"] == "folder 'WindowFrame Roughing'"
@@ -1352,7 +1362,7 @@ class TestScopedHealthLists:
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
         setup = SharedSetup("Roughing", ops=[_op("Rough clean", has_toolpath=False)])
         setup.operations._items[0].isGenerating = True
-        setup.machine = SimpleNamespace(description="Haas VF-2")
+        setup.machine = _MACHINE
         monkeypatch.setattr(st._cam_common, "get_cam", lambda: (_FakeCAM([setup]), None))
         out = _payload(st.handler(target="Roughing"))
         assert out["completed"] is False
@@ -1422,7 +1432,7 @@ class TestOpLabelsRepeatedPath:
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
         setup = SharedSetup("Roughing", ops=[_op("Rough clean", has_toolpath=False),
                                              _op("Rough clean", has_toolpath=False)])
-        setup.machine = SimpleNamespace(description="Haas VF-2")
+        setup.machine = _MACHINE
         monkeypatch.setattr(st._cam_common, "get_cam", lambda: (_FakeCAM([setup]), None))
         out = _payload(st.handler(target="Roughing"))
         assert out["empty_toolpaths"] == ["Roughing / Rough clean (operation 1)",

@@ -9,15 +9,16 @@ construction is captured on fakes so we assert which JointGeometry factory + key
 without a live design.
 """
 
-import json
 from types import SimpleNamespace
 
 import adsk.core
 import adsk.fusion
 import pytest
 
-from conftest import (BRepEdge, BRepFace, Circle3D, Cone, Cylinder, FakeMatrix3D, FakePoint,
-                      FakeVector3D, Line3D, Plane, Torus, _Vertex, load_tool)
+from conftest import (BRepBody, BRepEdge, BRepFace, Circle3D, Cone, Cylinder, FakeJoint, FakeJoints,
+                      FakeMatrix3D, FakePoint, FakeTimelineObject, FakeVector3D, Line3D, MakeComp,
+                      Plane, Torus, _Vertex, install, load_tool, make_design, make_occurrence,
+                      payload as _payload)
 
 jg = load_tool("joint_at_geometry")
 
@@ -26,6 +27,7 @@ _ST = adsk.core.SurfaceTypes
 _CT = adsk.core.Curve3DTypes
 _KP = adsk.fusion.JointKeyPointTypes
 _JD = adsk.fusion.JointDirections
+_FHS = adsk.fusion.FeatureHealthStates
 
 
 # ── fakes for the JointGeometry factory + keypoint enum ─────────────────────
@@ -104,7 +106,7 @@ def _face(surface_type, origin=None, context=None, component=None, normal=(0.0, 
     surface = _surface(surface_type, normal)
     if origin is not None:
         surface.origin = FakePoint(*origin)
-    body = SimpleNamespace(parentComponent=component) if component is not None else None
+    body = BRepBody(parent_component=component) if component is not None else None
     return BRepFace(surface, assembly_context=context, body=body,
                     normal=FakeVector3D(*normal), point_on_face=point_on_face)
 
@@ -113,21 +115,14 @@ def _comp(name, token):
     """One component as a FRESH wrapper. Live, two references to one component are DISTINCT objects
     sharing one entityToken, so a fixture handing the same object to both sides of a same-component
     test cannot tell an identity compare from the token compare the placement ladder makes."""
-    return SimpleNamespace(name=name, entityToken=token)
-
-
-def _root_component():
-    """A fresh root component per test: the by-component occurrence lookup a test overrides to
-    place a sub-component is state, and a module-level singleton would carry it into the next one."""
-    return SimpleNamespace(name="Root", entityToken="ROOT", allOccurrencesByComponent=lambda c: [])
+    return MakeComp(name=name, entity_token=token)
 
 
 def _placed(matrix, component=None):
     """An occurrence: transform2 is the composed component-to-world matrix, and `component` is what
     it places - the ladder matches an entity's owning component against that, not against the first
     occurrence it meets."""
-    return SimpleNamespace(transform2=matrix, transform=FakeMatrix3D(), component=component,
-                           assemblyContext=None)
+    return make_occurrence(component=component, transform2=matrix, transform=FakeMatrix3D())
 
 
 def _proxy_face(surface_type, world_origin, matrix, token="CHILD"):
@@ -143,16 +138,13 @@ def _proxy_face(surface_type, world_origin, matrix, token="CHILD"):
 @pytest.fixture
 def world_frames(monkeypatch):
     """Wire the two seams the world-lift reads: the active design's root component (a native ROOT
-    face needs no transform) and the identity matrix factory. same_component stays the REAL one -
-    component wrappers are never identity-stable live, so an `a is b` stand-in here would let an
-    identity compare pass for the token compare the ladder actually makes."""
+    face needs no transform) and the identity matrix factory. install() replaces the design seams
+    only, so same_component stays the REAL one - component wrappers are never identity-stable live,
+    so an `a is b` stand-in here would let an identity compare pass for the token compare the ladder
+    actually makes. A test places a sub-component by seeding the root's by-component lookup."""
     import adsk.core
-    globs = jg._joint_geometry_for.__globals__
-    root_comp = _root_component()
-    design = SimpleNamespace(rootComponent=root_comp)
-    stub = SimpleNamespace(design=lambda: design,
-                           same_component=globs["_common"].same_component)
-    monkeypatch.setitem(globs, "_common", stub)
+    root_comp = MakeComp(name="Root", entity_token="ROOT")
+    install(jg, make_design(comp=root_comp))
     monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(FakeMatrix3D), raising=False)
     return root_comp
 
@@ -165,40 +157,19 @@ def _edge(curve_type):
     return BRepEdge(curve)
 
 
-def _matrix(pos):
-    vec = type("V", (), {"x": pos[0], "y": pos[1], "z": pos[2]})()
-    return type("M", (), {"translation": vec})()
+def _at(pos):
+    """A placement matrix at `pos` (cm), the shared numeric Matrix3D - its .translation is the
+    origin every moved_by read comes off."""
+    return FakeMatrix3D(0.0, pos)
 
 
-class _MovingOcc:
-    """An occurrence whose WORLD transform2.translation tracks a mutable origin (cm) - lets a test
-    move it across joint creation and assert the reported moved_by delta. `local` holds the separate
-    LOCAL .transform: a nested proxy's local matrix leaves its parent's placement out, so the two
-    disagree the moment an ancestor is not identity."""
-    def __init__(self, name, pos, local=None):
-        self.name = name
-        self._pos = list(pos)
-        self._local = list(local) if local is not None else None
-    def move_to(self, pos):
-        self._pos = list(pos)
-    @property
-    def transform2(self):
-        return _matrix(self._pos)
-    @property
-    def transform(self):
-        return _matrix(self._local if self._local is not None else self._pos)
-
-
-class _LocalOnlyOcc:
-    """An occurrence carrying ONLY .transform - the fallback path for a build without transform2."""
-    def __init__(self, name, pos):
-        self.name = name
-        self._pos = list(pos)
-    def move_to(self, pos):
-        self._pos = list(pos)
-    @property
-    def transform(self):
-        return _matrix(self._pos)
+def _moving_occ(name, pos, local=None):
+    """An occurrence a test moves across joint creation by ASSIGNING transform2, so the reported
+    moved_by delta is a real placement change. `local` holds the separate LOCAL .transform: a nested
+    proxy's local matrix leaves its parent's placement out, so the two disagree the moment an
+    ancestor is not identity."""
+    return make_occurrence(path=name, transform2=_at(pos),
+                           transform=_at(local if local is not None else pos))
 
 
 def _install(monkeypatch, rec=None):
@@ -331,7 +302,7 @@ class TestJointGeometryRules:
         # one occurrence listed twice.
         occs = [_placed(FakeMatrix3D(_ROT90Z_DEG, (50.0 + 20.0 * i, 6.0, 0.0)),
                         component=_comp("Child", "CHILD")) for i in range(placements)]
-        world_frames.allOccurrencesByComponent = lambda c, o=occs: o
+        world_frames._occurrences_by_component = {"Child": occs}
         face = _face(_ST.TorusSurfaceType, origin=local_origin,
                      component=_comp("Child", "CHILD"))
         return jg._joint_geometry_for(face)
@@ -365,7 +336,7 @@ class TestJointGeometryRules:
         _install(monkeypatch, _OriginRecorder((50.0, 8.0, 0.0)))
         occ = _placed(FakeMatrix3D(_ROT90Z_DEG, (50.0, 6.0, 0.0)),
                       component=_comp("Child", "CHILD"))
-        world_frames.allOccurrencesByComponent = lambda c, o=[occ]: o
+        world_frames._occurrences_by_component = {"Child": [occ]}
         face = _face(_ST.TorusSurfaceType, origin=(2.0, 0.0, 0.0),
                      component=_comp("Child", "CHILD"))
         g, _label, err = jg._joint_geometry_for(face)
@@ -455,44 +426,21 @@ class _FakeJointInput:
         self.motion = ("ball", a, b); return True
 
 
-class _FakeJoints:
-    def __init__(self, health_state=0, message=""):
-        self.last_input = None
-        self._hs = health_state
-        self._msg = message
-    def createInput(self, g1, g2):
-        self.last_input = _FakeJointInput(); return self.last_input
-    def add(self, ji):
-        return type("J", (), {"name": "Joint1", "healthState": self._hs,
-                              "errorOrWarningMessage": self._msg,
-                              "occurrenceOne": type("O", (), {"name": "Rod:1"})(),
-                              "occurrenceTwo": type("O", (), {"name": "Crank:1"})()})()
-
-
-def _install_design(monkeypatch, token_map, joint_health=0, joint_msg="", rec=None, snapshots=None):
-    """`snapshots` supplies a Design.snapshots surface (the moved-but-uncaptured position flag the
-    create gates on); omitted, the design exposes none and the flag reads unknown."""
-    rec = _install(monkeypatch, rec)
-    joints = _FakeJoints(joint_health, joint_msg)
-    root = type("R", (), {"joints": joints})()
-    class FakeDesign:
-        rootComponent = root
-        def findEntityByToken(self, h):
-            e = token_map.get(h)
-            return [e] if e is not None else []
-    if snapshots is not None:
-        FakeDesign.snapshots = snapshots
-    d = FakeDesign()
-    app = type("A", (), {"activeProduct": d})()
-    monkeypatch.setattr(jg, "app", app)
-    monkeypatch.setattr(jg._common, "app", app)
-    monkeypatch.setattr(adsk.fusion.Design, "cast", lambda x: x if isinstance(x, FakeDesign) else None)
+def _install_design(monkeypatch, token_map, joint_health=_FHS.HealthyFeatureHealthState,
+                    joint_msg="", rec=None, snapshots=None, new_joint=None):
+    """Install a design whose root carries the joints collection, and return it. `new_joint` is what
+    add() hands back and `joints._input` the JointInput createInput does, with `joints._calls` saying
+    whether it was ever asked for one. `snapshots` supplies a Design.snapshots surface (the
+    moved-but-uncaptured flag the create gates on); omitted, that flag reads unknown."""
+    _install(monkeypatch, rec)
+    joint = new_joint if new_joint is not None else FakeJoint(
+        name="Joint1", health=joint_health, message=joint_msg,
+        occurrence_one=make_occurrence("Rod:1"), occurrence_two=make_occurrence("Crank:1"))
+    joints = FakeJoints(new_joint=joint, joint_input=_FakeJointInput())
+    root = MakeComp(name="Root")
+    root.joints = joints
+    install(jg, make_design(comp=root, tokens=token_map, snapshots=snapshots))
     return joints
-
-
-def _payload(res):
-    assert res["isError"] is False, res
-    return json.loads(res["content"][0]["text"])
 
 
 class TestHandler:
@@ -515,7 +463,7 @@ class TestHandler:
         assert out["occurrence_one"] == "Rod:1" and out["occurrence_two"] == "Crank:1"
         # axis='x' passes XAxisJointDirection with NO custom entity - the joint FRAME's X, which is
         # world X only when the picked geometry's frame is world-aligned.
-        assert joints.last_input.motion == ("revolute", _JD.XAxisJointDirection)
+        assert joints._input.motion == ("revolute", _JD.XAxisJointDirection)
 
     def test_revolute_auto_axis_uses_geometry_axis(self, monkeypatch):
         # axis='auto' (default) on cylinder faces derives the axis FROM the geometry
@@ -523,7 +471,7 @@ class TestHandler:
         pin = _face(_ST.CylinderSurfaceType)
         joints = _install_design(monkeypatch, {"rod": _face(_ST.CylinderSurfaceType), "pin": pin})
         out = _payload(jg.handler(handle_one="rod", handle_two="pin", motion="revolute"))
-        m = joints.last_input.motion
+        m = joints._input.motion
         assert m[0] == "revolute" and m[1] == _JD.CustomJointDirection      # CustomJointDirection used
         assert m[2] is not None                              # an axis entity was passed
         assert out["axis"] == "auto(geometry)"
@@ -531,14 +479,15 @@ class TestHandler:
     def test_slider_auto_axis_from_geometry(self, monkeypatch):
         joints = _install_design(monkeypatch, {"pis": _face(_ST.CylinderSurfaceType), "bore": _face(_ST.CylinderSurfaceType)})
         _payload(jg.handler(handle_one="pis", handle_two="bore", motion="slider"))
-        m = joints.last_input.motion
+        m = joints._input.motion
         assert m[0] == "slider" and m[1] == _JD.CustomJointDirection
 
     def test_reports_health_warning_when_joint_fails_to_compute(self, monkeypatch):
-        # a joint can ADD fine yet report healthState=1 (over-constrained / Compute Failed) - the
+        # a joint can ADD fine yet report a WARNING state (over-constrained / Compute Failed) - the
         # handler must surface that as a health warning, not a false success.
         _install_design(monkeypatch, {"a": _face(_ST.CylinderSurfaceType), "b": _face(_ST.CylinderSurfaceType)},
-                        joint_health=1, joint_msg="Can't resolve positions.Compute FailedX")
+                        joint_health=_FHS.WarningFeatureHealthState,
+                        joint_msg="Can't resolve positions.Compute FailedX")
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
         assert out["healthy"] is False
         assert "FAILED TO COMPUTE" in out["health_warning"]
@@ -552,7 +501,7 @@ class TestHandler:
                 "Can't resolve positions.Compute FailedJoint1")
         _install_design(monkeypatch, {"a": _face(_ST.CylinderSurfaceType),
                                       "b": _face(_ST.CylinderSurfaceType)},
-                        joint_health=1, joint_msg=blob)
+                        joint_health=_FHS.WarningFeatureHealthState, joint_msg=blob)
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
         warning = out["health_warning"]
         assert warning.endswith("Can't resolve positions. Inspect relationships.")
@@ -564,7 +513,7 @@ class TestHandler:
         for length, cut in ((200, False), (201, True)):
             _install_design(monkeypatch, {"a": _face(_ST.CylinderSurfaceType),
                                           "b": _face(_ST.CylinderSurfaceType)},
-                            joint_health=1, joint_msg="z" * length)
+                            joint_health=_FHS.WarningFeatureHealthState, joint_msg="z" * length)
             warning = _payload(jg.handler(handle_one="a", handle_two="b",
                                           motion="revolute"))["health_warning"]
             assert warning.endswith(" ...") is cut, length
@@ -579,7 +528,7 @@ class TestHandler:
     def test_rigid_motion_has_null_axis(self, monkeypatch):
         joints = _install_design(monkeypatch, {"a": _face(_ST.CylinderSurfaceType), "b": _face(_ST.CylinderSurfaceType)})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
-        assert joints.last_input.motion == ("rigid",)
+        assert joints._input.motion == ("rigid",)
         assert out["axis"] is None                       # rigid has no motion axis to report
 
     def test_ball_motion_pins_pitch_z_yaw_x(self, monkeypatch):
@@ -588,26 +537,26 @@ class TestHandler:
         # any args, so only pinning the enum pair catches a swap before a live document does.
         joints = _install_design(monkeypatch, {"a": _face(_ST.CylinderSurfaceType), "b": _face(_ST.CylinderSurfaceType)})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="ball"))
-        assert joints.last_input.motion == ("ball", _JD.ZAxisJointDirection, _JD.XAxisJointDirection)
+        assert joints._input.motion == ("ball", _JD.ZAxisJointDirection, _JD.XAxisJointDirection)
         assert out["jointed"] is True
 
     def test_slider_named_axis_is_frame_relative(self, monkeypatch):
         # axis='z' on cylinder faces takes the frame-relative Z direction (no CustomJointDirection).
         joints = _install_design(monkeypatch, {"a": _face(_ST.CylinderSurfaceType), "b": _face(_ST.CylinderSurfaceType)})
         _payload(jg.handler(handle_one="a", handle_two="b", motion="slider", axis="z"))
-        assert joints.last_input.motion == ("slider", _JD.ZAxisJointDirection)
+        assert joints._input.motion == ("slider", _JD.ZAxisJointDirection)
 
     def test_cylindrical_named_axis_is_frame_relative(self, monkeypatch):
         joints = _install_design(monkeypatch, {"a": _face(_ST.CylinderSurfaceType), "b": _face(_ST.CylinderSurfaceType)})
         _payload(jg.handler(handle_one="a", handle_two="b", motion="cylindrical", axis="y"))
-        assert joints.last_input.motion == ("cyl", _JD.YAxisJointDirection)
+        assert joints._input.motion == ("cyl", _JD.YAxisJointDirection)
 
     def test_auto_axis_with_no_geometry_axis_falls_back_to_frame_z(self, monkeypatch):
         # PLANAR faces give _axis_entity nothing -> 'auto' can't derive an axis; the motion uses the
         # default frame-relative Z direction and the reported axis is plain 'auto', NOT 'auto(geometry)'.
         joints = _install_design(monkeypatch, {"a": _face(_ST.PlaneSurfaceType), "b": _face(_ST.PlaneSurfaceType)})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
-        assert joints.last_input.motion == ("revolute", _JD.ZAxisJointDirection)   # frame Z, not CUSTOM
+        assert joints._input.motion == ("revolute", _JD.ZAxisJointDirection)   # frame Z, not CUSTOM
         assert out["axis"] == "auto"
 
     def test_unknown_axis_keyword_errors(self, monkeypatch):
@@ -622,7 +571,7 @@ class TestHandler:
         # a circular edge can define the motion axis (auto -> CustomJointDirection + the edge).
         joints = _install_design(monkeypatch, {"a": _edge(_CT.Circle3DCurveType), "b": _edge(_CT.Circle3DCurveType)})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
-        m = joints.last_input.motion
+        m = joints._input.motion
         assert m[0] == "revolute" and m[1] == _JD.CustomJointDirection and m[2] is not None
         assert out["axis"] == "auto(geometry)"
 
@@ -630,13 +579,13 @@ class TestHandler:
         # joint_at aligns the picked keypoints, repositioning handle_one's occurrence; a real move
         # must surface as moved_by + move_warning, not silently (the teleport defect: a member
         # relocating to the joint without the caller being told).
-        moving = _MovingOcc("Rod:1", (10.0, 0.0, 0.0))    # cm - the moving occurrence's origin
+        moving = _moving_occ("Rod:1", (10.0, 0.0, 0.0))    # cm - the moving occurrence's origin
         face_a = _face(_ST.PlaneSurfaceType); face_a.assemblyContext = moving
         face_b = _face(_ST.PlaneSurfaceType)
         joints = _install_design(monkeypatch, {"a": face_a, "b": face_b})
         orig_add = joints.add
         def moving_add(ji):                                # add() repositions the occurrence
-            j = orig_add(ji); moving.move_to((2.5, 0.5, 0.0)); return j
+            j = orig_add(ji); moving.transform2 = _at((2.5, 0.5, 0.0)); return j
         joints.add = moving_add
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
         assert "moved_by" in out
@@ -648,13 +597,13 @@ class TestHandler:
     def test_reports_moved_by_when_the_fixed_side_moves(self, monkeypatch):
         # grounding / an existing joint can make the solver move occurrence_TWO instead of one - both
         # sides are watched, and the mover is named (observed live: the wrong member can be the one that moves).
-        moving = _MovingOcc("Crank:1", (0.0, 0.0, 0.0))
+        moving = _moving_occ("Crank:1", (0.0, 0.0, 0.0))
         face_a = _face(_ST.PlaneSurfaceType)                        # handle_one stays put
         face_b = _face(_ST.PlaneSurfaceType); face_b.assemblyContext = moving
         joints = _install_design(monkeypatch, {"a": face_a, "b": face_b})
         orig_add = joints.add
         def moving_add(ji):
-            j = orig_add(ji); moving.move_to((3.0, 0.0, 0.0)); return j    # 3 cm = 30 mm
+            j = orig_add(ji); moving.transform2 = _at((3.0, 0.0, 0.0)); return j    # 3 cm = 30 mm
         joints.add = moving_add
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
         assert "moved_by" in out and out["moved_by"]["distance_mm"] == 30.0
@@ -665,35 +614,35 @@ class TestHandler:
         # rotation/translation out. moved_by is a WORLD distance the caller acts on, so it comes off
         # .transform2. Here the LOCAL matrix never changes across the joint while the WORLD one moves
         # 30 mm - read off .transform the reposition would be reported as no move at all.
-        moving = _MovingOcc("Rod:1", (0.0, 0.0, 0.0), local=(1.0, 0.0, 0.0))
+        moving = _moving_occ("Rod:1", (0.0, 0.0, 0.0), local=(1.0, 0.0, 0.0))
         face_a = _face(_ST.PlaneSurfaceType); face_a.assemblyContext = moving
         face_b = _face(_ST.PlaneSurfaceType)
         joints = _install_design(monkeypatch, {"a": face_a, "b": face_b})
         orig_add = joints.add
         def moving_add(ji):
-            j = orig_add(ji); moving.move_to((3.0, 0.0, 0.0)); return j   # world moves 3 cm
+            j = orig_add(ji); moving.transform2 = _at((3.0, 0.0, 0.0)); return j   # world moves 3 cm
         joints.add = moving_add
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
         assert out["moved_by"]["distance_mm"] == 30.0
 
-    def test_transform_is_the_fallback_when_transform2_is_absent(self, monkeypatch):
-        # An occurrence (or a build) carrying no transform2 must still be watched, not silently
-        # dropped to "no move".
-        moving = _LocalOnlyOcc("Rod:1", (0.0, 0.0, 0.0))
-        assert not hasattr(moving, "transform2")
+    def test_transform_is_the_fallback_when_transform2_will_not_read(self, monkeypatch):
+        # An occurrence whose transform2 DECLINES must still be watched off its LOCAL .transform,
+        # not silently dropped to "no move".
+        moving = make_occurrence("Rod:1", transform=_at((0.0, 0.0, 0.0)),
+                                 raises_on={"transform2": "3 : the placement is unavailable"})
         face_a = _face(_ST.PlaneSurfaceType); face_a.assemblyContext = moving
         face_b = _face(_ST.PlaneSurfaceType)
         joints = _install_design(monkeypatch, {"a": face_a, "b": face_b})
         orig_add = joints.add
         def moving_add(ji):
-            j = orig_add(ji); moving.move_to((3.0, 0.0, 0.0)); return j
+            j = orig_add(ji); moving.transform = _at((3.0, 0.0, 0.0)); return j
         joints.add = moving_add
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
         assert out["moved_by"]["distance_mm"] == 30.0
 
     def test_no_moved_by_when_part_stays_put(self, monkeypatch):
         # a well-matched pair whose keypoints already coincide does not move -> no moved_by / warning.
-        still = _MovingOcc("Rod:1", (4.0, 1.0, 0.0))
+        still = _moving_occ("Rod:1", (4.0, 1.0, 0.0))
         face_a = _face(_ST.PlaneSurfaceType); face_a.assemblyContext = still
         face_b = _face(_ST.PlaneSurfaceType)
         _install_design(monkeypatch, {"a": face_a, "b": face_b})       # add() leaves the position unchanged
@@ -757,14 +706,14 @@ class TestHandler:
         joints = _install_design(monkeypatch, {"a": _face(_ST.PlaneSurfaceType),
                                   "b": _face(_ST.PlaneSurfaceType)})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid", flip=True))
-        assert joints.last_input.isFlipped is True
+        assert joints._input.isFlipped is True
         assert out["flipped"] is True
 
     def test_no_flip_leaves_joint_input_unflipped(self, monkeypatch):
         joints = _install_design(monkeypatch, {"a": _face(_ST.PlaneSurfaceType),
                                   "b": _face(_ST.PlaneSurfaceType)})
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="rigid"))
-        assert not getattr(joints.last_input, "isFlipped", False)
+        assert not getattr(joints._input, "isFlipped", False)
         assert out["flipped"] is False
 
 
@@ -785,6 +734,11 @@ class TestHealthVerdict:
     def _out(self, monkeypatch, **kw):
         self._cyl_pair(monkeypatch, **kw)
         return _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
+
+    def _joint(self, **kw):
+        """The joint add() hands back, named and coupled the way the payload reports it."""
+        return FakeJoint(name="Joint1", occurrence_one=make_occurrence("Rod:1"),
+                         occurrence_two=make_occurrence("Crank:1"), **kw)
 
     def test_a_healthy_joint_names_its_state(self, monkeypatch):
         out = self._out(monkeypatch, joint_health=self._FHS.HealthyFeatureHealthState)
@@ -831,14 +785,10 @@ class TestHealthVerdict:
         # The Joint object and its TimelineObject each carry healthState and they can disagree: a
         # joint reading HEALTHY whose timeline item reports a WARNING is a failed compute, and
         # reading the joint alone publishes healthy=true for it.
-        joints = self._cyl_pair(monkeypatch)
-        item = SimpleNamespace(healthState=self._FHS.WarningFeatureHealthState,
-                               errorOrWarningMessage="Conflicts with assembly relationships.")
-        joints.add = lambda ji: SimpleNamespace(
-            name="Joint1", healthState=self._FHS.HealthyFeatureHealthState,
-            errorOrWarningMessage="", timelineObject=item,
-            occurrenceOne=SimpleNamespace(name="Rod:1"),
-            occurrenceTwo=SimpleNamespace(name="Crank:1"))
+        item = FakeTimelineObject(health=self._FHS.WarningFeatureHealthState,
+                                  message="Conflicts with assembly relationships.")
+        self._cyl_pair(monkeypatch, new_joint=self._joint(
+            health=self._FHS.HealthyFeatureHealthState, timeline_object=item))
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
         assert out["healthy"] is False and out["health_state"] == "warning"
         assert "Conflicts with assembly relationships." in out["health_warning"]
@@ -846,21 +796,9 @@ class TestHealthVerdict:
     def test_a_joint_answering_no_state_is_read_off_its_timeline_item(self, monkeypatch):
         # The joint itself answers nothing; its timeline item answers HEALTHY. Reading the joint
         # alone would publish 'healthy' null for a state that was in fact read.
-        joints = self._cyl_pair(monkeypatch)
-        item = SimpleNamespace(healthState=self._FHS.HealthyFeatureHealthState,
-                               errorOrWarningMessage="")
-
-        class _Blind:
-            name = "Joint1"
-            timelineObject = item
-            occurrenceOne = SimpleNamespace(name="Rod:1")
-            occurrenceTwo = SimpleNamespace(name="Crank:1")
-
-            @property
-            def healthState(self):
-                raise RuntimeError("health unreadable")
-
-        joints.add = lambda ji: _Blind()
+        item = FakeTimelineObject(health=self._FHS.HealthyFeatureHealthState, message="")
+        self._cyl_pair(monkeypatch,
+                       new_joint=self._joint(health_readable=False, timeline_object=item))
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
         assert out["healthy"] is True and out["health_state"] == "healthy"
         assert "health_warning" not in out
@@ -868,18 +806,7 @@ class TestHealthVerdict:
     def test_a_state_that_will_not_read_leaves_the_verdict_null(self, monkeypatch):
         # An unreadable state is not a clean compute either - reading it as healthy publishes
         # healthy=true for a joint nothing verified.
-        joints = self._cyl_pair(monkeypatch)
-
-        class _Blind:
-            name = "Joint1"
-            occurrenceOne = type("O", (), {"name": "Rod:1"})()
-            occurrenceTwo = type("O", (), {"name": "Crank:1"})()
-
-            @property
-            def healthState(self):
-                raise RuntimeError("health unreadable")
-
-        joints.add = lambda ji: _Blind()
+        self._cyl_pair(monkeypatch, new_joint=self._joint(health_readable=False))
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
         assert out["healthy"] is None and out["health_state"] is None
         # The warning names BOTH sources that stayed silent - the condition this branch fires on. A
@@ -895,18 +822,7 @@ class TestHealthVerdict:
         # whose state nothing read. The verdict is gated on the state having been READ instead.
         # The empty family is SET here, never delattr'd off the shared adsk mock: a deleted Mock
         # member does not reliably come back and leaks into unrelated tests.
-        joints = self._cyl_pair(monkeypatch)
-
-        class _Blind:
-            name = "Joint1"
-            occurrenceOne = type("O", (), {"name": "Rod:1"})()
-            occurrenceTwo = type("O", (), {"name": "Crank:1"})()
-
-            @property
-            def healthState(self):
-                raise RuntimeError("health unreadable")
-
-        joints.add = lambda ji: _Blind()
+        self._cyl_pair(monkeypatch, new_joint=self._joint(health_readable=False))
         monkeypatch.setattr(jg.adsk.fusion, "FeatureHealthStates", type("FHS", (), {})())
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
         assert out["healthy"] is None and out["health_state"] is None
@@ -1056,26 +972,25 @@ class TestModelParameters:
     def test_payload_names_the_joints_own_dnn_params(self, monkeypatch):
         # the created joint's offset/angle ModelParameter names must reach the payload (with the
         # shared offset-is-frame-Z teaching) so an agent can param_set the right dNN.
-        joints = _install_design(monkeypatch, {"a": _face(_ST.CylinderSurfaceType),
-                                  "b": _face(_ST.CylinderSurfaceType)})
-        orig_add = joints.add
-        def add_with_params(ji):
-            j = orig_add(ji)
-            j.offset = type("P", (), {"name": "d8"})()
-            j.angle = type("P", (), {"name": "d5"})()
-            return j
-        joints.add = add_with_params
+        _install_design(monkeypatch, {"a": _face(_ST.CylinderSurfaceType),
+                                      "b": _face(_ST.CylinderSurfaceType)},
+                        new_joint=FakeJoint(name="Joint1",
+                                            occurrence_one=make_occurrence("Rod:1"),
+                                            occurrence_two=make_occurrence("Crank:1"),
+                                            offset=SimpleNamespace(name="d8"),
+                                            angle=SimpleNamespace(name="d5")))
         out = _payload(jg.handler(handle_one="a", handle_two="b", motion="revolute"))
         assert out["model_parameters"] == {"offset": "d8", "angle": "d5"}
         assert "FRAME'S Z" in out["note"]
 
     def test_motion_param_names_omits_absent_params(self):
+        # A joint that ANSWERS both members as null - the shared FakeJoint sets offset/angle only
+        # when given, so it can only model them missing, which is a shape live Joint never has.
         j = type("J", (), {"offset": None, "angle": None})()
         assert jg.motion_param_names(j) == {}
 
     def test_motion_param_names_reads_both(self):
-        j = type("J", (), {"offset": type("P", (), {"name": "d12"})(),
-                           "angle": type("P", (), {"name": "d11"})()})()
+        j = FakeJoint(offset=SimpleNamespace(name="d12"), angle=SimpleNamespace(name="d11"))
         assert jg.motion_param_names(j) == {"offset": "d12", "angle": "d11"}
 
 
@@ -1110,7 +1025,7 @@ class TestPendingMoveRefusal:
         assert res["isError"] is True
         assert "would silently revert" in res["message"]
         assert "assembly_capture_position(action='capture')" in res["message"]
-        assert joints.last_input is None                 # no joint input was ever built
+        assert joints._calls == []                       # no joint input was ever built
 
     def test_joints_normally_with_nothing_pending(self, monkeypatch):
         _install_design(monkeypatch, self._faces(), snapshots=_Snapshots(pending=False))

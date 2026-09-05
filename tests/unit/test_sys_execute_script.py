@@ -104,12 +104,12 @@ class TestBulkMutationConstraint:
         assert ".products" in desc and "app.activeProduct" in desc
         assert "measured killing the call" in desc
 
-    def test_description_says_the_channel_can_die_mid_session(self):
-        # Measured: this channel stopped executing mid-session while the typed tools kept working.
-        # It sits on the prefer-a-typed-tool sentence, which is the action it implies.
+    def test_description_prefers_a_typed_tool_and_claims_no_channel_death(self):
+        # The silence once blamed on this channel was Fusion's own stdout shim overflowing, which
+        # the prelude now clears each call - so the description no longer teaches a dying channel.
         desc = ses.TOOL_DESCRIPTION
-        assert "dying mid-session" in desc and "typed tools kept working" in desc
         assert "prefer a typed tool" in desc
+        assert "dying" not in desc
 
     def test_description_stays_under_the_wire_ceiling(self):
         # The description is the surface every connected agent pays for on every turn; the ceiling
@@ -223,9 +223,44 @@ class TestReadOnlyRouting:
     def test_the_file_the_loader_execs_is_the_sentinel_wrapped_script(self, run_script):
         app, _ = run_script(reply=json.dumps({"message": "", "success": True}))
         text = app.script_file_text
-        assert text.startswith('print("%s")' % ses._RUN_SENTINEL)
+        assert text.startswith(ses._UNJAM_PRELUDE + 'print("%s")' % ses._RUN_SENTINEL)
         assert _SCRIPT in text
         assert text.endswith("run(None)")
+
+    def test_the_prelude_unjams_a_truncated_shim_and_points_the_outer_one_at_the_console(self, monkeypatch):
+        # The measured state: shims nested one per read_only call, the innermost past its 1 MiB
+        # lifetime and dropping every write. After the prelude the outer shim forwards straight to
+        # the console and counts from zero, so this run's prints reach the text Python.Run returns.
+        import sys as real_sys
+
+        class CatchOut:
+            def __init__(self):
+                self.seen = []
+
+            def write(self, text):
+                self.seen.append(text)
+
+        class _NsSanitizedWriter:
+            def __init__(self, original):
+                self._original, self._written, self._truncated = original, 0, False
+
+            def write(self, text):
+                if self._truncated:
+                    return
+                self._written += len(text)
+                self._original.write(text)
+
+        console = CatchOut()
+        jammed = _NsSanitizedWriter(console)
+        jammed._truncated, jammed._written = True, 1048576
+        outer = _NsSanitizedWriter(_NsSanitizedWriter(jammed))
+        outer.write("lost")
+        assert console.seen == []
+        monkeypatch.setattr(real_sys, "stdout", outer)
+        exec(ses._UNJAM_PRELUDE, {})
+        outer.write("found")
+        assert console.seen == ["found"]
+        assert outer._original is console and outer._written == len("found")
 
     def test_write_mode_still_uses_python_run_inside_a_transaction(self, run_script):
         app, res = run_script(reply=None, read_only=False)

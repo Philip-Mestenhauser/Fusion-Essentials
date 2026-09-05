@@ -12,91 +12,54 @@ also builds adsk.core.ObjectCollection — both seams are patched.
 
 import json
 
-from conftest import load_tool
+import live_api_facts as _api_facts
+from conftest import (FakeCAMParameter, FakeCAMParameters, FakeMachine, FakeSetup, load_tool,
+                      make_cam, _make_object_collection)
 
 ces = load_tool("cam_edit_setup")
 
-
-# ── fakes: setup params + body collections ──────────────────────────────────
-
-class _Val:
-    def __init__(self, v):
-        self.value = v
+_STOCK_MODES = _api_facts.ENUMS["cam.SetupStockModes"]
 
 
-class _CadVal:
-    """A CadObjectParameterValue fake: .value is a list of bound entities, mutated in place."""
-    def __init__(self):
-        self.value = []
+# ── the setup under edit: parameters + body collections ─────────────────────
+
+def _params(d, cad_params=()):
+    """A setup's parameters: `d` as expression parameters, `cad_params` as the WCS geometry ones
+    (a CadObjectParameterValue whose .value is the bound-entity list, mutated in place)."""
+    rows = [FakeCAMParameter(k, v, value=v) for k, v in d.items()]
+    rows.extend(FakeCAMParameter(k, "", value=[]) for k in cad_params)
+    # choice-mode params the WCS bind sets by expression
+    for k in ("wcs_origin_mode", "wcs_orientation_mode"):
+        if k not in d:
+            rows.append(FakeCAMParameter(k, "'stockPoint'", value="'stockPoint'"))
+    return FakeCAMParameters(rows)
 
 
-class _Param:
-    def __init__(self, name, expr, cad=False, editable=True):
-        self.name = name
-        self.expression = expr
-        # a WCS geometry param carries a CadObjectParameterValue; a plain one an expression value.
-        self.value = _CadVal() if cad else _Val(expr)
-        self.warning = ""
-        # A CAMParameter answers isEditable; a settable setup parameter reads True.
-        self.isEditable = editable
-
-    @property
-    def error(self):
-        # Live signal: an expression referencing a missing parameter is STORED verbatim but its .error
-        # reads 'Failed to evaluate expression.' (its .value.value even comes back a finite 0.0, so only
-        # .error reveals the failure). Model that by keying off a missing-reference marker.
-        if isinstance(self.expression, str) and "NoSuch" in self.expression:
-            return "Failed to evaluate expression."
-        return ""
+def _replace(parameters, param):
+    """Swap `param` in for the one of that name - how a test gives one parameter a scenario shape."""
+    items = parameters._coll._items
+    for i, existing in enumerate(items):
+        if existing.name == param.name:
+            items[i] = param
+            return param
+    items.append(param)
+    return param
 
 
-class _Params:
-    def __init__(self, d, cad_params=()):
-        self._d = {k: _Param(k, v) for k, v in d.items()}
-        for k in cad_params:
-            self._d[k] = _Param(k, "", cad=True)
-        # choice-mode params the WCS bind sets by expression
-        for k in ("wcs_origin_mode", "wcs_orientation_mode"):
-            self._d.setdefault(k, _Param(k, "'stockPoint'"))
-    def itemByName(self, name):
-        return self._d.get(name)
-
-
-class _ObjColl:
-    def __init__(self):
-        self.items = []
-    def add(self, x):
-        self.items.append(x); return True
-    @property
-    def count(self):
-        return len(self.items)
-    @classmethod
-    def create(cls):
-        return cls()
-
-
-class _Machine:
-    def __init__(self, description):
-        self.description = description
-        self.vendor = ""
-        self.model = ""
-
-
-class _Setup:
+class _Setup(FakeSetup):
     # WCS geometry params carry a CadObjectParameterValue (mutated in place); the rest are expressions.
     _CAD_PARAMS = ("wcs_origin_point", "wcs_orientation_axisZ", "wcs_orientation_axisX")
 
     def __init__(self, name, params, machine_sticks=True, require_enable=True):
-        self.name = name
-        self.parameters = _Params(params, cad_params=self._CAD_PARAMS)
-        self._models = _ObjColl()
-        self._fixtures = _ObjColl()
-        self._stock = _ObjColl()
+        super().__init__(name, parameters=_params(params, cad_params=self._CAD_PARAMS))
+        self._models = _make_object_collection()
+        self._fixtures = _make_object_collection()
+        self._stock = _make_object_collection()
         self._machine = None
         self.machine_sticks = machine_sticks   # False models an assignment that silently doesn't take
         # Fusion refuses stockSolids unless stockMode==SolidStock, and fixtures unless fixtureEnabled.
         self.require_enable = require_enable
-        self.stockMode = 1                     # RelativeBoxStock (matches the live default)
+        self.stockMode = _STOCK_MODES["RelativeBoxStock"]      # the live default
         self.fixtureEnabled = False
     # Setup.machine takes a transient copy; the tool reads it back to confirm.
     @property
@@ -126,25 +89,9 @@ class _Setup:
         return self._stock
     @stockSolids.setter
     def stockSolids(self, coll):
-        # SolidStock == 6 in adsk.cam.SetupStockModes
-        if self.require_enable and self.stockMode != 6:
+        if self.require_enable and self.stockMode != _STOCK_MODES["SolidStock"]:
             raise RuntimeError("stockSolids need stockMode=SolidStock")
         self._stock = coll
-
-
-class _Setups:
-    def __init__(self, setups):
-        self._s = setups
-    @property
-    def count(self):
-        return len(self._s)
-    def item(self, i):
-        return self._s[i]
-
-
-class _CAM:
-    def __init__(self, setups):
-        self.setups = _Setups(setups)
 
 
 _DEFAULT_PARAMS = {
@@ -155,12 +102,10 @@ _DEFAULT_PARAMS = {
 
 
 def _install(monkeypatch, setups=("Setup1",), require_enable=True):
-    cam = _CAM([_Setup(n, dict(_DEFAULT_PARAMS), require_enable=require_enable) for n in setups])
+    cam = make_cam(*[_Setup(n, dict(_DEFAULT_PARAMS), require_enable=require_enable)
+                     for n in setups])
     monkeypatch.setattr(ces, "get_cam", lambda: (cam, None))
-    monkeypatch.setattr(ces, "_object_collection", _ObjColl.create)
-    # the SolidStock enum member the handler reads must equal 6 (the live value) for the fake's
-    # stockMode gate to accept the switch.
-    monkeypatch.setattr(ces.adsk.cam.SetupStockModes, "SolidStock", 6, raising=False)
+    monkeypatch.setattr(ces, "_object_collection", _make_object_collection)
     # body resolver seam: name -> a fake body (the tool calls this instead of _inputs directly in tests)
     bodies = {"Stock": object(), "Vise": object(), "Plate": object()}
     def _resolve_bodies(names):
@@ -174,7 +119,7 @@ def _install(monkeypatch, setups=("Setup1",), require_enable=True):
     cam._bodies = bodies
     # machine resolver seam: a known 'vendor|model' -> a fake Machine, anything else -> a refusal.
     # (Patched so it auto-restores - TestMachineResolver exercises the REAL resolve_machine.)
-    known = {"Haas|VF-2": _Machine("Haas VF-2")}
+    known = {"Haas|VF-2": FakeMachine(description="Haas VF-2")}
     def resolve_machine(name):
         m = known.get(name)
         if not m:
@@ -297,7 +242,7 @@ class TestParameterEvaluation:
         assert rec["after"] == "2.5" and rec["warning"] == "stock less than model width"
 
 
-class _UnreadableEditableSetupParam(_Param):
+class _UnreadableEditableSetupParam(FakeCAMParameter):
     """isEditable does not answer at all - the read that may not mint a refusal."""
 
     @property
@@ -317,7 +262,7 @@ class TestNotEditable:
     def test_a_non_editable_parameter_is_refused_and_nothing_is_assigned(self, monkeypatch):
         cam = _install(monkeypatch)
         sp = cam.setups.item(0).parameters
-        sp._d["stockZHigh"] = _Param("stockZHigh", "0.0", editable=False)
+        _replace(sp, FakeCAMParameter("stockZHigh", "0.0", editable=False))
         res = ces.handler(setup="Setup1", parameters={"stockZHigh": "2.5"})
         assert res["isError"] is True
         assert "does not accept a write to: stockZHigh" in res["message"]
@@ -328,8 +273,8 @@ class TestNotEditable:
     def test_every_locked_parameter_is_named_and_the_settable_sibling_is_untouched(self, monkeypatch):
         cam = _install(monkeypatch)
         sp = cam.setups.item(0).parameters
-        sp._d["stockZHigh"] = _Param("stockZHigh", "0.0", editable=False)
-        sp._d["surfaceZHigh"] = _Param("surfaceZHigh", "1.0", editable=False)
+        _replace(sp, FakeCAMParameter("stockZHigh", "0.0", editable=False))
+        _replace(sp, FakeCAMParameter("surfaceZHigh", "1.0", editable=False))
         res = ces.handler(setup="Setup1", parameters={
             "stockZHigh": "2.5", "surfaceZHigh": "3", "wcs_origin_boxPoint": "'top left'"})
         assert res["isError"] is True
@@ -338,7 +283,8 @@ class TestNotEditable:
 
     def test_the_refusal_points_at_the_read_that_lists_the_refusing_rows(self, monkeypatch):
         cam = _install(monkeypatch)
-        cam.setups.item(0).parameters._d["stockZHigh"] = _Param("stockZHigh", "0.0", editable=False)
+        _replace(cam.setups.item(0).parameters,
+                 FakeCAMParameter("stockZHigh", "0.0", editable=False))
         res = ces.handler(setup="Setup1", parameters={"stockZHigh": "2.5"})
         assert "cam_get(include=['parameters'], setup=...)" in res["message"]
         assert "editable false" in res["message"]
@@ -348,69 +294,66 @@ class TestNotEditable:
         # read that never happened, and lock the caller out of a parameter that does take the write.
         cam = _install(monkeypatch)
         sp = cam.setups.item(0).parameters
-        sp._d["stockZHigh"] = _UnreadableEditableSetupParam("stockZHigh", "0.0")
+        _replace(sp, _UnreadableEditableSetupParam("stockZHigh", "0.0"))
         out = _payload(ces.handler(setup="Setup1", parameters={"stockZHigh": "2.5"}))
         assert out["updated_count"] == 1 and out["changed"][0]["after"] == "2.5"
 
 
-class _StuckSetupParam(_Param):
+class _StuckSetupParam(FakeCAMParameter):
     """Accepts an expression assignment and keeps the one it already holds - the swallowed write the
     platform reports as success, with a clean .error channel."""
-    def __setattr__(self, key, value):
-        if key == "expression" and "expression" in self.__dict__:
-            return
-        object.__setattr__(self, key, value)
+
+    @FakeCAMParameter.expression.setter
+    def expression(self, value):
+        pass
 
 
-class _ThirdValueSetupParam(_Param):
+class _ThirdValueSetupParam(FakeCAMParameter):
     """Takes the assignment and stores a value of its OWN - neither the expression it held nor the
     one written. A gate keyed on 'it kept the prior expression' passes this one."""
-    def __setattr__(self, key, value):
-        if key == "expression" and "expression" in self.__dict__:
-            object.__setattr__(self, key, "999")
-            return
-        object.__setattr__(self, key, value)
+
+    @FakeCAMParameter.expression.setter
+    def expression(self, value):
+        self._expression = "999"
 
 
-class _QuotedStoreSetupParam(_Param):
+class _QuotedStoreSetupParam(FakeCAMParameter):
     """Takes the assignment and stores the SINGLE-QUOTED form of it - the shape a CAM string
     parameter's stored expression carries (receipt cam-parameter-expressions, whose probe reads
     'context' and 'strategy' back starting with a quote). A caller sends either spelling."""
-    def __setattr__(self, key, value):
-        if key == "expression" and "expression" in self.__dict__:
-            s = str(value)
-            # An expression written already quoted is stored as written - one wrapper, never two.
-            object.__setattr__(self, key, s if len(s) >= 2 and s[0] == s[-1] == "'" else "'" + s + "'")
-            return
-        object.__setattr__(self, key, value)
+
+    @FakeCAMParameter.expression.setter
+    def expression(self, value):
+        s = str(value)
+        # An expression written already quoted is stored as written - one wrapper, never two.
+        self._expression = s if len(s) >= 2 and s[0] == s[-1] == "'" else "'" + s + "'"
 
 
-class _EnumRefusingSetupParam(_Param):
+class _EnumRefusingSetupParam(FakeCAMParameter):
     """The platform's refusal for a value outside a string parameter's enumeration - Fusion words
     it '3 : Invalid enumeration value.'"""
-    def __setattr__(self, key, value):
-        if key == "expression" and "expression" in self.__dict__:
-            raise RuntimeError("3 : Invalid enumeration value.")
-        object.__setattr__(self, key, value)
+
+    @FakeCAMParameter.expression.setter
+    def expression(self, value):
+        raise RuntimeError("3 : Invalid enumeration value.")
 
 
-class _UnreadableSetupParam(_Param):
+class _UnreadableSetupParam(FakeCAMParameter):
     """Reads its prior expression, takes the assignment, and will not read one back afterwards -
     the write is neither a landed change nor a no-take, because nothing answered either way."""
-    def __init__(self, name, expr):
-        object.__setattr__(self, "_writes", 0)
-        super().__init__(name, expr)
+
+    _writes = 0
 
     @property
     def expression(self):
-        if self._writes > 1:
+        if self._writes:
             raise RuntimeError("expression is unreadable")
-        return self._expr
+        return self._expression
 
     @expression.setter
-    def expression(self, v):
-        object.__setattr__(self, "_expr", v)
-        object.__setattr__(self, "_writes", self._writes + 1)
+    def expression(self, value):
+        self._expression = value
+        self._writes += 1
 
 
 class TestParameterNoTake:
@@ -421,7 +364,7 @@ class TestParameterNoTake:
     def test_a_parameter_that_keeps_its_prior_expression_is_an_error(self, monkeypatch):
         cam = _install(monkeypatch)
         sp = cam.setups.item(0).parameters
-        sp._d["stockZHigh"] = _StuckSetupParam("stockZHigh", "0.0")
+        _replace(sp, _StuckSetupParam("stockZHigh", "0.0"))
         res = ces.handler(setup="Setup1", parameters={"stockZHigh": "2.5"})
         assert res["isError"] is True
         assert "the assignment did not take" in res["message"]
@@ -435,7 +378,7 @@ class TestParameterNoTake:
         # request is caught too - and the message states the value it actually reads.
         cam = _install(monkeypatch)
         sp = cam.setups.item(0).parameters
-        sp._d["stockZHigh"] = _ThirdValueSetupParam("stockZHigh", "0.0")
+        _replace(sp, _ThirdValueSetupParam("stockZHigh", "0.0"))
         res = ces.handler(setup="Setup1", parameters={"stockZHigh": "2.5"})
         assert res["isError"] is True
         assert "the assignment did not take" in res["message"]
@@ -446,7 +389,7 @@ class TestParameterNoTake:
         # an after of null is the swallowed mutation this arm exists to refuse.
         cam = _install(monkeypatch)
         sp = cam.setups.item(0).parameters
-        sp._d["stockZHigh"] = _UnreadableSetupParam("stockZHigh", "0.0")
+        _replace(sp, _UnreadableSetupParam("stockZHigh", "0.0"))
         res = ces.handler(setup="Setup1", parameters={"stockZHigh": "2.5"})
         assert res["isError"] is True
         assert "UNCONFIRMED" in res["message"] and "stockZHigh" in res["message"]
@@ -456,7 +399,7 @@ class TestParameterNoTake:
     def test_an_unreadable_parameter_rolls_the_siblings_back_too(self, monkeypatch):
         cam = _install(monkeypatch)
         sp = cam.setups.item(0).parameters
-        sp._d["stockZHigh"] = _UnreadableSetupParam("stockZHigh", "0.0")
+        _replace(sp, _UnreadableSetupParam("stockZHigh", "0.0"))
         res = ces.handler(setup="Setup1", parameters={
             "wcs_origin_boxPoint": "'top left'", "stockZHigh": "2.5"})
         assert res["isError"] is True and "UNCONFIRMED" in res["message"]
@@ -467,7 +410,7 @@ class TestParameterNoTake:
         # found - a valid write beside a swallowed one must not be left standing.
         cam = _install(monkeypatch)
         sp = cam.setups.item(0).parameters
-        sp._d["stockZHigh"] = _StuckSetupParam("stockZHigh", "0.0")
+        _replace(sp, _StuckSetupParam("stockZHigh", "0.0"))
         res = ces.handler(setup="Setup1", parameters={
             "wcs_origin_boxPoint": "'top left'", "stockZHigh": "2.5"})
         assert res["isError"] is True
@@ -482,7 +425,7 @@ class TestParameterNoTake:
         # call a landed write a no-take.
         cam = _install(monkeypatch)
         sp = cam.setups.item(0).parameters
-        sp._d["wcs_origin_boxPoint"] = _QuotedStoreSetupParam("wcs_origin_boxPoint", "'top center'")
+        _replace(sp, _QuotedStoreSetupParam("wcs_origin_boxPoint", "'top center'"))
         out = _payload(ces.handler(setup="Setup1",
                                    parameters={"wcs_origin_boxPoint": "top left"}))
         assert out["updated_count"] == 1
@@ -494,7 +437,7 @@ class TestParameterNoTake:
         # already held is the swallowed write, and it stays convicted.
         cam = _install(monkeypatch)
         sp = cam.setups.item(0).parameters
-        sp._d["wcs_origin_boxPoint"] = _StuckSetupParam("wcs_origin_boxPoint", "'top center'")
+        _replace(sp, _StuckSetupParam("wcs_origin_boxPoint", "'top center'"))
         res = ces.handler(setup="Setup1", parameters={"wcs_origin_boxPoint": "top left"})
         assert res["isError"] is True
         assert "the assignment did not take" in res["message"] and "top center" in res["message"]
@@ -504,7 +447,7 @@ class TestParameterNoTake:
         # setup already carries reads it back, which is the state they asked for.
         cam = _install(monkeypatch)
         sp = cam.setups.item(0).parameters
-        sp._d["stockZHigh"] = _StuckSetupParam("stockZHigh", "0.0")
+        _replace(sp, _StuckSetupParam("stockZHigh", "0.0"))
         out = _payload(ces.handler(setup="Setup1", parameters={"stockZHigh": "0.0"}))
         assert out["updated_count"] == 1 and out["changed"][0]["after"] == "0.0"
 
@@ -521,7 +464,7 @@ class TestRemedyFork:
 
     def test_a_dropped_write_gets_its_own_remedy_not_the_expression_one(self, monkeypatch):
         cam = _install(monkeypatch)
-        cam.setups.item(0).parameters._d["stockZHigh"] = _StuckSetupParam("stockZHigh", "0.0")
+        _replace(cam.setups.item(0).parameters, _StuckSetupParam("stockZHigh", "0.0"))
         res = ces.handler(setup="Setup1", parameters={"stockZHigh": "2.5"})
         assert "must reference existing parameters" not in res["message"]
         assert "passed the isEditable check" in res["message"]
@@ -529,7 +472,7 @@ class TestRemedyFork:
 
     def test_an_unreadable_read_back_gets_the_re_read_remedy(self, monkeypatch):
         cam = _install(monkeypatch)
-        cam.setups.item(0).parameters._d["stockZHigh"] = _UnreadableSetupParam("stockZHigh", "0.0")
+        _replace(cam.setups.item(0).parameters, _UnreadableSetupParam("stockZHigh", "0.0"))
         res = ces.handler(setup="Setup1", parameters={"stockZHigh": "2.5"})
         assert "must reference existing parameters" not in res["message"]
         assert "passed the isEditable check" not in res["message"]
@@ -589,10 +532,10 @@ class TestMachine:
     def test_assignment_that_does_not_take_is_error(self, monkeypatch):
         # Setup.machine setter silently drops the value -> the read-back must turn that into a hard error,
         # never a false ok.
-        cam = _CAM([_Setup("Setup1", dict(_DEFAULT_PARAMS), machine_sticks=False)])
+        cam = make_cam(_Setup("Setup1", dict(_DEFAULT_PARAMS), machine_sticks=False))
         monkeypatch.setattr(ces, "get_cam", lambda: (cam, None))
         monkeypatch.setattr(ces, "resolve_machine",
-                            lambda name: (_Machine("Haas VF-2"), "Haas VF-2", None))
+                            lambda name: (FakeMachine(description="Haas VF-2"), "Haas VF-2", None))
         res = ces.handler(setup="Setup1", machine="Haas|VF-2")
         assert res["isError"] is True and "did not take" in res["message"].lower()
 
@@ -780,9 +723,9 @@ class TestReadMachines:
 
 class TestMachineStripSimulation:
     def _setup_with_sim_machine(self, monkeypatch):
-        cam = _CAM([_Setup("Setup1", dict(_DEFAULT_PARAMS))])
+        cam = make_cam(_Setup("Setup1", dict(_DEFAULT_PARAMS)))
         monkeypatch.setattr(ces, "get_cam", lambda: (cam, None))
-        monkeypatch.setattr(ces, "_object_collection", _ObjColl.create)
+        monkeypatch.setattr(ces, "_object_collection", _make_object_collection)
         src = _machine("Haas", "VF-2", "Haas VF-2")
         src.hasSimulationModel = True
         src.clearSimulationModel = lambda: setattr(src, "hasSimulationModel", False)
@@ -889,7 +832,7 @@ class TestWCS:
             value = []
             def __setattr__(self, k, v):
                 pass                          # silently drops the bind
-        cam.setups.item(0).parameters._d["wcs_origin_point"].value = _StuckCad()
+        cam.setups.item(0).parameters.itemByName("wcs_origin_point").value = _StuckCad()
         res = ces.handler(setup="Setup1", wcs={"origin": "vtx-1"})
         assert res["isError"] is True and "no geometry" in res["message"].lower()
 
@@ -999,7 +942,7 @@ class TestRename:
     def test_renaming_onto_the_name_it_already_reads_writes_nothing(self, monkeypatch):
         # A rename onto the current name is a NO-OP, not a dedupe: writing it again makes the
         # platform dedupe the setup against itself ('LegSetup' -> 'LegSetup1', measured).
-        cam = _CAM([_DedupingNameSetup("LegSetup", dict(_DEFAULT_PARAMS))])
+        cam = make_cam(_DedupingNameSetup("LegSetup", dict(_DEFAULT_PARAMS)))
         monkeypatch.setattr(ces, "get_cam", lambda: (cam, None))
         out = _payload(ces.handler(setup="LegSetup", rename="LegSetup"))
         assert cam.setups.item(0).name == "LegSetup"    # untouched, not 'LegSetup1'
@@ -1015,7 +958,7 @@ class TestRename:
 
     def test_a_declined_rename_is_an_error_not_a_reported_success(self, monkeypatch):
         # DECLINED means the name did not move at all - the one case that is a failure.
-        cam = _CAM([_StubbornNameSetup("Setup1", dict(_DEFAULT_PARAMS))])
+        cam = make_cam(_StubbornNameSetup("Setup1", dict(_DEFAULT_PARAMS)))
         monkeypatch.setattr(ces, "get_cam", lambda: (cam, None))
         res = ces.handler(setup="Setup1", rename="Op10 Mill")
         assert res["isError"] is True and "did not take" in res["message"]
@@ -1025,7 +968,7 @@ class TestRename:
     def test_a_name_that_does_not_read_back_is_UNCONFIRMED_not_a_deduped_rename(self, monkeypatch):
         # An unread name is neither the declined case nor the deduped one. Taking the dedupe branch
         # would publish 'None' as the setup's new address over an isError:false payload.
-        cam = _CAM([_UnreadableNameSetup("Setup1", dict(_DEFAULT_PARAMS))])
+        cam = make_cam(_UnreadableNameSetup("Setup1", dict(_DEFAULT_PARAMS)))
         monkeypatch.setattr(ces, "get_cam", lambda: (cam, None))
         res = ces.handler(setup="Setup1", rename="Op10 Mill")
         assert res["isError"] is True and "UNCONFIRMED" in res["message"]
@@ -1036,7 +979,7 @@ class TestRename:
     def test_a_deduped_name_is_published_as_the_new_address_not_a_failure(self, monkeypatch):
         # Setup.name dedupes rather than refusing, so a landed name matching neither the request
         # nor the name it held is the setup's new address - every later call needs THAT name.
-        cam = _CAM([_DedupingNameSetup("Setup1", dict(_DEFAULT_PARAMS))])
+        cam = make_cam(_DedupingNameSetup("Setup1", dict(_DEFAULT_PARAMS)))
         monkeypatch.setattr(ces, "get_cam", lambda: (cam, None))
         out = _payload(ces.handler(setup="Setup1", rename="Op10"))
         assert cam.setups.item(0).name == "Op101"
@@ -1072,8 +1015,7 @@ class TestQuotedStringParameter:
     def test_the_enumeration_refusal_names_the_expression_written(self, monkeypatch):
         cam = _install(monkeypatch)
         sp = cam.setups.item(0).parameters
-        sp._d["wcs_origin_boxPoint"] = _EnumRefusingSetupParam("wcs_origin_boxPoint",
-                                                               "'top center'")
+        _replace(sp, _EnumRefusingSetupParam("wcs_origin_boxPoint", "'top center'"))
         res = ces.handler(setup="Setup1", parameters={"wcs_origin_boxPoint": "top lft"})
         assert res["isError"] is True
         assert "Invalid enumeration value" in res["message"]      # the platform's own text, relayed

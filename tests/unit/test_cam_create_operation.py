@@ -8,9 +8,9 @@ Plus the guards (no CAM, setup not found, bad strategy, tool ref out of range).
 """
 
 import json
-from types import SimpleNamespace
 
-from conftest import load_tool
+from conftest import (FakeOperation, FakeSetup, FakeTool, _NamedCollection, _Strategy as _Entitled,
+                      load_tool, make_cam, make_cam_parameters)
 
 cco = load_tool("cam_create_operation")
 _cam = load_tool("_cam_common")
@@ -26,35 +26,19 @@ _FLAG_PROPS = ("is2DStrategy", "is3DStrategy", "isDrillingStrategy", "isMillingS
                "isAdditiveStrategy", "isCuttingStrategy", "isSupportStrategy", "isSuppressible")
 
 
-class _Strategy:
-    """An OperationStrategy: a name, a title, the isGenerationAllowed entitlement flag and the
-    classification flags. A flag not named here answers False, as an unset one does live."""
+class _Strategy(_Entitled):
+    """An OperationStrategy: a name, a title, the shared fake's isGenerationAllowed entitlement flag
+    (allowed=None makes the flag itself RAISE) and the classification flags. A flag not named here
+    answers False, as an unset one does live."""
 
     def __init__(self, name, allowed=True, title=None, **flags):
         assert not set(flags) - set(_FLAG_PROPS), (
             f"not OperationStrategy members: {sorted(set(flags) - set(_FLAG_PROPS))}")
+        super().__init__(allowed)
         self.name = name
         self.title = title if title is not None else (name or "").replace("_", " ").title()
-        self.isGenerationAllowed = allowed
         for prop in _FLAG_PROPS:
             setattr(self, prop, flags.get(prop, False))
-
-
-class _RaisingStrategy:
-    """A strategy whose isGenerationAllowed will NOT read - the state that must never be turned into
-    an entitlement refusal. Its other fields read normally, so only the entitlement is unknown."""
-
-    def __init__(self, name, **flags):
-        assert not set(flags) - set(_FLAG_PROPS), (
-            f"not OperationStrategy members: {sorted(set(flags) - set(_FLAG_PROPS))}")
-        self.name = name
-        self.title = name.replace("_", " ").title()
-        for prop in _FLAG_PROPS:
-            setattr(self, prop, flags.get(prop, False))
-
-    @property
-    def isGenerationAllowed(self):
-        raise RuntimeError("isGenerationAllowed is unreadable on this build")
 
 
 class _StrategyVector:
@@ -83,16 +67,13 @@ class _OperationInput:
         self.displayName = None
 
 
-class _Operation:
+class _Operation(FakeOperation):
     """An added Operation: it is born under the input's displayName when one was carried, else the
     platform's own auto-name."""
 
     def __init__(self, inp):
-        self.name = getattr(inp, "displayName", None) or "Op1"
-        self.strategy = inp.strategy
-        self.tool = inp.tool
-        self.hasToolpath = False
-        self.isToolpathValid = False
+        super().__init__(getattr(inp, "displayName", None) or "Op1", has_toolpath=False, valid=False,
+                         strategy=inp.strategy, tool=inp.tool)
 
 
 # The two Deaf shapes below are a setter that accepts the value and keeps the default, so nothing
@@ -180,7 +161,7 @@ class _SwappedToolOperation(_Operation):
 
     def __init__(self, inp):
         super().__init__(inp)
-        self.tool = _Tool("6mm Ball Endmill", number=7)
+        self.tool = _tool("6mm Ball Endmill", number=7)
 
 
 class _PrefixedToolOperation(_Operation):
@@ -189,25 +170,26 @@ class _PrefixedToolOperation(_Operation):
 
     def __init__(self, inp):
         super().__init__(inp)
-        self.tool = _Tool("#1 - " + inp.tool.description, number=1)
+        self.tool = _tool("#1 - " + inp.tool.description, number=1)
 
 
-class _Operations:
+class _Operations(_NamedCollection):
     op_class = _Operation                     # swapped by a test that needs a different Operation
 
     def __init__(self, strategies):
-        self.compatibleStrategies = _StrategyVector(strategies)
-        self.added = []
+        super().__init__()
+        # the same list the shared collection counts and items: what add() appends, a walk reads
+        self.added = self._items
+        self._offered = list(strategies)
         # the generationMode each input carried AT the add
         self.modes_at_add = []
         # the displayName each input carried AT the add - the name the operation is born under
         self.names_at_add = []
-        self._count = 0
+
     @property
-    def count(self):
-        return len(self.added)
-    def item(self, i):
-        return self.added[i]
+    def compatibleStrategies(self):
+        return _StrategyVector(self._offered)
+
     def createInput(self, strategy):
         if strategy not in [s.name for s in self.compatibleStrategies]:
             raise RuntimeError("invalid strategy")
@@ -220,76 +202,47 @@ class _Operations:
         return op
 
 
-class _Setup:
+class _Setup(FakeSetup):
     def __init__(self, name, strategies):
-        self.name = name
+        super().__init__(name)
         self.operations = _Operations(strategies)
 
 
-class _Setups:
-    def __init__(self, setups):
-        self._s = setups
-    @property
-    def count(self):
-        return len(self._s)
-    def item(self, i):
-        return self._s[i]
+def _tool(desc, number=1, tool_type="flat end mill"):
+    """A library Tool: the description, tool_number and tool_type the create reads it by (a
+    tool_type of None is the parameter the tool does not carry at all)."""
+    rows = [("tool_number", "", number)]
+    if tool_type is not None:
+        rows.append(("tool_type", "", tool_type))
+    return FakeTool(description=desc, parameters=make_cam_parameters(*rows))
 
 
-class _ToolParams:
-    """Tool.parameters - itemByName(n).value.value, the shape the tool_number read walks."""
+def _make_cam(setups, strategies, doc_tools):
+    """A CAM product whose setups carry `strategies`, plus the document tool library and the
+    generateToolpath launch (its future is kept so a test can assert THIS one was registered)."""
+    cam = make_cam(*[_Setup(n, strategies) for n in setups])
+    cam.documentToolLibrary = _NamedCollection(list(doc_tools))   # this doc's tools
+    cam.generated = []
+    cam.futures = []
 
-    def __init__(self, values):
-        self._d = {k: SimpleNamespace(value=SimpleNamespace(value=v)) for k, v in values.items()}
-
-    def itemByName(self, name):
-        return self._d.get(name)
-
-
-class _Tool:
-    """A library Tool: the description, tool_number and tool_type the create reads it by."""
-
-    def __init__(self, desc, number=1, tool_type="flat end mill"):
-        self.desc = desc
-        self.description = desc
-        params = {"tool_number": number}
-        if tool_type is not None:
-            params["tool_type"] = tool_type
-        self.parameters = _ToolParams(params)
-
-
-class _ToolLib:
-    def __init__(self, tools):
-        self._t = tools
-    @property
-    def count(self):
-        return len(self._t)
-    def item(self, i):
-        return self._t[i]
-
-
-class _CAM:
-    def __init__(self, setups, strategies=("face", "adaptive", "drill", "bore"), doc_tools=()):
-        self.setups = _Setups([_Setup(n, strategies) for n in setups])
-        self.documentToolLibrary = _ToolLib(list(doc_tools))   # this doc's tools (real adsk shape)
-        self.generated = []
-        self.futures = []
-    def generateToolpath(self, op):
+    def _generate(op):
         op.hasToolpath = True
         op.isToolpathValid = True
-        self.generated.append(op)
-        # GenerateToolpathFuture stand-in, kept so a test can assert THIS object was registered.
+        cam.generated.append(op)
         fut = type("Fut", (), {"numberOfOperations": 1})()
-        self.futures.append(fut)
+        cam.futures.append(fut)
         return fut
+
+    cam.generateToolpath = _generate
+    return cam
 
 
 def _install(monkeypatch, setups=("Setup1",), tools=2, doc_tools=(),
              strategies=("face", "adaptive", "drill", "bore")):
-    cam = _CAM(list(setups), strategies=strategies, doc_tools=doc_tools)
+    cam = _make_cam(list(setups), strategies, doc_tools)
     monkeypatch.setattr(cco, "get_cam", lambda: (cam, None))
     # tool-by-reference resolver: (library_url, index) -> Tool, mirrors cam_edit_tools's shared handle
-    lib = _ToolLib([_Tool("12mm Flat Endmill"), _Tool("6mm Ball Endmill")][:tools])
+    lib = _NamedCollection([_tool("12mm Flat Endmill"), _tool("6mm Ball Endmill")][:tools])
     cco._tool_at = lambda url, idx: (lib.item(idx) if 0 <= idx < lib.count else None,
                                      None if 0 <= idx < lib.count else "tool index %d out of range" % idx)
     # the document-library path is NOT patched — it runs the real _doc_tool_at against cam.documentToolLibrary
@@ -375,7 +328,7 @@ class TestProbeStrategyNeedsAProbe:
         return cam
 
     def test_a_cutting_tool_on_a_probing_strategy_is_refused_before_the_add(self, monkeypatch):
-        cam = self._with_tool(monkeypatch, _Tool("50mm Face Mill", tool_type="face mill"))
+        cam = self._with_tool(monkeypatch, _tool("50mm Face Mill", tool_type="face mill"))
         res = cco.handler(setup="Setup1", strategy="probe",
                           tool_library_url="u", tool_index=0)
         assert res["isError"] is True
@@ -386,7 +339,7 @@ class TestProbeStrategyNeedsAProbe:
         assert cam.setups.item(0).operations.count == 0        # nothing was created
 
     def test_a_probe_creates_on_a_probing_strategy(self, monkeypatch):
-        cam = self._with_tool(monkeypatch, _Tool("OMP400", tool_type="probe"))
+        cam = self._with_tool(monkeypatch, _tool("OMP400", tool_type="probe"))
         out = _payload(cco.handler(setup="Setup1", strategy="probe",
                                    tool_library_url="u", tool_index=0))
         assert out["tool"] == "OMP400"
@@ -395,18 +348,18 @@ class TestProbeStrategyNeedsAProbe:
     def test_every_probing_strategy_is_gated_and_a_cutting_one_is_not(self, monkeypatch):
         # THE BOUNDARY: the gate is keyed on the STRATEGY, so a face mill still creates a 'face'.
         for strategy in ("probe", "probe_geometry", "inspect_surface"):
-            self._with_tool(monkeypatch, _Tool("50mm Face Mill", tool_type="face mill"))
+            self._with_tool(monkeypatch, _tool("50mm Face Mill", tool_type="face mill"))
             res = cco.handler(setup="Setup1", strategy=strategy,
                               tool_library_url="u", tool_index=0)
             assert res["isError"] is True, strategy
-        cam = self._with_tool(monkeypatch, _Tool("50mm Face Mill", tool_type="face mill"))
+        cam = self._with_tool(monkeypatch, _tool("50mm Face Mill", tool_type="face mill"))
         _payload(cco.handler(setup="Setup1", strategy="face", tool_library_url="u", tool_index=0))
         assert cam.setups.item(0).operations.count == 1
 
     def test_a_tool_type_that_does_not_read_refuses_nothing(self, monkeypatch):
         # an unread type is no verdict - refusing on it would block a create off a read that
         # never answered.
-        cam = self._with_tool(monkeypatch, _Tool("Mystery", tool_type=None))
+        cam = self._with_tool(monkeypatch, _tool("Mystery", tool_type=None))
         _payload(cco.handler(setup="Setup1", strategy="probe", tool_library_url="u", tool_index=0))
         assert cam.setups.item(0).operations.count == 1
 
@@ -588,7 +541,7 @@ class TestCreate:
                                    tool_library_url="u", tool_index=0, generate=False))
         op = cam.setups.item(0).operations.item(0)
         assert op.strategy == "face"
-        assert op.tool is not None and op.tool.desc == "12mm Flat Endmill"
+        assert op.tool is not None and op.tool.description == "12mm Flat Endmill"
         assert out["operation"] == "Op1" and out["strategy"] == "face"
         assert out["generation_started"] is False
         # not generated -> no toolpath yet
@@ -726,15 +679,15 @@ class TestGenerationMode:
 class TestDocumentToolScope:
     def test_creates_op_from_document_library(self, monkeypatch):
         # tool_scope='document' takes the tool from cam.documentToolLibrary by index — no url needed
-        cam = _install(monkeypatch, doc_tools=(_Tool("Demo Face Mill"), _Tool("Demo Flat Endmill")))
+        cam = _install(monkeypatch, doc_tools=(_tool("Demo Face Mill"), _tool("Demo Flat Endmill")))
         out = _payload(cco.handler(setup="Setup1", strategy="face",
                                    tool_scope="document", tool_index=1, generate=False))
         op = cam.setups.item(0).operations.item(0)
-        assert op.tool.desc == "Demo Flat Endmill"
+        assert op.tool.description == "Demo Flat Endmill"
         assert out["operation"] == "Op1"
 
     def test_document_index_out_of_range(self, monkeypatch):
-        _install(monkeypatch, doc_tools=(_Tool("only one"),))
+        _install(monkeypatch, doc_tools=(_tool("only one"),))
         res = cco.handler(setup="Setup1", strategy="face", tool_scope="document", tool_index=5)
         assert res["isError"] is True and "range" in res["message"].lower()
 
@@ -746,7 +699,7 @@ class TestDocumentToolScope:
     def test_document_scope_ignores_url(self, monkeypatch):
         # tool_scope=document WINS over a supplied url: the tool comes from the document library and
         # url resolution is never attempted - a bogus url must not even be looked at.
-        cam = _install(monkeypatch, doc_tools=(_Tool("Demo Tool"),))
+        cam = _install(monkeypatch, doc_tools=(_tool("Demo Tool"),))
 
         def _boom(url, idx):
             raise AssertionError("url resolution attempted despite tool_scope=document")
@@ -754,7 +707,7 @@ class TestDocumentToolScope:
         out = _payload(cco.handler(setup="Setup1", strategy="face",
                                    tool_scope="document", tool_index=0, generate=False,
                                    tool_library_url="bogus://not-a-library"))
-        assert cam.setups.item(0).operations.item(0).tool.desc == "Demo Tool"
+        assert cam.setups.item(0).operations.item(0).tool.description == "Demo Tool"
         assert out["operation"] == "Op1"
 
     def test_no_ref_at_all_errors(self, monkeypatch):
@@ -785,12 +738,6 @@ class _DeafVocabulary(_Operations):
     """compatibleStrategies will not READ, while createInput and add still work - the platform path
     a create can still take when the vocabulary is unreadable, so no pre-flight has anything to
     check and createInput is the only gate left."""
-
-    def __init__(self, strategies):
-        self._offered = list(strategies)
-        self.added = []
-        self.modes_at_add = []
-        self.names_at_add = []
 
     @property
     def compatibleStrategies(self):
@@ -831,7 +778,7 @@ class TestStrategyRows:
         # THE honesty boundary: safe(read, False) here would mint a blocked strategy out of a
         # property that never answered, and the create would refuse a strategy this license allows.
         cam = _blocked_setup(monkeypatch,
-                             extra=(_RaisingStrategy("mystery", isMillingStrategy=True),))
+                             extra=(_Strategy("mystery", allowed=None, isMillingStrategy=True),))
         rows = {r["name"]: r for r in cco._strategy_rows(cam.setups.item(0))}
         assert rows["mystery"]["allowed"] is None
         assert rows["mystery"]["is_milling"] is True     # the readable flags still read
@@ -892,7 +839,7 @@ class TestReadStrategies:
         return json.loads(res["content"][0]["text"])
 
     def test_the_tallies_split_true_false_and_unreadable(self, monkeypatch):
-        _blocked_setup(monkeypatch, extra=(_RaisingStrategy("mystery"),))
+        _blocked_setup(monkeypatch, extra=(_Strategy("mystery", allowed=None),))
         out = self._payload_of(cco.read_strategies())
         row = out["setups"][0]
         assert row["strategy_count"] == 3
@@ -975,7 +922,7 @@ class TestStrategyEntitlement:
     def test_an_unreadable_entitlement_creates_and_discloses_instead_of_refusing(self, monkeypatch):
         # `is False`, not falsiness: None is a flag that never answered, and refusing on it would
         # invent an entitlement verdict. The create runs the platform's own path and says so.
-        cam = _blocked_setup(monkeypatch, extra=(_RaisingStrategy("mystery"),))
+        cam = _blocked_setup(monkeypatch, extra=(_Strategy("mystery", allowed=None),))
         out = _payload(cco.handler(setup="Setup1", strategy="mystery",
                                    tool_library_url="u", tool_index=0))
         assert cam.setups.item(0).operations.count == 1
@@ -994,7 +941,7 @@ class TestStrategyEntitlement:
     def test_the_disclosure_rides_the_generate_path_too(self, monkeypatch):
         # generate=true REPLACES the note, so a disclosure written before that assembly is silently
         # dropped on exactly the call that goes on to launch a generation.
-        _blocked_setup(monkeypatch, extra=(_RaisingStrategy("mystery"),))
+        _blocked_setup(monkeypatch, extra=(_Strategy("mystery", allowed=None),))
         out = _payload(cco.handler(setup="Setup1", strategy="mystery",
                                    tool_library_url="u", tool_index=1, generate=True))
         assert out["generation_started"] is True
@@ -1117,7 +1064,7 @@ class TestComposedWireLength:
     def test_the_create_note_plus_its_disclosure_fits_the_budget(self, monkeypatch):
         # the longest composition this tool ships: the no-generate note with the entitlement
         # pre-flight disclosed as skipped.
-        _blocked_setup(monkeypatch, extra=(_RaisingStrategy("mystery"),))
+        _blocked_setup(monkeypatch, extra=(_Strategy("mystery", allowed=None),))
         out = _payload(cco.handler(setup="Setup1", strategy="mystery",
                                    tool_library_url="u", tool_index=0))
         assert len(out["note"]) <= self._BUDGET, out["note"]

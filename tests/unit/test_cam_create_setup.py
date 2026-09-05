@@ -7,90 +7,39 @@ guards. No live Fusion - fakes mimic adsk.cam.CAM.setups.
 """
 
 import json
+from types import SimpleNamespace
 
 import adsk.cam
+import adsk.fusion
 
-from conftest import load_tool, _NamedCollection
+from conftest import BRepBody, FakeSetup, FakeSetups, MakeComp, install, load_tool, make_design
 
 cs = load_tool("cam_create_setup")
 
 
-# ── fakes ────────────────────────────────────────────────────────────────────
+class _StubbornSetup(FakeSetup):
+    """A setup whose name write is accepted and dropped - the rename that never took."""
 
-class FakeBody:
-    def __init__(self, name, is_solid=True):
-        self.name = name
-        self.isSolid = is_solid
-
-
-class FakeComp:
-    def __init__(self, bodies):
-        self.bRepBodies = _NamedCollection(bodies)
-        self.occurrences = type("O", (), {"itemByName": lambda self, n: None})()
-        self.allOccurrences = []
-
-
-class FakeSetupInput:
-    def __init__(self, op_type):
-        self.operationType = op_type
-        self.models = []
-        self.name = None
-
-
-class FakeSetup:
-    def __init__(self, inp):
-        self.name = inp.name or "Setup1"
-        self.operationType = inp.operationType
-        self.models = inp.models
-        self.operations = type("Ops", (), {"count": 0})()
-
-
-class FakeSetups:
-    def __init__(self):
-        self.added = []
     @property
-    def count(self):
-        return len(self.added)
-    def item(self, i):
-        return self.added[i]
-    def createInput(self, op_type):
-        return FakeSetupInput(op_type)
-    def add(self, inp):
-        s = FakeSetup(inp)
-        self.added.append(s)
-        return s
+    def name(self):
+        return "Setup1"
+
+    @name.setter
+    def name(self, value):
+        pass
 
 
-class FakeCAM:
-    def __init__(self):
-        self.setups = FakeSetups()
+def _install(monkeypatch, bodies=None, has_cam=True, setups=None):
+    """Wire a design holding `bodies` and a CAM product whose setups collection is `setups`."""
+    comp = MakeComp(bodies=[BRepBody("Body1")] if bodies is None else bodies)
+    design = make_design(comp=comp)
+    cam = SimpleNamespace(setups=setups if setups is not None else FakeSetups()) if has_cam else None
 
-
-class FakeDesign:
-    def __init__(self, comp):
-        self.rootComponent = comp
-        self._tokens = {}
-    def findEntityByToken(self, t):
-        e = self._tokens.get(t)
-        return [e] if e is not None else []
-
-
-def _install(monkeypatch, bodies=None, has_cam=True):
-    bodies = bodies if bodies is not None else [FakeBody("Body1")]
-    comp = FakeComp(bodies)
-    design = FakeDesign(comp)
-    cam = FakeCAM() if has_cam else None
-
-    import adsk.cam, adsk.fusion
-    adsk.fusion.BRepBody = FakeBody
-    adsk.fusion.Design.cast = lambda x: x if isinstance(x, FakeDesign) else None
-
-    # the tool reads CAM via the shared get_cam resolver and design via _design
+    # the models input discriminates a BRepBody by isinstance, so the shared fake IS the class
+    monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
     monkeypatch.setattr(cs, "get_cam", lambda: ((cam, None) if cam else (None, "no CAM")))
-    cs._design = lambda: design
-    # models is a BodyRefList -> resolves via _common.design()/target_component() (the app-ref seam)
-    cs._inputs._common.design = lambda: design
-    cs._inputs._common.target_component = lambda d: comp
+    # models is a TargetRefList -> resolves through _common.design()/target_component()
+    install(cs, design)
     return design, cam, comp
 
 
@@ -105,18 +54,18 @@ class TestOperationType:
     def test_default_is_milling(self, monkeypatch):
         _, cam, _ = _install(monkeypatch)
         out = _payload(cs.handler())
-        assert cam.setups.added[-1].operationType == adsk.cam.OperationTypes.MillingOperation
+        assert cam.setups._added[-1].operationType == adsk.cam.OperationTypes.MillingOperation
         assert out["created"] is True
 
     def test_turning(self, monkeypatch):
         _, cam, _ = _install(monkeypatch)
         _payload(cs.handler(operation_type="turning"))
-        assert cam.setups.added[-1].operationType == adsk.cam.OperationTypes.TurningOperation
+        assert cam.setups._added[-1].operationType == adsk.cam.OperationTypes.TurningOperation
 
     def test_phantom_setup_that_never_lands_bites(self, monkeypatch):
         # add() returns a setup object but it never appears in the re-listed collection -> error
         _, cam, _ = _install(monkeypatch)
-        cam.setups.add = lambda inp: FakeSetup(inp)     # returned, never appended
+        cam.setups.add = lambda inp: FakeSetup("Setup1")   # returned, never appended
         res = cs.handler()
         assert res["isError"] is True
         assert "did not land" in res["message"]
@@ -131,33 +80,33 @@ class TestOperationType:
 
 class TestModelSelection:
     def test_all_root_bodies_when_omitted(self, monkeypatch):
-        _, cam, _ = _install(monkeypatch, bodies=[FakeBody("A"), FakeBody("B")])
+        _, cam, _ = _install(monkeypatch, bodies=[BRepBody("A"), BRepBody("B")])
         _payload(cs.handler())
-        models = cam.setups.added[-1].models
+        models = cam.setups._added[-1].models
         assert {m.name for m in models} == {"A", "B"}
 
     def test_default_set_is_every_root_body_including_a_surface_one(self, monkeypatch):
         # The default machining set is every root BRep body, solid AND surface - what the walk does
         # and what the tool now claims. An isSolid filter here would silently drop 'Skin'.
-        _, cam, _ = _install(monkeypatch, bodies=[FakeBody("Plate"), FakeBody("Skin", is_solid=False)])
+        _, cam, _ = _install(monkeypatch, bodies=[BRepBody("Plate"), BRepBody("Skin", is_solid=False)])
         _payload(cs.handler())
-        assert {m.name for m in cam.setups.added[-1].models} == {"Plate", "Skin"}
+        assert {m.name for m in cam.setups._added[-1].models} == {"Plate", "Skin"}
 
     def test_named_body(self, monkeypatch):
-        _, cam, _ = _install(monkeypatch, bodies=[FakeBody("Widget"), FakeBody("Other")])
+        _, cam, _ = _install(monkeypatch, bodies=[BRepBody("Widget"), BRepBody("Other")])
         _payload(cs.handler(models="Widget"))
-        models = cam.setups.added[-1].models
+        models = cam.setups._added[-1].models
         assert [m.name for m in models] == ["Widget"]
 
     def test_body_by_handle(self, monkeypatch):
-        design, cam, _ = _install(monkeypatch, bodies=[FakeBody("Body1")])
+        design, cam, _ = _install(monkeypatch, bodies=[BRepBody("Body1")])
         h = "/v" + "Z" * 70
-        design._tokens[h] = FakeBody("FromHandle")
+        design._tokens[h] = BRepBody("FromHandle")
         _payload(cs.handler(models=h))
-        assert cam.setups.added[-1].models[0].name == "FromHandle"
+        assert cam.setups._added[-1].models[0].name == "FromHandle"
 
     def test_missing_named_model_errors(self, monkeypatch):
-        _install(monkeypatch, bodies=[FakeBody("Body1")])
+        _install(monkeypatch, bodies=[BRepBody("Body1")])
         res = cs.handler(models="Nope")
         assert res["isError"] is True and "Nope" in res["message"]
 
@@ -189,15 +138,15 @@ class TestNamingAndGuards:
     def test_custom_name(self, monkeypatch):
         _, cam, _ = _install(monkeypatch)
         out = _payload(cs.handler(name="Op10 Mill"))
-        assert cam.setups.added[-1].name == "Op10 Mill"
+        assert cam.setups.item(0).name == "Op10 Mill"
         assert out["setup_name"] == "Op10 Mill"
 
     def test_blank_name_not_assigned(self, monkeypatch):
-        # whitespace-only name -> inp.name left at the FakeSetupInput default (None),
-        # so the setup keeps its auto-name ("Setup1"), it is NOT set to "   ".
+        # a whitespace-only name is no rename at all, so the setup keeps the auto-name the add
+        # gave it ("Setup1") - it is NOT set to "   ".
         _, cam, _ = _install(monkeypatch)
         out = _payload(cs.handler(name="   "))
-        assert cam.setups.added[-1].name == "Setup1"
+        assert cam.setups.item(0).name == "Setup1"
         assert out["setup_name"] == "Setup1"
 
     def test_a_name_a_setup_already_answers_to_is_refused_before_the_add(self, monkeypatch):
@@ -221,19 +170,7 @@ class TestNamingAndGuards:
     def test_a_declined_name_is_disclosed_not_published_as_requested(self, monkeypatch):
         # The setup LANDED, so a name the platform declines (or dedupes) is a disclosure, not a
         # failed create - and the payload publishes the name Setup.name reads back.
-        _, cam, _ = _install(monkeypatch)
-        class StubbornSetup(FakeSetup):
-            @property
-            def name(self):
-                return "Setup1"
-            @name.setter
-            def name(self, value):
-                pass
-        def add(inp):
-            s = StubbornSetup(inp)
-            cam.setups.added.append(s)
-            return s
-        cam.setups.add = add
+        _install(monkeypatch, setups=FakeSetups(new_setup=_StubbornSetup("Setup1")))
         out = _payload(cs.handler(name="Op10 Mill"))
         assert out["setup_name"] == "Setup1"
         assert "Op10 Mill" in out["rename_warning"] and "did not take" in out["rename_warning"]
@@ -248,7 +185,7 @@ class TestNamingAndGuards:
 
 class TestOutputFields:
     def test_model_count_and_names_reported(self, monkeypatch):
-        _install(monkeypatch, bodies=[FakeBody("A"), FakeBody("B"), FakeBody("C")])
+        _install(monkeypatch, bodies=[BRepBody("A"), BRepBody("B"), BRepBody("C")])
         out = _payload(cs.handler())
         assert out["model_count"] == 3
         assert set(out["models"]) == {"A", "B", "C"}
@@ -256,7 +193,7 @@ class TestOutputFields:
         assert out["operation_type"] == "milling"
 
     def test_single_body_model_count_one(self, monkeypatch):
-        _install(monkeypatch, bodies=[FakeBody("Solo")])
+        _install(monkeypatch, bodies=[BRepBody("Solo")])
         out = _payload(cs.handler())
         assert out["model_count"] == 1
         assert out["models"] == ["Solo"]

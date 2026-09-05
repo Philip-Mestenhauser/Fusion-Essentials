@@ -649,6 +649,14 @@ class _FakeTriangleMesh:
             self.normalVectorsAsDouble = list(normals)
 
 
+@fusion_fake(factory_for="_NamedCollection")
+def make_face_groups(spec):
+    """A MeshBody.faceGroups collection: an int builds that many groups with tempIds 1..n, a
+    sequence names the tempIds. The tempId is the read a caller compares across a generation."""
+    ids = list(range(1, spec + 1)) if isinstance(spec, int) else list(spec)
+    return _NamedCollection([types.SimpleNamespace(tempId=t) for t in ids])
+
+
 @fusion_fake(live_type="PolygonMesh", facts=("shape-dump-mesh-world",))
 class _FakePolygonMesh:
     """MeshBody.mesh - the flat x,y,z node coordinates a smooth moves and the flat normal
@@ -667,6 +675,7 @@ class _FakePolygonMesh:
                     "meshbody-assembly-context-proxy",
                     "meshbody-delete-answers-true-and-removes",
                     "meshbody-facegroups-counted-before-generation",
+                    "facegroup-generation-reads-carry-no-verdict",
                     "meshbody-area-and-boundingbox-open-mesh"))
 class MeshBody:
     """Matches type(entity).__name__ == 'MeshBody' - the shared mesh fake every mesh-feature tool
@@ -689,14 +698,16 @@ class MeshBody:
     `_closed_readable`, `_mesh_readable` (the PolygonMesh behind both the coordinates and the
     normals). A test flips one on the instance to break that read mid-flight.
 
-    `area` (cm2), `bbox`, `face_groups` and the polygon-mesh census `polygons`/`mesh_nodes` are set
-    only when given, so a mesh whose surface area, box, face groups or polygon census does not read
-    stays a testable state; live, all four read on an OPEN mesh too and faceGroups already counts 1
-    before any generation. `deletes` is what deleteMe() answers - see the method."""
+    `area` (cm2), `bbox` and the polygon-mesh census `polygons`/`mesh_nodes` are set only when given,
+    so a mesh whose surface area, box or polygon census does not read stays a testable state; live,
+    all of them read on an OPEN mesh too. `face_groups` DEFAULTS to the ONE group whose tempId reads
+    0 that a mesh publishes before anything segments it (measured); an int builds that many groups
+    with tempIds 1..n, a sequence names the tempIds outright, and None is the mesh whose faceGroups
+    does not read at all. `deletes` is what deleteMe() answers - see the method."""
     def __init__(self, name="Scan1", tri=12, nodes=8, is_closed=True, volume=1.0, coords=(),
                  normals=(), token=None, parent=None, counts_readable=True, volume_readable=True,
                  closed_readable=True, mesh_readable=True, lifts=True, area=None, bbox=None,
-                 face_groups=None, polygons=None, mesh_nodes=None, deletes=True):
+                 face_groups=(0,), polygons=None, mesh_nodes=None, deletes=True):
         self.name = name
         self.isValid = True
         self._polygons = polygons
@@ -707,9 +718,7 @@ class MeshBody:
         if bbox is not None:
             self.boundingBox = bbox
         if face_groups is not None:
-            self.faceGroups = _NamedCollection([None] * face_groups
-                                               if isinstance(face_groups, int)
-                                               else list(face_groups))
+            self.faceGroups = make_face_groups(face_groups)
         # A NATIVE body reads assemblyContext None and nativeObject None; createForAssemblyContext
         # mints the proxy that answers both. `lifts` False models a lift handing nothing back.
         self.assemblyContext = None
@@ -907,10 +916,13 @@ class _NamedCollection:
 
     `raises` is the collection that will not enumerate AT ALL - count, item, itemByName and
     iteration each throw that message, which is not the same answer as an empty walk. A test flips
-    `_raises` on the instance to break the reads mid-flight."""
-    def __init__(self, items=(), raises=None):
+    `_raises` on the instance to break the reads mid-flight. `item_raises` is the NARROWER state -
+    the walk counts, but reaching for a member throws - which is what a collection whose length
+    survives a stale read while its items do not answers."""
+    def __init__(self, items=(), raises=None, item_raises=None):
         self._items = list(items)
         self._raises = raises
+        self._item_raises = item_raises
 
     def _live(self):
         if self._raises:
@@ -923,6 +935,8 @@ class _NamedCollection:
 
     def item(self, i):
         self._live()
+        if self._item_raises:
+            raise RuntimeError(self._item_raises)
         if 0 <= i < len(self._items):
             return self._items[i]
         if _api_facts.BEHAVIOR["collection_item_out_of_range_raises"]:
@@ -1029,10 +1043,18 @@ class FakeVector3D:
         self.x, self.y, self.z = m._apply_vector(self.x, self.y, self.z)
         return True
 
+    def asPoint(self):
+        """The same three components as a Point3D - what a translation column is read through when
+        a caller wants a POSITION out of a placement's translation vector."""
+        return FakePoint(self.x, self.y, self.z)
+
 
 @fusion_fake(live_type="Matrix3D",
              facts=("shape-dump-design-world",
-                    "matrix3d-invert-singular-answers-true-and-corrupts"))
+                    "matrix3d-invert-singular-answers-true-and-corrupts",
+                    "matrix3d-transformby-applies-the-argument-after-self",
+                    "matrix3d-asarray-row-major-translation-3-7-11",
+                    "matrix3d-translation-copies-and-refuses-none"))
 class FakeMatrix3D:
     """Numeric adsk.core.Matrix3D: a rotation of `deg` about Z followed by a translation `t` (cm).
 
@@ -1053,31 +1075,109 @@ class FakeMatrix3D:
 
     A ROTATED placement is what tells a real lift apart from a backwards one - under identity the
     two are the same matrix.
+
+    ``setToRotation``/``transformBy`` carry the general rotation the (deg, t) constructor is one case
+    of, so a rotation about ANY axis through ANY origin is expressible. setToRotation bakes the
+    PIVOT correction into the translation column, which is why assigning ``translation`` after it
+    destroys the pivot and a caller composes a translation matrix instead; ``_direct_translation``
+    records that assignment so a test can tell the two apart.
     """
     def __init__(self, deg=0.0, t=(0.0, 0.0, 0.0), invertible=True):
         self._deg = float(deg)
         self._t = tuple(float(v) for v in t)
         self._invertible = bool(invertible)
+        r = math.radians(self._deg)
+        c, s = math.cos(r), math.sin(r)
+        self._r = ((c, -s, 0.0), (s, c, 0.0), (0.0, 0.0, 1.0))
+        self._rotated = False
+        self._composed = []
+        self._direct_translation = False
 
     def copy(self):
-        return type(self)(self._deg, self._t, self._invertible)
+        m = type(self)(self._deg, self._t, self._invertible)
+        m._r, m._t, m._rotated = self._r, self._t, self._rotated
+        m._direct_translation = self._direct_translation
+        return m
 
     def invert(self):
         if not self._invertible:
             return False
-        # (R, t) -> (R^-1, -R^-1 t)
-        r = math.radians(-self._deg)
-        c, s = math.cos(r), math.sin(r)
-        tx, ty, tz = self._t
+        # (R, t) -> (R^-1, -R^-1 t); a rotation matrix's inverse is its transpose.
+        self._r = tuple(zip(*self._r))
         self._deg = -self._deg
-        self._t = (-(c * tx - s * ty), -(s * tx + c * ty), -tz)
+        self._t = tuple(-v for v in self._apply_vector(*self._t))
         return True
+
+    @property
+    def translation(self):
+        """Matrix3D.translation - the offset column as a FRESH Vector3D each read (measured:
+        matrix3d-translation-copies-and-refuses-none - the object handed back is never the one
+        assigned), so mutating what a read returned moves nothing."""
+        return FakeVector3D(*self._t)
+
+    @translation.setter
+    def translation(self, vec):
+        # Measured: the member takes a Vector3D and NOTHING else. None answers
+        # "3 : invalid argument value"; a Point3D/tuple/list/int/Vector2D answers a TYPE error, so
+        # duck-typing on x/y/z here would accept a Point3D the live member rejects.
+        if vec is None:
+            raise RuntimeError("3 : invalid argument value")
+        if not isinstance(vec, FakeVector3D):
+            raise TypeError("translation takes a Vector3D, not a %s" % type(vec).__name__)
+        if self._rotated:
+            self._direct_translation = True
+        self._t = (float(vec.x), float(vec.y), float(vec.z))
+
+    def setToRotation(self, angle, axis, origin):
+        """Matrix3D.setToRotation(angle_rad, axis, origin) -> bool. The translation column becomes
+        the PIVOT correction that holds `origin` fixed, so the rotation runs about that point."""
+        ax, ay, az = (float(getattr(axis, a, 0.0) or 0.0) for a in ("x", "y", "z"))
+        n = (ax * ax + ay * ay + az * az) ** 0.5
+        if n < 1e-12:
+            return False
+        ax, ay, az = ax / n, ay / n, az / n
+        c, s, k = math.cos(angle), math.sin(angle), 1.0 - math.cos(angle)
+        self._r = ((c + ax * ax * k, ax * ay * k - az * s, ax * az * k + ay * s),
+                   (ay * ax * k + az * s, c + ay * ay * k, ay * az * k - ax * s),
+                   (az * ax * k - ay * s, az * ay * k + ax * s, c + az * az * k))
+        o = tuple(float(getattr(origin, a, 0.0) or 0.0) for a in ("x", "y", "z"))
+        self._t = tuple(a - b for a, b in zip(o, self._apply_vector(*o)))
+        self._rotated = True
+        return True
+
+    def transformBy(self, other):
+        """Matrix3D.transformBy(other) -> bool: `other` is applied AFTER this matrix in world
+        coordinates (measured: matrix3d-transformby-applies-the-argument-after-self - rotate-then-
+        translate lands the offset, the reverse order rotates it). It ACCUMULATES, so two successive
+        moves of +5 leave the placement 10 out and a repeated move never reads as unchanged."""
+        self._composed.append(other)
+        rows = getattr(other, "_r", ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
+        self._r = tuple(tuple(sum(rows[i][k] * self._r[k][j] for k in range(3))
+                              for j in range(3)) for i in range(3))
+        moved = other._apply_vector(*self._t) if hasattr(other, "_apply_vector") else self._t
+        self._t = tuple(a + b for a, b in zip(moved, getattr(other, "_t", (0.0, 0.0, 0.0))))
+        self._rotated = self._rotated or bool(getattr(other, "_rotated", False))
+        return True
+
+    def asArray(self):
+        """Matrix3D.asArray - the 16 cells ROW-MAJOR, the translation in elements 3/7/11 (measured:
+        matrix3d-asarray-row-major-translation-3-7-11)."""
+        return [self._r[0][0], self._r[0][1], self._r[0][2], self._t[0],
+                self._r[1][0], self._r[1][1], self._r[1][2], self._t[1],
+                self._r[2][0], self._r[2][1], self._r[2][2], self._t[2],
+                0.0, 0.0, 0.0, 1.0]
+
+    def getAsCoordinateSystem(self):
+        """(origin, xAxis, yAxis, zAxis) - the Python shape of the void-return plus four
+        output-parameter API; the axes are this matrix's rotation on the world basis."""
+        return (FakePoint(*self._t),
+                FakeVector3D(*self._apply_vector(1.0, 0.0, 0.0)),
+                FakeVector3D(*self._apply_vector(0.0, 1.0, 0.0)),
+                FakeVector3D(*self._apply_vector(0.0, 0.0, 1.0)))
 
     def _apply_vector(self, x, y, z):
         """The rotation ONLY - what a Vector3D gets, so a direction never picks up a placement."""
-        r = math.radians(self._deg)
-        c, s = math.cos(r), math.sin(r)
-        return (c * x - s * y, s * x + c * y, z)
+        return tuple(row[0] * x + row[1] * y + row[2] * z for row in self._r)
 
     def _apply_point(self, x, y, z):
         """The rotation AND the translation - what a Point3D gets."""
@@ -1320,8 +1420,12 @@ class FakeOperation:
     coerced default would publish one of them off a read that never happened."""
     def __init__(self, name, has_toolpath=True, valid=True, suppressed=False, shown=False,
                  operation_state=0, has_error=False, error="", has_warning=False, warning="",
-                 state_readable=True, strategy="contour2d"):
+                 state_readable=True, strategy="contour2d", parameters=None, tool=None):
         self.name = name
+        # An operation with no `parameters` given still answers a collection - the read every CAM
+        # tool makes; `tool` unset answers None, the empty read a tool row has to survive.
+        self.parameters = FakeCAMParameters() if parameters is None else parameters
+        self.tool = tool
         # Operation.strategy - 'manual' is the Manual NC pass-through, which carries no toolpath by
         # construction and is excluded from the empty-toolpath class.
         self.strategy = strategy
@@ -1688,16 +1792,30 @@ class MakeComp:
     set only when given, so a component that answers no meshBodies at all stays a testable state.
     """
     def __init__(self, name="Root", bodies=(), occurrences=(), sketches=(), entity_token=None,
-                 parent_design=None, mesh_bodies=None):
+                 parent_design=None, mesh_bodies=None, all_occurrences=None, joints=None,
+                 as_built_joints=None, joint_origins=None, rigid_groups=None, motion_links=None,
+                 assembly_constraints=None, occurrences_by_component=None):
         self.name = name
         norm = [b if hasattr(b, "name") else BRepBody(b) for b in bodies]
         self.bRepBodies = _NamedCollection(norm)
         if mesh_bodies is not None:
             self.meshBodies = _MeshBodies(list(mesh_bodies))
         self.occurrences = _NamedCollection(list(occurrences))
-        self.allOccurrences = list(occurrences)
+        # allOccurrences is the NESTED walk - the same list as occurrences unless a caller hands the
+        # deeper one, which is the only walk reaching an occurrence inside a sub-assembly.
+        self.allOccurrences = list(occurrences if all_occurrences is None else all_occurrences)
         self.sketches = _NamedCollection(list(sketches))
         self.boundingBox = None
+        # The assembly collections a live Component ALWAYS carries - a component holding no joints
+        # answers an EMPTY walk, never a missing member, so each defaults to empty. A collection
+        # that will not enumerate is _NamedCollection(raises=...) handed in here.
+        self.joints = _NamedCollection(list(joints or ()))
+        self.asBuiltJoints = _NamedCollection(list(as_built_joints or ()))
+        self.jointOrigins = _NamedCollection(list(joint_origins or ()))
+        self.rigidGroups = _NamedCollection(list(rigid_groups or ()))
+        self.motionLinks = _NamedCollection(list(motion_links or ()))
+        self.assemblyConstraints = _NamedCollection(list(assembly_constraints or ()))
+        self._occurrences_by_component = occurrences_by_component
         # Set only when asked: a component whose token does NOT read is its own tested state, and
         # every live component has a token but two DISTINCT ones can share it (document-local), so a
         # test that cares about identity must choose the tokens rather than inherit a default.
@@ -1710,11 +1828,35 @@ class MakeComp:
         if parent_design is not None:
             self.parentDesign = parent_design
 
+    def allOccurrencesByComponent(self, component):
+        """Every occurrence in this component's subtree placing `component` - the multi-placement
+        rung of the placement ladder. Matched on entityToken, since two references to one component
+        are distinct objects sharing one token and an identity compare would answer none; a curated
+        `occurrences_by_component` map keyed by component NAME overrides that walk."""
+        # A COUNTED collection, never a bare list: a caller reads `.count` off it, and a list's own
+        # `count` is a bound METHOD - truthy, never an int, so a list silently breaks that read.
+        if self._occurrences_by_component is not None:
+            return _NamedCollection(
+                self._occurrences_by_component.get(getattr(component, "name", None), []))
+        want = getattr(component, "entityToken", None)
+        if want is None:
+            return _NamedCollection([])
+        out = []
+        for occ in self.allOccurrences:
+            try:
+                placed = occ.component
+            except Exception:
+                continue
+            if getattr(placed, "entityToken", None) == want:
+                out.append(occ)
+        return _NamedCollection(out)
+
 
 @fusion_fake(live_type="Design",
              facts=("shape-dump-design-world", "allcomponents-design-only",
                     "find-entity-token-shape", "find-entity-token-miss",
-                    "find-entity-token-multi", "design-computeall-returns-true"))
+                    "find-entity-token-multi", "design-computeall-returns-true",
+                    "design-activate-root-reads-back"))
 class MakeDesign:
     """A design exposing the attributes tools/inputs read: rootComponent, activeComponent (defaults to
     root), allOccurrences, allComponents, and findEntityByToken(token) backed by a `tokens` map.
@@ -1733,14 +1875,34 @@ class MakeDesign:
 
     `computeAll()` is the full recompute design_recompute drives; it answers the measured True,
     `compute_raises` is the message it throws with instead, and the calls are counted privately in
-    `_computes`."""
+    `_computes`.
+
+    `active_occurrence` is the occurrence holding the edit target, None at the root - the read
+    `isRootComponentActive` is the other face of, never disagreeing with it live. `root_activate_ok`
+    is what `activateRootComponent()` answers and `root_activate_lies` the answer-true-and-never-
+    clear state a return-to-root read-back catches (the Design-side twin of FakeOccurrence's
+    `activate_lies`); Occurrence carries no deactivate(), so this is the only way back to root.
+    `root_active_reads` forces `isRootComponentActive` to one answer whatever `activeOccurrence`
+    holds - a DECLARED worst case, since live the two are one state, and the only shape in which a
+    caller checking just one of the pair can be caught."""
     def __init__(self, comp=None, tokens=None, all_components=None, parent_document=None,
                  design_type=None, active_edit_object=None, timeline=None, user_parameters=None,
-                 all_parameters=None, compute_raises=None):
+                 all_parameters=None, compute_raises=None, active_occurrence=None,
+                 root_activate_ok=True, root_activate_lies=False, root_active_reads=None,
+                 snapshots=None):
         self._compute_raises = compute_raises
         self._computes = 0
         self.rootComponent = comp if comp is not None else MakeComp()
         self.activeComponent = self.rootComponent
+        self.activeOccurrence = active_occurrence
+        self._root_activate_ok = root_activate_ok
+        self._root_activate_lies = root_activate_lies
+        self._root_active_reads = root_active_reads
+        # A design whose snapshots read DECLINES leaves the moved-but-uncaptured flag unreadable,
+        # which is not the answer "nothing is pending" - a joint create refuses only on a flag that
+        # proved True. Set when given, since no shared Snapshots fake carries the ordinary answer.
+        if snapshots is not None:
+            self.snapshots = snapshots
         if parent_document is not None:
             self.parentDocument = parent_document
         if design_type is not None:
@@ -1761,6 +1923,18 @@ class MakeDesign:
         # A counted+iterable collection on the DESIGN, as in the live API - Component has no
         # allComponents attribute, so a fake must not offer one anywhere else.
         return _NamedCollection(self._all_components)
+
+    @property
+    def isRootComponentActive(self):
+        # The measured pair: a null activeOccurrence and root-active are ONE state - unless a test
+        # declares the worst case in which they disagree.
+        return (self.activeOccurrence is None if self._root_active_reads is None
+                else self._root_active_reads)
+
+    def activateRootComponent(self):
+        if self._root_activate_ok and not self._root_activate_lies:
+            self.activeOccurrence = None
+        return self._root_activate_ok
 
     def findEntityByToken(self, token):
         # Live returns a SWIG BaseVector, not a list - len/bool/index/iterate behave list-like
@@ -1802,20 +1976,26 @@ def make_source_document(urn):
 @fusion_fake(factory_for="MakeDesign")
 def make_design(bodies=(), occurrences=(), tokens=None, comp=None, all_components=None,
                 sketches=(), mesh_bodies=None, design_type=None, active_edit_object=None,
-                timeline=None, user_parameters=None, all_parameters=None, compute_raises=None):
+                timeline=None, user_parameters=None, all_parameters=None, compute_raises=None,
+                snapshots=None, joints=None, as_built_joints=None, all_occurrences=None):
     """Build a standard FakeDesign. Use `comp=` to supply a tool-specific component (one carrying a
     fake `features`/`exportManager`/… surface); otherwise a plain MakeComp(bodies, occurrences).
-    `timeline`/`user_parameters`/`all_parameters`/`compute_raises` pass through to MakeDesign."""
+    `timeline`/`user_parameters`/`all_parameters`/`compute_raises`/`snapshots` pass through to
+    MakeDesign; `joints`/`as_built_joints`/`all_occurrences` to the component it builds."""
     if comp is None:
         comp = MakeComp(bodies=bodies, occurrences=occurrences, sketches=sketches,
-                        mesh_bodies=mesh_bodies)
+                        mesh_bodies=mesh_bodies, joints=joints, as_built_joints=as_built_joints,
+                        all_occurrences=all_occurrences)
     return MakeDesign(comp=comp, tokens=tokens, all_components=all_components,
                       design_type=design_type, active_edit_object=active_edit_object,
                       timeline=timeline, user_parameters=user_parameters,
-                      all_parameters=all_parameters, compute_raises=compute_raises)
+                      all_parameters=all_parameters, compute_raises=compute_raises,
+                      snapshots=snapshots)
 
 
-@fusion_fake(live_type="Occurrence", facts=("shape-dump-design-world",))
+@fusion_fake(live_type="Occurrence",
+             facts=("shape-dump-design-world",
+                    "occurrence-plain-reads-referenced-false-empty-collections"))
 class FakeOccurrence:
     """One assembly occurrence: the component it places, its fullPathName, its name.
 
@@ -1845,17 +2025,33 @@ class FakeOccurrence:
     answering the bool its caller gates on; ``activate_lies`` is the answer-true-and-never-flip
     state an activation read-back catches, and ``activate_ok`` False the refusal said out loud.
 
+    ``transform`` is the LOCAL placement, relative to the parent component, composing no ancestor -
+    the read a world-vs-local pair is told apart by, and the fallback a build whose ``transform2``
+    declines falls to. Both are SETTABLE, since a free move writes one back and reads it again.
+    ``isGroundToParent`` is settable for the same reason; ``ground_set_ok`` False is the write the
+    platform refuses and ``ground_lies`` the one it accepts and never applies - the pair a
+    read-back gate separates.
+
+    ``joints`` is the joint membership a move warns about, ``isGrounded`` the legacy UI Ground/Fix
+    flag, ``bRepBodies`` the bodies this instance places, ``isReferencedComponent`` whether the
+    instance places an EXTERNAL component and ``boundingBox`` its own box. Measured: a plain local
+    occurrence answers isReferencedComponent False and two EMPTY collections, so those are the
+    defaults here - a read that DECLINES is ``raises_on``, never a missing member.
+
     ONE class, so a test can point ``adsk.fusion.Occurrence`` at it and the shared occurrence
     resolver's isinstance check passes on a handle it resolved.
     """
 
     def __init__(self, path="Comp:1", component=None, raises=None, transform2=None,
                  assembly_context=None, ground_to_parent=None, children=(), raises_on=None,
-                 is_active=False, activate_ok=True, activate_lies=False):
+                 is_active=False, activate_ok=True, activate_lies=False, transform=None,
+                 joints=None, grounded=None, bodies=None, bounding_box=None, entity_token=None,
+                 ground_set_ok=True, ground_lies=False, referenced=None):
         self._path = path
         self._component = component
         self._raises = raises
         self._transform2 = transform2
+        self._transform = transform
         self._assembly_context = assembly_context
         self._ground_to_parent = ground_to_parent
         self._children = _NamedCollection(list(children))
@@ -1863,6 +2059,21 @@ class FakeOccurrence:
         self._is_active = is_active
         self._activate_ok = activate_ok
         self._activate_lies = activate_lies
+        self._grounded = grounded
+        self._bounding_box = bounding_box
+        self._ground_set_ok = ground_set_ok
+        self._ground_lies = ground_lies
+        self._grounds = []
+        # The ORDINARY live answers (measured: occurrence-plain-reads-referenced-false-empty-
+        # collections - a plain local occurrence reads False and two empty collections). A read that
+        # DECLINES is raises_on, never an absent member: the live type carries all three.
+        self._joints = _NamedCollection(list(joints or ()))
+        self._bodies = _NamedCollection(list(bodies or ()))
+        self._referenced = False if referenced is None else referenced
+        # Set only when asked: every live occurrence has a token, but two DISTINCT ones can share it
+        # (document-local), so a test that cares about identity chooses the token.
+        if entity_token is not None:
+            self.entityToken = entity_token
         self.name = path.split("+")[-1]
 
     def _read(self, prop, value):
@@ -1880,9 +2091,63 @@ class FakeOccurrence:
     def component(self):
         return self._read("component", self._component)
 
+    # Each of the four reads below goes through _read, so `raises`/`raises_on` govern it like every
+    # other read here; each takes a setter so a scenario SUBCLASS can assign it in its own __init__.
+    @property
+    def isGrounded(self):
+        return self._read("isGrounded", self._grounded)
+
+    @isGrounded.setter
+    def isGrounded(self, value):
+        self._grounded = value
+
+    @property
+    def boundingBox(self):
+        return self._read("boundingBox", self._bounding_box)
+
+    @boundingBox.setter
+    def boundingBox(self, value):
+        self._bounding_box = value
+
+    @property
+    def joints(self):
+        return self._read("joints", self._joints)
+
+    @joints.setter
+    def joints(self, value):
+        self._joints = value
+
+    @property
+    def bRepBodies(self):
+        return self._read("bRepBodies", self._bodies)
+
+    @bRepBodies.setter
+    def bRepBodies(self, value):
+        self._bodies = value
+
+    @property
+    def isReferencedComponent(self):
+        return self._read("isReferencedComponent", self._referenced)
+
+    @isReferencedComponent.setter
+    def isReferencedComponent(self, value):
+        self._referenced = value
+
+    @property
+    def transform(self):
+        return self._read("transform", self._transform)
+
+    @transform.setter
+    def transform(self, value):
+        self._transform = value
+
     @property
     def transform2(self):
         return self._read("transform2", self._transform2)
+
+    @transform2.setter
+    def transform2(self, value):
+        self._transform2 = value
 
     @property
     def assemblyContext(self):
@@ -1891,6 +2156,16 @@ class FakeOccurrence:
     @property
     def isGroundToParent(self):
         return self._read("isGroundToParent", self._ground_to_parent)
+
+    @isGroundToParent.setter
+    def isGroundToParent(self, value):
+        # ``ground_set_ok`` False RAISES, which is the refusal the tool's try/except reports;
+        # ``ground_lies`` takes the assignment silently and never flips, which only a read-back catches.
+        self._grounds.append(bool(value))
+        if not self._ground_set_ok:
+            raise RuntimeError("3 : this occurrence cannot be grounded to its parent")
+        if not self._ground_lies:
+            self._ground_to_parent = bool(value)
 
     @property
     def childOccurrences(self):
@@ -1908,14 +2183,19 @@ class FakeOccurrence:
 
 @fusion_fake(factory_for="FakeOccurrence")
 def make_occurrence(path="Comp:1", component=None, raises=None, transform2=None,
-                    assembly_context=None, ground_to_parent=None, children=(), raises_on=None):
+                    assembly_context=None, ground_to_parent=None, children=(), raises_on=None,
+                    transform=None, joints=None, grounded=None, bodies=None, bounding_box=None,
+                    entity_token=None, referenced=None):
     """An occurrence placing `component` at assembly path `path`, with the placement matrix
     ``transform2`` and the occurrence ``assembly_context`` that places it, the ground-to-parent lock
     ``ground_to_parent`` and the nested ``children`` a census descends into. Pass ``raises`` to model
     an unresolved external reference, where every read but ``name`` throws that message, or
     ``raises_on`` = {property: message} for the row where only that one read declines."""
     return FakeOccurrence(path, component, raises, transform2, assembly_context,
-                          ground_to_parent, children, raises_on)
+                          ground_to_parent, children, raises_on, transform=transform,
+                          joints=joints, grounded=grounded, bodies=bodies,
+                          bounding_box=bounding_box, entity_token=entity_token,
+                          referenced=referenced)
 
 
 def make_sketch_curve(token="curve0", length=1.0, is_closed=None):
@@ -1976,24 +2256,27 @@ class SketchCurves:
 class Sketch:
     """A sketch: its name, sketchCurves, sketchPoints and the parentComponent a feature must be
     built in. `profiles` are the closed regions a blind profiles.item(0) indexes and
-    `is_compute_deferred` the flag whose True makes those regions the pre-deferral ones."""
+    `is_compute_deferred` the flag whose True makes those regions the pre-deferral ones.
+    `is_visible` is the browser bulb a tool hides a helper sketch behind."""
     def __init__(self, name="Sketch1", curves=None, points=(), profiles=(),
-                 is_compute_deferred=False, parent_component=None):
+                 is_compute_deferred=False, parent_component=None, is_visible=True):
         self.name = name
         self.sketchCurves = SketchCurves() if curves is None else curves
         self.sketchPoints = _NamedCollection(points)
         self.profiles = _NamedCollection(profiles)
         self.isComputeDeferred = is_compute_deferred
         self.parentComponent = parent_component
+        self.isVisible = is_visible
 
 
 @fusion_fake(factory_for="Sketch")
 def make_sketch(name="Sketch1", lines=(), arcs=(), circles=(), ellipses=(), splines=(), points=(),
-                profiles=(), is_compute_deferred=False, parent_component=None):
+                profiles=(), is_compute_deferred=False, parent_component=None, is_visible=True):
     """A Sketch whose curves are grouped into the per-kind sub-collections. Members come from
     make_sketch_curve."""
     curves = SketchCurves(lines, arcs, circles, ellipses, splines)
-    return Sketch(name, curves, points, profiles, is_compute_deferred, parent_component)
+    return Sketch(name, curves, points, profiles, is_compute_deferred, parent_component,
+                  is_visible)
 
 
 def sketch_curves_edit(collection, add=(), remove=()):
@@ -2422,6 +2705,7 @@ class FakeTimeline:
         self._marker = len(self._items) if marker is None else marker
         self._raises = raises
         self._move_ok = move_ok
+        self._moves = []
 
     def _read(self, value):
         if self._raises:
@@ -2439,9 +2723,17 @@ class FakeTimeline:
     def markerPosition(self):
         return self._read(self._marker)
 
+    @markerPosition.setter
+    def markerPosition(self, value):
+        # Settable live, and the roll a relation edit brackets its write with; the assignments land
+        # in _moves so a test can read back WHERE the marker was driven, not just where it ended.
+        self._moves.append(value)
+        self._marker = value
+
     def _move(self, position):
         if not self._move_ok:
             return False
+        self._moves.append(position)
         if 0 <= position <= len(self._items):
             self._marker = position
         return True
@@ -2681,9 +2973,11 @@ class _MotionLimits:
 class RevoluteJointMotion:
     """The revolute motion: rotationValue in RADIANS, its limits, and the axis vector a drive reads
     its heading off. An assignment beyond an enabled bound is ignored and one that lands is stored
-    on the measured 0.1 deg grid."""
-    def __init__(self, value=0.0, limits=None, axis_vector=None, joint_type=None):
+    on the measured 0.1 deg grid. `stores` False takes every assignment and keeps NONE of them -
+    the swallowed write only a read-back catches, distinct from a value a limit refused."""
+    def __init__(self, value=0.0, limits=None, axis_vector=None, joint_type=None, stores=True):
         self._value = value
+        self._stores = stores
         self.rotationLimits = _MotionLimits() if limits is None else limits
         self.rotationAxisVector = axis_vector
         self.jointType = (_api_facts.ENUMS["fusion.JointTypes"]["RevoluteJointType"]
@@ -2695,7 +2989,7 @@ class RevoluteJointMotion:
 
     @rotationValue.setter
     def rotationValue(self, value):
-        if _limit_allows(self.rotationLimits, value):
+        if self._stores and _limit_allows(self.rotationLimits, value):
             self._value = _stored_rotation(value)
 
 
@@ -2705,9 +2999,11 @@ class RevoluteJointMotion:
 class SliderJointMotion:
     """The slider motion: slideValue in CM, its limits, and the direction vector a drive's SIGN
     follows. An assignment beyond an enabled bound is ignored; no store grid is measured for it, so
-    a value that lands is kept verbatim."""
-    def __init__(self, value=0.0, limits=None, direction_vector=None, joint_type=None):
+    a value that lands is kept verbatim. `stores` False takes every assignment and keeps NONE of
+    them - the swallowed write only a read-back catches."""
+    def __init__(self, value=0.0, limits=None, direction_vector=None, joint_type=None, stores=True):
         self._value = value
+        self._stores = stores
         self.slideLimits = _MotionLimits() if limits is None else limits
         self.slideDirectionVector = direction_vector
         self.jointType = (_api_facts.ENUMS["fusion.JointTypes"]["SliderJointType"]
@@ -2719,7 +3015,7 @@ class SliderJointMotion:
 
     @slideValue.setter
     def slideValue(self, value):
-        if _limit_allows(self.slideLimits, value):
+        if self._stores and _limit_allows(self.slideLimits, value):
             self._value = value
 
 
@@ -2730,11 +3026,13 @@ class SliderJointMotion:
 class CylindricalJointMotion:
     """The cylindrical motion: both drivable values, each against its own limits. It exposes
     rotationAxisVector and NO slideDirectionVector, as the live type does, so a slide-heading read
-    declines here exactly as it declines live."""
+    declines here exactly as it declines live. `stores` False takes every assignment to EITHER value
+    and keeps neither - the swallowed write only a read-back catches."""
     def __init__(self, rotation=0.0, slide=0.0, rotation_limits=None, slide_limits=None,
-                 axis_vector=None, joint_type=None):
+                 axis_vector=None, joint_type=None, stores=True):
         self._rotation = rotation
         self._slide = slide
+        self._stores = stores
         self.rotationLimits = _MotionLimits() if rotation_limits is None else rotation_limits
         self.slideLimits = _MotionLimits() if slide_limits is None else slide_limits
         self.rotationAxisVector = axis_vector
@@ -2747,7 +3045,7 @@ class CylindricalJointMotion:
 
     @rotationValue.setter
     def rotationValue(self, value):
-        if _limit_allows(self.rotationLimits, value):
+        if self._stores and _limit_allows(self.rotationLimits, value):
             self._rotation = _stored_rotation(value)
 
     @property
@@ -2756,7 +3054,7 @@ class CylindricalJointMotion:
 
     @slideValue.setter
     def slideValue(self, value):
-        if _limit_allows(self.slideLimits, value):
+        if self._stores and _limit_allows(self.slideLimits, value):
             self._slide = value
 
 
@@ -2764,10 +3062,22 @@ class CylindricalJointMotion:
 class FakeJoint:
     """One joint: the jointMotion whose SUBCLASS says what it drives, the two occurrences it
     couples, the suppress/flip flags a joint edit writes back, its entityToken and timelineObject,
-    the motionLinks it takes part in, and deleteMe answering the bool its caller gates on."""
+    the motionLinks it takes part in, and deleteMe answering the bool its caller gates on.
+
+    ``geometryOrOriginOne``/``Two`` are ALWAYS present, reading None where the joint names no
+    reference - which is what an inferred joint answers, so a frame read falls over a null rather
+    than over an absent member. ``offset``/``angle``/``parentComponent``/``objectType`` are set only
+    when given, since a joint whose parameters or owner do not read is its own tested state.
+
+    ``health_readable`` False makes the healthState read RAISE - the state a compute verdict has to
+    publish as null rather than read as healthy. ``motion_set_ok`` is what every setAs*JointMotion
+    answers, and the calls land in ``_motion_calls``."""
     def __init__(self, name="Joint1", motion=None, occurrence_one=None, occurrence_two=None,
                  suppressed=False, flipped=False, entity_token=None,
-                 timeline_object=None, health=None, message="", links=(), delete_ok=True):
+                 timeline_object=None, health=None, message="", links=(), delete_ok=True,
+                 geometry_one=None, geometry_two=None, offset=None, angle=None,
+                 parent_component=None, object_type=None, health_readable=True,
+                 motion_set_ok=True):
         self.name = name
         self.jointMotion = motion
         self.occurrenceOne = occurrence_one
@@ -2776,12 +3086,64 @@ class FakeJoint:
         self.isFlipped = flipped
         self.timelineObject = timeline_object
         self.motionLinks = _NamedCollection(list(links))
+        self._health_readable = health_readable
         self.healthState = health
         self.errorOrWarningMessage = message
+        self.geometryOrOriginOne = geometry_one
+        self.geometryOrOriginTwo = geometry_two
+        if offset is not None:
+            self.offset = offset
+        if angle is not None:
+            self.angle = angle
+        if parent_component is not None:
+            self.parentComponent = parent_component
+        if object_type is not None:
+            self.objectType = object_type
         if entity_token is not None:
             self.entityToken = entity_token
+        self._motion_set_ok = motion_set_ok
+        self._motion_calls = []
         self._delete_ok = delete_ok
         self._deleted = False
+
+    @property
+    def healthState(self):
+        if not self._health_readable:
+            raise RuntimeError("3 : the health state of this joint is unavailable")
+        return self._health
+
+    @healthState.setter
+    def healthState(self, value):
+        self._health = value
+
+    @healthState.deleter
+    def healthState(self):
+        self._health_readable = False
+
+    def _set_motion(self, kind, args):
+        self._motion_calls.append((kind, args))
+        return self._motion_set_ok
+
+    def setAsRigidJointMotion(self):
+        return self._set_motion("rigid", ())
+
+    def setAsRevoluteJointMotion(self, *args):
+        return self._set_motion("revolute", args)
+
+    def setAsSliderJointMotion(self, *args):
+        return self._set_motion("slider", args)
+
+    def setAsCylindricalJointMotion(self, *args):
+        return self._set_motion("cylindrical", args)
+
+    def setAsPlanarJointMotion(self, *args):
+        return self._set_motion("planar", args)
+
+    def setAsBallJointMotion(self, *args):
+        return self._set_motion("ball", args)
+
+    def setAsPinSlotJointMotion(self, *args):
+        return self._set_motion("pin_slot", args)
 
     def deleteMe(self):
         if self._delete_ok:
@@ -2839,10 +3201,16 @@ class FakeMotionLink:
     back and passes through, the ratio parameters valueOne/valueTwo (whose OWN .value is the number,
     as a ModelParameter's is), isReversed, isSuppressed, and deleteMe - the rollback a link whose
     ratio would not apply is undone with. motionOne/motionTwo are set only when given: a link that
-    reports NEITHER is the state a re-value refuses on rather than guessing the coupling."""
+    reports NEITHER is the state a re-value refuses on rather than guessing the coupling.
+
+    The health pair and ``timelineObject`` are PLAIN attributes, so a test expresses the link that
+    answers no compute state at all by DELETING them (go_stale) - which a property would refuse.
+    ``health`` left None reads HEALTHY, since a link that answers a state is the ordinary case and a
+    default of "unread" would let a withheld-flag test pass without deleting anything."""
     def __init__(self, name="Link1", joint_one=None, joint_two=None, motion_one=None,
                  motion_two=None, value_one=1.0, value_two=1.0, reversed_link=False,
-                 suppressed=False, set_motion_ok=True, delete_ok=True):
+                 suppressed=False, set_motion_ok=True, delete_ok=True, health=None, message="",
+                 timeline_object=None, entity_token=None):
         self.name = name
         self.jointOne = joint_one
         self.jointTwo = joint_two
@@ -2854,6 +3222,12 @@ class FakeMotionLink:
         self.valueTwo = types.SimpleNamespace(value=value_two)
         self.isReversed = reversed_link
         self.isSuppressed = suppressed
+        self.healthState = (_api_facts.ENUMS["fusion.FeatureHealthStates"][
+            "HealthyFeatureHealthState"] if health is None else health)
+        self.errorOrWarningMessage = message
+        self.timelineObject = timeline_object
+        if entity_token is not None:
+            self.entityToken = entity_token
         self._set_motion_ok = set_motion_ok
         self._motion_data = []
         self._delete_ok = delete_ok
@@ -2927,9 +3301,13 @@ class FakeRigidGroup:
         if entity_token is not None:
             self.entityToken = entity_token
         self._set_ok, self._delete_ok = set_ok, delete_ok
+        self._sets = []
         self._deleted = False
 
-    def setOccurrences(self, occurrences):
+    def setOccurrences(self, occurrences, include_children):
+        """setOccurrences(occurrences, includeChildren) -> bool - BOTH arguments are required live,
+        and the call is refused unless the timeline marker sits just before the group."""
+        self._sets.append((occurrences, bool(include_children)))
         if not self._set_ok:
             return False
         self.occurrences = _NamedCollection(list(occurrences))
@@ -2973,33 +3351,42 @@ class FakeRigidGroups:
 
 @fusion_fake(factory_for="FakeJoint")
 def make_joint(name="Joint1", kind="revolute", rotation=0.0, slide=0.0, rotation_limits=None,
-               slide_limits=None, occurrence_one=None, occurrence_two=None, axis_vector=None):
+               slide_limits=None, occurrence_one=None, occurrence_two=None, axis_vector=None,
+               stores=True, **joint_kwargs):
     """A joint carrying the motion `kind` names - 'revolute', 'slider' or 'cylindrical', the three
     a drive can move. Limits are _MotionLimits, so a drive past an enabled bound is refused the
-    measured way."""
+    measured way; `stores` False makes the motion swallow every write. Further keywords reach
+    FakeJoint itself."""
     if kind == "revolute":
-        motion = RevoluteJointMotion(rotation, rotation_limits, axis_vector)
+        motion = RevoluteJointMotion(rotation, rotation_limits, axis_vector, stores=stores)
     elif kind == "slider":
-        motion = SliderJointMotion(slide, slide_limits, axis_vector)
+        motion = SliderJointMotion(slide, slide_limits, axis_vector, stores=stores)
     elif kind == "cylindrical":
-        motion = CylindricalJointMotion(rotation, slide, rotation_limits, slide_limits, axis_vector)
+        motion = CylindricalJointMotion(rotation, slide, rotation_limits, slide_limits, axis_vector,
+                                        stores=stores)
     else:
         raise ValueError("make_joint kind is revolute, slider or cylindrical, not %r" % (kind,))
     return FakeJoint(name=name, motion=motion, occurrence_one=occurrence_one,
-                     occurrence_two=occurrence_two)
+                     occurrence_two=occurrence_two, **joint_kwargs)
 
 
 # ── CAM job world ─────────────────────────────────────────────────────────
 
 @fusion_fake(live_type="CAMParameter",
              facts=("shape-dump-cam-job-world", "cam-parameter-expressions",
-                    "cam-parameter-locked-write-lands"))
+                    "cam-parameter-locked-write-lands", "cam-parameter-bad-reference"))
 class FakeCAMParameter:
     """One CAM parameter as the CAM tools read it: name/title, the `expression` a write goes through
-    and reads back (measured), the isEditable/isEnabled/isVisible flags a selection filters on, and
-    `value` - whose OWN .value is the payload, the second hop every value read makes."""
+    and reads back (measured), the isEditable/isEnabled/isVisible flags a selection filters on,
+    `value` - whose OWN .value is the payload, the second hop every value read makes - and the
+    error/warning channels a post-write read consults (`warning` never gates; `error` does).
+
+    The cam-parameter-bad-reference row is what `error` stands on: an expression naming a parameter
+    that does not exist is stored verbatim and reports success, and only .error names the failure.
+    An expression holding 'NoSuch' answers that text here, read from BEHAVIOR (the literal below is
+    the fallback until that row's regen lands the key). Pass `error` to pin the channel instead."""
     def __init__(self, name, expression="", value=None, title=None, editable=True, enabled=True,
-                 visible=True):
+                 visible=True, error=None, warning=""):
         self.name = name
         self._expression = expression
         self.value = types.SimpleNamespace(value=value)
@@ -3007,6 +3394,16 @@ class FakeCAMParameter:
         self.isEditable = editable
         self.isEnabled = enabled
         self.isVisible = visible
+        self._error = error
+        self.warning = warning
+
+    @property
+    def error(self):
+        if self._error is not None:
+            return self._error
+        expr = self._expression
+        text = _api_facts.BEHAVIOR["cam_bad_reference_error_text"]
+        return text if isinstance(expr, str) and "NoSuch" in expr else ""
 
     @property
     def expression(self):
@@ -3014,10 +3411,10 @@ class FakeCAMParameter:
 
     @expression.setter
     def expression(self, value):
-        # isEditable False does not make the platform drop a write (measured: a locked parameter
-        # takes it, expression and value both change); the flag only says the UI never offers the
-        # edit, which is why cam_edit_operation refuses BEFORE writing.
-        if self.isEditable or _api_facts.BEHAVIOR["cam_locked_parameter_write_lands"]:
+        # Measured: isEditable False does not make the platform drop a write - a locked parameter
+        # takes it, expression and value both change. The flag is the fallback this fake falls to
+        # only if that measurement ever reads False.
+        if _api_facts.BEHAVIOR["cam_locked_parameter_write_lands"] or self.isEditable:
             self._expression = value
 
 
@@ -3059,10 +3456,10 @@ class FakeTool:
                                          "cam-machine-query-keyed-on-model"))
 class FakeMachine:
     """A machine from the library or off a setup: the description/vendor/model a label is built
-    from (adsk.cam.Machine has no .name), its id, the capabilities flags a kind list reads, and the
-    elements tree a limits read walks."""
+    from (adsk.cam.Machine has no .name), its id, the capabilities flags a kind list reads, the
+    elements tree a limits read walks, and the hasPost/hasSimulationModel pair a create publishes."""
     def __init__(self, description="", vendor="", model="", machine_id=None, capabilities=None,
-                 elements=None, has_post=False):
+                 elements=None, has_post=False, has_simulation_model=False):
         self.description = description
         self.vendor = vendor
         self.model = model
@@ -3070,6 +3467,7 @@ class FakeMachine:
         self.capabilities = capabilities
         self.elements = elements
         self.hasPost = has_post
+        self.hasSimulationModel = has_simulation_model
 
 
 @fusion_fake(live_type="SetupInput", facts=("shape-dump-cam-job-world",))

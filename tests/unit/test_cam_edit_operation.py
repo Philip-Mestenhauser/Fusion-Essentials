@@ -10,51 +10,43 @@ live Fusion here — fakes mimic CAMParameters.
 """
 
 import json
-from conftest import load_tool, make_cam
+import types
+
+from conftest import (FakeCAMFolder, FakeCAMParameter, FakeCAMParameters, FakeTool,
+                      _NamedCollection, load_tool, make_cam)
 from conftest import FakeSetup as SharedSetup, FakeOperation as SharedOp
 
 ce = load_tool("cam_edit_operation")
 
 
-class FakeValue:
-    def __init__(self, v):
-        self.value = v
+class FakeParam(FakeCAMParameter):
+    """A numeric operation parameter: its evaluated .value follows the expression it stores (the
+    platform's own read, a finite 0.0 for an expression that did not evaluate - only .error exposes
+    that), and the expression 'BOOM' is the one the platform refuses outright."""
 
-
-class FakeParam:
-    def __init__(self, name, expr, warning="", editable=True):
-        self.name = name
-        self._expr = expr
-        self.warning = warning
-        # A CAMParameter answers isEditable; the live default on a settable one is True.
-        self.isEditable = editable
-    @property
-    def expression(self):
-        return self._expr
-    @expression.setter
-    def expression(self, v):
-        if v == "BOOM":
+    @FakeCAMParameter.expression.setter
+    def expression(self, value):
+        if value == "BOOM":
             raise RuntimeError("invalid expression")
-        self._expr = v
-    @property
-    def error(self):
-        # Mirror the live CAMParameter contract: a broken expression is STORED (expression echoes it,
-        # value.value reads a finite 0.0) and ONLY .error reveals the failure.
-        return "Failed to evaluate expression." if "NoSuchParam" in self._expr else ""
+        FakeCAMParameter.expression.fset(self, value)
+
     @property
     def value(self):
         try:
-            return FakeValue(float(self._expr.split()[0]))
+            return types.SimpleNamespace(value=float(self._expression.split()[0]))
         except Exception:
-            return FakeValue(0.0 if "NoSuchParam" in self._expr else None)
+            return types.SimpleNamespace(value=0.0 if self.error else None)
+
+    @value.setter
+    def value(self, v):
+        pass
 
 
-class FakeParams:
-    def __init__(self, d):
-        # values are expression strings, or pre-built FakeParams (for a warning-bearing param).
-        self._d = {k: (v if isinstance(v, FakeParam) else FakeParam(k, v)) for k, v in d.items()}
-    def itemByName(self, n):
-        return self._d.get(n)
+def FakeParams(d):
+    """An operation's parameters from {name: expression} - a value that is already a parameter
+    (a warning-bearing or scenario one) is taken as it is."""
+    return FakeCAMParameters([v if isinstance(v, FakeCAMParameter) else FakeParam(k, v)
+                              for k, v in d.items()])
 
 
 class FakePreset:
@@ -64,55 +56,36 @@ class FakePreset:
         self.id = pid if pid is not None else "id-" + name
 
 
-class FakePresets:
-    """ToolPresets - enumerated by .count / .item(i), the shape the shared preset walk reads."""
-    def __init__(self, presets):
-        self._l = list(presets)
-    @property
-    def count(self):
-        return len(self._l)
-    def item(self, i):
-        return self._l[i]
-
-
-class FakeTool:
-    def __init__(self, presets):
-        self.presets = FakePresets(presets)
-
-
-class FakeLibTool:
+def FakeLibTool(description, number, presets=()):
     """A library Tool: the description and the tool_number parameter its identity is read from."""
-    def __init__(self, description, number, presets=()):
-        self.description = description
-        self.parameters = FakeParams({"tool_number": str(number)})
-        self.presets = FakePresets([FakePreset(p) for p in presets])
+    return FakeTool(description=description, parameters=FakeParams({"tool_number": str(number)}),
+                    presets=[FakePreset(p) for p in presets])
 
 
-class FakeDocLibrary:
-    """cam.documentToolLibrary - the count/item(i) collection the document-scope tool ref reads."""
-    def __init__(self, tools):
-        self._l = list(tools)
-    @property
-    def count(self):
-        return len(self._l)
-    def item(self, i):
-        return self._l[i]
+class FakeOp(SharedOp):
+    # The members this fake (and its scenario subclasses) model as PROPERTIES; while the shared
+    # fake's own __init__ runs, a write to one lands on the private state instead, so a scenario
+    # setter only ever sees a write the tool under test made.
+    _AT_INIT = {"tool": "_tool", "isSuppressed": "_suppressed", "hasToolpath": "_has_toolpath"}
+    _built = False
 
-
-class FakeOp:
     def __init__(self, name, params, suppressed=False, has_toolpath=True,
                  presets=None, preset=None, is_generating=False, toolpath_valid=True):
-        self.name = name
-        self.parameters = FakeParams(params)
-        self.strategy = "adaptive"
-        self._suppressed = bool(suppressed)
-        self._has_toolpath = bool(has_toolpath)
         # An operation with no tool has no presets to point at - the default here, so the existing
         # tests keep meeting the tool-less operation they always did.
-        self._tool = FakeTool(presets) if presets is not None else None
+        super().__init__(name, parameters=FakeParams(params), strategy="adaptive",
+                         suppressed=bool(suppressed), has_toolpath=bool(has_toolpath),
+                         valid=bool(toolpath_valid),
+                         tool=FakeTool(presets=presets) if presets is not None else None)
         self._preset = preset
         self.isGenerating = bool(is_generating)
-        self.isToolpathValid = bool(toolpath_valid)
+        self._built = True
+
+    def __setattr__(self, key, value):
+        if not self._built and key in self._AT_INIT:
+            object.__setattr__(self, self._AT_INIT[key], value)
+            return
+        object.__setattr__(self, key, value)
 
     @property
     def tool(self):
@@ -146,6 +119,10 @@ class FakeOp:
     @property
     def hasToolpath(self):
         return self._has_toolpath
+
+    @hasToolpath.setter
+    def hasToolpath(self, value):
+        self._has_toolpath = bool(value)
 
 
 class DroppedFlagOp(FakeOp):
@@ -227,36 +204,37 @@ class RaisingPresetSetterOp(FakeOp):
         raise RuntimeError("operation is locked")
 
 
-class FakeOps:
+def FakeSetup(ops):
+    """The setup the operations sit in - one only, since every test here addresses by name."""
+    return SharedSetup("Setup1", ops=ops)
+
+
+class _AllOperationsOnlySetup(SharedSetup):
+    """A setup whose .operations reads None, so only allOperations can answer it."""
+
     def __init__(self, ops):
-        self._l = ops
+        super().__init__("Setup1", ops=ops)
+        self._ops = list(ops)
+
     @property
-    def count(self):
-        return len(self._l)
-    def item(self, i):
-        return self._l[i]
+    def operations(self):
+        return None
 
+    @operations.setter
+    def operations(self, value):
+        pass
 
-class FakeSetup:
-    def __init__(self, ops):
-        self.operations = FakeOps(ops)
-        self.allOperations = FakeOps(ops)
-
-
-class FakeSetups:
-    def __init__(self, setups):
-        self._l = setups
     @property
-    def count(self):
-        return len(self._l)
-    def item(self, i):
-        return self._l[i]
+    def allOperations(self):
+        return _NamedCollection(self._ops)
 
 
-class FakeCAM:
-    def __init__(self, ops, doc_tools=()):
-        self.setups = FakeSetups([FakeSetup(ops)])
-        self.documentToolLibrary = FakeDocLibrary(doc_tools)
+def FakeCAM(ops, doc_tools=()):
+    """A CAM product holding one setup of `ops`, plus the document tool library the document-scope
+    tool reference reads by index."""
+    cam = make_cam(FakeSetup(ops))
+    cam.documentToolLibrary = _NamedCollection(list(doc_tools))
+    return cam
 
 
 def _install(monkeypatch, op_name="Adaptive1", params=None):
@@ -385,25 +363,24 @@ class QuotingParam(FakeParam):
     @FakeParam.expression.setter
     def expression(self, v):
         s = str(v)
-        self._expr = s if len(s) >= 2 and s[0] == s[-1] == "'" else f"'{s}'"
+        self._expression = s if len(s) >= 2 and s[0] == s[-1] == "'" else f"'{s}'"
 
 
 class UnreadableAfterParam(FakeParam):
     """The expression reads until it is written, then stops answering - a write nothing can confirm
     (the shape cam_edit_setup's arm calls UNCONFIRMED)."""
-    def __init__(self, *a, **kw):
-        super().__init__(*a, **kw)
-        self._written = False
+
+    _written = False
 
     @property
     def expression(self):
         if self._written:
             raise RuntimeError("expression no longer readable")
-        return self._expr
+        return self._expression
 
     @expression.setter
     def expression(self, v):
-        self._expr = v
+        self._expression = v
         self._written = True
 
 
@@ -412,7 +389,7 @@ class NumericNormalizingParam(FakeParam):
     @FakeParam.expression.setter
     def expression(self, v):
         s = str(v)
-        self._expr = s if "." in s else s + "."
+        self._expression = s if "." in s else s + "."
 
 
 class UnitAppendingParam(FakeParam):
@@ -421,7 +398,7 @@ class UnitAppendingParam(FakeParam):
     @FakeParam.expression.setter
     def expression(self, v):
         s = str(v)
-        self._expr = s if s.endswith(" mm") else s + " mm"
+        self._expression = s if s.endswith(" mm") else s + " mm"
 
 
 class NeverReadableParam(FakeParam):
@@ -433,7 +410,7 @@ class NeverReadableParam(FakeParam):
 
     @expression.setter
     def expression(self, v):
-        self._expr = v
+        self._expression = v
 
 
 class UnreadableEditableParam(FakeParam):
@@ -952,10 +929,7 @@ class TestFindOperation:
     def test_falls_back_to_allOperations_when_operations_missing(self, monkeypatch):
         # A setup that exposes only allOperations (operations is None) must still resolve.
         op = FakeOp("OnlyAll", {"tool_stepover": "2."})
-        setup = FakeSetup([op])
-        setup.operations = None                 # force the `or allOperations` fallback
-        cam = FakeCAM([])
-        cam.setups = FakeSetups([setup])
+        cam = make_cam(_AllOperationsOnlySetup([op]))    # forces the `or allOperations` fallback
         monkeypatch.setattr(ce, "get_cam", lambda: (cam, None))
         out = _payload(ce.handler(operation="OnlyAll", parameters={"tool_stepover": "1"}))
         assert out["operation"] == "OnlyAll"
@@ -981,20 +955,8 @@ class TestFindOperation:
         # a folder-nested operation must resolve too - .operations only lists what's directly in
         # the setup, so the lookup must recurse into .folders (and .patterns) to reach it.
         nested_op = FakeOp("Drill1", {"tool_stepover": "2."})
-
-        class FakeFolder:
-            def __init__(self, name, ops):
-                self.name = name
-                self.operations = FakeOps(ops)
-                self.folders = FakeOps([])
-                self.patterns = FakeOps([])
-
-        folder = FakeFolder("Holes", [nested_op])
-        setup = FakeSetup([])
-        setup.folders = FakeOps([folder])
-        setup.patterns = FakeOps([])
-        cam = FakeCAM([])
-        cam.setups = FakeSetups([setup])
+        folder = FakeCAMFolder("Holes", ops=[nested_op])
+        cam = make_cam(SharedSetup("Setup1", folders=[folder]))
         monkeypatch.setattr(ce, "get_cam", lambda: (cam, None))
         out = _payload(ce.handler(operation="Drill1", parameters={"tool_stepover": "1"}))
         assert out["operation"] == "Drill1"
@@ -1010,20 +972,17 @@ class DroppedToolOp(FakeOp):
         pass
 
 
-class NumberlessLibTool(FakeLibTool):
+def NumberlessLibTool(description):
     """A library tool carrying no tool_number parameter at all - _read_tool_number answers None."""
-    def __init__(self, description):
-        super().__init__(description, 0)
-        self.parameters = FakeParams({})
+    return FakeTool(description=description)
 
 
-class _PrefixedTool:
+def _PrefixedTool(tool, number):
     """The operation's own COPY of a library tool: its description carries the '#<number> - ' prefix
     measured live, which the library tool's own description does not."""
-    def __init__(self, tool, number):
-        self.description = f"#{number} - {tool.description}"
-        self.parameters = tool.parameters
-        self.presets = tool.presets
+    copy = FakeTool(description=f"#{number} - {tool.description}", parameters=tool.parameters)
+    copy.presets = tool.presets
+    return copy
 
 
 class PrefixingToolOp(FakeOp):
@@ -1035,36 +994,28 @@ class PrefixingToolOp(FakeOp):
         self._tool = _PrefixedTool(value, 1)
 
 
-class _TextValue:
-    """A CAMParameter value that hands its number back as TEXT, which a library tool's tool_number
-    can do - the read has to answer an int or None, never the string."""
-    def __init__(self, text):
-        self.value = text
+def TextNumberLibTool(description, number_text):
+    """A library tool whose tool_number hands its evaluated value back as TEXT rather than a number -
+    the read has to answer an int or None, never the string."""
+    number = FakeCAMParameter("tool_number", number_text, value=number_text)
+    return FakeTool(description=description, parameters=FakeCAMParameters([number]))
 
 
-class _TextNumberParam(FakeParam):
-    """tool_number handing its evaluated value back as TEXT rather than a number."""
-    @property
-    def value(self):
-        return _TextValue(self._expr)
-
-
-class TextNumberLibTool(FakeLibTool):
-    def __init__(self, description, number_text):
-        super().__init__(description, 0)
-        self.parameters = FakeParams({"tool_number": _TextNumberParam("tool_number", number_text)})
-
-
-class DescriptionlessLibTool:
+class _DescriptionlessTool(FakeTool):
     """A library tool whose description does not read - the identity comparison cannot be made, and
     no value may be printed for it."""
-    def __init__(self, number):
-        self.parameters = FakeParams({"tool_number": str(number)})
-        self.presets = FakePresets([])
 
     @property
     def description(self):
         raise RuntimeError("description unreadable")
+
+    @description.setter
+    def description(self, value):
+        pass
+
+
+def DescriptionlessLibTool(number):
+    return _DescriptionlessTool(parameters=FakeParams({"tool_number": str(number)}))
 
 
 class ThirdToolOp(FakeOp):
@@ -1490,7 +1441,11 @@ class HoleFacesParam(FakeParam):
 
     @property
     def value(self):
-        return FakeValue(list(self._faces))
+        return types.SimpleNamespace(value=list(self._faces))
+
+    @value.setter
+    def value(self, v):
+        pass
 
 
 class TestHoleRenameGuard:

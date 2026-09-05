@@ -9,22 +9,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from conftest import Viewport, load_tool, payload, error_message
+from conftest import FakeSetup, Viewport, load_tool, payload, error_message
 
 mod = load_tool("cam_activate_setup")
-
-
-class FakeSetup:
-    def __init__(self, name="Setup1", activates=True):
-        self.name = name
-        self.isActive = False
-        self.activate_calls = 0
-        self._activates = activates
-
-    def activate(self):
-        self.activate_calls += 1
-        if self._activates:
-            self.isActive = True
 
 
 class UnreadableActiveSetup(FakeSetup):
@@ -106,12 +93,12 @@ def test_an_ambiguous_name_is_not_reported_as_missing(wire):
 def test_activates_and_reports_the_setup_name(wire):
     setup = wire(setup=FakeSetup(name="Op10"))
     out = payload(mod.activate_setup_handler(setup="Op10"))
-    assert setup.activate_calls == 1
+    assert setup._activate_calls == 1
     assert out["activated"] == "Op10"
 
 
 def test_activate_that_does_not_take_is_an_error(wire):
-    wire(setup=FakeSetup(name="Op10", activates=False))
+    wire(setup=FakeSetup(name="Op10", activate_lies=True))
     assert "isActive=false" in error_message(mod.activate_setup_handler(setup="Op10"))
 
 

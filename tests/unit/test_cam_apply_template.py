@@ -9,7 +9,8 @@ own walk.
 import json
 from types import SimpleNamespace
 
-from conftest import load_tool
+from conftest import (FakeCAMFolder, FakeOperation, FakeSetup, FakeTool, _NamedCollection,
+                      load_tool, make_cam)
 
 ct = load_tool("cam_apply_template")
 
@@ -23,16 +24,6 @@ class _FakeTemplate:
     def __init__(self, name="T"):
         self.name = name
         self.isValidTemplate = True
-
-
-class _Coll:
-    def __init__(self, items):
-        self._i = list(items)
-    @property
-    def count(self):
-        return len(self._i)
-    def item(self, i):
-        return self._i[i]
 
 
 class TestApplyTemplateEnumValidation:
@@ -57,34 +48,16 @@ class TestApplyTemplateEnumValidation:
 # the call is the read the claim rests on.
 
 
-def _op(name, tool=None, strategy="drill"):
-    """One operation as a setup's walk reads it - `tool` is the description Operation.tool answers
-    (or a tool OBJECT), and None is an operation carrying no tool at all."""
-    holder = SimpleNamespace(description=tool) if isinstance(tool, str) else tool
-    return SimpleNamespace(name=name, strategy=strategy, tool=holder)
+class _ApplyOp(FakeOperation):
+    """An operation as the setup's walk reads it - `tool` is the description Operation.tool's own
+    object answers (a Tool OBJECT is passed through), and None an operation carrying no tool."""
+
+    def __init__(self, name, tool=None, strategy="drill"):
+        super().__init__(name, strategy=strategy)
+        self.tool = FakeTool(description=tool) if isinstance(tool, str) else tool
 
 
-class _ApplyFolder:
-    """A CAM folder under the setup - the shared walk reaches its operations AFTER the setup's own."""
-
-    def __init__(self, name, ops):
-        self.name = name
-        self._ops = [_op(*row) for row in ops]
-
-    @property
-    def operations(self):
-        return _Coll(self._ops)
-
-    @property
-    def folders(self):
-        return _Coll([])
-
-    @property
-    def patterns(self):
-        return _Coll([])
-
-
-class _ApplySetup:
+class _ApplySetup(FakeSetup):
     """The apply target: `adds` is what the template lands ((name, tool) pairs, or a count of
     tool-less ops - adds=0 models the call returning operations the setup never took), `existing`
     and `folders` what it already held, `phantom` a rise in its own COUNT the walk does not see,
@@ -92,10 +65,10 @@ class _ApplySetup:
 
     def __init__(self, name, adds=1, existing=(), folders=(), phantom=0, count_unreadable=False,
                  returns=None):
-        self.name = name
+        super().__init__(name, ops=[_ApplyOp(*row) for row in existing],
+                         folders=[FakeCAMFolder(fname, ops=[_ApplyOp(*row) for row in ops])
+                                  for fname, ops in folders])
         self.applied = []
-        self._ops = [_op(*row) for row in existing]
-        self._folders = [_ApplyFolder(fname, ops) for fname, ops in folders]
         self._adds = ([(f"Op{i + 1}", None) for i in range(adds)]
                       if isinstance(adds, int) else list(adds))
         self._phantom_after = phantom
@@ -104,34 +77,23 @@ class _ApplySetup:
         self._returns = returns
 
     @property
-    def operations(self):
-        return _Coll(self._ops)
-
-    @property
-    def folders(self):
-        return _Coll(self._folders)
-
-    @property
-    def patterns(self):
-        return _Coll([])
-
-    @property
     def allOperations(self):
         if self._count_unreadable:
             raise RuntimeError("allOperations is not available")
-        nested = sum(len(f._ops) for f in self._folders)
-        return SimpleNamespace(count=len(self._ops) + nested + self._phantom)
+        flat = list(FakeCAMFolder.allOperations.fget(self))
+        return _NamedCollection(flat + [_ApplyOp(f"Phantom{i + 1}")
+                                        for i in range(self._phantom)])
 
     def createFromCAMTemplate2(self, template_input):
         self.applied.append(template_input)
-        made = [_op(*row) for row in self._adds]
-        self._ops.extend(made)
+        made = [_ApplyOp(*row) for row in self._adds]
+        self.operations._items.extend(made)
         self._phantom = self._phantom_after
         return made if self._returns is None else self._returns
 
 
 def _wire_apply(monkeypatch, setup):
-    monkeypatch.setattr(ct, "get_cam", lambda: (SimpleNamespace(), None))
+    monkeypatch.setattr(ct, "get_cam", lambda: (make_cam(setup), None))
     monkeypatch.setattr(ct, "_template_library", lambda: (SimpleNamespace(), None))
     monkeypatch.setattr(ct, "find_setup", lambda cam, name: (setup, [setup.name], None))
     monkeypatch.setattr(ct, "_find_template_by_name",
@@ -143,7 +105,7 @@ class TestApplyTemplateUrlAgainstName:
     both a url and the name it believes is there gets the disagreement, not an apply."""
 
     def _wire_url(self, monkeypatch, setup, at_url_name):
-        monkeypatch.setattr(ct, "get_cam", lambda: (SimpleNamespace(), None))
+        monkeypatch.setattr(ct, "get_cam", lambda: (make_cam(setup), None))
         monkeypatch.setattr(ct, "_template_library",
                             lambda: (SimpleNamespace(templateAtURL=lambda u:
                                                      _FakeTemplate(at_url_name)), None))

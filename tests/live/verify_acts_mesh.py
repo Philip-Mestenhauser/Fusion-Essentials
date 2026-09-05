@@ -349,11 +349,12 @@ _MESH = [
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "ME", "quality": "low"}, "ok", None),
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "MF", "quality": "low"}, "ok", None),
     ("mesh_get", {"target": "Msh"}, "ok", None),
-    # 'face_group_count' is mb.faceGroups.count after the add - the side effect prismatic convert
-    # needs. The no-op guard only fires where add() returned nothing, so a feature with zero groups
-    # behind it reads ok.
+    # MA is a box cast to mesh, measured to segment 1 -> 6 groups under 'fast', so THIS row's
+    # generation must move the count - a payload reporting no movement here is a generation that
+    # did nothing. (The tool passes no verdict of its own: one flat region segments into one group.)
     ("mesh_generate_face_groups", {"mesh": "MA", "method": "fast"},
-     lambda p: p["generated"] is True and (p["face_group_count"] or 0) >= 1, None),
+     lambda p: (p["generated"] is True and p["changed"] is True
+                and p["face_group_count"] > p["face_group_count_before"]), None),
     # the converted bodies are the component's BRep census differenced across the add; a row with no
     # handle is a body the next tool cannot address, and 'design_mode' is read before the scope opens.
     ("mesh_to_brep", {"mesh": "MA", "method": "faceted", "operation": "base_feature"},
