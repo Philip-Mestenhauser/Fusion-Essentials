@@ -29,7 +29,7 @@ recomputes the hash and fails on any difference, so a green suite cannot ride on
 run that never saw the current code or a weakened predicate. Only a run with zero
 FAIL/blocked/pass* steps rewrites this file.
 
-Stamp: source db6bf6458b1d3a1b88dfb44bcafa4ceefbf5227106ce88c50b70d062333faeca | Fusion 2705.1.4 | verified 2026-09-06
+Stamp: source 1958510cfc9904e1e0b73b5a429e2c8c6a8a4adb6151b6b97ab2d8155466c989 | Fusion 2705.1.4 | verified 2026-09-06
 
 154 covered / 0 called / 2 refusals-only / 31 skipped(reason) / 0 pending
 
@@ -48,6 +48,7 @@ Stamp: source db6bf6458b1d3a1b88dfb44bcafa4ceefbf5227106ce88c50b70d062333faeca |
 | ACT 7 - THE VISE | narrative |
 | ACT 7b - MOTION BENCH | narrative |
 | ACT 8 - SWARF CAMEO | narrative |
+| ACT 8b - THE HUB | narrative |
 | ACT 9 - THE SHOWCASE | narrative |
 | ACT 10a - CAM: JOB + GENERATE | narrative |
 | ACT 10b - CAM: DELIVERABLES | narrative |
@@ -55,6 +56,7 @@ Stamp: source db6bf6458b1d3a1b88dfb44bcafa4ceefbf5227106ce88c50b70d062333faeca |
 | ACT 10c - CAM: EXTENSION STRATEGIES | narrative |
 | ACT 10c2 - CAM: TURNING | narrative |
 | ACT 10c3 - CAM: TURNING POST | narrative |
+| ACT 10c4 - CAM: THE HUB JOB | narrative |
 | ACT 10d - CAM: THE SECOND SETUP | narrative |
 | ACT 10e - CAM: MULTI-SETUP POST | narrative |
 | FINALE | narrative |

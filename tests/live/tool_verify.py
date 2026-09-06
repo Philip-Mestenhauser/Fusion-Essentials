@@ -48,7 +48,7 @@ siblings, and a step is edited in the one it belongs to:
 
   verify_core.py      the wire, the step kinds, the value predicates, the scratch fixtures
   verify_layout.py    the sketch hoist, the slot packer, the framing pass
-  verify_acts_doc.py / _sketch / _model / _motion / _mesh / _cam    the step rows, per domain
+  verify_acts_doc.py / _sketch / _model / _motion / _mesh / _cam / _hub   the step rows, per domain
   verify_program.py   the ordered acts, run through those passes, plus STEPS/STORY/EXCLUDED
   verify_runner.py    run/run_steps/judged_steps and the receipt (source_hash, --check)
 """
@@ -124,6 +124,10 @@ from verify_acts_cam import (  # noqa: F401
     PART_COMP, PART_DRIVER, STOCK_COMP, VISE_BASE, JAW_FIXED, JAW_MOVING, CAM_SETUP,
     _op_created, _toolpath_shown, _CAM_STORY, _tmpl_names, _CAM_DELIVER,
     poll_generation, _CAM, _CAM_FB_DELIVER)
+
+from verify_acts_hub import (  # noqa: F401
+    HUB_COMP, HUB_MILL_SETUP, HUB_TURN_SETUP, _HUB, _HUB_JOB, _fully_constrained, _hub_box,
+    _hub_setups, _hub_tools_landed, _rim_edge, _threaded, _tilt_frame, _tilt_v)
 
 from verify_program import (  # noqa: F401
     _ACT_PROGRAM, _SKETCH_PHASE, _placed_boxes, ACTS, ACT_NEEDS, POLL_AFTER, STEPS, STORY,

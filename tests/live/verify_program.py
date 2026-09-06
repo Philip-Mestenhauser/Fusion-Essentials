@@ -15,6 +15,7 @@ from verify_acts_cam import (
     _CAM_FB_DELIVER, _CAM_MULTI_POST, _CAM_SCOPE, _CAM_SECOND_SETUP, _CAM_STORY, _CAM_TURNING,
     _CAM_TURNING_POST, _MX_SETUP, _ROT_SETUP, _SW_SETUP, _SW_SETUP2, _SWARF_RIG, _TURN_SETUP)
 from verify_acts_doc import _FINALE, _OVERTURE, _SHOWCASE
+from verify_acts_hub import _HUB, _HUB_JOB
 from verify_acts_mesh import _MACHINING, _MESH, _NESTING
 from verify_acts_model import (
     _DETAILS, _DETAILS_FB, _RESIZE, _RESIZE_FB, _SOLIDS, _SOLIDS_FB)
@@ -75,6 +76,10 @@ _ACT_PROGRAM = [
     # The drafted cameo the extension strategies are machined on, built here rather than beside
     # them: it is modelling work, and the acts below it run in the Manufacture workspace.
     ("ACT 8 - SWARF CAMEO", None, _SWARF_RIG, []),
+    # The CAM competence world, built the way the guidance argues for: a turned hub whose three
+    # dimensioned sketches are fully constrained before a feature consumes them. It depends on
+    # nothing the story built and nothing depends on its geometry, so it runs its narrative always.
+    ("ACT 8b - THE HUB", None, _HUB, []),
     # SHOW. Beauty shots, the whole view vocabulary, the renames and the export/import round trips.
     # It runs BEFORE the machining so the sweep ends on the job and its post, and it touches
     # neither the part's name nor its geometry, so the CAM acts address what the model acts built.
@@ -100,6 +105,9 @@ _ACT_PROGRAM = [
     # generation runs BETWEEN acts, not between the steps of one.
     ("ACT 10c2 - CAM: TURNING", None, _CAM_TURNING, []),
     ("ACT 10c3 - CAM: TURNING POST", None, _CAM_TURNING_POST, []),
+    # The hub's own job, added AFTER the acts above have taken their library reads: this one appends
+    # nine cutters, and every index those acts select by is read off the count before it.
+    ("ACT 10c4 - CAM: THE HUB JOB", None, _HUB_JOB, []),
     # The last two acts machine the PART - the flip setup and the program that spans it and the
     # first - so each is gated on the job ACT 10a built, and falls back to nothing rather than to a
     # scratch world: every tool they drive is driven again by the scratch-stock fallbacks above, so
@@ -113,11 +121,12 @@ _ACT_PROGRAM = [
 
 # Every sketch that can be drawn on bare origin planes is drawn in ACT 1c, before anything is
 # solid - the acts after it model, they do not sketch. The acts named here keep their own steps: the
-# two sketch acts are already sketch-first, the OVERTURE has no geometry, and the vise draws every
-# profile on a datum plane derived from the part it is being built around.
+# two sketch acts are already sketch-first, the OVERTURE has no geometry, the vise draws every
+# profile on a datum plane derived from the part it is being built around, and the hub's
+# constraints and dimensions stay behind the curves they close, which the hoist would carry away.
 _SKETCH_PHASE, _ACT_PROGRAM = _sketches_first(
     _ACT_PROGRAM, after=("ACT 0 - OVERTURE", "ACT 1 - SKETCH + PARAMETERS", "ACT 1b - SKETCH TOOLS",
-                         "ACT 7 - THE VISE"))
+                         "ACT 7 - THE VISE", "ACT 8b - THE HUB"))
 _ACT_PROGRAM = (_ACT_PROGRAM[:3]
                 + [("ACT 1c - EVERY OTHER SKETCH", None, _SKETCH_PHASE, [])]
                 + _ACT_PROGRAM[3:])
