@@ -11,7 +11,7 @@ import json
 from types import SimpleNamespace
 
 
-from conftest import FakeMachine, load_tool, make_cam
+from conftest import load_tool, make_cam
 from conftest import FakeSetup as SharedSetup, FakeCAMFolder as SharedFolder, FakeOperation as SharedOp
 
 gen = load_tool("cam_generate")
@@ -49,21 +49,10 @@ def _FakeCAM(setups, machining_times=None):
     return cam
 
 
-_MACHINE = FakeMachine(description="Haas VF-2")
-
-
-class _MachinedSetup(SharedSetup):
-    """A setup carrying an assigned machine: the scoped verdict reads _cam_common.setup_blockers off
-    Setup.machine, so a machine-less setup is one blocked by no_machine_selected, not a clean one."""
-
-    def __init__(self, name, ops=(), machine=_MACHINE):
-        super().__init__(name, ops=ops)
-        self.machine = machine
-
-
-def _setup(name, ops=(), machine=_MACHINE):
-    """A setup as the poll walks it, machine assigned unless a test takes it away."""
-    return _MachinedSetup(name, ops=ops, machine=machine)
+def _setup(name, ops=()):
+    """A setup as the launch walks it. No machine member is set: cam_generate's blocked list is the
+    entitlement one (isGenerationAllowed), and it never reads Setup.machine."""
+    return SharedSetup(name, ops=ops)
 
 
 class TestTargetResolution:

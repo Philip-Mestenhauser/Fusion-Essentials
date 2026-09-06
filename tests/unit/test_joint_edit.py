@@ -23,9 +23,9 @@ from types import SimpleNamespace
 
 import adsk.fusion
 
-from conftest import (FakeJoint, FakeTimeline, FakeTimelineObject, MakeComp, RevoluteJointMotion,
-                      SliderJointMotion, _MotionLimits, _NamedCollection, install, load_tool,
-                      make_design)
+from conftest import (FakeJoint, FakeModelParameter, FakeTimeline, FakeTimelineObject, MakeComp,
+                      RevoluteJointMotion, SliderJointMotion, _MotionLimits, _NamedCollection,
+                      install, load_tool, make_design)
 from conftest import payload as _payload
 
 jt = load_tool("joint_edit")
@@ -36,27 +36,12 @@ _HEALTH = adsk.fusion.FeatureHealthStates
 
 # ── fakes ───────────────────────────────────────────────────────────────────
 
-# The unit an expression may carry -> its factor into Fusion's DATABASE units (cm for a length,
-# radians for an angle), which is what Parameter.value reads in whatever the expression said.
-_EXPRESSION_UNITS = {"mm": 0.1, "cm": 1.0, "in": 2.54, "deg": math.pi / 180.0}
-
-
-class FakeModelParameter:
-    """Matches Joint.offset / Joint.angle - a ModelParameter whose `expression` is settable in
-    display units and whose `value` reads back in DATABASE units (cm / radians)."""
-    def __init__(self):
-        self._expression = None
-        self.value = None
-
-    @property
-    def expression(self):
-        return self._expression
-
-    @expression.setter
-    def expression(self, text):
-        self._expression = text
-        number, _, unit = (text or "").strip().rpartition(" ")
-        self.value = float(number) * _EXPRESSION_UNITS[unit]
+def _param(**kw):
+    """Joint.offset / Joint.angle: a ModelParameter starting BLANK, whose `expression` assignment
+    (in display units) re-evaluates `value` into DATABASE units - cm for a length, radians here."""
+    kw.setdefault("expression", None)
+    kw.setdefault("value", None)
+    return FakeModelParameter(tracks_expression=True, **kw)
 
 
 def _jo(name):
@@ -65,11 +50,13 @@ def _jo(name):
 
 
 def _joint(name="BoomPivot", cls=FakeJoint, motion=None, **kw):
-    """One editable Joint: a motion, its own offset/angle parameters and a timeline item."""
+    """One editable Joint: a motion, its own offset/angle parameters and a timeline item. Pass
+    offset=None / angle=None for the member that is PRESENT and answers null."""
+    kw.setdefault("offset", _param())
+    kw.setdefault("angle", _param())
     return cls(name=name, motion=RevoluteJointMotion() if motion is None else motion,
                timeline_object=FakeTimelineObject(name=name),
-               geometry_one="OLD1", geometry_two="OLD2",
-               offset=FakeModelParameter(), angle=FakeModelParameter(), **kw)
+               geometry_one="OLD1", geometry_two="OLD2", **kw)
 
 
 def _rolls(joint):
@@ -80,11 +67,8 @@ def _rolls(joint):
 def _root(joints=(), as_built=()):
     """The root component an edit reads: both joint collections plus the world construction axes.
     asBuiltJoints is a SEPARATE collection from joints - find_joint searches both."""
-    comp = MakeComp(name="Root", joints=list(joints), as_built_joints=list(as_built))
-    comp.xConstructionAxis = "WAXIS_X"
-    comp.yConstructionAxis = "WAXIS_Y"
-    comp.zConstructionAxis = "WAXIS_Z"
-    return comp
+    return MakeComp(name="Root", joints=list(joints), as_built_joints=list(as_built),
+                    construction_axes=("WAXIS_X", "WAXIS_Y", "WAXIS_Z"))
 
 
 def _install_joints(joints, timeline_items=None):
@@ -246,6 +230,20 @@ class TestOffsetAngle:
         assert res["isError"] is True
         assert "rigid/inferred" in res["message"] and "AS-BUILT" not in res["message"]
 
+    def test_an_offset_member_that_reads_null_is_refused_like_an_absent_one(self, monkeypatch):
+        # The member is PRESENT and answers None, so a guard written as hasattr() lets the null
+        # through into the expression write; the guard has to be on the VALUE.
+        monkeypatch.setattr(adsk.fusion, "AsBuiltJoint", type("AsBuiltJoint", (), {}))
+        _install_joints([_joint(offset=None)])
+        res = jt.handler(joint_name="BoomPivot", offset=5)
+        assert res["isError"] is True and "rigid/inferred" in res["message"]
+
+    def test_an_angle_member_that_reads_null_is_refused_like_an_absent_one(self, monkeypatch):
+        monkeypatch.setattr(adsk.fusion, "AsBuiltJoint", type("AsBuiltJoint", (), {}))
+        _install_joints([_joint(angle=None)])
+        res = jt.handler(joint_name="BoomPivot", angle=30)
+        assert res["isError"] is True and "no angle parameter" in res["message"]
+
     def test_as_built_angle_refusal_routes_to_the_regular_joint(self, monkeypatch):
         # the angle arm mirrors the offset arm: an AsBuiltJoint exposes no angle parameter either,
         # and the dead-end "no angle parameter" wording must not be what an as-built joint gets
@@ -365,8 +363,7 @@ class _StuckParameter(FakeModelParameter):
     """A ModelParameter that accepts the expression assignment and keeps the value it holds -
     nothing raises, so only the read-back catches it."""
     def __init__(self, value=0.0):
-        super().__init__()
-        self.value = value
+        super().__init__(expression=None, value=value, tracks_expression=True)
 
     @FakeModelParameter.expression.setter
     def expression(self, text):
@@ -375,6 +372,9 @@ class _StuckParameter(FakeModelParameter):
 
 class _BlindParameter(FakeModelParameter):
     """A ModelParameter whose value READ raises - the re-read that cannot be taken."""
+    def __init__(self):
+        super().__init__(expression=None, value=None, tracks_expression=True)
+
     def __getattribute__(self, name):
         if name == "value":
             raise RuntimeError("parameter value unreadable")
@@ -385,7 +385,7 @@ class _DriftingParameter(FakeModelParameter):
     """A ModelParameter that lands its own value a fixed distance (in DATABASE units) from the one
     the expression asked for."""
     def __init__(self, drift):
-        super().__init__()
+        super().__init__(expression=None, value=None, tracks_expression=True)
         self._drift = drift
 
     @FakeModelParameter.expression.setter

@@ -48,12 +48,6 @@ class _BlindPlacement(FakeMatrix3D):
         raise RuntimeError("no coordinate system available")
 
 
-def _bodies_only_box(occ, box):
-    """Attach the bodies-only boundingBox2(entityTypes) read the plain box must not stand in for."""
-    occ.boundingBox2 = lambda entity_types, bb=box: bb
-    return occ
-
-
 def _occ(name, comp, origin=(0.0, 0.0, 0.0), bbox=None, body_bbox=None, grounded=False,
          ground_to_parent=False, body_count=1, rotation_deg=0.0, full_path=None, children=(),
          broken_children=(), transform2=None):
@@ -61,19 +55,19 @@ def _occ(name, comp, origin=(0.0, 0.0, 0.0), bbox=None, body_bbox=None, grounded
     # component.occurrences is the COMPONENT-LOCAL superset - the only collection an occurrence
     # with an unresolved reference appears in; childOccurrences (assembly context) drops it.
     component = MakeComp(name=comp, occurrences=list(broken_children) + list(children))
+    # body_bbox models the bodies-only boundingBox2 read; "empty" = no bodies (None). An occurrence
+    # WITHOUT it carries no boundingBox2 at all, so body_aabb falls back to .boundingBox, like a
+    # BRepBody - which is why the knob is passed only when the rig asks for it.
+    bodies_only = ({} if body_bbox is None else
+                   {"bodies_bounding_box": None if body_bbox == "empty" else make_bbox(*body_bbox)})
     # fullPathName is the ONLY thing that tells two nested instances sharing a leaf name apart;
     # a top-level occurrence's path is just its name.
-    occ = make_occurrence(
+    return make_occurrence(
         path=full_path or name, component=component,
         transform2=FakeMatrix3D(rotation_deg, origin) if transform2 is None else transform2,
         children=list(children), grounded=grounded, ground_to_parent=ground_to_parent,
         bodies=[BRepBody(f"Body{i + 1}") for i in range(body_count)],
-        bounding_box=make_bbox(*bbox) if bbox else None)
-    # body_bbox models the bodies-only read; "empty" = no bodies (None). An occurrence WITHOUT it
-    # carries no boundingBox2 at all, so body_aabb falls back to .boundingBox, like a BRepBody.
-    if body_bbox is not None:
-        _bodies_only_box(occ, None if body_bbox == "empty" else make_bbox(*body_bbox))
-    return occ
+        bounding_box=make_bbox(*bbox) if bbox else None, **bodies_only)
 
 
 UNAVAILABLE = ("3 : The occurrence's referenced component is unavailable (broken or missing "
@@ -2092,6 +2086,16 @@ class TestJointLimitsRead:
         kin_design(joints=[j])
         rec = _payload(ap.handler())["joints"][0]
         assert "rotation_limits_deg" not in rec and "slide_limits_mm" not in rec
+
+    def test_a_disabled_bound_carrying_a_value_stays_off_the_wire(self, kin_design):
+        # The ENABLE FLAG is the gate, not the number beside it: a reader keying on the value would
+        # pass every zero-valued disabled bound above and publish this -60 as a real limit.
+        j = _joint("Swing", _REVOLUTE, "A:1", "B:1")
+        j.jointMotion.rotationLimits = _MotionLimits(
+            disabled_values={"minimum": math.radians(-60), "rest": math.radians(5)})
+        kin_design(joints=[j])
+        rec = _payload(ap.handler())["joints"][0]
+        assert "rotation_limits_deg" not in rec
 
 
 # ── the DEFAULT cap of every bounded array, driven through the payload ───────────────────────────

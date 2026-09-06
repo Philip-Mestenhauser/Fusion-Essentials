@@ -165,14 +165,6 @@ class TestOwnerFacts:
         assert not [k for k in out if k.startswith("owner")]
         assert "role" not in out
 
-    def test_a_maker_that_will_not_read_gets_no_owner_keys(self):
-        # the model parameter is there but its createdBy declines: the row stays flat rather than
-        # naming a maker nothing read
-        out = params._param_summary(FakeModelParameter(name="d195", owner=None),
-                                    units_manager=_UM())
-        assert not [k for k in out if k.startswith("owner")]
-        assert "role" not in out
-
     def test_an_empty_role_is_dropped_rather_than_published_blank(self):
         out = params._param_summary(
             FakeModelParameter(owner=FakeFeature("Extrude1"), role=""), units_manager=_UM())

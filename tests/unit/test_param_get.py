@@ -121,11 +121,14 @@ class TestOwnerOnTheReadPath:
         assert "note" not in out
 
     def test_no_note_when_not_one_model_row_has_an_owner(self, monkeypatch):
-        # a note describing owner keys that are not in the payload sends a caller looking for them
-        design = _design(FakeUserParameters([]), [FakeModelParameter(name="d1", owner=None)])
+        # a note describing owner keys that are not in the payload sends a caller looking for them.
+        # Every model parameter answers a maker (measured), so the payload with no owner key at all
+        # is the one carrying no model row: allParameters holding only the user parameter above it.
+        u1 = _p("PartX")
+        design = _design(FakeUserParameters([u1]), [u1])
         monkeypatch.setattr(params._common, "design", lambda: design)
         out = _payload(params.handler(include_model_parameters=True))
-        assert out["model_parameter_count"] == 1
+        assert out["model_parameter_count"] == 0
         assert "note" not in out
 
     def test_a_single_named_model_parameter_is_answered_with_its_owner(self, monkeypatch):

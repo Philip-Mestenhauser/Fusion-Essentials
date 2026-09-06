@@ -254,9 +254,9 @@ def _comp(name="Comp1", token=None):
     lands in. entityToken, because _common.same_component compares on it: the landed-component
     read-back and the active-component disclosure both refuse to claim anything about a pair they
     cannot identify. A test that wants that state deletes the attribute."""
-    comp = MakeComp(name=name, entity_token=token if token is not None else f"TOKEN:{name}")
-    comp.xYConstructionPlane = object()
-    comp.originConstructionPoint = object()     # the stable anchor for anchor=coordinates
+    comp = MakeComp(name=name, entity_token=token if token is not None else f"TOKEN:{name}",
+                    origin_construction_point=object(),   # the anchor for anchor=coordinates
+                    origin_planes=(object(), object(), object()))
     comp.jointOrigins = _FakeJointOrigins(comp)
     return comp
 
@@ -426,9 +426,8 @@ class _CapSketches(_NamedCollection):
 
 def _cap_comp(store):
     """A component whose sketches collection captures the orientation line that gets drawn."""
-    comp = MakeComp(name="Comp1")
+    comp = MakeComp(name="Comp1", origin_planes=(object(), object(), object()))
     comp.sketches = _CapSketches(store)
-    comp.xYConstructionPlane = object()
     return comp
 
 

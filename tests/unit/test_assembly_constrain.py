@@ -10,7 +10,7 @@ import pytest
 
 import live_api_facts as _api_facts
 from conftest import (FakeMatrix3D, FakeTimeline, FakeTimelineObject, MakeComp, install, load_tool,
-                      make_design, make_occurrence, payload)
+                      make_design, make_placed_occurrence, payload)
 
 ja = load_tool("assembly_constrain")
 
@@ -19,9 +19,6 @@ _WARNING = _api_facts.ENUMS["fusion.FeatureHealthStates"]["WarningFeatureHealthS
 _ERROR = _api_facts.ENUMS["fusion.FeatureHealthStates"]["ErrorFeatureHealthState"]
 
 _ORIGIN = (0.0, 0.0, 0.0)
-# The message an occurrence whose placement will not read at all throws with, on BOTH matrix reads -
-# _occ_origin falls from transform2 to transform, so blinding one alone leaves a readable pose.
-_NO_TRANSFORM = "transform unreadable"
 
 
 # ── fakes ───────────────────────────────────────────────────────────────────
@@ -120,13 +117,7 @@ class _PoisonTimelineObject(FakeTimelineObject):
         self._health = value
 
 
-def _part(path, pos=None):
-    """One occurrence at WORLD translation `pos` (cm), or - pos=None - one whose transform will not read."""
-    comp = MakeComp(name=path.split("+")[-1].split(":")[0])
-    if pos is None:
-        return make_occurrence(path=path, component=comp,
-                               raises_on={"transform2": _NO_TRANSFORM, "transform": _NO_TRANSFORM})
-    return make_occurrence(path=path, component=comp, transform2=FakeMatrix3D(t=pos))
+_part = make_placed_occurrence
 
 
 @pytest.fixture

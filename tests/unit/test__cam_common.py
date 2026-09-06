@@ -2251,24 +2251,15 @@ class TestWarningOverlayTally:
         assert t["out_of_date"] == 1 and t["warnings"] == 1
 
 
-class _MachinedSetup(FakeSetup):
-    """A setup carrying the machine setup_blockers reads (through machine_label) and the fault pair
-    the rollup reads - neither of which the shared setup fake models."""
-
-    def __init__(self, name="Setup1", ops=(), machine=None, has_error=False, error=""):
-        super().__init__(name, ops=ops)
-        self.machine = machine
-        self.hasError = has_error
-        self.error = error
-
-
 _HAAS = FakeMachine(description="Haas VF-2")
 
 
-def _machined_setup(ops, name="Setup1", machine=_HAAS):
-    """A setup with an assigned machine: setup_blockers reads Setup.machine, so machine=None is a
-    setup blocked by no_machine_selected, not a clean one."""
-    return _MachinedSetup(name, ops=ops, machine=machine)
+def _machined_setup(ops, name="Setup1", machine=_HAAS, error=None):
+    """A setup with an assigned machine and a readable fault channel: setup_blockers reads
+    Setup.machine (through machine_label), so machine=None is a setup blocked by
+    no_machine_selected; error=None is the no-fault setup live_readiness counts as clean."""
+    return FakeSetup(name, ops=ops, machine=machine,
+                     has_error=error is not None, error=error or "")
 
 
 class TestLiveReadinessEdges:
@@ -2590,7 +2581,21 @@ class TestLiveReadinessConsumesSetupBlockers:
             self, monkeypatch, operation_cast_passthrough):
         sig = self._sig(monkeypatch, [_machined_setup([_tally_op("Face1"), _tally_op("Face2")])])
         assert sig["setups_blocked"] == []
+        assert sig["setups_errored"] == 0
         assert sig["readiness"] == "2 of 2 active ops valid - ready to post."
+
+    def test_a_setup_level_fault_blocks_the_job_its_operations_alone_read_as_ready(
+            self, monkeypatch, operation_cast_passthrough):
+        # the discriminating pair to the test above: the same two valid ops, and the BLOCKER comes
+        # from the setup's own fault channel - a verdict built from the op tally alone misses it.
+        sig = self._sig(monkeypatch, [_machined_setup([_tally_op("Face1"), _tally_op("Face2")],
+                                                      error="Stock is smaller than the model.\nfix it")])
+        assert sig["valid"] == 2 and sig["errored"] == 0
+        assert sig["setups_errored"] == 1
+        assert sig["samples"]["setup"] == {"name": "Setup1",
+                                           "error": "Stock is smaller than the model."}
+        assert sig["readiness"] == ("BLOCKER: 1 setup(s) have errors - the job will not post "
+                                    "until fixed.")
 
     def test_only_the_blocked_setup_of_several_is_named(self, monkeypatch,
                                                         operation_cast_passthrough):
@@ -4944,7 +4949,7 @@ def _haas():
 
 def _MachineSetup(name, machine=None):
     """A setup whose assigned machine the limits read walks."""
-    return _MachinedSetup(name, machine=machine)
+    return FakeSetup(name, machine=machine)
 
 
 class TestMachineLimits:

@@ -2249,6 +2249,457 @@ ROWS = [
 """,
     },
     {
+        "id": "shape-dump-drawing-world",
+        "claim": "The row makes and removes its OWN source, so nothing it measures depends on what a project happens to hold: it adds a scratch design carrying one placed box, saves it into the cloud project 'MCP Test Project' as MeasureDrawingSource, takes that document's DataFile as the createDrawingInput source, and in a finally closes the document and deletes the file. Right after saveAs the DataFile's id is the LOCAL cache path - the cloud urn: id lands asynchronously, about two seconds - so the row pumps doEvents under a 20 second clock bound until the urn: form answers and FAILS naming the timeout if it never does. Before saving, ONE listing of that folder's own dataFiles (never recursive) deletes any MeasureDrawingSource a previous run left behind; that listing LAGS its own deletes, so an entry it names can already be gone and the row reports the entries seen and the deletes that took rather than inferring a leftover from the difference. The same lag makes deleteMe RAISE InternalValidationError while a just-closed file is still settling, so the removal pumps doEvents and retries under a clock bound - measured taking two or three attempts. DrawingManager.get() answers a DrawingManager and createDrawingInput answers a CreateDrawingInput whose customSize hands out a CustomSheetSize already carrying a positive width and height and at least two zones each way, so 'a DEFAULT CustomSheetSize' is read rather than assumed. The deleting of the source is reported but does NOT gate the row: a False leaves the file for the next run's sweep and the detail names it. The eleven document-side types (DrawingDocument, Drawing, Sheets, Sheet, Views, View, DrawingSketches, DrawingSketch, Images, DrawingExportManager, DocumentSettings) come off their CLASS objects: adsk.core.DocumentTypes carries no drawing member at all, so documents.add cannot make one, and DrawingManager.createDrawing would mint a SECOND cloud file, which this row does not call. The class dump rests on the class-dir-equals-instance-dir-minus-'this' reading, re-measured here on CreateDrawingInput, which the row holds both of. The collection types are named Views/Images, NOT DrawingViews/DrawingImages, and the settings type is DocumentSettings - the labels are what the fake-shape lint maps a fake onto, so each live one is read back rather than assumed",
+        "encoded_in": ("no shared fake yet - the per-file doubles in test_drawing_get.py, "
+                       "test_drawing_create.py, test_drawing_edit_sheet.py, "
+                       "test_drawing_dimension.py, test_drawing_export.py, "
+                       "test_drawing_add_sketch.py and test_drawing_insert_image.py; "
+                       "_drawing_common.active_drawing_document and _drawing_common.sheet_facts "
+                       "read these types live"),
+        "body": """
+    import time as _clock
+    SOURCE_NAME = "MeasureDrawingSource"
+    projects = app.data.dataProjects
+    project = None
+    for i in range(projects.count):
+        if projects.item(i).name == "MCP Test Project":
+            project = projects.item(i)
+            break
+    folder = None if project is None else project.rootFolder
+
+    def source_file():
+        \"\"\"The row's own saved source in the target folder, or None - ONE flat listing.\"\"\"
+        # dataFiles hands back a FRESH snapshot per property access, so the count and the item
+        # must come off ONE bound collection - indexing a later access with an earlier count
+        # raises 'invalid argument index' while the folder is still settling after a save.
+        files = folder.dataFiles
+        for i in range(files.count):
+            if files.item(i).name == SOURCE_NAME:
+                return files.item(i)
+        return None
+
+    # ONE flat listing, every delete raise-safe. The listing LAGS its own deletes, so an entry it
+    # names here can already be gone - the row reports both counts and infers nothing from a
+    # delete that did not take.
+    seen = 0
+    swept = 0
+    if folder is not None:
+        listing = folder.dataFiles
+        for i in range(listing.count):
+            if listing.item(i).name != SOURCE_NAME:
+                continue
+            seen += 1
+            try:
+                swept += 1 if listing.item(i).deleteMe() else 0
+            except Exception:
+                pass
+    dm = adsk.drawing.DrawingManager.get()
+    di = None
+    cs = None
+    urn = None
+    deleted = None
+    settle = None
+    tries = 0
+    tmp = None if folder is None else app.documents.add(
+        adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        if tmp is not None:
+            src_design = adsk.fusion.Design.cast(
+                tmp.products.itemByProductType("DesignProductType"))
+            make_placed_box(src_design, "MeasureDrawingBox")
+            started = _clock.time()
+            tmp.saveAs(SOURCE_NAME, folder,
+                       "scratch source the shape-dump-drawing-world row saves and deletes", "")
+            # saveAs answers immediately with dataFile.id still the LOCAL cache path; the cloud
+            # urn: id lands asynchronously, and both createDrawingInput and deleteMe want the
+            # settled file, so the pump waits for that form rather than the first truthy id.
+            deadline = started + 20.0
+            while _clock.time() < deadline:
+                df = tmp.dataFile
+                got = df.id if df is not None else ""
+                if got and got.startswith("urn:"):
+                    urn = got
+                    settle = round(_clock.time() - started, 2)
+                    break
+                adsk.doEvents()
+                _clock.sleep(0.2)
+            if urn is not None:
+                di = dm.createDrawingInput(
+                    tmp.dataFile, adsk.drawing.DrawingCreationModes.AutomaticDrawingCreationMode)
+                cs = di.customSize
+    finally:
+        if tmp is not None:
+            tmp.close(False)
+            # deleteMe RAISES InternalValidationError while the just-closed file is still
+            # settling, and the folder listing lags its own deletes - so the retry pumps
+            # doEvents, treats a raise as one more not-yet, and stops on the first True.
+            stop = _clock.time() + 25.0
+            while _clock.time() < stop:
+                leftover = source_file()
+                if leftover is None:
+                    break
+                tries += 1
+                try:
+                    if leftover.deleteMe():
+                        deleted = True
+                        break
+                except Exception:
+                    pass
+                deleted = False
+                for _ in range(10):
+                    adsk.doEvents()
+                    _clock.sleep(0.2)
+    live = [("DrawingManager", dm)]
+    if di is not None:
+        live.append(("CreateDrawingInput", di))
+        live.append(("CustomSheetSize", cs))
+    wrong = [lbl + "=" + type(o).__name__ for lbl, o in live if type(o).__name__ != lbl]
+    counts = [dump_shape(lbl, o) for lbl, o in live]
+    for name in ("DrawingDocument", "Drawing", "Sheets", "Sheet", "Views", "View",
+                 "DrawingSketches", "DrawingSketch", "Images", "DrawingExportManager",
+                 "DocumentSettings"):
+        counts.append(dump_shape(name, getattr(adsk.drawing, name)))
+    doc_types = [n for n in dir(adsk.core.DocumentTypes) if not n.startswith("_")]
+    no_drawing_doc_type = not [n for n in doc_types if "Drawing" in n]
+    aliases = ("DrawingViews", "DrawingView", "DrawingImages", "DrawingDimensions",
+               "DrawingDocumentSettings")
+    no_drawing_aliases = not any(hasattr(adsk.drawing, n) for n in aliases)
+    # None means no CreateDrawingInput was reachable to take the reading on: the gate wants True,
+    # so a source that never saved or never settled FAILS the row instead of passing it on the
+    # eleven class dumps.
+    class_ok = None
+    if di is not None:
+        ctl = set(n for n in dir(adsk.drawing.CreateDrawingInput) if not n.startswith("_"))
+        class_ok = ctl == set(n for n in dir(di) if not n.startswith("_")) - set(["this"])
+    size = None if cs is None else (cs.width, cs.height, cs.horizontalZones, cs.verticalZones)
+    sized = size is not None and size[0] > 0 and size[1] > 0 and size[2] >= 2 and size[3] >= 2
+    emit(len(counts) == 14 and all(c > 0 for c in counts) and not wrong and class_ok is True
+         and no_drawing_doc_type and no_drawing_aliases and sized and urn is not None,
+         "shape-dump-drawing-world: " + str(len(counts)) + " types, min attrs "
+         + str(min(counts)) + ", source " + SOURCE_NAME + " saved into "
+         + ("'" + project.name + "'" if project is not None
+            else "NO project named 'MCP Test Project' - nothing was saved")
+         + " and its cloud urn: id "
+         + ("settled in " + str(settle) + "s" if urn is not None
+            else "NEVER settled inside the 20s bound, so no CreateDrawingInput was taken")
+         + "; the source was "
+         + ("removed after " + str(tries) + " delete attempt(s)" if deleted is True
+            else ("scratch file left: " + SOURCE_NAME + " after " + str(tries) + " attempt(s)")
+            if deleted is False else "not found to delete")
+         + "; the opening sweep saw " + str(seen) + " listing entr(ies) under that name and "
+         + str(swept) + " deleted"
+         + "; DocumentTypes names no drawing document "
+         "(it carries " + ",".join(doc_types) + ") so the eleven document-side types come off "
+         "the class (class dir == instance dir minus 'this' on CreateDrawingInput: "
+         + str(class_ok) + "); adsk.drawing carries none of " + ",".join(aliases) + ": "
+         + str(no_drawing_aliases) + ", a fresh CreateDrawingInput hands out customSize "
+         + str(size) + " as (width, height, horizontal zones, vertical zones), mislabelled "
+         + (", ".join(wrong) or "none"))
+""",
+    },
+    {
+        "id": "shape-dump-appearance-world",
+        "claim": "The appearance world dumps seven library types - MaterialLibraries off app.materialLibraries, the first MaterialLibrary carrying appearances, its Appearances, that library's first Appearance, the Appearance's appearanceProperties, the ColorProperty among them and the Color that property's value answers - and the row reads that Appearance.appearanceProperties answers a PROPERTIES collection: there is no type named AppearanceProperties in adsk.core or adsk.fusion. Beside them it reads the PLAIN answers a fresh scratch entity gives with no override applied, which is what a body/occurrence/face double has to start from: BRepBody.appearance is already a live Appearance (never None) and opacity reads 1.0, but visibleOpacity on the NATIVE body RAISES InternalValidationError while the same read through an assembly-context proxy answers 1.0; Occurrence.appearance reads None, its visibleOpacity 1.0, and Occurrence carries no opacity member at all; Component.opacity reads 1.0 and BRepFace.appearance is a live Appearance. The native visibleOpacity raise is CAUGHT and the row keeps reading, so a build that stops raising fails this row rather than passing it quietly",
+        "encoded_in": ("no shared fake yet - the per-file doubles in test_appearance_set.py and "
+                       "test_model_set_material.py; appearance_set._reads_as and "
+                       "appearance_set._apply_opacity read these members live"),
+        "body": """
+    libs = app.materialLibraries
+    lib = None
+    for i in range(libs.count):
+        if libs.item(i).appearances.count:
+            lib = libs.item(i)
+            break
+    ap = lib.appearances.item(0)
+    props = ap.appearanceProperties
+    cp = None
+    for i in range(props.count):
+        if type(props.item(i)).__name__ == "ColorProperty":
+            cp = props.item(i)
+            break
+    live = [("MaterialLibraries", libs), ("MaterialLibrary", lib),
+            ("Appearances", lib.appearances), ("Appearance", ap), ("Properties", props),
+            ("ColorProperty", cp), ("Color", cp.value)]
+    wrong = [lbl + "=" + type(o).__name__ for lbl, o in live if type(o).__name__ != lbl]
+    counts = [dump_shape(lbl, o) for lbl, o in live]
+    no_appearance_properties = not (hasattr(adsk.core, "AppearanceProperties")
+                                    or hasattr(adsk.fusion, "AppearanceProperties"))
+    plain = {}
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        native, occ = make_placed_box(d, "AppearanceDump")
+        comp = occ.component
+        proxy = native.createForAssemblyContext(occ)
+        plain["body_appearance"] = type(native.appearance).__name__
+        plain["body_opacity"] = native.opacity
+        try:
+            plain["native_visible_opacity"] = repr(native.visibleOpacity)
+        except Exception as ex:
+            plain["native_visible_opacity"] = "raised " + type(ex).__name__ + " " + str(ex)[:70]
+        plain["proxy_visible_opacity"] = proxy.visibleOpacity
+        plain["occ_appearance"] = occ.appearance
+        plain["occ_visible_opacity"] = occ.visibleOpacity
+        plain["occ_has_opacity"] = hasattr(occ, "opacity")
+        plain["component_opacity"] = comp.opacity
+        plain["face_appearance"] = type(native.faces.item(0).appearance).__name__
+    finally:
+        tmp.close(False)
+    emit(len(counts) == 7 and all(c > 0 for c in counts) and not wrong
+         and no_appearance_properties
+         and plain["body_appearance"] == "Appearance" and plain["body_opacity"] == 1.0
+         and plain["native_visible_opacity"].startswith("raised ")
+         and plain["proxy_visible_opacity"] == 1.0 and plain["occ_appearance"] is None
+         and plain["occ_visible_opacity"] == 1.0 and plain["occ_has_opacity"] is False
+         and plain["component_opacity"] == 1.0 and plain["face_appearance"] == "Appearance",
+         "shape-dump-appearance-world: " + str(len(counts)) + " types, min attrs "
+         + str(min(counts)) + ", library '" + lib.name + "' of " + str(libs.count)
+         + " holds " + str(lib.appearances.count) + " appearances, '" + ap.name
+         + "' carries " + str(props.count) + " properties whose collection answers "
+         + type(props).__name__ + " (adsk carries no AppearanceProperties type: "
+         + str(no_appearance_properties) + "); plain reads on a fresh entity: BRepBody.appearance="
+         + plain["body_appearance"] + " opacity=" + repr(plain["body_opacity"])
+         + " native visibleOpacity=" + plain["native_visible_opacity"]
+         + " proxy visibleOpacity=" + repr(plain["proxy_visible_opacity"])
+         + ", Occurrence.appearance=" + repr(plain["occ_appearance"]) + " visibleOpacity="
+         + repr(plain["occ_visible_opacity"]) + " carries an opacity member="
+         + str(plain["occ_has_opacity"]) + ", Component.opacity="
+         + repr(plain["component_opacity"]) + ", BRepFace.appearance="
+         + plain["face_appearance"] + ", mislabelled " + (", ".join(wrong) or "none"))
+""",
+    },
+    {
+        "id": "shape-dump-pmi-world",
+        "claim": "PMI authoring runs on this installation, and the row proves it by CREATING what it dumps: in a scratch design holding a box with one hole, component.pmiAnnotations answers a PMIAnnotations, its leaderLineNotes a PMILeaderLineNotes whose createInput(planar face) answers a PMILeaderLineNoteInput and add() a PMILeaderLineNote, its holeThreadNotes a PMIHoleThreadNotes whose createInput([cylindrical face]) answers a PMIHoleThreadNoteInput and add() a PMIHoleThreadNote. A created note's segments answer a PMISegmentVector, and the six document-free factories - PMITextSegment.create(text), PMISymbolSegment.create(member), PMILineBreakSegment.create(), PMIGeometricValue.create(), PMIGeometricValueTolerance.create() and PMIDisplaySettings.create(), the last four taking NO argument - each answer their own type. Both adds are gated, so a session where the Design/Manufacturing Extension is not entitled FAILS this row naming the refusal instead of passing on the reads alone",
+        "encoded_in": ("no shared fake yet - the per-file doubles in test__pmi.py, "
+                       "test_pmi_get.py, test_pmi_create.py, test_pmi_edit.py and "
+                       "test_pmi_delete.py; _pmi.walk_annotations, _pmi.build_segments and "
+                       "_pmi.annotation_record read these types live"),
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = d.rootComponent
+        sk = root.sketches.add(root.xYConstructionPlane)
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(
+            adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(4.0, 4.0, 0.0))
+        body = root.features.extrudeFeatures.addSimple(
+            sk.profiles.item(0), adsk.core.ValueInput.createByReal(1.0),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation).bodies.item(0)
+        top = None
+        for i in range(body.faces.count):
+            f = body.faces.item(i)
+            if type(f.geometry).__name__ == "Plane" and f.pointOnFace.z > 0.5:
+                top = f
+        holes = root.features.holeFeatures
+        hin = holes.createSimpleInput(adsk.core.ValueInput.createByReal(0.4))
+        sk2 = root.sketches.add(top)
+        hin.setPositionBySketchPoint(sk2.sketchPoints.add(adsk.core.Point3D.create(2.0, 2.0, 0.0)))
+        hin.setDistanceExtent(adsk.core.ValueInput.createByReal(0.5))
+        holes.add(hin)
+        cyl = None
+        for i in range(body.faces.count):
+            if type(body.faces.item(i).geometry).__name__ == "Cylinder":
+                cyl = body.faces.item(i)
+        plane_face = None
+        for i in range(body.faces.count):
+            f = body.faces.item(i)
+            if type(f.geometry).__name__ == "Plane" and f.pointOnFace.z > 0.5:
+                plane_face = f
+        notes = root.pmiAnnotations.leaderLineNotes
+        note_in = notes.createInput(plane_face)
+        note_in.segments = [adsk.fusion.PMITextSegment.create("ShapeDump")]
+        note = notes.add(note_in)
+        hnotes = root.pmiAnnotations.holeThreadNotes
+        hole_in = hnotes.createInput([cyl])
+        hole_note = hnotes.add(hole_in)
+        live = [("PMIAnnotations", root.pmiAnnotations),
+                ("PMILeaderLineNotes", notes), ("PMILeaderLineNoteInput", note_in),
+                ("PMILeaderLineNote", note), ("PMIHoleThreadNotes", hnotes),
+                ("PMIHoleThreadNoteInput", hole_in), ("PMIHoleThreadNote", hole_note),
+                ("PMISegmentVector", note.segments),
+                ("PMITextSegment", adsk.fusion.PMITextSegment.create("dump")),
+                ("PMISymbolSegment", adsk.fusion.PMISymbolSegment.create(
+                    adsk.fusion.PMISymbolTypes.DiameterPMISymbolType)),
+                ("PMILineBreakSegment", adsk.fusion.PMILineBreakSegment.create()),
+                ("PMIGeometricValue", adsk.fusion.PMIGeometricValue.create()),
+                ("PMIGeometricValueTolerance", adsk.fusion.PMIGeometricValueTolerance.create()),
+                ("PMIDisplaySettings", adsk.fusion.PMIDisplaySettings.create())]
+        wrong = [lbl + "=" + type(o).__name__ for lbl, o in live if type(o).__name__ != lbl]
+        counts = [dump_shape(lbl, o) for lbl, o in live]
+        emit(len(counts) == 14 and all(c > 0 for c in counts) and not wrong
+             and notes.count == 1 and hnotes.count == 1 and len(note.segments) == 1,
+             "shape-dump-pmi-world: " + str(len(counts)) + " types, min attrs "
+             + str(min(counts)) + ", PMI authoring is entitled here - the component holds "
+             + str(notes.count) + " leader note carrying " + str(len(note.segments))
+             + " segment and " + str(hnotes.count) + " hole/thread note, both created by this "
+             "row, mislabelled " + (", ".join(wrong) or "none"))
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
+        "id": "shape-dump-mesh-calculator-quality",
+        "claim": "A BRepBody's meshManager answers a MeshManager whose createMeshCalculator() answers a TriangleMeshCalculator; a FRESH calculator reads all four of its knobs - maxNormalDeviation, surfaceTolerance, maxAspectRatio, maxSideLength - as 0.0, so it carries no tolerances of its own. setQuality returns True and writes surfaceTolerance ALONE: the other three stay 0.0 after it, and HighQualityTriangleMesh lands a strictly SMALLER surfaceTolerance than NormalQualityTriangleMesh on the same body, which is the comparison a quality that silently did nothing would fail. calculate() answers a TriangleMesh carrying nodes, and meshManager.displayMeshes answers a TriangleMeshList",
+        "encoded_in": ("no shared fake yet - the per-file doubles in test_save_as_mesh.py; "
+                       "save_as_mesh._tessellate reads meshManager, createMeshCalculator, the "
+                       "BOOL setQuality returns and calculate live"),
+        "need_box": True,
+        "body": """
+    def knobs(c):
+        return (c.maxNormalDeviation, c.surfaceTolerance, c.maxAspectRatio, c.maxSideLength)
+
+    mm = body.meshManager
+    calc = mm.createMeshCalculator()
+    fresh = knobs(calc)
+    took = calc.setQuality(adsk.fusion.TriangleMeshQualityOptions.NormalQualityTriangleMesh)
+    normal = knobs(calc)
+    high_calc = mm.createMeshCalculator()
+    high_took = high_calc.setQuality(adsk.fusion.TriangleMeshQualityOptions.HighQualityTriangleMesh)
+    high = knobs(high_calc)
+    mesh = calc.calculate()
+    live = [("MeshManager", mm), ("TriangleMeshCalculator", calc), ("TriangleMesh", mesh),
+            ("TriangleMeshList", mm.displayMeshes)]
+    wrong = [lbl + "=" + type(o).__name__ for lbl, o in live if type(o).__name__ != lbl]
+    counts = [dump_shape(lbl, o) for lbl, o in live]
+    untouched = [normal[i] == 0.0 and high[i] == 0.0 for i in (0, 2, 3)]
+    emit(len(counts) == 4 and all(c > 0 for c in counts) and not wrong
+         and fresh == (0.0, 0.0, 0.0, 0.0) and took is True and high_took is True
+         and normal[1] > 0.0 and high[1] > 0.0 and high[1] < normal[1] and all(untouched)
+         and mesh.nodeCount > 0,
+         "shape-dump-mesh-calculator-quality: " + str(len(counts)) + " types, min attrs "
+         + str(min(counts)) + ", a fresh calculator reads " + str(fresh)
+         + " as (maxNormalDeviation, surfaceTolerance, maxAspectRatio, maxSideLength); setQuality "
+         "returned " + repr(took) + "/" + repr(high_took) + " and left normal=" + str(normal)
+         + " high=" + str(high) + ", so only surfaceTolerance moved and high < normal is "
+         + str(high[1] < normal[1]) + "; calculate() gave " + str(mesh.nodeCount) + " nodes and "
+         + str(mesh.triangleCount) + " triangles, displayMeshes holds "
+         + str(mm.displayMeshes.count) + ", mislabelled " + (", ".join(wrong) or "none"))
+""",
+    },
+    {
+        "id": "shape-dump-units-manager",
+        "claim": "A design's unitsManager and its fusionUnitsManager BOTH answer a FusionUnitsManager - neither read hands back the base UnitsManager, so that base type is dumped from its CLASS object under the class-dir-equals-instance-dir-minus-'this' reading, re-measured in this row on the live FusionUnitsManager. The base's public names are a STRICT subset of the subclass's, and the four the subclass adds are exactly design, distanceDisplayUnits, massDisplayUnits and unitSystem: a build that moved a member between the two fails this row rather than letting a UnitsManager-shaped fake keep a surface the live object no longer has",
+        "encoded_in": ("tests/conftest.py FakeUnitsManager - this dump is the SHAPES key that "
+                       "sweeps its defaultLengthUnits and evaluateExpression, both among "
+                       "UnitsManager's 15 public names; _param_common._param_summary converts "
+                       "through the same object"),
+        "body": """
+    fum = des.unitsManager
+    fum_two = des.fusionUnitsManager
+    counts = [dump_shape("FusionUnitsManager", fum)]
+    counts.append(dump_shape("UnitsManager", adsk.core.UnitsManager))
+    base = set(n for n in dir(adsk.core.UnitsManager) if not n.startswith("_"))
+    derived = set(n for n in dir(adsk.fusion.FusionUnitsManager) if not n.startswith("_"))
+    class_ok = derived == set(n for n in dir(fum) if not n.startswith("_")) - set(["this"])
+    both_fusion = (type(fum).__name__ == "FusionUnitsManager"
+                   and type(fum_two).__name__ == "FusionUnitsManager")
+    added = sorted(derived - base)
+    emit(len(counts) == 2 and all(c > 0 for c in counts) and class_ok and both_fusion
+         and base < derived
+         and added == ["design", "distanceDisplayUnits", "massDisplayUnits", "unitSystem"],
+         "shape-dump-units-manager: " + str(len(counts)) + " types, min attrs "
+         + str(min(counts)) + ", unitsManager answers " + type(fum).__name__
+         + " and fusionUnitsManager answers " + type(fum_two).__name__
+         + " so UnitsManager comes off the class (class dir == instance dir minus 'this': "
+         + str(class_ok) + "); UnitsManager carries " + str(len(base))
+         + " public names, FusionUnitsManager " + str(len(derived))
+         + ", a strict superset adding " + ", ".join(added))
+""",
+    },
+    {
+        "id": "parameter-favorite-maker-text-value-and-fresh-appearances",
+        "claim": "Four plain reads the parameter and appearance doubles stand on, measured on one scratch design carrying a dimensioned sketch, an extrude and one TEXT user parameter. (1) ModelParameter.isFavorite reads the bool False on every allParameters entry outside userParameters. (2) ModelParameter.createdBy never declines and never reads None: each one answers the entity that made it - the Sketch for a sketch dimension's parameter, the ExtrudeFeature for an extrude's - so a model parameter with no readable maker was not reachable here; the DECLINE belongs to UserParameter, which carries NO createdBy member at all and raises AttributeError on the read. (3) Parameter.value on a TEXT parameter RAISES 'Parameter is not numeric type' while textValue answers the unquoted string, so the textValue fallback is live code; a text parameter is made with units 'Text' and a QUOTED string-literal expression, an unquoted one is refused at add with 'Invalid expression', and the same unquoted string under empty units makes a NUMERIC parameter whose textValue raises 'Parameter is not text type' instead. (4) Design.appearances is an Appearances collection that starts EMPTY and fills from GEOMETRY, not from any apply: it counts 0 on a design with no bodies, still 0 after a sketch is drawn, and becomes 1 the moment the extrude brings a body in - that one entry is the body's default material appearance, named 'Steel - Satin'. The row reads the count at all three moments, so binding the collection early and asserting its count late (which reads the CURRENT count, never the captured one) cannot pass this claim",
+        "encoded_in": ("tests/conftest.py FakeModelParameter (its owner-None branch and its "
+                       "isFavorite default) and MakeDesign's appearances default, plus the text "
+                       "double in test__param_common.py; _param_common._owner_facts and "
+                       "_param_common._param_summary branch on the first three"),
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = d.rootComponent
+        appearances = d.appearances
+        # The COUNT is captured at each moment, never the collection: `appearances` is live, so
+        # reading its count at emit time would answer the post-extrude number for every moment.
+        appearances_t0 = appearances.count
+        sk = root.sketches.add(root.xYConstructionPlane)
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(
+            adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(2.0, 1.0, 0.0))
+        line = sk.sketchCurves.sketchLines.item(0)
+        sk.sketchDimensions.addDistanceDimension(
+            line.startSketchPoint, line.endSketchPoint,
+            adsk.fusion.DimensionOrientations.AlignedDimensionOrientation,
+            adsk.core.Point3D.create(1.0, -1.0, 0.0))
+        appearances_sketched = appearances.count
+        root.features.extrudeFeatures.addSimple(
+            sk.profiles.item(0), adsk.core.ValueInput.createByReal(1.0),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        appearances_bodied = appearances.count
+        appearance_name = appearances.item(0).name if appearances_bodied else None
+        makers = []
+        favorites = []
+        for i in range(d.allParameters.count):
+            p = d.allParameters.item(i)
+            favorites.append(p.isFavorite)
+            try:
+                makers.append(type(p.createdBy).__name__)
+            except Exception as ex:
+                makers.append("raised " + type(ex).__name__)
+        model_only = d.userParameters.count == 0
+        text = d.userParameters.add(
+            "shapeDumpText", adsk.core.ValueInput.createByString("'Roughing'"), "Text", "")
+        try:
+            text_value = repr(text.value)
+        except Exception as ex:
+            text_value = "raised " + type(ex).__name__ + " " + str(ex)[:60]
+        try:
+            user_maker = repr(text.createdBy)
+        except Exception as ex:
+            user_maker = "raised " + type(ex).__name__ + " " + str(ex)[:60]
+        try:
+            d.userParameters.add(
+                "shapeDumpBare", adsk.core.ValueInput.createByString("Roughing"), "Text", "")
+            unquoted = "accepted"
+        except Exception as ex:
+            unquoted = "raised " + type(ex).__name__ + " " + str(ex)[:60]
+        numeric = d.userParameters.add(
+            "shapeDumpNumeric", adsk.core.ValueInput.createByString("Roughing"), "", "")
+        try:
+            numeric_text = repr(numeric.textValue)
+        except Exception as ex:
+            numeric_text = "raised " + type(ex).__name__ + " " + str(ex)[:60]
+        emit(model_only and len(favorites) == 3 and all(f is False for f in favorites)
+             and sorted(set(makers)) == ["ExtrudeFeature", "Sketch"]
+             and text.valueType == adsk.fusion.ParameterValueTypes.TextParameterValueType
+             and text.textValue == "Roughing" and text.unit == "Text"
+             and text_value.startswith("raised ") and "not numeric type" in text_value
+             and user_maker.startswith("raised AttributeError")
+             and unquoted.startswith("raised ") and "Invalid expression" in unquoted
+             and numeric.valueType == adsk.fusion.ParameterValueTypes.NumericParameterValueType
+             and numeric_text.startswith("raised ") and "not text type" in numeric_text
+             and type(appearances).__name__ == "Appearances" and appearances_t0 == 0
+             and appearances_sketched == 0 and appearances_bodied == 1
+             and appearance_name == "Steel - Satin",
+             "parameter-favorite-maker-text-value-and-fresh-appearances: "
+             + str(len(favorites)) + " model parameters (no user parameter yet: "
+             + str(model_only) + ") read isFavorite " + str(favorites) + " and createdBy "
+             + str(makers) + "; a TEXT parameter (units 'Text', a quoted literal) reads unit "
+             + repr(text.unit) + " valueType " + str(text.valueType) + " textValue "
+             + repr(text.textValue) + " and value " + text_value
+             + "; UserParameter.createdBy " + user_maker + "; the same string UNQUOTED under "
+             "units 'Text' " + unquoted + ", and under empty units it makes valueType "
+             + str(numeric.valueType) + " whose textValue " + numeric_text
+             + "; " + type(appearances).__name__ + " counts " + str(appearances_t0)
+             + " with no body, " + str(appearances_sketched) + " after the sketch and "
+             + str(appearances_bodied) + " after the extrude, that entry being "
+             + repr(appearance_name) + " - it fills from geometry, not from an apply")
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
         "id": "brepedge-evaluator-tangent-follows-curve-not-edge",
         "claim": ("BRepEdge.evaluator.getTangent, taken at the parameter of startVertex.geometry, "
                   "returns a vector ANTI-parallel to (endVertex - startVertex) exactly when "
@@ -2471,6 +2922,45 @@ ROWS = [
              "occurrence-plain-reads-referenced-false-empty-collections: isReferencedComponent="
              + str(referenced) + " joints.count=" + str(n_joints)
              + " bRepBodies.count=" + str(n_bodies) + " (expect False/0/0)")
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
+        "id": "occurrence-plain-reads-valid-and-lit",
+        "claim": "A plain LOCAL occurrence made by addNewComponent, before anything is modelled in it, answers isValid True, isLightBulbOn True and isReferencedComponent False - a fresh instance is live and lit, so neither flag has an unset or declining state a fake may model. Its boundingBox2 asked for solid bodies answers NOTHING (None, not an empty box) while the component holds no body, and answers a BoundingBox3D once one extrude lands - the 1 cm cube's box, min (0,0,0) to max (1,1,1). boundingBox2 takes a BITWISE BoundingBoxEntityTypes value, not a list, and the row reads both moments on the SAME occurrence so the None is the bodyless state rather than a different object",
+        "encoded_in": ("tests/conftest.py FakeOccurrence - its valid and light_bulb_on knobs "
+                       "(installed as plain isValid/isLightBulbOn attributes) and its "
+                       "bodies_bounding_box knob, whose None stands for the read that answers "
+                       "nothing on an instance placing no body"),
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        solid = adsk.fusion.BoundingBoxEntityTypes.SolidBRepBodyBoundingBoxEntityType
+        occ = d.rootComponent.occurrences.addNewComponent(adsk.core.Matrix3D.create())
+        valid = occ.isValid
+        lit = occ.isLightBulbOn
+        referenced = occ.isReferencedComponent
+        empty_box = occ.boundingBox2(solid)
+        comp = occ.component
+        sk = comp.sketches.add(comp.xYConstructionPlane)
+        sk.sketchCurves.sketchLines.addTwoPointRectangle(
+            adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(1.0, 1.0, 0.0))
+        comp.features.extrudeFeatures.addSimple(
+            sk.profiles.item(0), adsk.core.ValueInput.createByReal(1.0),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        box = occ.boundingBox2(solid)
+        kind = type(box).__name__
+        corners = None if box is None else (box.minPoint.x, box.minPoint.y, box.minPoint.z,
+                                            box.maxPoint.x, box.maxPoint.y, box.maxPoint.z)
+        emit(valid is True and lit is True and referenced is False and empty_box is None
+             and kind == "BoundingBox3D" and corners == (0.0, 0.0, 0.0, 1.0, 1.0, 1.0),
+             "occurrence-plain-reads-valid-and-lit: a fresh local occurrence reads isValid="
+             + str(valid) + " isLightBulbOn=" + str(lit) + " isReferencedComponent="
+             + str(referenced) + " (expect True/True/False); boundingBox2(solid bodies) answers "
+             + repr(empty_box) + " while it places no body and " + kind + " once one extrude "
+             "lands, cornered " + str(corners) + " (expect None then 0,0,0 to 1,1,1)")
     finally:
         tmp.close(False)
 """,
@@ -5568,23 +6058,30 @@ ROWS = [
                        "reads units); tests/unit/test_design_export.py's DXF options fake"),
         "body": """
     import os, tempfile
-    root = des.rootComponent
-    sk = root.sketches.add(root.xYConstructionPlane)
-    sk.sketchCurves.sketchLines.addByTwoPoints(
-        adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(1.0, 1.0, 0.0))
-    opts = des.exportManager.createDXFSketchExportOptions(
-        os.path.join(tempfile.gettempdir(), "unused_measure_dxf_units.dxf"), sk)
-    n = dump_shape("DXFSketchExportOptions", opts)
-    names = set(x for x in dir(opts) if not x.startswith("_"))
-    flags = [f for f in ("isConstructionExported", "isPointsExported",
-                         "isProjectedGeometryExported") if f not in names]
-    emit(opts is not None and n > 0 and sk.sketchCurves.count == 1
-         and "units" in names and not flags,
-         "dxf-sketch-options-carries-units-unread: options type="
-         + type(opts).__name__ + " dumps " + str(n) + " attrs from a "
-         + str(sk.sketchCurves.count) + "-curve sketch; 'units' listed="
-         + str("units" in names) + " (NOT read here); missing content flags: "
-         + (", ".join(flags) or "none"))
+    # Its own scratch document: the product active when the sweep reaches this row is whatever
+    # the previous row left, and its sibling PASSES on ANY abort, so this rig must not lean on it.
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = d.rootComponent
+        sk = root.sketches.add(root.xYConstructionPlane)
+        sk.sketchCurves.sketchLines.addByTwoPoints(
+            adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(1.0, 1.0, 0.0))
+        opts = d.exportManager.createDXFSketchExportOptions(
+            os.path.join(tempfile.gettempdir(), "unused_measure_dxf_units.dxf"), sk)
+        n = dump_shape("DXFSketchExportOptions", opts)
+        names = set(x for x in dir(opts) if not x.startswith("_"))
+        flags = [f for f in ("isConstructionExported", "isPointsExported",
+                             "isProjectedGeometryExported") if f not in names]
+        emit(opts is not None and n > 0 and sk.sketchCurves.count == 1
+             and "units" in names and not flags,
+             "dxf-sketch-options-carries-units-unread: options type="
+             + type(opts).__name__ + " dumps " + str(n) + " attrs from a "
+             + str(sk.sketchCurves.count) + "-curve sketch; 'units' listed="
+             + str("units" in names) + " (NOT read here); missing content flags: "
+             + (", ".join(flags) or "none"))
+    finally:
+        tmp.close(False)
 """,
     },
     {
@@ -5609,13 +6106,17 @@ ROWS = [
         "facts_on_pass": {"behavior.dxf_sketch_options_units_read_raises": True},
         "body": """
     import os, tempfile
-    root = des.rootComponent
+    # The same scratch-document rig as its sibling row; the abort below skips the close, and the
+    # runner reclaims the stray document afterwards.
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+    root = d.rootComponent
     sk = root.sketches.add(root.xYConstructionPlane)
     sk.sketchCurves.sketchLines.addByTwoPoints(
         adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(1.0, 1.0, 0.0))
     # Nothing is exported: the options object only records the filename, and the row dies at the
     # units read below, so this path is never written.
-    opts = des.exportManager.createDXFSketchExportOptions(
+    opts = d.exportManager.createDXFSketchExportOptions(
         os.path.join(tempfile.gettempdir(), "unused_measure_dxf_units.dxf"), sk)
     try:
         u = opts.units

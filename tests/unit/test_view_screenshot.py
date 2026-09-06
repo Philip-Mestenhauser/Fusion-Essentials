@@ -11,24 +11,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import FakeApplication, MakeComp, MakeDesign, Viewport, load_tool
+from conftest import (FakeApplication, FakeOccurrence, MakeComp, MakeDesign, Viewport, load_tool,
+                      make_occurrence)
 
 gs = load_tool("view_screenshot")
 
 
-class FakeOcc:
-    """One occurrence in the isolation walk. Bespoke: its settable isLightBulbOn - the bulb the
-    whole helper is about - is not on the shared FakeOccurrence, so there is nothing to migrate onto;
-    the component it places IS the shared Component fake.
-
-    A real Occurrence always answers `component`; one whose read RAISES is an unresolved external
-    reference, which the shared census keeps out of this walk."""
-
-    def __init__(self, name, on=True):
-        self.name = name
-        self.fullPathName = name
-        self.isLightBulbOn = on
-        self.component = MakeComp(name=name.split(":")[0])
+def FakeOcc(path, on=True):
+    """One occurrence in the isolation walk: its own visibility bulb, and the shared Component fake
+    it places. A real Occurrence always answers `component`; one whose read RAISES is an unresolved
+    external reference, which the shared census keeps out of this walk."""
+    return make_occurrence(path=path, light_bulb_on=on,
+                           component=MakeComp(name=path.split("+")[-1].split(":")[0]))
 
 
 def _install(occs):
@@ -94,8 +88,7 @@ class TestIsolateForFit:
     def test_ambiguous_name_refused_not_first_match(self):
         # two instances share local name "Bolt:1" under different sub-assemblies - a bare "Bolt"
         # substring must ERROR (naming both fullPathNames), NOT silently isolate the first.
-        a = FakeOcc("Bolt:1"); a.fullPathName = "Sub-A:1+Bolt:1"
-        b = FakeOcc("Bolt:1"); b.fullPathName = "Sub-B:1+Bolt:1"
+        a, b = FakeOcc("Sub-A:1+Bolt:1"), FakeOcc("Sub-B:1+Bolt:1")
         _install([a, b])
         restore, _target, err = gs._isolate_for_fit("Bolt")
         assert restore is None
@@ -119,13 +112,14 @@ class TestIsolateForFit:
     def test_a_bulb_that_will_not_come_back_on_is_named_by_the_restore(self):
         # This tool MUTATES visibility to take its picture. A restore that silently failed leaves
         # a read tool having changed the document, so the failure has to be reportable.
-        class OneWay(FakeOcc):
+        class OneWay(FakeOccurrence):
             """A bulb that switches OFF and then refuses to come back ON - so the hide takes and
             the restore silently does not, which is the only shape that leaves a read tool
             having changed the document."""
 
-            def __init__(self, name):
-                super().__init__(name)
+            def __init__(self, path):
+                super().__init__(path=path, light_bulb_on=True,
+                                 component=MakeComp(name=path.split("+")[-1].split(":")[0]))
                 object.__setattr__(self, "_armed", True)
 
             def __setattr__(self, key, value):
@@ -133,8 +127,7 @@ class TestIsolateForFit:
                     return
                 object.__setattr__(self, key, value)
 
-        stuck = OneWay("B:1")
-        object.__setattr__(stuck, "fullPathName", "Sub:1+B:1")
+        stuck = OneWay("Sub:1+B:1")
         _install([FakeOcc("A:1"), stuck])
         restore, _target, _err = gs._isolate_for_fit("A:1")
         assert stuck.isLightBulbOn is False           # the hide DID take

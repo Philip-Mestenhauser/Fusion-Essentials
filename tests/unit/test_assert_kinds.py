@@ -23,6 +23,7 @@ from conftest import (
     FakeTimeline,
     FakeTimelineObject,
     load_tool,
+    make_occurrence,
 )
 
 kernel = load_tool("_assert")
@@ -559,11 +560,8 @@ def _coll(items):
 
 
 def _occ(name, transl, bodies=None, children=None):
-    return types.SimpleNamespace(
-        name=name,
-        transform=types.SimpleNamespace(translation=transl),
-        bRepBodies=_coll(bodies or []),
-        childOccurrences=_coll(children or []))
+    return make_occurrence(path=name, transform=types.SimpleNamespace(translation=transl),
+                           bodies=bodies or [], children=children or [])
 
 
 class TestComputeFailureReaders:
@@ -842,12 +840,12 @@ class TestChildGeometryMoved:
         assert res["isError"] is True                  # the world move did NOT reach the geometry
         assert "did not propagate" in res["message"].lower()
 
-    def test_transform_is_the_fallback_when_transform2_is_absent(self, monkeypatch):
-        # A build (or a proxy) carrying no transform2 must still be gated, not silently skipped.
+    def test_transform_is_the_fallback_when_transform2_answers_nothing(self, monkeypatch):
+        # An occurrence whose transform2 answers nothing must still be gated, not silently skipped.
         cbody = _body(_pt(0, 0, 0))
         child = _occ("Child:1", _pt(0, 0, 0), bodies=[cbody])
         wrapper = _occ("Wrapper:1", _pt(0, 0, 0), children=[child])
-        assert not hasattr(wrapper, "transform2")
+        assert wrapper.transform2 is None
         p = self._wire(monkeypatch, [wrapper])
 
         def handler(**kw):

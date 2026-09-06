@@ -79,8 +79,7 @@ class TestPlacement:
     def test_invalid_inserted_occurrence_bites(self, monkeypatch):
         # addByInsert returns an occurrence object that reads isValid=false -> error, not ok
         design, root_comp = _install(monkeypatch)
-        root_comp.occurrences.insert_result = type(
-            "BadOcc", (), {"name": "Part:1", "isValid": False})()
+        root_comp.occurrences.insert_result = make_occurrence(path="Part:1", valid=False)
         res = io.handler(document_id="urn:x")
         assert res["isError"] is True
         assert "isValid=false" in res["message"]

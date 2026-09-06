@@ -1482,12 +1482,27 @@ class FakeSetup(FakeCAMFolder):
     plus Setup.parameters - the collection the WCS binding is written to and read back from
     (build one with wcs_params below; None models a setup whose parameters do not read) - and the
     activate()/isActive pair. activate() returns a bool AND flips isActive, as the live one does;
-    'activate_lies' models it returning true while the setup never becomes active."""
+    'activate_lies' models it returning true while the setup never becomes active.
+
+    `machine` and the `has_error`/`error` fault pair are set only when given, so a setup whose
+    machine or fault channel does not read stays a testable state; live every setup carries all
+    three, so an unset one is this fake's DECLARED absence rather than a shape live presents.
+    `machine=None` is the measured "no machine assigned" answer (what setup_blockers calls
+    no_machine_selected), and `has_error=False` the plain no-fault answer live_readiness reads."""
+
+    _UNSET = object()
 
     def __init__(self, name, ops=(), folders=(), patterns=(), parameters=None, is_active=False,
-                 activate_ok=True, activate_lies=False):
+                 activate_ok=True, activate_lies=False, machine=_UNSET, has_error=_UNSET,
+                 error=_UNSET):
         super().__init__(name, ops=ops, folders=folders, patterns=patterns)
         self.parameters = parameters
+        if machine is not FakeSetup._UNSET:
+            self.machine = machine
+        if has_error is not FakeSetup._UNSET:
+            self.hasError = has_error
+        if error is not FakeSetup._UNSET:
+            self.error = error
         self.isActive = is_active
         self._activate_ok = activate_ok
         self._activate_lies = activate_lies
@@ -1646,6 +1661,7 @@ def make_gated_cam(member="inspectionResults", text="preview feature is not enab
     return type("_GatedCam", (), {member: property(_raise)})()
 
 
+@fusion_fake(live_type="UnitsManager", facts=("shape-dump-units-manager",))
 class FakeUnitsManager:
     """A UnitsManager whose evaluateExpression resolves only a known set - an unknown reference
     RAISES, matching the live FusionUnitsManager (it errors on an unresolvable or dimension-
@@ -1717,12 +1733,21 @@ class BRepFace:
     `assembly_context` is the occurrence a PROXY face was read through - None (the default) is a
     NATIVE face, whose reads are in its owning component's space. `param_reversed` is the live
     isParamReversed a normal flip is read back on; None leaves that flag unreadable.
+    `assembly_proxy` installs createForAssemblyContext answering it - pass None for the factory that
+    ANSWERS NOTHING, which is the state a caller must not fall back to the native face on. Left
+    unset the face carries no factory at all, so a proxy read declines instead.
     """
+
+    _UNSET = object()
+
     def __init__(self, surface, area=0.0, centroid=None, edge_count=0, body_name=None,
                  entity_token=None, body=None, point_on_face=None, normal=None,
-                 bounding_box=None, assembly_context=None, param_reversed=None):
+                 bounding_box=None, assembly_context=None, param_reversed=None,
+                 assembly_proxy=_UNSET):
         self.geometry = surface
         self.assemblyContext = assembly_context
+        if assembly_proxy is not BRepFace._UNSET:
+            self.createForAssemblyContext = lambda _occ, _p=assembly_proxy: _p
         if param_reversed is not None:
             self.isParamReversed = bool(param_reversed)
         if bounding_box is not None:
@@ -1793,13 +1818,30 @@ class MakeComp:
 
     `mesh_bodies` is the separate MeshBody collection (a _MeshBodies, which carries no itemByName) -
     set only when given, so a component that answers no meshBodies at all stays a testable state.
+
+    `origin_construction_point`, `construction_axes` (x, y, z) and `origin_planes` (xY, xZ, yZ) are
+    the component's own origin geometry - the anchor a coordinate snap resolves to, the three axis
+    entities a world-axis or revolve read picks from, and the three planes a plane alias resolves to.
+    Each is set only when given, so a component whose origin geometry does not read stays a testable
+    state; live every component carries all seven.
     """
+
+    _UNSET = object()
+
     def __init__(self, name="Root", bodies=(), occurrences=(), sketches=(), entity_token=None,
                  parent_design=None, mesh_bodies=None, all_occurrences=None, joints=None,
                  as_built_joints=None, joint_origins=None, rigid_groups=None, motion_links=None,
-                 assembly_constraints=None, occurrences_by_component=None):
+                 assembly_constraints=None, occurrences_by_component=None,
+                 origin_construction_point=_UNSET, construction_axes=None, origin_planes=None):
         self.name = name
-        norm = [b if hasattr(b, "name") else BRepBody(b) for b in bodies]
+        norm = [BRepBody(b) if isinstance(b, str) else b for b in bodies]
+        for body in norm:
+            # Renaming it into BRepBody(<that object>) makes `name` the object itself: every
+            # by-name read then misses and the row publishes junk, far from the line that built it.
+            if not hasattr(body, "name"):
+                raise TypeError(
+                    "MakeComp body %r carries no name - pass a body name (str) or an object "
+                    "with a .name" % (body,))
         self.bRepBodies = _NamedCollection(norm)
         if mesh_bodies is not None:
             self.meshBodies = _MeshBodies(list(mesh_bodies))
@@ -1819,6 +1861,14 @@ class MakeComp:
         self.motionLinks = _NamedCollection(list(motion_links or ()))
         self.assemblyConstraints = _NamedCollection(list(assembly_constraints or ()))
         self._occurrences_by_component = occurrences_by_component
+        if origin_construction_point is not MakeComp._UNSET:
+            self.originConstructionPoint = origin_construction_point
+        if construction_axes is not None:
+            (self.xConstructionAxis, self.yConstructionAxis,
+             self.zConstructionAxis) = construction_axes
+        if origin_planes is not None:
+            (self.xYConstructionPlane, self.xZConstructionPlane,
+             self.yZConstructionPlane) = origin_planes
         # Set only when asked: a component whose token does NOT read is its own tested state, and
         # every live component has a token but two DISTINCT ones can share it (document-local), so a
         # test that cares about identity must choose the tokens rather than inherit a default.
@@ -1889,14 +1939,20 @@ class MakeDesign:
     holds - a DECLARED worst case, since live the two are one state, and the only shape in which a
     caller checking just one of the pair can be caught.
 
-    `appearances` is the document's own appearance assets, set only when asked: a design whose
-    appearance collection does not read at all is its own tested state, and no shared Appearances
-    fake carries the ordinary answer."""
+    `appearances` is the document's own appearance assets. MEASURED (parameter-favorite-maker-text-
+    value-and-fresh-appearances): a design carrying NO body answers an EMPTY collection - an asset
+    arrives with the geometry, so a design holding an extruded body holds that body's default
+    appearance - and empty is the default here. Passing an explicit None installs the member
+    ANSWERING null, which is a different state from the absent member and the one a safe() read
+    cannot tell from it by accident. `analyses` is the analyses collection a section read reaches
+    sectionAnalyses through, set only when asked: no measurement says what a plain design answers."""
+
+    _UNSET = object()
     def __init__(self, comp=None, tokens=None, all_components=None, parent_document=None,
                  design_type=None, active_edit_object=None, timeline=None, user_parameters=None,
                  all_parameters=None, compute_raises=None, active_occurrence=None,
                  root_activate_ok=True, root_activate_lies=False, root_active_reads=None,
-                 snapshots=None, appearances=None):
+                 snapshots=None, appearances=_UNSET, analyses=None):
         self._compute_raises = compute_raises
         self._computes = 0
         self.rootComponent = comp if comp is not None else MakeComp()
@@ -1910,8 +1966,10 @@ class MakeDesign:
         # proved True. Set when given, since no shared Snapshots fake carries the ordinary answer.
         if snapshots is not None:
             self.snapshots = snapshots
-        if appearances is not None:
-            self.appearances = appearances
+        self.appearances = (_NamedCollection([])
+                            if appearances is MakeDesign._UNSET else appearances)
+        if analyses is not None:
+            self.analyses = analyses
         if parent_document is not None:
             self.parentDocument = parent_document
         if design_type is not None:
@@ -2004,7 +2062,8 @@ def make_design(bodies=(), occurrences=(), tokens=None, comp=None, all_component
 
 @fusion_fake(live_type="Occurrence",
              facts=("shape-dump-design-world",
-                    "occurrence-plain-reads-referenced-false-empty-collections"))
+                    "occurrence-plain-reads-referenced-false-empty-collections",
+                    "occurrence-plain-reads-valid-and-lit"))
 class FakeOccurrence:
     """One assembly occurrence: the component it places, its fullPathName, its name.
 
@@ -2047,16 +2106,33 @@ class FakeOccurrence:
     occurrence answers isReferencedComponent False and two EMPTY collections, so those are the
     defaults here - a read that DECLINES is ``raises_on``, never a missing member.
 
+    ``valid`` and ``light_bulb_on`` are ``isValid`` (whether the instance still stands for a live
+    object) and ``isLightBulbOn`` (its own visibility bulb), PLAIN attributes so an isolate walk that
+    writes the bulb and reads it back drives the shared fake. Measured
+    (occurrence-plain-reads-valid-and-lit): a plain local occurrence answers True to both, so those
+    are the defaults - a read that DECLINES is ``raises_on``. ``bodies_bounding_box`` is what
+    ``boundingBox2(entityTypes)`` answers - the BODIES-ONLY box, which the plain ``boundingBox``
+    (construction geometry included) must not stand in for; pass None for the read that answers
+    NOTHING, which is what an instance placing no body gives. Left unset the occurrence carries no
+    boundingBox2 at all, the state a body_aabb fallback is tested on.
+
     ONE class, so a test can point ``adsk.fusion.Occurrence`` at it and the shared occurrence
     resolver's isinstance check passes on a handle it resolved.
     """
+
+    _UNSET = object()
 
     def __init__(self, path="Comp:1", component=None, raises=None, transform2=None,
                  assembly_context=None, ground_to_parent=None, children=(), raises_on=None,
                  is_active=False, activate_ok=True, activate_lies=False, transform=None,
                  joints=None, grounded=None, bodies=None, bounding_box=None, entity_token=None,
                  ground_set_ok=True, ground_lies=False, referenced=None, delete_ok=True,
-                 derived=False, document_reference=None):
+                 derived=False, document_reference=None, valid=True, light_bulb_on=True,
+                 bodies_bounding_box=_UNSET):
+        self.isValid = valid
+        self.isLightBulbOn = light_bulb_on
+        if bodies_bounding_box is not FakeOccurrence._UNSET:
+            self.boundingBox2 = lambda _entity_types, _bb=bodies_bounding_box: _bb
         self._path = path
         self._component = component
         self._raises = raises
@@ -2212,6 +2288,10 @@ class FakeOccurrence:
     def childOccurrences(self):
         return self._read("childOccurrences", self._children)
 
+    @childOccurrences.setter
+    def childOccurrences(self, value):
+        self._children = value
+
     @property
     def isActive(self):
         return self._read("isActive", self._is_active)
@@ -2227,19 +2307,34 @@ def make_occurrence(path="Comp:1", component=None, raises=None, transform2=None,
                     assembly_context=None, ground_to_parent=None, children=(), raises_on=None,
                     transform=None, joints=None, grounded=None, bodies=None, bounding_box=None,
                     entity_token=None, referenced=None, delete_ok=True, derived=False,
-                    document_reference=None):
+                    document_reference=None, valid=True, light_bulb_on=True,
+                    bodies_bounding_box=FakeOccurrence._UNSET):
     """An occurrence placing `component` at assembly path `path`, with the placement matrix
     ``transform2`` and the occurrence ``assembly_context`` that places it, the ground-to-parent lock
     ``ground_to_parent`` and the nested ``children`` a census descends into. Pass ``raises`` to model
     an unresolved external reference, where every read but ``name`` throws that message, or
     ``raises_on`` = {property: message} for the row where only that one read declines;
-    ``delete_ok`` False is the deleteMe the platform refuses."""
+    ``delete_ok`` False is the deleteMe the platform refuses. ``valid``/``light_bulb_on``/
+    ``bodies_bounding_box`` pass through to FakeOccurrence."""
     return FakeOccurrence(path, component, raises, transform2, assembly_context,
                           ground_to_parent, children, raises_on, transform=transform,
                           joints=joints, grounded=grounded, bodies=bodies,
                           bounding_box=bounding_box, entity_token=entity_token,
                           referenced=referenced, delete_ok=delete_ok, derived=derived,
-                          document_reference=document_reference)
+                          document_reference=document_reference, valid=valid,
+                          light_bulb_on=light_bulb_on, bodies_bounding_box=bodies_bounding_box)
+
+
+@fusion_fake(factory_for="FakeOccurrence")
+def make_placed_occurrence(path, pos=None, unreadable="transform unreadable"):
+    """One occurrence of a component named for `path`'s leaf, at WORLD translation `pos` (cm) - or,
+    with `pos` None, one whose transform2 AND transform both decline, since an origin read falls
+    from the first to the second and blinding one alone leaves a readable pose."""
+    comp = MakeComp(name=path.split("+")[-1].split(":")[0])
+    if pos is None:
+        return make_occurrence(path=path, component=comp,
+                               raises_on={"transform2": unreadable, "transform": unreadable})
+    return make_occurrence(path=path, component=comp, transform2=FakeMatrix3D(t=pos))
 
 
 def make_sketch_curve(token="curve0", length=1.0, is_closed=None):
@@ -3066,24 +3161,41 @@ class FakeModelParameter:
     a user parameter has no equivalent of - `createdBy`, the entity that made it, and `role`, the
     slot it fills on that entity.
 
-    `owner` None is a DECLARED state, not a measured one: the createdBy read DECLINES, which is the
-    only shape in which this parameter's row publishes no owner keys at all."""
+    `owner` is what createdBy answers. MEASURED (parameter-favorite-maker-text-value-and-fresh-
+    appearances): createdBy on a model parameter never declines and never reads None - each one
+    answers the entity that made it, a Sketch for a sketch dimension and an ExtrudeFeature for an
+    extrude - so the default here is a maker rather than nothing. The DECLINE belongs to
+    UserParameter, which carries no createdBy member at all; FakeUserParameter is that shape.
+
+    `tracks_expression` makes an `expression` ASSIGNMENT recompute `value` in Fusion's DATABASE
+    units (cm for a length, radians for an angle) the way a live parameter re-evaluates - the pair a
+    caller writing an expression and re-reading the value is judged on. Without it `expression` is a
+    plain attribute and `value` stays where it was put, which is the swallowed write."""
+
+    _DATABASE_UNITS = {"mm": 0.1, "cm": 1.0, "in": 2.54, "deg": math.pi / 180.0}
+
     def __init__(self, name="d195", owner=None, role="Distance", expression="5 mm",
-                 value=0.5, unit="mm", comment="", favorite=False):
+                 value=0.5, unit="mm", comment="", favorite=False, tracks_expression=False):
         self.name = name
-        self.expression = expression
+        self._tracks = tracks_expression
+        self._expression = expression
         self.value = value
         self.unit = unit
         self.comment = comment
         self.isFavorite = favorite
         self.role = role
-        self._owner = owner
+        self.createdBy = FakeFeature("Extrude1") if owner is None else owner
 
     @property
-    def createdBy(self):
-        if self._owner is None:
-            raise RuntimeError("the maker of this parameter is unavailable")
-        return self._owner
+    def expression(self):
+        return self._expression
+
+    @expression.setter
+    def expression(self, text):
+        self._expression = text
+        if self._tracks:
+            number, _, unit = (text or "").strip().rpartition(" ")
+            self.value = float(number) * FakeModelParameter._DATABASE_UNITS[unit]
 
 
 # ── joint motion world ────────────────────────────────────────────────────
@@ -3115,15 +3227,20 @@ def _stored_rotation(radians):
 class _MotionLimits:
     """A JointLimits pair on a motion: the enable flag and the value per bound. Named without a Fake
     prefix because JointLimits has no live SHAPES dump to sweep against (test_fake_shapes_exist),
-    like _Strategy above. A bound left None reads disabled."""
+    like _Strategy above. A bound left None reads disabled.
 
-    def __init__(self, minimum=None, maximum=None, rest=None):
+    `disabled_values` = {bound name: number} arms a DISABLED bound with a non-zero value, which is
+    the state a reader taking minimumValue/maximumValue/restValue without checking its enable flag
+    publishes as a real bound. Bound names are the plain 'minimum'/'maximum'/'rest'."""
+
+    def __init__(self, minimum=None, maximum=None, rest=None, disabled_values=None):
+        held = dict(disabled_values or {})
         self.isMinimumValueEnabled = minimum is not None
-        self.minimumValue = 0.0 if minimum is None else minimum
+        self.minimumValue = held.get("minimum", 0.0) if minimum is None else minimum
         self.isMaximumValueEnabled = maximum is not None
-        self.maximumValue = 0.0 if maximum is None else maximum
+        self.maximumValue = held.get("maximum", 0.0) if maximum is None else maximum
         self.isRestValueEnabled = rest is not None
-        self.restValue = 0.0 if rest is None else rest
+        self.restValue = held.get("rest", 0.0) if rest is None else rest
 
 
 @fusion_fake(live_type="RevoluteJointMotion",
@@ -3187,12 +3304,16 @@ class CylindricalJointMotion:
     """The cylindrical motion: both drivable values, each against its own limits. It exposes
     rotationAxisVector and NO slideDirectionVector, as the live type does, so a slide-heading read
     declines here exactly as it declines live. `stores` False takes every assignment to EITHER value
-    and keeps neither - the swallowed write only a read-back catches."""
+    and keeps neither - the swallowed write only a read-back catches. `rotation_stores` and
+    `slide_stores` narrow that to ONE degree of freedom, which is the split that separates a
+    two-value drive reporting per-DOF from one reporting the pair; each defaults to `stores`."""
     def __init__(self, rotation=0.0, slide=0.0, rotation_limits=None, slide_limits=None,
-                 axis_vector=None, joint_type=None, stores=True):
+                 axis_vector=None, joint_type=None, stores=True, rotation_stores=None,
+                 slide_stores=None):
         self._rotation = rotation
         self._slide = slide
-        self._stores = stores
+        self._rotation_stores = stores if rotation_stores is None else rotation_stores
+        self._slide_stores = stores if slide_stores is None else slide_stores
         self.rotationLimits = _MotionLimits() if rotation_limits is None else rotation_limits
         self.slideLimits = _MotionLimits() if slide_limits is None else slide_limits
         self.rotationAxisVector = axis_vector
@@ -3205,7 +3326,7 @@ class CylindricalJointMotion:
 
     @rotationValue.setter
     def rotationValue(self, value):
-        if self._stores and _limit_allows(self.rotationLimits, value):
+        if self._rotation_stores and _limit_allows(self.rotationLimits, value):
             self._rotation = _stored_rotation(value)
 
     @property
@@ -3214,7 +3335,7 @@ class CylindricalJointMotion:
 
     @slideValue.setter
     def slideValue(self, value):
-        if self._stores and _limit_allows(self.slideLimits, value):
+        if self._slide_stores and _limit_allows(self.slideLimits, value):
             self._slide = value
 
 
@@ -3227,15 +3348,20 @@ class FakeJoint:
     ``geometryOrOriginOne``/``Two`` are ALWAYS present, reading None where the joint names no
     reference - which is what an inferred joint answers, so a frame read falls over a null rather
     than over an absent member. ``offset``/``angle``/``parentComponent``/``objectType`` are set only
-    when given, since a joint whose parameters or owner do not read is its own tested state.
+    when given, since a joint whose parameters or owner do not read is its own tested state; passing
+    ``offset``/``angle`` an explicit None installs the member ANSWERING null, which is a different
+    state from the absent member and the one a safe() read cannot tell from it by accident.
 
     ``health_readable`` False makes the healthState read RAISE - the state a compute verdict has to
     publish as null rather than read as healthy. ``motion_set_ok`` is what every setAs*JointMotion
     answers, and the calls land in ``_motion_calls``."""
+
+    _UNSET = object()
+
     def __init__(self, name="Joint1", motion=None, occurrence_one=None, occurrence_two=None,
                  suppressed=False, flipped=False, entity_token=None,
                  timeline_object=None, health=None, message="", links=(), delete_ok=True,
-                 geometry_one=None, geometry_two=None, offset=None, angle=None,
+                 geometry_one=None, geometry_two=None, offset=_UNSET, angle=_UNSET,
                  parent_component=None, object_type=None, health_readable=True,
                  motion_set_ok=True):
         self.name = name
@@ -3251,9 +3377,9 @@ class FakeJoint:
         self.errorOrWarningMessage = message
         self.geometryOrOriginOne = geometry_one
         self.geometryOrOriginTwo = geometry_two
-        if offset is not None:
+        if offset is not FakeJoint._UNSET:
             self.offset = offset
-        if angle is not None:
+        if angle is not FakeJoint._UNSET:
             self.angle = angle
         if parent_component is not None:
             self.parentComponent = parent_component
@@ -3315,8 +3441,13 @@ class FakeJoint:
 class FakeJoints:
     """component.joints: the counted/by-name walk a joint resolve makes, plus createInput/add.
     createInput answers `joint_input` - None models the input that could not be built, which the
-    create tools guard on - and add() appends `new_joint` (or a default) and hands it back."""
-    def __init__(self, joints=(), new_joint=None, joint_input=None):
+    create tools guard on - and add() appends `new_joint` and hands it back. Left unset `new_joint`
+    is a default FakeJoint; an explicit None is the add that ANSWERS NOTHING, appending no joint -
+    the create a caller must not report as landed."""
+
+    _UNSET = object()
+
+    def __init__(self, joints=(), new_joint=_UNSET, joint_input=None):
         self._joints = list(joints)
         self._new = new_joint
         self._input = joint_input
@@ -3341,7 +3472,9 @@ class FakeJoints:
 
     def add(self, joint_input):
         self._calls.append(("add", joint_input))
-        joint = self._new if self._new is not None else FakeJoint()
+        if self._new is None:
+            return None
+        joint = FakeJoint() if self._new is FakeJoints._UNSET else self._new
         self._joints.append(joint)
         return joint
 
@@ -3512,10 +3645,11 @@ class FakeRigidGroups:
 @fusion_fake(factory_for="FakeJoint")
 def make_joint(name="Joint1", kind="revolute", rotation=0.0, slide=0.0, rotation_limits=None,
                slide_limits=None, occurrence_one=None, occurrence_two=None, axis_vector=None,
-               stores=True, **joint_kwargs):
+               stores=True, rotation_stores=None, slide_stores=None, **joint_kwargs):
     """A joint carrying the motion `kind` names - 'revolute', 'slider' or 'cylindrical', the three
     a drive can move. Limits are _MotionLimits, so a drive past an enabled bound is refused the
-    measured way; `stores` False makes the motion swallow every write. Further keywords reach
+    measured way; `stores` False makes the motion swallow every write, and on a cylindrical
+    `rotation_stores`/`slide_stores` narrow that to one degree of freedom. Further keywords reach
     FakeJoint itself."""
     if kind == "revolute":
         motion = RevoluteJointMotion(rotation, rotation_limits, axis_vector, stores=stores)
@@ -3523,7 +3657,8 @@ def make_joint(name="Joint1", kind="revolute", rotation=0.0, slide=0.0, rotation
         motion = SliderJointMotion(slide, slide_limits, axis_vector, stores=stores)
     elif kind == "cylindrical":
         motion = CylindricalJointMotion(rotation, slide, rotation_limits, slide_limits, axis_vector,
-                                        stores=stores)
+                                        stores=stores, rotation_stores=rotation_stores,
+                                        slide_stores=slide_stores)
     else:
         raise ValueError("make_joint kind is revolute, slider or cylindrical, not %r" % (kind,))
     return FakeJoint(name=name, motion=motion, occurrence_one=occurrence_one,

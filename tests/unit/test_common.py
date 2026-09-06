@@ -1780,7 +1780,7 @@ class TestComponentContains:
         # component-local scan and complete likewise stays True.
         outer = _root(name="Sub", token="TOKEN:Sub")
         del outer.allOccurrences
-        good = _PlainOcc("Bolt:1")
+        good = _plain_occ("Bolt:1")
         good.component.entityToken = "TOKEN:Bolt"
         outer.occurrences = _NamedCollection([_BrokenOcc("45740"), good])
         walk = common.component_walk(outer)
@@ -1800,7 +1800,7 @@ class TestComponentContains:
         # did compare are not the whole subtree - every identity in it read cleanly.
         outer = _root(name="Sub", token="TOKEN:Sub")
         del outer.allOccurrences
-        child = _PlainOcc("Mid:1")
+        child = _plain_occ("Mid:1")
         child.component.entityToken = "TOKEN:Mid"
         child.childOccurrences = _RaisingColl()
         outer.occurrences = _NamedCollection([child])
@@ -1819,6 +1819,9 @@ _UNAVAILABLE = ("3 : The occurrence's referenced component is unavailable (broke
                 "external reference).")
 _PATH_INVALID = "2 : InternalValidationError : path.valid()"
 _WALK_RAISE = "2 : InternalValidationError : occ"
+# The text documentReference throws on an ORDINARY local occurrence - the same one the broken
+# specimen gives, which is why that read cannot tell the two apart.
+_NOT_EXTERNAL = "3 : Occurrence is not referencing an external component"
 
 
 def _RaisingColl():
@@ -1827,14 +1830,13 @@ def _RaisingColl():
 
 
 class _BrokenOcc:
-    """The measured specimen - an occurrence whose source project is archived. Bespoke: the isValid
-    and isLightBulbOn reads the tests below hold to True are not on the shared FakeOccurrence, so
-    there is nothing to migrate them onto. Only `name` reads,
-    and it is the only identity a caller can publish. Every other signal a walk might gate on LIES:
-    isReferencedComponent reads False where a LIVE xref reads True; documentReference raises the
-    SAME "not referencing an external component" text an ordinary local occurrence gives, so it
-    cannot tell the two apart; isValid and isLightBulbOn both read True. This class is the home of
-    that measurement, and the tests below hold each signal to it."""
+    """The measured specimen - an occurrence whose source project is archived. Bespoke: `name`
+    itself RAISES in one variant, which the shared FakeOccurrence answers as a plain attribute.
+    Only `name` reads, and it is the only identity a caller can publish. Every other signal a walk
+    might gate on LIES: isReferencedComponent reads False where a LIVE xref reads True;
+    documentReference raises the SAME "not referencing an external component" text an ordinary
+    local occurrence gives, so it cannot tell the two apart; isValid and isLightBulbOn both read
+    True. This class is the home of that measurement, and the tests below hold each signal to it."""
     def __init__(self, name="45740", name_raises=False):
         self._name = name
         self._name_raises = name_raises
@@ -1862,28 +1864,21 @@ class _BrokenOcc:
 
     @property
     def documentReference(self):
-        raise RuntimeError("3 : Occurrence is not referencing an external component")
+        raise RuntimeError(_NOT_EXTERNAL)
 
 
-class _PlainOcc:
+def _plain_occ(name, children=(), broken_children=()):
     """An ORDINARY LOCAL occurrence - the trap. isReferencedComponent is False and
     documentReference raises the same text the broken one gives, so only occ.component tells them
-    apart. Bespoke: a test below REASSIGNS childOccurrences to break one subtree mid-walk, and the
-    shared FakeOccurrence answers that read through a getter with no setter."""
-    def __init__(self, name, children=(), broken_children=()):
-        self.name = name
-        self.fullPathName = name
-        self.isReferencedComponent = False
-        # component.occurrences is the SUPERSET: it holds the unresolved child too.
-        self.component = types.SimpleNamespace(
+    apart."""
+    return make_occurrence(
+        path=name, children=children,
+        # component.occurrences is the SUPERSET: it holds the unresolved child too, while
+        # childOccurrences DROPS one - an unresolved child's assembly path is invalid.
+        component=types.SimpleNamespace(
             name=name.split(":")[0],
-            occurrences=_NamedCollection(list(broken_children) + list(children)))
-        # childOccurrences DROPS an unresolved child - its assembly path is invalid.
-        self.childOccurrences = _NamedCollection(children)
-
-    @property
-    def documentReference(self):
-        raise RuntimeError("3 : Occurrence is not referencing an external component")
+            occurrences=_NamedCollection(list(broken_children) + list(children))),
+        raises_on={"documentReference": _NOT_EXTERNAL})
 
 
 def _walk_design(top=(), broken_top=(), fast=None):
@@ -1912,7 +1907,7 @@ class TestBrokenReference:
         # THE trap: this occurrence reads isReferencedComponent False and RAISES the same
         # "not referencing an external component" text from documentReference that the broken one
         # does. A detector keyed on either would call it broken.
-        occ = _PlainOcc("Root:1")
+        occ = _plain_occ("Root:1")
         assert occ.isReferencedComponent is False
         with pytest.raises(RuntimeError):
             occ.documentReference
@@ -1939,7 +1934,7 @@ class TestBrokenReference:
 
 class TestOccurrenceWalk:
     def test_zero_broken_on_the_fast_path_reports_the_fast_walk_and_no_broken_rows(self):
-        a, b = _PlainOcc("Frame:1"), _PlainOcc("Bolt:1")
+        a, b = _plain_occ("Frame:1"), _plain_occ("Bolt:1")
         walk = common.occurrence_walk(_walk_design(fast=[a, b]))
         assert walk.method == "allOccurrences"
         assert walk.broken == [] and walk.total == 2
@@ -1948,8 +1943,8 @@ class TestOccurrenceWalk:
     def test_a_raising_walk_with_zero_broken_still_reports_the_honest_count(self):
         # the boundary that matters most: the walk RAISED, nothing is broken, and the census must be
         # the real number over the 'recursed' marker - never 0.
-        bolt = _PlainOcc("Bolt:1")
-        frame = _PlainOcc("Frame:1", children=[bolt])
+        bolt = _plain_occ("Bolt:1")
+        frame = _plain_occ("Frame:1", children=[bolt])
         walk = common.occurrence_walk(_walk_design(top=[frame]))
         assert walk.method == "recursed"
         assert walk.total == 2 and walk.broken == []
@@ -1957,8 +1952,8 @@ class TestOccurrenceWalk:
 
     def test_one_broken_child_is_found_named_and_counted(self):
         broken = _BrokenOcc("45740")
-        container = _PlainOcc("Op1 Workholding Container:1",
-                              children=[_PlainOcc("48205-125 (1):1")],
+        container = _plain_occ("Op1 Workholding Container:1",
+                              children=[_plain_occ("48205-125 (1):1")],
                               broken_children=[broken])
         walk = common.occurrence_walk(_walk_design(top=[container]))
         assert walk.method == "recursed"
@@ -1974,7 +1969,7 @@ class TestOccurrenceWalk:
 
     def test_a_broken_TOP_LEVEL_occurrence_is_found_too(self):
         walk = common.occurrence_walk(
-            _walk_design(top=[_PlainOcc("Frame:1")], broken_top=[_BrokenOcc("45740")]))
+            _walk_design(top=[_plain_occ("Frame:1")], broken_top=[_BrokenOcc("45740")]))
         assert walk.names() == ["45740"]
         assert walk.broken[0]["parent_path"] == "Root"
         assert walk.total == 2
@@ -1989,8 +1984,8 @@ class TestOccurrenceWalk:
 
     def test_a_nested_broken_row_carries_its_parent_PATH(self):
         broken = _BrokenOcc("45740")
-        inner = _PlainOcc("Sub:1", broken_children=[broken])
-        outer = _PlainOcc("Op 2 Workholding:1", children=[inner])
+        inner = _plain_occ("Sub:1", broken_children=[broken])
+        outer = _plain_occ("Op 2 Workholding:1", children=[inner])
         walk = common.occurrence_walk(_walk_design(top=[outer]))
         assert walk.broken[0]["parent_path"] == "Op 2 Workholding:1+Sub:1"
 
@@ -2011,7 +2006,7 @@ class TestOccurrenceWalk:
         assert walk.occurrences == [] and walk.broken == []
 
     def test_an_unreadable_SUBTREE_marks_the_census_incomplete_not_short(self):
-        good = _PlainOcc("Frame:1")
+        good = _plain_occ("Frame:1")
         good.childOccurrences = _RaisingColl()
         walk = common.occurrence_walk(_walk_design(top=[good]))
         assert walk.method == "recursed"
@@ -2023,21 +2018,21 @@ class TestOccurrenceWalk:
         assert common.occurrence_walk(None).total is None
 
     def test_cap_bounds_the_rows_but_never_the_census(self):
-        occs = [_PlainOcc(f"P{i}:1") for i in range(5)]
+        occs = [_plain_occ(f"P{i}:1") for i in range(5)]
         walk = common.occurrence_walk(_walk_design(fast=occs), cap=2)
         assert len(walk.occurrences) == 2
         assert walk.total == 5
 
     def test_all_occurrences_survives_a_raising_walk_instead_of_returning_empty(self):
         # the defect this replaces: safe(root.allOccurrences) or [] published an empty assembly.
-        frame = _PlainOcc("Frame:1", children=[_PlainOcc("Bolt:1")])
+        frame = _plain_occ("Frame:1", children=[_plain_occ("Bolt:1")])
         assert [o.name for o in common.all_occurrences(_walk_design(top=[frame]))] == [
             "Frame:1", "Bolt:1"]
 
     def test_component_walk_runs_over_ANY_component_subtree(self):
         class _Sub:
             name = "Sub"
-            occurrences = _NamedCollection([_PlainOcc("Bolt:1")])
+            occurrences = _NamedCollection([_plain_occ("Bolt:1")])
 
             @property
             def allOccurrences(self):

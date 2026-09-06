@@ -71,8 +71,6 @@ _ALLOWLIST = {}
 # Fake-shaped conftest classes with NO live SHAPES dump to sweep against yet. Shrink-only: the
 # staleness check fails the moment a dump lands (auto-map then takes over) or the class goes.
 _UNMAPPED_OK = {
-    "FakeUnitsManager": "UnitsManager has no SHAPES dump yet - add it to a shape-dump measurement "
-                        "row and regenerate (py -3 tests/live/measure_api.py with Fusion up)",
     "FakeInfiniteLine3D": "InfiniteLine3D has no SHAPES dump; every member the fake carries "
                           "(create/origin/direction/isColinearTo) is exercised live by the shipped "
                           "Add Holder command code that _holder.py keeps verbatim",

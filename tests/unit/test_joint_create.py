@@ -1030,17 +1030,16 @@ def _snap_face(surface_type, *, area=1.0, proxy=None):
     """One face: its surface type, its area, and what proxying yields. Surface types come from the
     MEASURED enum (adsk.core.SurfaceTypes) - Cylinder is 1 and 3 is Sphere, so a fake built on a
     hand-typed 3 describes a sphere and lets a cylinder-picker that never matched look correct."""
-    face = BRepFace(_surface(surface_type), area=area)
-    # BRepFace carries no assembly-proxy knob yet, so the proxy this face yields is attached here.
-    face.createForAssemblyContext = lambda occ, _p=proxy: _p
-    return face
+    return BRepFace(_surface(surface_type), area=area, assembly_proxy=proxy)
 
 
 def _snap_occurrence(*, origin_point=None, has_body=True, faces=()):
-    """An occurrence exposing exactly what _resolve_snap_entity reads off it."""
-    comp = MakeComp(name="Boom", bodies=[BRepBody("Body1", faces=faces)] if has_body else [])
-    if origin_point is not None:
-        comp.originConstructionPoint = origin_point
+    """An occurrence exposing exactly what _resolve_snap_entity reads off it. A component built
+    WITHOUT an origin point carries no originConstructionPoint at all, which is the read that has to
+    be guarded before the proxy is asked for."""
+    point = {} if origin_point is None else {"origin_construction_point": origin_point}
+    comp = MakeComp(name="Boom", bodies=[BRepBody("Body1", faces=faces)] if has_body else [],
+                    **point)
     return FakeOccurrence(path="Boom:1", component=comp)
 
 
@@ -1239,8 +1238,8 @@ class TestCreateHandlerFailurePaths:
         assert _added(coll) is None
 
     def test_an_add_returning_nothing_is_reported(self, monkeypatch):
-        _, coll = _install_create(monkeypatch)
-        coll.add = lambda ji: None
+        design, coll = _install_create(monkeypatch)
+        design.rootComponent.joints = FakeJoints(joint_input=coll._input, new_joint=None)
         res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")
         assert res["isError"] is True and "joints.add returned nothing" in res["message"]
 

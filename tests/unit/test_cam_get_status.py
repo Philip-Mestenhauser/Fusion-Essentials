@@ -65,18 +65,11 @@ class _DocHandle:
 _MACHINE = FakeMachine(description="Haas VF-2")
 
 
-class _MachinedSetup(SharedSetup):
-    """A setup carrying an assigned machine: the scoped verdict reads _cam_common.setup_blockers off
-    Setup.machine, so a machine-less setup is one blocked by no_machine_selected, not a clean one."""
-
-    def __init__(self, name, ops=(), machine=_MACHINE):
-        super().__init__(name, ops=ops)
-        self.machine = machine
-
-
 def _setup(name, ops=(), machine=_MACHINE):
-    """A setup as the poll walks it, machine assigned unless a test takes it away."""
-    return _MachinedSetup(name, ops=ops, machine=machine)
+    """A setup as the poll walks it, machine assigned unless a test takes it away: the scoped verdict
+    reads _cam_common.setup_blockers off Setup.machine, so machine=None is one blocked by
+    no_machine_selected, not a clean one."""
+    return SharedSetup(name, ops=ops, machine=machine)
 
 
 # ── _collect_op_health: warnings / errors / empty derivation ────────────────────────────────────────

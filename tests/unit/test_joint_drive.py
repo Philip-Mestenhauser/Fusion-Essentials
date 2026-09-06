@@ -112,17 +112,8 @@ def _blind_revolute():
 
 
 def _cylindrical_frozen_slide():
-    """A cylindrical joint whose ROTATION lands while its SLIDE is taken and kept nowhere - the
-    per-DOF split the shared `stores` knob, which governs both values at once, does not carry."""
-    class CylindricalJointMotion(_Cylindrical):     # the NAME is what current_joint_type keys on
-        @property
-        def slideValue(self):
-            return self._slide
-
-        @slideValue.setter
-        def slideValue(self, v):
-            pass                                    # accepted, lands nowhere
-    return CylindricalJointMotion()
+    """A cylindrical joint whose ROTATION lands while its SLIDE is taken and kept nowhere."""
+    return CylindricalJointMotion(slide_stores=False)
 
 
 def link_pair(j1, j2, blind=False, name="MotionLink1", **kw):

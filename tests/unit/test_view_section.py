@@ -95,17 +95,6 @@ class FakeSectionAnalyses:
         return sec
 
 
-class _OriginPlaneRoot(MakeComp):
-    """The root component plus the three origin construction planes a plane alias resolves to;
-    MakeComp does not carry them."""
-
-    def __init__(self, occurrences=()):
-        MakeComp.__init__(self, name="Root", occurrences=occurrences)
-        self.xYConstructionPlane = "PLANE_XY"
-        self.xZConstructionPlane = "PLANE_XZ"
-        self.yZConstructionPlane = "PLANE_YZ"
-
-
 class FakeAnalyses:
     """design.analyses, holding sectionAnalyses. Bespoke: Analyses has no shape dump, so there is
     no shared fake to stand for it."""
@@ -115,9 +104,9 @@ class FakeAnalyses:
 
 def _install(occurrences=(), existing_sections=()):
     sections = FakeSectionAnalyses(existing_sections)
-    root = _OriginPlaneRoot(occurrences)
-    design = MakeDesign(comp=root)
-    design.analyses = FakeAnalyses(sections)
+    root = MakeComp(name="Root", occurrences=occurrences,
+                    origin_planes=("PLANE_XY", "PLANE_XZ", "PLANE_YZ"))
+    design = MakeDesign(comp=root, analyses=FakeAnalyses(sections))
     sv.app = FakeApplication(
         active_product=design,
         # _aim_at_cut reads eye/target (for distance) and writes eye/upVector/isFitView.

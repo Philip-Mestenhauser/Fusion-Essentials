@@ -13,6 +13,7 @@ from conftest import (FakeApplication, FakeBaseFeature, FakeBaseFeatures, FakeCA
                       FakeDataFile, FakeDataFolder, FakeExportManager, FakeFusionDocument,
                       _ExportOptions,
                       FakeDocumentReference, FakeFeature, FakeFeatures, FakeJoint, FakeJoints,
+                      FakeModelParameter,
                       FakeMachine, FakeMatrix3D,
                       FakeMotionLink, FakeMotionLinks, FakePoint, FakeRigidGroup, FakeRigidGroups,
                       FakeSelection, FakeSetups, FakeTimeline, FakeTimelineObject, FakeTool,
@@ -189,6 +190,21 @@ class TestParameterWorld:
         made = design.userParameters.add("width", None, "mm", "note")
         assert design.userParameters.itemByName("width") is made
         assert made.unit == "mm" and made.comment == "note"
+
+    def test_a_model_parameter_answers_its_maker_and_a_user_parameter_has_no_such_member(self):
+        # MEASURED: createdBy on a model parameter never declines, and the DECLINE that leaves a row
+        # flat is UserParameter carrying no such member - a fake with it the other way round makes
+        # the guard in _owner_facts look like it is catching the wrong shape.
+        assert FakeModelParameter().createdBy.name == "Extrude1"
+        assert FakeModelParameter(owner=FakeFeature("Sketch2")).createdBy.name == "Sketch2"
+        with pytest.raises(AttributeError):
+            FakeUserParameter("width").createdBy
+
+    def test_a_bodyless_designs_appearances_read_empty_rather_than_declining(self):
+        # MEASURED: a design carrying no body answers an EMPTY collection, not a decline - an asset
+        # arrives with the geometry. A fake that declined would make every appearance read look
+        # unavailable on the design a test builds without bodies.
+        assert make_design().appearances.count == 0
 
 
 class TestJointMotionWorld:
@@ -457,6 +473,15 @@ class TestPlacementMatrix:
         origin, x_axis, _y, _z = m.getAsCoordinateSystem()
         assert (origin.x, origin.y, origin.z) == (1.0, 2.0, 3.0)
         assert (round(x_axis.x, 6), round(x_axis.y, 6)) == (1.0, 0.0)
+
+
+class TestComponentBodies:
+    def test_a_body_object_with_no_name_is_refused_where_it_was_handed_in(self):
+        # Renaming it into BRepBody(<that object>) makes `name` the object itself: every by-name
+        # read then misses and the row publishes junk, far from the line that built it.
+        with pytest.raises(TypeError, match="carries no name"):
+            MakeComp(bodies=[object()])
+        assert MakeComp(bodies=["Body1"]).bRepBodies.itemByName("Body1") is not None
 
 
 class TestAssemblyPlacement:
