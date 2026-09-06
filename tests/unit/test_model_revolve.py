@@ -69,11 +69,9 @@ def _comp(sketches, rf, name="Comp", token="TOKEN:Comp"):
     # Every live component answers an entityToken, and _common.same_component compares on it: the
     # assembly-context lift REFUSES an owner it cannot identify rather than guess whether a native
     # entity needs proxying. A test that wants that state deletes the attribute.
-    comp = MakeComp(name=name, sketches=sketches, entity_token=token)
+    comp = MakeComp(name=name, sketches=sketches, entity_token=token,
+                    construction_axes=(("axis", "x"), ("axis", "y"), ("axis", "z")))
     comp.features = types.SimpleNamespace(revolveFeatures=rf)
-    comp.xConstructionAxis = ("axis", "x")
-    comp.yConstructionAxis = ("axis", "y")
-    comp.zConstructionAxis = ("axis", "z")
     return comp
 
 
@@ -301,12 +299,13 @@ def safe_name(comp):
     return getattr(comp, "name", None)
 
 
-def _cylindrical_face(owner=None):
+def _cylindrical_face(owner=None, proxy=BRepFace._UNSET):
     """A cylinder face whose axis points along +z - the shape that hides a dropped axis POSITION: its
     DIRECTION is a world key, so only the entity reaching createInput proves the position survived.
-    `owner` makes it NATIVE to that component (read through the face's body)."""
+    `owner` makes it NATIVE to that component (read through the face's body); `proxy` is what its
+    createForAssemblyContext hands back, None for the lift that answers nothing."""
     body = BRepBody(parent_component=owner) if owner is not None else None
-    return BRepFace(Cylinder(FakeVector3D(0, 0, 1)), body=body)
+    return BRepFace(Cylinder(FakeVector3D(0, 0, 1)), body=body, assembly_proxy=proxy)
 
 
 class TestAxisFromGeometry:
@@ -366,10 +365,9 @@ class TestAxisFromGeometry:
 class TestCrossComponentAxis:
     def test_native_face_from_another_component_is_proxied_into_its_occurrence(self, wire):
         other = _comp([], FakeRevFeatures(), name="PartB", token="TOKEN:PartB")
-        f = _cylindrical_face(owner=other)
         proxied = _cylindrical_face()
         proxied.assemblyContext = make_occurrence("PartB:1")
-        f.createForAssemblyContext = lambda occ, p=proxied: p
+        f = _cylindrical_face(owner=other, proxy=proxied)
         rf = wire([_sketch("Ring")], tokens={"CYL": f},
                   placements={"PartB": [make_occurrence("PartB:1")]})
         out = payload(rv.handler(sketch_name="Ring", axis="CYL"))
@@ -378,8 +376,7 @@ class TestCrossComponentAxis:
 
     def test_component_placed_twice_is_refused_with_both_paths(self, wire):
         other = _comp([], FakeRevFeatures(), name="PartB", token="TOKEN:PartB")
-        f = _cylindrical_face(owner=other)
-        f.createForAssemblyContext = lambda occ: _cylindrical_face()
+        f = _cylindrical_face(owner=other, proxy=_cylindrical_face())
         rf = wire([_sketch("Ring")], tokens={"CYL": f},
                   placements={"PartB": [make_occurrence("PartB:1"), make_occurrence("PartB:2")]})
         res = rv.handler(sketch_name="Ring", axis="CYL")
@@ -390,8 +387,7 @@ class TestCrossComponentAxis:
 
     def test_proxy_that_cannot_be_built_is_refused_not_passed_native(self, wire):
         other = _comp([], FakeRevFeatures(), name="PartB", token="TOKEN:PartB")
-        f = _cylindrical_face(owner=other)
-        f.createForAssemblyContext = lambda occ: None      # the context could not be built
+        f = _cylindrical_face(owner=other, proxy=None)     # the context could not be built
         rf = wire([_sketch("Ring")], tokens={"CYL": f},
                   placements={"PartB": [make_occurrence("PartB:1")]})
         res = rv.handler(sketch_name="Ring", axis="CYL")

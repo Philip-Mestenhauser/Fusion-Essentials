@@ -349,6 +349,16 @@ class TestHandlerCoordinateAnchor:
         assert out["location"] == {"x": 0.0, "y": 0.0, "z": 0.0, "units": "mm"}
         assert out["offset_parameters"] == {"x": 0.0, "y": 0.0, "z": 0.0, "units": "mm"}
 
+    def test_each_axis_lands_its_own_coordinate(self, monkeypatch):
+        # Three DISTINCT values, so each axis is pinned separately: an offset fed another axis's
+        # number places the frame somewhere else entirely, and the read-back that follows compares
+        # per axis, not by distance from the origin.
+        _install_handler(monkeypatch)
+        out = _payload(jo.handler(anchor="coordinates", target="at",
+                                  x=10, y=20, z=30, units="mm"))
+        assert out["offset_parameters"] == {"x": 10.0, "y": 20.0, "z": 30.0, "units": "mm"}
+        assert out["location"] == {"x": 10.0, "y": 20.0, "z": 30.0, "units": "mm"}
+
     def test_mismatched_offset_readback_errors_and_rolls_back(self, monkeypatch):
         # If the offsets don't stick (the JO reports a different position than asked), that is a
         # mislocated origin - a hard error with a rollback, never a false success.

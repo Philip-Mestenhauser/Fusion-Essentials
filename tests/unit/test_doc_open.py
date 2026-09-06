@@ -163,3 +163,29 @@ class TestAsyncLoadHandoff:
         # shipped either way would be prose rather than the state this call measured.
         landed = self._open(monkeypatch, active=True)
         assert landed["is_active"] is True and landed["note"] is None
+
+
+class TestConfiguredDesign:
+    """A Configured Design opens at ONE of its configurations, and which one is not this call's to
+    choose - so the payload publishes the flag it read off the DataFile and, only then, the note
+    naming where the configurations are listed and switched. A plain design carries neither."""
+
+    def _open(self, monkeypatch, **data_file):
+        opened = FakeFusionDocument(name="Bracket")
+        monkeypatch.setattr(od, "_resolve_data_file",
+                            lambda raw: (FakeDataFile("Bracket", **data_file), raw, [raw]))
+        monkeypatch.setattr(od, "_open_document", lambda d: (opened, "openUsingContext", None))
+        monkeypatch.setattr(od, "app", FakeApplication(active_document=opened))
+        res = od.handler(file_id="urn:bracket", force_api_open=True)
+        assert res["isError"] is False, res
+        return json.loads(res["content"][0]["text"])
+
+    def test_a_configured_design_publishes_the_configuration_note(self, monkeypatch):
+        out = self._open(monkeypatch, is_configured_design=True)
+        assert out["is_configured_design"] is True
+        assert "configurationTopTable" in out["configured_design_note"]
+        # the twin: the note rides on the flag the file answered, so a plain design gets no claim
+        # about configurations it does not have.
+        plain = self._open(monkeypatch, is_configured_design=False)
+        assert plain["is_configured_design"] is False
+        assert "configured_design_note" not in plain

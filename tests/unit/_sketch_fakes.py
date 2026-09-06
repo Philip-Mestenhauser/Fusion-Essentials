@@ -221,16 +221,18 @@ def _datum(name):
     return cp
 
 
+def _origin_datums():
+    """The three origin construction planes an xy/xz/yz alias resolves to."""
+    return tuple(_datum(n) for n in ("XY", "XZ", "YZ"))
+
+
 def _draw_component(name, sketch, planes):
     # entityToken, because _common.same_component compares on it and answers None without one -
     # and the assembly-context lift REFUSES an owner it cannot tell from the root rather than
     # hand back a component-local datum Fusion would reject.
-    comp = MakeComp(name=name, entity_token=f"TOKEN:{name}")
+    comp = MakeComp(name=name, entity_token=f"TOKEN:{name}", origin_planes=_origin_datums())
     comp.sketches = FakeSketches(sketch)
     comp.constructionPlanes = _NamedCollection(list(planes))
-    comp.xYConstructionPlane = _datum("XY")
-    comp.xZConstructionPlane = _datum("XZ")
-    comp.yZConstructionPlane = _datum("YZ")
     return comp
 
 
@@ -266,11 +268,8 @@ def _scoped_design(pairs):
     involved and the test would pass against unscoped code."""
     comps = []
     for name, sketches in pairs:
-        comp = MakeComp(name=name, sketches=list(sketches))
+        comp = MakeComp(name=name, sketches=list(sketches), origin_planes=_origin_datums())
         comp.constructionPlanes = _NamedCollection([])
-        comp.xYConstructionPlane = _datum("XY")
-        comp.xZConstructionPlane = _datum("XZ")
-        comp.yZConstructionPlane = _datum("YZ")
         comps.append(comp)
     return make_design(comp=comps[0], all_components=comps)
 

@@ -28,10 +28,18 @@ from conftest import (
     FakeProducts,
     FakeSelection,
     FakeSelections,
+    FakeTimeline,
     FakeUserInterface,
+    FakeUserParameter,
+    FakeUserParameters,
+    MakeComp,
+    MakeDesign,
     Viewport,
+    _NamedCollection,
     load_tool,
+    make_bbox,
     make_cam,
+    make_occurrence,
     strategy_factory,
 )
 
@@ -80,19 +88,16 @@ class BrokenOcc:
         raise RuntimeError("2 : InternalValidationError : path.valid()")
 
 
-class FakeOcc:
-    def __init__(self, name, comp=None, children=0, bodies=1, grounded=False, xref=False,
-                 broken_children=()):
-        self.name = name
-        # component.occurrences is the COMPONENT-LOCAL superset - the only collection an unresolved
-        # child appears in; childOccurrences (the assembly-context one) drops it.
-        self.component = type("C", (), {"name": comp or name.split(":")[0],
-                                        "occurrences": _Coll(list(broken_children)
-                                                             + [None] * children)})()
-        self.childOccurrences = _Coll([None] * children)
-        self.bRepBodies = _Coll([None] * bodies)
-        self.isGrounded = grounded
-        self.isReferencedComponent = xref
+def FakeOcc(name, comp=None, children=0, bodies=1, grounded=False, xref=False,
+            broken_children=()):
+    """One occurrence in the browser digest, on the shared occurrence fake.
+
+    component.occurrences is the COMPONENT-LOCAL superset - the only collection an unresolved child
+    appears in; childOccurrences (the assembly-context one) drops it."""
+    component = MakeComp(name=comp or name.split(":")[0],
+                         occurrences=list(broken_children) + [None] * children)
+    return make_occurrence(path=name, component=component, children=[None] * children,
+                           bodies=[None] * bodies, grounded=grounded, referenced=xref)
 
 
 class FakeJoint:
@@ -128,45 +133,29 @@ class FakeNoHealthAnywhere:
         self.name = name
 
 
-class _Pt:
-    def __init__(self, x, y, z):
-        self.x, self.y, self.z = x, y, z
+# The read a design holding an unresolved reference refuses: the walk will not enumerate at all, so
+# the census has to be rebuilt from component.occurrences.
+_WALK_UNREADABLE = "2 : InternalValidationError : occ"
 
 
-class _BBox:
-    def __init__(self, mn, mx):
-        self.minPoint = _Pt(*mn)
-        self.maxPoint = _Pt(*mx)
+def _unreadable_walk():
+    return _NamedCollection(raises=_WALK_UNREADABLE)
 
 
-class _RaisingWalk:
-    """root.allOccurrences on a design holding an unresolved reference: the PROPERTY ACCESS itself
-    raises, so the census has to be rebuilt from component.occurrences."""
-    @property
-    def count(self):
-        raise RuntimeError("2 : InternalValidationError : occ")
-
-    def item(self, i):
-        raise RuntimeError("2 : InternalValidationError : occ")
-
-    def __iter__(self):
-        raise RuntimeError("2 : InternalValidationError : occ")
-
-
-class FakeRoot:
-    def __init__(self, top_occs=(), all_count=None, joints=(), bodies=0, sketches=0, bbox=None,
-                 walk_raises=False, as_built=()):
-        self.name = "Root"
-        self.occurrences = _Coll(top_occs)
-        self.allOccurrences = (_RaisingWalk() if walk_raises else
-                               _Coll([None] * (all_count if all_count is not None else len(top_occs))))
-        self.joints = _Coll(joints)
-        # the live Component carries BOTH joint collections; an as-built joint appears only here.
-        self.asBuiltJoints = _Coll(as_built)
-        self.bRepBodies = _Coll([None] * bodies)
-        self.sketches = _Coll([None] * sketches)
-        # bbox = ((minx,miny,minz),(maxx,maxy,maxz)) in cm (internal API units), or None = no geometry
-        self.boundingBox = _BBox(*bbox) if bbox is not None else None
+def FakeRoot(top_occs=(), all_count=None, joints=(), bodies=0, sketches=0, bbox=None,
+             walk_raises=False, as_built=()):
+    """The root component on the shared component fake: both occurrence walks, both joint
+    collections (an as-built joint appears only in the second), and the body/sketch counts.
+    `bbox` is ((minx,miny,minz),(maxx,maxy,maxz)) in cm, None a design with no geometry."""
+    root = MakeComp(name="Root", occurrences=list(top_occs),
+                    all_occurrences=[None] * (len(top_occs) if all_count is None else all_count),
+                    joints=list(joints), as_built_joints=list(as_built),
+                    bodies=[f"Body{i + 1}" for i in range(bodies)],
+                    sketches=[None] * sketches)
+    if walk_raises:
+        root.allOccurrences = _unreadable_walk()
+    root.boundingBox = make_bbox(*bbox) if bbox is not None else None
+    return root
 
 
 class _UnitsMgr:
@@ -179,33 +168,27 @@ class _UnitsMgr:
         return value * factor
 
 
-class FakeSubComp:
-    """A sub-component carrying its OWN sketches/bodies collections - like the live Component. It has
-    NO allComponents attribute (that collection is a Design property), matching the API so a design-wide
-    count that mistakenly read it off a component would raise, not silently degrade."""
-    def __init__(self, name, bodies=0, sketches=0):
-        self.name = name
-        self.bRepBodies = _Coll([None] * bodies)
-        self.sketches = _Coll([None] * sketches)
+def FakeSubComp(name, bodies=0, sketches=0):
+    """A sub-component carrying its OWN sketches/bodies collections - the scope a design-wide count
+    has to reach past the root for. Component carries no allComponents (that collection is a Design
+    property), so a count that read it off here would raise rather than silently degrade."""
+    return MakeComp(name=name, bodies=[f"{name}Body{i + 1}" for i in range(bodies)],
+                    sketches=[None] * sketches)
 
 
-class FakeDesign:
-    def __init__(self, root, timeline=(), units="mm", design_type=1, parameters=0, sub_components=(),
-                 marker=None):
-        self.rootComponent = root
-        self.timeline = _Coll(timeline)
-        if marker is not None:                 # a rolled-back marker (< count) means features after it are reverted
-            self.timeline.markerPosition = marker
-        self.unitsManager = _UnitsMgr(units)
-        self.designType = design_type        # 1 = parametric, 0 = direct
-        self.userParameters = type("UP", (), {"count": parameters})()
-        # allComponents lives on the DESIGN and is a counted collection (root included), as in the live
-        # API - _common.all_components reads it here, never off a Component.
-        self._all_components = [root] + list(sub_components)
-
-    @property
-    def allComponents(self):
-        return _Coll(self._all_components)
+def FakeDesign(root, timeline=(), units="mm", design_type=1, parameters=0, sub_components=(),
+               marker=None):
+    """The design behind the orientation read, on the shared design fake. `design_type` is 1
+    parametric / 0 direct; a `marker` below the timeline count means the features after it are
+    reverted. allComponents lives on the DESIGN (root included), as in the live API - never on a
+    Component."""
+    des = MakeDesign(comp=root, all_components=[root] + list(sub_components),
+                     design_type=design_type,
+                     timeline=FakeTimeline(list(timeline), marker=marker),
+                     user_parameters=FakeUserParameters(
+                         [FakeUserParameter(name=f"d{i}") for i in range(parameters)]))
+    des.unitsManager = _UnitsMgr(units)
+    return des
 
 
 class FakeSetup:
@@ -254,14 +237,12 @@ class FakeOp:
         self.isGenerating = False
 
 
-class FakeCAM:
-    def __init__(self, setups, machining_times=None):
-        self.setups = _Coll(setups)
-        # The EMPTY class reads a second signal off the product - an operation whose toolpath
-        # generated empty reads hasToolpath True and only its machining time answers. The answer
-        # itself is the SHARED one (conftest.make_cam), borrowed rather than re-rolled, so this
-        # file cannot teach a different getMachiningTime contract than the other CAM tests read.
-        self.getMachiningTime = make_cam(machining_times=machining_times).getMachiningTime
+def FakeCAM(setups, machining_times=None):
+    """The CAM product carrying `setups`. The EMPTY class reads a second signal off it - an
+    operation whose toolpath generated empty reads hasToolpath True and only its machining time
+    answers - and that answer is the shared one, so this file cannot teach a different
+    getMachiningTime contract than the other CAM tests read."""
+    return make_cam(*setups, machining_times=machining_times)
 
 
 def _ref(name, out_of_date=False):
@@ -299,7 +280,7 @@ def _install(active_product=None, doc=None, cam=None, design_for_cast=None,
              camera=None, selection=()):
     """Wire the module's app + adsk casts. active_product is what app.activeProduct returns (a design,
     a CAM product, or None); design_for_cast is what Design.cast resolves to (default: active_product
-    if it's a FakeDesign). camera/selection feed the new view + selection echo."""
+    if it's a design). camera/selection feed the new view + selection echo."""
     cam_obj = camera if camera is not None else Camera()
     ui = FakeUserInterface(FakeSelections([FakeSelection(entity=e) for e in selection]),
                            active_workspace=_DESIGN_WORKSPACE)
@@ -310,10 +291,15 @@ def _install(active_product=None, doc=None, cam=None, design_for_cast=None,
 
     import adsk.fusion, adsk.cam
     dcast = design_for_cast if design_for_cast is not None else (
-        active_product if isinstance(active_product, FakeDesign) else None)
+        active_product if isinstance(active_product, MakeDesign) else None)
     adsk.fusion.Design.cast = lambda x: dcast if (x is active_product or x is None) else (
-        x if isinstance(x, FakeDesign) else None)
-    adsk.cam.CAM.cast = lambda x: x if isinstance(x, FakeCAM) else None
+        x if isinstance(x, MakeDesign) else None)
+    # get_cam reaches the product through the APP-level document, which is the bare adsk mock here -
+    # so the cast answers only for the CAM product this document was built with, and None (no
+    # Manufacture workspace) for the mock's stand-in.
+    ccast = cam if cam is not None else (
+        doc.products.itemByProductType("CAMProductType") if doc is not None else None)
+    adsk.cam.CAM.cast = lambda x: ccast if (ccast is not None and x is ccast) else None
 
 
 def _payload(res):
@@ -1079,7 +1065,7 @@ class TestExternalReferences:
     def test_an_unreadable_census_publishes_null_not_zero(self):
         # neither walk enumerated: the count is UNKNOWN. A 0 here is a read failure dressed as a fact.
         root = FakeRoot(walk_raises=True)
-        root.occurrences = _RaisingWalk()
+        root.occurrences = _unreadable_walk()
         des = FakeDesign(root, timeline=[FakeTL(0)])
         _install(active_product=des, doc=_doc(design=des))
         out = _payload(wo.handler())

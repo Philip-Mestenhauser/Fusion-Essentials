@@ -114,6 +114,16 @@ class TestDeleteDocument:
         assert out["was_referenced_by"] == []
         assert "reference_state_unreadable" not in out
 
+    def test_force_on_a_clean_file_publishes_forced_false(self, cloud):
+        # 'forced' reports whether a GUARD was overridden, not which flag the call carried: this
+        # file's reference read answered and answered none, so force overrode nothing.
+        f = FakeDataFile("PartA", file_id="urn:f")
+        cloud({"urn:f": f})
+        out = _payload(dm.handler(document_id="urn:f", confirm_name="PartA", force=True))
+        assert out["deleted"] is True and f._deleted is True
+        assert out["forced"] is False
+        assert out["was_referenced_by"] == []
+
     def test_confirm_name_whitespace_forgiven(self, cloud):
         f = FakeDataFile("PartA", file_id="urn:f")
         cloud({"urn:f": f})

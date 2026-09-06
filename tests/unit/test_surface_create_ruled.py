@@ -110,13 +110,11 @@ def _component(name, ruled, bodies=()):
     """A component carrying features.ruledSurfaceFeatures, the two profile factories (each tagged
     with its own component name, so a profile built on the WRONG component is visible), and the
     origin construction axes a world-axis direction resolves to."""
-    comp = MakeComp(name=name, bodies=list(bodies))
+    comp = MakeComp(name=name, bodies=list(bodies),
+                    construction_axes=tuple(types.SimpleNamespace(name=a) for a in "XYZ"))
     comp.features = types.SimpleNamespace(ruledSurfaceFeatures=ruled)
     comp.createBRepEdgeProfile = lambda coll, n=name: ("edge_profile", n)
     comp.createOpenProfile = lambda coll, chained, n=name: ("open_profile", n)
-    comp.xConstructionAxis = types.SimpleNamespace(name="X")
-    comp.yConstructionAxis = types.SimpleNamespace(name="Y")
-    comp.zConstructionAxis = types.SimpleNamespace(name="Z")
     return comp
 
 

@@ -15,6 +15,18 @@ from ._common import timeline_health as _timeline_health
 from ._param_common import _find_parameter, _param_summary
 
 
+def _text_unit_remedy(refusal, unit, expression):
+    """The quoting remedy for Fusion's OWN invalid-expression refusal under 'Text', else ''."""
+    # Runs on the except path, where a batch item's unit/expression is whatever JSON the schema's
+    # plain-object items carried - so every read here coerces rather than assuming a string.
+    expr = str(expression or "").strip()
+    if str(unit or "").strip().lower() != "text" or not expr or any(q in expr for q in "'\""):
+        return ""
+    if "invalid expression" not in str(refusal).lower():
+        return ""      # a name or unit Fusion refused is a different failure, not this one
+    return f" - a 'Text' parameter holds a QUOTED literal: pass \"'{expr}'\", not {expr}."
+
+
 def _add_one(design, name, expression, unit, comment, favorite):
     """Add a single user parameter, health-guarded. Returns (result_dict, error_str). On success
     error_str is None; on failure result_dict is None and error_str explains why (param rolled back
@@ -32,7 +44,7 @@ def _add_one(design, name, expression, unit, comment, favorite):
         vi = adsk.core.ValueInput.createByString(expression)
         p = design.userParameters.add(name, vi, unit or "", comment or "")
     except Exception as e:
-        return None, f"could not add '{name}': {e}"
+        return None, f"could not add '{name}': {e}{_text_unit_remedy(e, unit, expression)}"
     if not p:
         return None, f"adding '{name}' returned nothing."
     if favorite:
@@ -100,7 +112,7 @@ tool = (
     .add_input_property("expression", {"type": "string",
             "description": "Value/expression, e.g. '25 mm', 'PartX/2', \"'text'\"; function args use ';' - max(a; b)."})
     .add_input_property("unit", {"type": "string",
-            "description": "Unit: mm/cm/in/deg or '' for unitless (default mm)."})
+            "description": "Unit: mm/cm/in/deg, '' for unitless, or 'Text' for a text parameter (default mm)."})
     .add_input_property("comment", {"type": "string", "description": "Optional comment."})
     .add_input_property("favorite", {"type": "boolean",
             "description": "Show in the favorites list (default false)."})

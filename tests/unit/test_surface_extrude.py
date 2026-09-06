@@ -34,13 +34,11 @@ def _sketch(name="Sketch1", curve_count=2):
 def _comp(features, sketches=(), name="Root"):
     """A component carrying the feature collections, the two profile factories and the origin
     axes a surface build reads."""
-    comp = MakeComp(name=name, sketches=list(sketches))
+    comp = MakeComp(name=name, sketches=list(sketches),
+                    construction_axes=(("axis", "x"), ("axis", "y"), ("axis", "z")))
     comp.features = features
     comp.createOpenProfile = lambda curves, chained: ("open_profile", None)
     comp.createBRepEdgeProfile = lambda edges: ("edge_profile", None)
-    comp.xConstructionAxis = ("axis", "x")
-    comp.yConstructionAxis = ("axis", "y")
-    comp.zConstructionAxis = ("axis", "z")
     return comp
 
 

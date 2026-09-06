@@ -10,6 +10,7 @@ git checkouts with different line-ending config). ``check()`` is the offline gat
 runs: red when the receipt is missing, stampless, or the source has moved since the stamp.
 """
 
+import ast
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ import pytest
 TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(TESTS_DIR, "live"))
 import tool_verify  # noqa: E402
+import verify_runner  # noqa: E402  source_hash reads SRC_ROOT/_HERE off ITS namespace, not the facade
 
 
 def _tree(tmp_path, files):
@@ -67,6 +69,52 @@ class TestSourceHash:
         root = _tree(tmp_path, {"sub/deep/c.py": content})
         expected = hashlib.sha256(b"sub/deep/c.py" + b"\0" + content + b"\0").hexdigest()
         assert tool_verify.source_hash(root) == expected
+
+
+class TestHarnessSideOfTheHash:
+    """Which tests/live modules the receipt binds: the SWEEP's, and only those."""
+
+    @staticmethod
+    def _rig(tmp_path, monkeypatch):
+        src = _tree(tmp_path / "src", {"a.py": b"x = 1\n"})
+        live = tmp_path / "live"
+        live.mkdir()
+        (live / "measure_api.py").write_bytes(b"ROWS = []\n")
+        (live / "verify_core.py").write_bytes(b"EXCLUDED = {}\n")
+        monkeypatch.setattr(verify_runner, "SRC_ROOT", src)
+        monkeypatch.setattr(verify_runner, "_HERE", str(live))
+        return src, live
+
+    def test_a_facts_harness_edit_leaves_the_hash_where_a_predicate_edit_moves_it(
+            self, tmp_path, monkeypatch):
+        # measure_api.py judges no step of the sweep, so a row-only edit to it must not force a
+        # seven-minute re-run; verify_core.py holds the predicates the receipt exists to bind.
+        src, live = self._rig(tmp_path, monkeypatch)
+        before = tool_verify.source_hash(src)
+        (live / "measure_api.py").write_bytes(b"ROWS = [{'id': 'new-row'}]\n")
+        assert tool_verify.source_hash(src) == before
+        (live / "verify_core.py").write_bytes(b"EXCLUDED = {'model_loft': 'skipped'}\n")
+        assert tool_verify.source_hash(src) != before
+
+    def test_no_module_the_sweep_imports_is_left_out_of_the_hash(self):
+        # The excluded names are safe only while the sweep does not read them: a predicate reached
+        # through one of these would then ride under a green receipt that never saw it change.
+        skipped = {fn[:-3] for fn in verify_runner._NOT_THE_SWEEP}
+        importers = []
+        for fn in sorted(os.listdir(tool_verify._HERE)):
+            if not fn.endswith(".py") or fn in verify_runner._NOT_THE_SWEEP:
+                continue
+            with open(os.path.join(tool_verify._HERE, fn), encoding="utf-8") as fh:
+                tree = ast.parse(fh.read(), filename=fn)
+            for node in ast.walk(tree):
+                names = []
+                if isinstance(node, ast.Import):
+                    names = [a.name.split(".")[0] for a in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    names = [node.module.split(".")[0]]
+                importers += [f"{fn} imports {n}" for n in names if n in skipped]
+        assert not importers, ("the receipt skips a module the sweep reads: "
+                               + ", ".join(importers))
 
 
 class TestVerifiedReceipt:

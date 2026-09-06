@@ -122,10 +122,8 @@ def _root(occurrences, rf, cf):
     # Components carry an entityToken and are compared on it: a wrapper is never identity-stable
     # (two reads of design.rootComponent are DIFFERENT objects sharing one token), so a fake that
     # keys on id() models a stability the platform does not have.
-    root = MakeComp(name="Root", occurrences=occurrences, entity_token="TOKEN:Root")
-    root.xConstructionAxis = "AXIS_X"
-    root.yConstructionAxis = "AXIS_Y"
-    root.zConstructionAxis = "AXIS_Z"
+    root = MakeComp(name="Root", occurrences=occurrences, entity_token="TOKEN:Root",
+                    construction_axes=("AXIS_X", "AXIS_Y", "AXIS_Z"))
     root.features = types.SimpleNamespace(rectangularPatternFeatures=rf,
                                           circularPatternFeatures=cf)
     rf.comp = root               # so add() can tell an OWN entity from a foreign native one
@@ -183,16 +181,13 @@ def _install_body_in_subcomponent():
     adsk.fusion.BRepBody = BRepBody
     # the SUB-component that owns the body - distinct axes + its OWN pattern-feature collections
     sub_rf, sub_cf = FakeRectFeatures(), FakeCircFeatures()
-    sub = MakeComp(name="Sub")
-    sub.xConstructionAxis, sub.yConstructionAxis, sub.zConstructionAxis = "SUB_X", "SUB_Y", "SUB_Z"
+    sub = MakeComp(name="Sub", construction_axes=("SUB_X", "SUB_Y", "SUB_Z"))
     sub.features = types.SimpleNamespace(rectangularPatternFeatures=sub_rf,
                                          circularPatternFeatures=sub_cf)
     body = BRepBody("SubBoss", parent_component=sub)
     # root carries DIFFERENT axes so a mistaken root build would be detectable
     root_rf, root_cf = FakeRectFeatures(), FakeCircFeatures()
-    root = MakeComp(name="Root")
-    root.xConstructionAxis, root.yConstructionAxis, root.zConstructionAxis = \
-        "ROOT_X", "ROOT_Y", "ROOT_Z"
+    root = MakeComp(name="Root", construction_axes=("ROOT_X", "ROOT_Y", "ROOT_Z"))
     root.features = types.SimpleNamespace(rectangularPatternFeatures=root_rf,
                                           circularPatternFeatures=root_cf)
     design = MakeDesign(comp=root)

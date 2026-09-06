@@ -136,6 +136,77 @@ class TestAddBatch:
         assert out["added"] is True and up.itemByName("Solo") is not None
 
 
+class TextRefusingUserParameters(FakeUserParameters):
+    """userParameters.add as a TEXT parameter measures (measure_api.py row parameter-favorite-maker-
+    text-value-and-fresh-appearances): under units 'Text' the expression must be a QUOTED literal,
+    and the same string unquoted is refused right at the add with "3 : Invalid expression". A name
+    Fusion will not take is refused by the SAME call in its own words - "3 : param name is not
+    valid" - which is what makes the two failures tellable apart only by the message."""
+
+    def add(self, name, value_input, unit="", comment=""):
+        if " " in name or "!" in name:
+            raise RuntimeError("3 : param name is not valid")
+        expression = getattr(value_input, "stringValue", "") or ""
+        if unit == "Text" and "'" not in expression:
+            raise RuntimeError("3 : Invalid expression")
+        return super().add(name, value_input, unit, comment)
+
+
+class UnitRefusingUserParameters(FakeUserParameters):
+    """userParameters.add refusing outright whatever it was handed as a unit - the seam that decides
+    what the tool's except path has to survive. Its wording stands for a refusal, not for Fusion's."""
+
+    def add(self, name, value_input, unit="", comment=""):
+        if not isinstance(unit, str):
+            raise RuntimeError("3 : the unit was refused")
+        return super().add(name, value_input, unit, comment)
+
+
+class TestTextParameter:
+    def test_an_unquoted_text_expression_is_refused_with_the_quoting_rule(self, monkeypatch):
+        # Fusion's own refusal says "Invalid expression" and nothing else, which leaves a caller
+        # guessing between the unit, the name and the expression - so the add carries the one
+        # correction that fixes it, spelled with the quotes.
+        up = TextRefusingUserParameters([])
+        _stub_design(monkeypatch, _design(up, make_timeline("A")))
+        res = params.handler(name="Strategy", expression="Roughing", unit="Text")
+        assert res["isError"] is True
+        assert "Invalid expression" in res["message"]        # what Fusion said
+        assert "\"'Roughing'\"" in res["message"]            # the expression that would have worked
+        assert up.itemByName("Strategy") is None
+
+    def test_a_quoted_text_expression_lands_under_the_text_unit(self, monkeypatch):
+        # The other half: 'Text' is not translated or defaulted away on the road to Fusion, so the
+        # quoted literal the caller wrote is what the parameter ends up holding.
+        up = TextRefusingUserParameters([])
+        _stub_design(monkeypatch, _design(up, make_timeline("A")))
+        out = _payload(params.handler(name="Strategy", expression="'Roughing'", unit="Text"))
+        assert out["added"] is True
+        assert up._added[0][2] == "Text"
+        assert up.itemByName("Strategy").expression == "'Roughing'"
+
+    def test_a_name_refusal_under_the_text_unit_carries_no_quoting_remedy(self, monkeypatch):
+        # Same unit, same unquoted expression - and a DIFFERENT failure. The remedy answers the
+        # refusal Fusion actually returned, so it reads that message rather than re-deriving a
+        # cause from the inputs, which are equally consistent with the wrong explanation.
+        up = TextRefusingUserParameters([])
+        _stub_design(monkeypatch, _design(up, make_timeline("A")))
+        res = params.handler(name="bad name!", expression="Roughing", unit="Text")
+        assert res["isError"] is True
+        assert "param name is not valid" in res["message"]
+        assert "QUOTED" not in res["message"]
+
+    def test_a_non_string_unit_in_a_batch_errors_instead_of_raising(self, monkeypatch):
+        # 'params' items are plain objects in the schema, so a unit reaches the add as any JSON
+        # value a caller sends. Whatever the add then does, building the failure message is the
+        # last step and may not itself raise - an exception out of the handler is not a payload.
+        up = UnitRefusingUserParameters([])
+        _stub_design(monkeypatch, _design(up, make_timeline("A")))
+        res = params.handler(params=[{"name": "Loose", "expression": "1", "unit": 5}])
+        assert res["isError"] is True
+        assert "Loose" in res["message"]
+
+
 class TestAddFavorite:
     def test_favorite_reported_from_param_state(self, monkeypatch):
         up = FakeUserParameters([])

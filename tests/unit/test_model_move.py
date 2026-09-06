@@ -143,12 +143,10 @@ def _wire(monkeypatch, bodies=(), feats=None, tokens=None, axes=True, design_typ
 
     `design_type` sets the modelling mode current_design_type reads (1 parametric, 0 direct); left
     unset the design reports neither, which is the 'unknown' mode."""
-    comp = MakeComp(name="Comp", bodies=list(bodies))
+    comp = MakeComp(name="Comp", bodies=list(bodies),
+                    construction_axes=(_X_AXIS, _Y_AXIS, _Z_AXIS) if axes else None)
     feats = feats if feats is not None else FakeMoveFeatures(bodies)
     comp.features = types.SimpleNamespace(moveFeatures=feats)
-    if axes:
-        comp.xConstructionAxis, comp.yConstructionAxis, comp.zConstructionAxis = (
-            _X_AXIS, _Y_AXIS, _Z_AXIS)
     design = make_design(comp=comp, tokens=tokens)
     if design_type is not None:
         design.designType = design_type
@@ -184,15 +182,14 @@ def _points(monkeypatch, start=(0.0, 0.0, 0.0), end=(4.0, 0.0, 0.0), rides=None)
 # proxied into comes from _inputs.single_placement, so a component placed SEVERAL times is refused
 # naming each path instead of resolving to its first instance.
 
-def _sub_component(name="Rail", bodies=(), feats=None):
+def _sub_component(name="Rail", bodies=(), feats=None, x_axis=_X_AXIS):
     """A sub-component carrying its OWN moveFeatures collection and origin axes - what _host_for
-    has to route to when the moved body lives there."""
-    comp = MakeComp(name=name, bodies=list(bodies))
-    comp.entityToken = "TOKEN:" + name
+    has to route to when the moved body lives there. `x_axis` is the entity the x key resolves to,
+    so a test can hand one that proxies (or one that will not)."""
+    comp = MakeComp(name=name, bodies=list(bodies), entity_token="TOKEN:" + name,
+                    construction_axes=(x_axis, _Y_AXIS, _Z_AXIS))
     comp.features = types.SimpleNamespace(
         moveFeatures=feats if feats is not None else FakeMoveFeatures(bodies))
-    comp.xConstructionAxis, comp.yConstructionAxis, comp.zConstructionAxis = (
-        _X_AXIS, _Y_AXIS, _Z_AXIS)
     return comp
 
 
@@ -229,10 +226,9 @@ class TestSubComponentHosting:
     def test_the_move_is_hosted_on_the_bodys_own_component_and_the_axis_is_proxied(self, monkeypatch):
         body = _body("Slug")
         sub_feats = FakeMoveFeatures([body])
-        sub = _sub_component(bodies=[body], feats=sub_feats)
-        body.parentComponent = sub
         axis = _Proxyable()
-        sub.xConstructionAxis = axis
+        sub = _sub_component(bodies=[body], feats=sub_feats, x_axis=axis)
+        body.parentComponent = sub
         _wire_sub(monkeypatch, sub, "Assy:1+Rail:1")
         monkeypatch.setattr(mm._BODIES, "resolve", lambda raw: ([body], None))
         out = payload(mm.handler(mode="along_entity", bodies=["Slug"], axis="x", distance=30))
@@ -264,9 +260,9 @@ class TestSubComponentHosting:
         # and the call fails inside the API with nothing pointing at why.
         body = _body("Slug")
         sub_feats = FakeMoveFeatures([body])
-        sub = _sub_component(bodies=[body], feats=sub_feats)
+        # an x axis that answers no createForAssemblyContext
+        sub = _sub_component(bodies=[body], feats=sub_feats, x_axis=object())
         body.parentComponent = sub
-        sub.xConstructionAxis = object()             # answers no createForAssemblyContext
         _wire_sub(monkeypatch, sub, "Assy:1+Rail:1")
         monkeypatch.setattr(mm._BODIES, "resolve", lambda raw: ([body], None))
         res = mm.handler(mode="along_entity", bodies=["Slug"], axis="x", distance=30)
@@ -293,11 +289,10 @@ class TestSubComponentHosting:
         # placed twice must NOT be refused on a reference that is unambiguous
         body = _body("Slug")
         sub_feats = FakeMoveFeatures([body])
-        sub = _sub_component(bodies=[body], feats=sub_feats)
+        axis = _Proxyable()
+        sub = _sub_component(bodies=[body], feats=sub_feats, x_axis=axis)
         body.parentComponent = sub
         body.assemblyContext = make_occurrence(path="Assy:1+Rail:2")
-        axis = _Proxyable()
-        sub.xConstructionAxis = axis
         _wire_sub(monkeypatch, sub, "Assy:1+Rail:1", "Assy:1+Rail:2")
         monkeypatch.setattr(mm._BODIES, "resolve", lambda raw: ([body], None))
         out = payload(mm.handler(mode="along_entity", bodies=["Slug"], axis="x", distance=30))

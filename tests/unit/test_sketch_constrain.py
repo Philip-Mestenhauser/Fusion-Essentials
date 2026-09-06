@@ -356,9 +356,8 @@ class FakeSketch(Sketch):
 def _component(sketches, name="Root"):
     """A component holding `sketches` plus the origin plane a PlaneRef('xy') resolves to - the
     'surface' operand's simplest form."""
-    comp = MakeComp(name=name, sketches=list(sketches))
-    comp.xYConstructionPlane = FakePlane("XY")
-    return comp
+    return MakeComp(name=name, sketches=list(sketches),
+                    origin_planes=(FakePlane("XY"), FakePlane("XZ"), FakePlane("YZ")))
 
 
 @pytest.fixture

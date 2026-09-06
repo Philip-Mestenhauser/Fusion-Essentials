@@ -5,7 +5,9 @@
 
 A module-level definition mentioned nowhere else across commands/ + tests/ fails, a test-file
 definition unused in its own file fails, and an import its home module never mentions fails.
-Class methods, dunders, pytest entry points (test_*/Test*, fixtures) and named seams are exempt."""
+A mention INSIDE a definition (self-construction, recursion) is not a use of it. Class methods,
+dunders, pytest entry points (test_*/Test*, fixtures) and named seams are exempt - but an autouse
+fixture nothing requests fails on a value it returns, which no test can read."""
 
 import ast
 from functools import lru_cache
@@ -39,6 +41,19 @@ def _py_files(root):
 
 def _parse(path):
     return _corpus.tree(path)
+
+
+def _test_helpers():
+    """The _*.py helper modules beside the tests (the fakes, the shared corpus reader) - module
+    code like any other."""
+    return [p for p in sorted(TESTS.rglob("_*.py"))
+            if not p.name.startswith("__") and "__pycache__" not in p.parts]
+
+
+def _definition_files():
+    """Every file the module-level definition checks scan."""
+    return (_py_files(MCP_ROOT) + sorted(TESTS.glob("gen_*.py")) + [TESTS / "conftest.py"]
+            + _test_helpers())
 
 
 @lru_cache(maxsize=None)
@@ -83,14 +98,24 @@ def _count_into(tree, bump):
                         bump(arg.value)
 
 
+def _self_mentions(node, name):
+    """Mentions of `name` INSIDE its own definition - a fake constructing itself in one of its
+    methods, or a function that only recurses, keeps a count nothing outside it contributes to."""
+    inner = {}
+    _count_into(node, lambda n: inner.__setitem__(n, inner.get(n, 0) + 1))
+    return inner.get(name, 0)
+
+
 def _module_definitions(tree):
     """(name, lineno, own_mentions) per module-level def/class/assigned constant - own_mentions is
-    what the definition itself contributes to the index (0 for def/class, 1 for an Assign target)."""
+    what the definition itself contributes to the index (its self-references for a def/class, 1
+    for an Assign target)."""
     out = []
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            # def/class statements bind the name WITHOUT an ast.Name node - zero self-mentions.
-            out.append((node.name, node.lineno, 0))
+            # the def/class statement binds the name WITHOUT an ast.Name node, so what it
+            # contributes is whatever its own body mentions.
+            out.append((node.name, node.lineno, _self_mentions(node, node.name)))
         elif isinstance(node, ast.Assign):
             for tgt in node.targets:
                 if isinstance(tgt, ast.Name):
@@ -142,11 +167,37 @@ def _fixture_decorated(node):
     return False
 
 
+def _is_autouse(node):
+    """True for a @pytest.fixture(autouse=True) function - one pytest runs without being asked."""
+    for dec in getattr(node, "decorator_list", []):
+        if not isinstance(dec, ast.Call):
+            continue
+        name = dec.func.attr if isinstance(dec.func, ast.Attribute) else getattr(dec.func, "id", "")
+        if name == "fixture" and any(kw.arg == "autouse" and getattr(kw.value, "value", None) is True
+                                     for kw in dec.keywords):
+            return True
+    return False
+
+
+def _own_returns(node):
+    """Linenos of the `return <value>` statements in a function's OWN scope - a return inside a
+    nested def belongs to that def, not to this one."""
+    out, stack = [], list(node.body)
+    while stack:
+        n = stack.pop()
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        if isinstance(n, ast.Return) and n.value is not None:
+            out.append(n.lineno)
+        stack.extend(ast.iter_child_nodes(n))
+    return sorted(out)
+
+
 class TestNoUnusedImports:
     def test_every_import_is_used_or_a_named_seam(self):
         offenders = []
         files = _py_files(MCP_ROOT) + sorted(TESTS.rglob("test_*.py")) \
-            + sorted(TESTS.glob("gen_*.py")) + [TESTS / "conftest.py"]
+            + sorted(TESTS.glob("gen_*.py")) + [TESTS / "conftest.py"] + _test_helpers()
         for path in files:
             if path.name == "__init__.py":
                 continue          # a package __init__'s imports are its re-export surface
@@ -189,8 +240,7 @@ class TestNoUnreferencedDefinitions:
     def test_every_module_level_definition_is_referenced_somewhere(self):
         counts = _mention_counts()
         offenders = []
-        files = _py_files(MCP_ROOT) + sorted(TESTS.glob("gen_*.py")) + [TESTS / "conftest.py"]
-        for path in files:
+        for path in _definition_files():
             tree = _parse(path)
             fixtures = {n.name for n in tree.body
                         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and _fixture_decorated(n)}
@@ -210,7 +260,7 @@ class TestNoUnreferencedDefinitions:
     def test_definition_exempt_table_matches_reality(self):
         counts = _mention_counts()
         defined = set()
-        for path in _py_files(MCP_ROOT) + sorted(TESTS.glob("gen_*.py")) + [TESTS / "conftest.py"]:
+        for path in _definition_files():
             defined |= {name for name, _, _ in _module_definitions(_parse(path))}
         stale = _stale_definition_exemptions(_DEFINITION_EXEMPT, counts, defined)
         assert not stale, "stale _DEFINITION_EXEMPT entries:\n  " + "\n  ".join(stale)
@@ -227,7 +277,7 @@ class TestNoUnreferencedDefinitions:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     if node.name.startswith(("test_", "Test")) or _fixture_decorated(node):
                         continue
-                    names = [(node.name, node.lineno, 0)]
+                    names = [(node.name, node.lineno, _self_mentions(node, node.name))]
                 elif isinstance(node, ast.Assign):
                     names = [(t.id, node.lineno, 1) for t in node.targets if isinstance(t, ast.Name)]
                 for name, lineno, own in names:
@@ -237,3 +287,22 @@ class TestNoUnreferencedDefinitions:
                         offenders.append(f"{path.relative_to(REPO)}:{lineno}: '{name}' is unused in its file")
         assert not offenders, ("Dead test-file definitions (delete them - a fake or helper nothing "
                                "in its own file uses is refactoring residue):\n" + "\n".join(offenders))
+
+    def test_an_autouse_fixture_returns_nothing_a_test_could_read(self):
+        # An autouse fixture runs unasked, so nothing has to request it by argument name - and a
+        # value it returns is then unreachable: the record it hands back is read by no one.
+        offenders = []
+        for path in sorted(TESTS.rglob("test_*.py")):
+            tree = _parse(path)
+            requested = {n.arg for n in ast.walk(tree) if isinstance(n, ast.arg)}
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if not _is_autouse(node) or node.name in requested:
+                    continue
+                for lineno in _own_returns(node):
+                    offenders.append(f"{path.relative_to(REPO)}:{lineno}: autouse fixture "
+                                     f"'{node.name}' returns a value no test takes as an argument")
+        assert not offenders, ("Autouse fixtures returning what nothing can read (drop the return, "
+                               "or the fixture if its setup serves no test in the file):\n"
+                               + "\n".join(offenders))

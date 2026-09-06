@@ -13,37 +13,46 @@ import types
 
 import pytest
 
-from conftest import (load_tool, make_design, _make_object_collection, _NamedCollection, BRepBody,
-                      FakePoint, FakeVector3D, MakeComp, MakeDesign, MeshBody, Profile, body_proxy,
-                      entity_proxy, make_source_document)
+from conftest import (load_tool, make_design, make_occurrence, _make_object_collection,
+                      _MeshBodies, _NamedCollection, BRepBody, BRepEdge, BRepFace, Circle3D,
+                      Cylinder, FakeBaseFeature, FakeOccurrence, FakePoint, FakeTimelineObject,
+                      FakeVector3D, Line3D, MakeComp,
+                      MakeDesign, MeshBody, Plane, Profile, Sketch, body_proxy, entity_proxy,
+                      make_source_document)
 
 inp = load_tool("_inputs")
 
 
 # ── fakes for entity resolution ─────────────────────────────────────────────
+#
+# Faces and edges are the shared BRepFace/BRepEdge; each surface/curve fake carries its own measured
+# surfaceType/curveType, so a kind predicate reads the real constant rather than a hand-wired one.
 
-class FakePlanarFace:
-    def __init__(self):
-        import adsk.core
-        self.geometry = type("G", (), {"surfaceType": adsk.core.SurfaceTypes.PlaneSurfaceType})()
-
-
-class FakeCylFace:
-    def __init__(self):
-        import adsk.core
-        self.geometry = type("G", (), {"surfaceType": adsk.core.SurfaceTypes.CylinderSurfaceType})()
+_UP = FakeVector3D(0, 0, 1)
 
 
-class FakeEdge:
-    pass
+def FakePlanarFace(centroid=None, context=None):
+    """A planar face. `centroid` is the position a composite handle's locator re-finds it by, and
+    `context` the assembly path an ambiguity refusal names it by."""
+    return BRepFace(Plane(_UP), centroid=None if centroid is None else FakePoint(*centroid),
+                    assembly_context=None if context is None
+                    else types.SimpleNamespace(fullPathName=context))
+
+
+def FakeCylFace():
+    return BRepFace(Cylinder(_UP))
+
+
+def FakeEdge():
+    return BRepEdge(Line3D(FakePoint(0, 0, 0), FakePoint(1, 0, 0)))
 
 
 def _install(token_map):
     """Install a fake design whose findEntityByToken resolves tokens from token_map, and wire the
     adsk isinstance types the kinds check against (SurfaceTypes ints come seeded)."""
     import adsk.fusion
-    adsk.fusion.BRepFace = (FakePlanarFace, FakeCylFace)   # isinstance check covers both fakes
-    adsk.fusion.BRepEdge = FakeEdge
+    adsk.fusion.BRepFace = BRepFace
+    adsk.fusion.BRepEdge = BRepEdge
     adsk.fusion.BRepVertex = type("V", (), {})
 
     # _inputs calls _common.design(); patch it. The requirement predicates read surfaceType live on
@@ -99,27 +108,21 @@ class TestGeometryHandle:
 # edit. The composite handle '<token>|@<kind>:<x>,<y>,<z>' lets resolution re-find the SAME geometry by
 # its kind+position when the token is dead, so the caller never has to re-query.
 
-class _Pt:
-    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
-
-
-class _HealFace(FakePlanarFace):
-    def __init__(self, centroid):
-        super().__init__()
-        self.centroid = _Pt(*centroid)
+def _HealFace(centroid):
+    """A planar face at a known centroid - what the locator re-finds when the token is dead."""
+    return FakePlanarFace(centroid=centroid)
 
 
 def _install_with_bodies(faces, token_map):
     """A design whose findEntityByToken uses token_map AND whose rootComponent carries bodies/faces so
     _refind_by_locator can scan them (the locator-fallback path)."""
     import adsk.fusion
-    adsk.fusion.BRepFace = (FakePlanarFace, FakeCylFace, _HealFace)
-    adsk.fusion.BRepEdge = FakeEdge
+    adsk.fusion.BRepFace = BRepFace
+    adsk.fusion.BRepEdge = BRepEdge
     adsk.fusion.BRepVertex = type("V", (), {})
 
-    body = type("Body", (), {"name": "Body1", "faces": _NamedCollection(faces),
-                             "edges": _NamedCollection([]),
-                             "vertices": _NamedCollection([])})()
+    body = BRepBody(name="Body1", faces=faces)
+    body.edges = _NamedCollection([])
     root = MakeComp(name="Root", bodies=[body])
     design = MakeDesign(comp=root, tokens=token_map)
     inp._common.design = lambda: design
@@ -216,15 +219,10 @@ class TestSelfHealingHandle:
 # both at the SAME centroid), so returning the first silently acts on geometry the caller never
 # picked.
 
-class _SplitFace(FakePlanarFace):
+def _SplitFace(centroid, context=None):
     """A planar face at a known centroid - a survivor of a split. `context` is the assembly path an
     ambiguity refusal names each candidate by."""
-
-    def __init__(self, centroid, context=None):
-        super().__init__()
-        self.centroid = _Pt(*centroid)
-        if context is not None:
-            self.assemblyContext = types.SimpleNamespace(fullPathName=context)
+    return FakePlanarFace(centroid=centroid, context=context)
 
 
 @pytest.fixture
@@ -233,7 +231,7 @@ def token_env(monkeypatch):
     entities one token can resolve to."""
     def build(tokens):
         import adsk.fusion
-        monkeypatch.setattr(adsk.fusion, "BRepFace", _SplitFace, raising=False)
+        monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace, raising=False)
         design = make_design(tokens=tokens)
         monkeypatch.setattr(inp._common, "design", lambda: design)
         monkeypatch.setattr(inp._common, "target_component", lambda _d=None: design.rootComponent)
@@ -485,62 +483,30 @@ class TestEdgeLoopRef:
 # Resolution is by what RESOLVES, not by string length: try the token first, then fall back to the
 # name. (A length heuristic would mis-route a long body NAME to findEntityByToken as a stale handle.)
 
-class FakeBody:
-    def __init__(self, name):
-        self.name = name
+def FakeBody(name):
+    """A BRep body, reduced to the name a by-name lookup keys on."""
+    return BRepBody(name=name)
 
 
 def _install_bodies(named=None, handle_map=None, components=None):
+    """`named` are the ROOT component's bodies, keyed by the name they answer; `components` is
+    {component name: its bodies} - or a LIST of (name, bodies) pairs where a test needs two
+    components carrying ONE name, which a dict cannot express."""
     import adsk.fusion
-    adsk.fusion.BRepBody = FakeBody
+    adsk.fusion.BRepBody = BRepBody
     named = named or {}
     handle_map = handle_map or {}
-    # component name -> list of its bodies; a LIST of (name, bodies) pairs where a test needs two
-    # components carrying ONE name, which a dict cannot express
     components = components or {}
 
-    class FakeBodies:
-        def itemByName(self, n):
-            return named.get(n)
-
-    class FakeComp:
-        bRepBodies = FakeBodies()
-
-    class _Coll:
-        # count/item is the measured live collection protocol; iteration kept for older consumers.
-        def __init__(self, items):
-            self._i = list(items)
-        @property
-        def count(self):
-            return len(self._i)
-        def item(self, i):
-            return self._i[i]
-        def __iter__(self):
-            return iter(self._i)
-
-    class FakeNamedComp:
-        def __init__(self, name, bodies):
-            self.name = name
-            self.bRepBodies = _Coll(bodies)
-            self.meshBodies = _Coll([])
-
     pairs = components.items() if isinstance(components, dict) else components
-    comp_objs = [FakeNamedComp(n, bs) for n, bs in pairs]
-
-    class FakeDesign:
-        rootComponent = FakeComp()
-        def findEntityByToken(self, h):
-            e = handle_map.get(h)
-            return [e] if e is not None else []
-        @property
-        def allComponents(self):
-            # allComponents is a COUNTED collection (count/item) on the live API even when there are
-            # no named sub-components - never a bare list.
-            return _Coll(comp_objs)
-    comp = FakeComp()
-    inp._common.design = lambda: FakeDesign()
-    inp._common.target_component = lambda d: comp
-    return comp
+    comp_objs = [MakeComp(name=n, bodies=list(bs), mesh_bodies=[]) for n, bs in pairs]
+    root = MakeComp(name="Root", bodies=list(named.values()))
+    # allComponents holds the named sub-components only, so a by-name walk over it never falls back
+    # to the root's own bodies.
+    design = MakeDesign(comp=root, all_components=comp_objs, tokens=handle_map)
+    inp._common.design = lambda: design
+    inp._common.target_component = lambda d: root
+    return root
 
 
 class TestBodyRef:
@@ -643,6 +609,11 @@ class TestBodyRef:
 
 # ── PlaneRef: the MULTI-SOURCE kind (origin alias | construction name | handle) ─────────────────
 
+# The three origin planes an 'xy'/'xz'/'yz' alias resolves to. ConstructionPlane has no measured
+# shape, so the entity a test gets back is a tagged tuple rather than a shared fake.
+_ORIGIN_PLANES = (("origin", "xy"), ("origin", "xz"), ("origin", "yz"))
+
+
 class FakeConstructionPlane:
     pass
 
@@ -673,52 +644,34 @@ def _install_planes(named=None, handle_map=None, subs=(), active=None):
     `active`: the component name PlaneRef should treat as active (default: the root).
     Returns the design; its components are reachable by name through allComponents.itemByName."""
     import adsk.fusion
-    adsk.fusion.BRepFace = (FakePlanarFace, FakeCylFace)
+    adsk.fusion.BRepFace = BRepFace
     adsk.fusion.ConstructionPlane = FakeConstructionPlane
     named = named or {}
     handle_map = handle_map or {}
 
-    class FakeConsPlanes(_NamedCollection):
-        """The count/item(i)/itemByName collection the design-wide plane walk reads."""
+    def _comp(name, planes=(), token=None):
+        # Every live component answers an entityToken, and PlaneRef's assembly-context step REFUSES
+        # an owner it cannot tell from the root rather than hand back a native plane Fusion would
+        # reject. A test that wants that state passes token=None.
+        c = MakeComp(name=name, entity_token=token, origin_planes=_ORIGIN_PLANES)
+        c.constructionPlanes = _NamedCollection(list(planes))
+        return c
 
-    class FakeComp:
-        xYConstructionPlane = ("origin", "xy")
-        xZConstructionPlane = ("origin", "xz")
-        yZConstructionPlane = ("origin", "yz")
-
-        def __init__(self, name, planes=(), token=None):
-            self.name = name
-            self.constructionPlanes = FakeConsPlanes(planes)
-            # Every live component answers an entityToken, and PlaneRef's assembly-context step
-            # REFUSES an owner it cannot tell from the root rather than hand back a native plane
-            # Fusion would reject. A test that wants that state passes token=None.
-            if token is not None:
-                self.entityToken = token
-
-    class FakeDesign:
-        def __init__(self, comps, occs):
-            self.rootComponent = comps[0]
-            self.allComponents = _NamedCollection(comps)
-            self.activeComponent = self.allComponents.itemByName(active) or comps[0]
-            self.rootComponent.allOccurrences = list(occs)
-            self.rootComponent.allOccurrencesByComponent = lambda c: _NamedCollection(
-                [o for o in occs if o.component is c])
-
-        def findEntityByToken(self, h):
-            e = handle_map.get(h)
-            return [e] if e is not None else []
-
-    root = FakeComp("Root", token="TOKEN:Root")
+    root = _comp("Root", token="TOKEN:Root")
     for nm, cp in named.items():
         cp.name, cp.component = nm, root       # the walk matches on the plane's OWN name
-    root.constructionPlanes = FakeConsPlanes(list(named.values()))
+    root.constructionPlanes = _NamedCollection(list(named.values()))
     comps, occs = [root], []
     for comp_name, plane_names, paths in subs:
-        sub = FakeComp(comp_name, token=f"TOKEN:{comp_name}")
-        sub.constructionPlanes = FakeConsPlanes([_CP(n, sub) for n in plane_names])
+        sub = _comp(comp_name, token=f"TOKEN:{comp_name}")
+        sub.constructionPlanes = _NamedCollection([_CP(n, sub) for n in plane_names])
         comps.append(sub)
-        occs += [types.SimpleNamespace(fullPathName=p, name=p, component=sub) for p in paths]
-    design = FakeDesign(comps, occs)
+        occs += [make_occurrence(path=p, component=sub) for p in paths]
+    design = MakeDesign(comp=root, all_components=comps, tokens=handle_map)
+    design.activeComponent = design.allComponents.itemByName(active) or root
+    root.allOccurrences = list(occs)
+    root.allOccurrencesByComponent = lambda c: _NamedCollection(
+        [o for o in occs if o.component is c])
     inp._common.design = lambda: design
     inp._common.target_component = lambda d: d.activeComponent
     return design
@@ -959,21 +912,14 @@ class TestPlaneRef:
 
 # ── AxisRef: world axis OR edge handle ──────────────────────────────────────
 
-class _FakeLinearEdge:
-    def __init__(self):
-        import adsk.core
-        self.geometry = type("G", (), {"curveType": adsk.core.Curve3DTypes.Line3DCurveType})()
-
-
-class _FakeArcEdge:
-    def __init__(self):
-        import adsk.core
-        self.geometry = type("G", (), {"curveType": adsk.core.Curve3DTypes.Arc3DCurveType})()
+def _curved_edge():
+    """An edge whose curve is not a line - the shape a straight-axis input refuses."""
+    return BRepEdge(Circle3D(_UP))
 
 
 def _install_axis(handle_map=None):
     import adsk.fusion
-    adsk.fusion.BRepEdge = (_FakeLinearEdge, _FakeArcEdge)
+    adsk.fusion.BRepEdge = BRepEdge
     design = make_design(tokens=handle_map or {})
     inp._common.design = lambda: design
 
@@ -986,7 +932,7 @@ class TestAxisRef:
         assert err is None and val == ("world", (1, 0, 0))
 
     def test_edge_handle_axis(self):
-        e = _FakeLinearEdge()
+        e = FakeEdge()
         _install_axis(handle_map={"E": e})
         k = inp.AxisRef("axis")
         val, err = k.resolve("E")
@@ -1006,7 +952,7 @@ class TestAxisRef:
         assert err is None and val == ("edge", ln)
 
     def test_curved_edge_rejected(self):
-        a = _FakeArcEdge()
+        a = _curved_edge()
         _install_axis(handle_map={"A": a})
         k = inp.AxisRef("axis")
         val, err = k.resolve("A")
@@ -1022,7 +968,7 @@ class TestAxisRef:
         # AxisRef must accept a COMPOSITE find_geometry handle ('<token>|@<kind>:x,y,z'), like
         # every other handle kind. The handle_map is keyed on the BARE token; passing the composite
         # must still resolve (the '|@locator' suffix is split off before findEntityByToken).
-        e = _FakeLinearEdge()
+        e = FakeEdge()
         _install_axis(handle_map={"TOKEN": e})
         handle = f"TOKEN{inp._HANDLE_SEP}edge:1.0,2.0,3.0"
         val, err = inp.AxisRef("axis").resolve(handle)
@@ -1042,18 +988,14 @@ class TestAxisRef:
 # world direction handles a face-derived one with NO code change (this is why joint_create_origin needs
 # none). The existing world-axis / straight-edge / sketch-line paths must keep working (tested above).
 
-class _FakePlanarAxisFace:
-    def __init__(self, normal):
-        import adsk.core
-        self.geometry = type("G", (), {"surfaceType": adsk.core.SurfaceTypes.PlaneSurfaceType,
-                                       "normal": _Pt(*normal)})()
+def _FakePlanarAxisFace(normal):
+    """A planar face whose surface carries the NORMAL a direction read takes."""
+    return BRepFace(Plane(FakeVector3D(*normal)))
 
 
-class _FakeCylAxisFace:
-    def __init__(self, axis):
-        import adsk.core
-        self.geometry = type("G", (), {"surfaceType": adsk.core.SurfaceTypes.CylinderSurfaceType,
-                                       "axis": _Pt(*axis)})()
+def _FakeCylAxisFace(axis):
+    """A cylinder face whose surface carries the AXIS a direction read takes."""
+    return BRepFace(Cylinder(FakeVector3D(*axis)))
 
 
 def _install_axis_face(handle_map):
@@ -1061,8 +1003,8 @@ def _install_axis_face(handle_map):
     (non-Mock) BRepEdge + SketchLine classes so those checks return False cleanly, plus BRepFace (the
     SurfaceTypes ints come seeded)."""
     import adsk.fusion
-    adsk.fusion.BRepFace = (_FakePlanarAxisFace, _FakeCylAxisFace)
-    adsk.fusion.BRepEdge = (_FakeLinearEdge, _FakeArcEdge)
+    adsk.fusion.BRepFace = BRepFace
+    adsk.fusion.BRepEdge = BRepEdge
     adsk.fusion.SketchLine = type("SL", (), {})
     design = make_design(tokens=handle_map)
     inp._common.design = lambda: design
@@ -1140,10 +1082,9 @@ def axis_env(monkeypatch):
 
     def build(axes=(), tokens=None, root_axes=()):
         monkeypatch.setattr(adsk.fusion, "ConstructionAxis", _FakeConstructionAxis, raising=False)
-        monkeypatch.setattr(adsk.fusion, "BRepEdge", (_FakeLinearEdge, _FakeArcEdge), raising=False)
+        monkeypatch.setattr(adsk.fusion, "BRepEdge", BRepEdge, raising=False)
         monkeypatch.setattr(adsk.fusion, "SketchLine", type("SL", (), {}), raising=False)
-        monkeypatch.setattr(adsk.fusion, "BRepFace", (_FakePlanarAxisFace, _FakeCylAxisFace),
-                            raising=False)
+        monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace, raising=False)
         # Tokens, because _common.same_component compares on entityToken and answers None without
         # one - and the assembly-context lift REFUSES a pair it cannot identify rather than guess
         # whether an entity needs proxying. A test that wants that state deletes the attribute.
@@ -1158,7 +1099,7 @@ def axis_env(monkeypatch):
         monkeypatch.setattr(inp._common, "target_component", lambda _d=None: active)
 
         def place(comp, *full_paths):
-            placed[id(comp)] = [types.SimpleNamespace(fullPathName=p) for p in full_paths]
+            placed[id(comp)] = [make_occurrence(path=p) for p in full_paths]
 
         return types.SimpleNamespace(active=active, root=root, design=design, place=place)
 
@@ -1358,7 +1299,7 @@ class TestAxisLineOfWorldSpace:
         # regression: only a ConstructionAxis takes the lift; an edge's world line is read directly,
         # and its direction is DERIVED from the two endpoints.
         axis_env()
-        edge = _FakeLinearEdge()
+        edge = FakeEdge()
         edge.worldGeometry = types.SimpleNamespace(startPoint=FakePoint(1, 0, 0),
                                                    endPoint=FakePoint(4, 0, 0))
         pair, err = inp.axis_line_of("rotate_axis", edge)
@@ -1373,7 +1314,7 @@ class TestAxisLineOfWorldSpace:
         # this from a real axis: the consumer would pivot about a direction pointing nowhere and
         # report success. Only this guard refuses it, and the refusal says WHY.
         axis_env()
-        edge = _FakeLinearEdge()
+        edge = FakeEdge()
         edge.worldGeometry = types.SimpleNamespace(startPoint=FakePoint(2, 3, 4),
                                                    endPoint=FakePoint(2, 3, 4))
         pair, err = inp.axis_line_of("rotate_axis", edge)
@@ -1385,12 +1326,12 @@ class TestAxisLineOfWorldSpace:
         # just past it resolves and normalizes. Pinning only an exact zero leaves the comparison
         # free to be an '==' or a '<' and stay green.
         axis_env()
-        at = _FakeLinearEdge()
+        at = FakeEdge()
         at.worldGeometry = types.SimpleNamespace(startPoint=FakePoint(0, 0, 0),
                                                  endPoint=FakePoint(1e-12, 0, 0))
         pair, err = inp.axis_line_of("rotate_axis", at)
         assert pair is None and "degenerate (zero length)" in err
-        above = _FakeLinearEdge()
+        above = FakeEdge()
         above.worldGeometry = types.SimpleNamespace(startPoint=FakePoint(0, 0, 0),
                                                     endPoint=FakePoint(2e-12, 0, 0))
         pair, err = inp.axis_line_of("rotate_axis", above)
@@ -1594,86 +1535,29 @@ class TestGeneration:
 # SEPARATE type living in meshBodies. The kind axis validates at resolve time and, on the WRONG kind,
 # returns a REDIRECTING error (the high-value part) instead of a silent miss / misleading downstream.
 
-class FakeBRep:
-    """Stands in for adsk.fusion.BRepBody. isSolid distinguishes solid vs open-surface. entity_token
-    stands in for the stable entityToken - two wrappers of the SAME physical body share one token."""
-    def __init__(self, name="Body1", is_solid=True, entity_token=None):
-        self.name = name
-        self.isSolid = is_solid
-        if entity_token is not None:
-            self.entityToken = entity_token
+def FakeBRep(name="Body1", is_solid=True, entity_token=None):
+    """A BRep body on the shared fake: isSolid distinguishes solid vs open-surface, and entityToken
+    is the stable identity two wrappers of the SAME physical body share."""
+    return BRepBody(name=name, is_solid=is_solid, entity_token=entity_token)
 
 
 def _install_kind_bodies(brep_named=None, mesh_named=None, handle_map=None):
     """Install fakes for the kind axis: BRepBody/MeshBody types wired for isinstance, a component with
     BOTH bRepBodies and meshBodies collections, and a handle resolver."""
     import adsk.fusion
-    adsk.fusion.BRepBody = FakeBRep
+    adsk.fusion.BRepBody = BRepBody
     adsk.fusion.MeshBody = MeshBody
     brep_named = brep_named or {}
     mesh_named = mesh_named or {}
     handle_map = handle_map or {}
 
-    class _Coll:
-        """bRepBodies-style: HAS itemByName (the real BRepBodies does)."""
-        def __init__(self, m):
-            self._m = m
-        def itemByName(self, n):
-            return self._m.get(n)
-
-    class _MeshColl:
-        """meshBodies-style: REALISTIC - the live MeshBodies has NO itemByName, only count + item(i).
-        Mesh-by-name must iterate."""
-        def __init__(self, m):
-            self._list = list(m.values())
-        @property
-        def count(self):
-            return len(self._list)
-        def item(self, i):
-            return self._list[i] if 0 <= i < len(self._list) else None
-
-    class FakeComp:
-        bRepBodies = _Coll(brep_named)
-        meshBodies = _MeshColl(mesh_named)
-
-    class FakeDesign:
-        rootComponent = FakeComp()
-        def findEntityByToken(self, h):
-            e = handle_map.get(h)
-            return [e] if e is not None else []
-    comp = FakeComp()
-    inp._common.design = lambda: FakeDesign()
+    # meshBodies is the _MeshBodies collection - no itemByName, unlike bRepBodies - so a mesh is
+    # found by iterate-and-match.
+    comp = MakeComp(bodies=list(brep_named.values()), mesh_bodies=list(mesh_named.values()))
+    design = MakeDesign(comp=comp, tokens=handle_map)
+    inp._common.design = lambda: design
     inp._common.target_component = lambda d: comp
     return comp
-
-
-class _BrepColl:
-    """bRepBodies-style: HAS itemByName, plus count/item."""
-    def __init__(self, d):
-        self._d = dict(d)
-
-    def itemByName(self, n):
-        return self._d.get(n)
-
-    @property
-    def count(self):
-        return len(self._d)
-
-    def item(self, i):
-        return list(self._d.values())[i]
-
-
-class _MeshOnlyColl:
-    """meshBodies-style: REALISTIC - no itemByName, only count + item(i)."""
-    def __init__(self, d):
-        self._list = list(d.values())
-
-    @property
-    def count(self):
-        return len(self._list)
-
-    def item(self, i):
-        return self._list[i] if 0 <= i < len(self._list) else None
 
 
 def _install_occurrence_scope(comp_name="MeshComp", brep_name="Body1", mesh_name="CompMesh",
@@ -1685,53 +1569,34 @@ def _install_occurrence_scope(comp_name="MeshComp", brep_name="Body1", mesh_name
     the read answers an EMPTY collection; "raises" - the read throws. `lifts` is MeshBody's
     createForAssemblyContext knob. Returns (occurrences, brep, mesh)."""
     import adsk.fusion
-    adsk.fusion.BRepBody = FakeBRep
+    adsk.fusion.BRepBody = BRepBody
     adsk.fusion.MeshBody = MeshBody
     brep, mesh = FakeBRep(brep_name, is_solid=True), MeshBody(mesh_name, lifts=lifts)
 
-    class _Comp:
-        name = comp_name
-        bRepBodies = _BrepColl({brep_name: brep})
-        meshBodies = _MeshOnlyColl({mesh_name: mesh})
-    comp = _Comp()
+    comp = MakeComp(name=comp_name, bodies=[brep], mesh_bodies=[mesh])
     brep.parentComponent = comp
     mesh.parentComponent = comp
 
-    class _Occ:
-        def __init__(self, path):
-            self.name = path
-            self.fullPathName = path
-            self.component = comp
-            self.bRepBodies = _BrepColl({brep_name: brep})
-            self.childOccurrences = _BrepColl({})
+    class _Occ(FakeOccurrence):
+        """The occurrence-level meshBodies read, which the shared occurrence fake carries no knob
+        for: it answers an empty collection, or throws when `occ_mesh_read` says so."""
 
         @property
         def meshBodies(self):
             if occ_mesh_read == "raises":
                 raise AttributeError("MeshBodies is not readable on an Occurrence")
-            return _MeshOnlyColl({})        # answers, and answers NOTHING
+            return _MeshBodies([])          # answers, and answers NOTHING
 
-    occs = [_Occ(f"{comp_name}:{i + 1}") for i in range(placements)]
+    occs = [_Occ(path=f"{comp_name}:{i + 1}", component=comp, bodies=[brep])
+            for i in range(placements)]
 
-    class _Root:
-        name = "Root"
-        bRepBodies = _BrepColl({})
-        meshBodies = _MeshOnlyColl({})
-        allOccurrences = list(occs)
+    root = MakeComp(name="Root", mesh_bodies=[], all_occurrences=occs)
+    root.allOccurrencesByComponent = lambda c: _NamedCollection(
+        list(occs) if c is comp else [])
+    # findEntityByToken answers nothing, so every lookup takes the NAME path.
+    design = MakeDesign(comp=root, all_components=[root, comp])
 
-        def allOccurrencesByComponent(self, c):
-            return _NamedCollection(list(occs)) if c is comp else _NamedCollection([])
-
-    root = _Root()
-
-    class _Design:
-        rootComponent = root
-        allComponents = _NamedCollection([root, comp])
-
-        def findEntityByToken(self, h):
-            return []               # not a handle -> force the name path
-
-    inp._common.design = lambda: _Design()
+    inp._common.design = lambda: design
     inp._common.target_component = lambda d=None: root
     return occs, brep, mesh
 
@@ -1804,63 +1669,25 @@ class TestBodyKind:
         # mesh. The design-wide component walk is the one path that reaches it - this fake raises on
         # occ.meshBodies exactly as live does, so a resolver that leaned on the occurrence fails here.
         import adsk.fusion
-        adsk.fusion.BRepBody = FakeBRep
+        adsk.fusion.BRepBody = BRepBody
         adsk.fusion.MeshBody = MeshBody
         m = MeshBody("Occ_Scan")
 
-        class _Coll:
-            """bRepBodies-style: HAS itemByName."""
-            def __init__(self, d):
-                self._d = d
-            def itemByName(self, n):
-                return self._d.get(n)
-            @property
-            def count(self):
-                return len(self._d)
-            def item(self, i):
-                return list(self._d.values())[i]
+        # the sub-COMPONENT that owns the mesh, reachable only via design.allComponents
+        sub = MakeComp(name="Scanned", mesh_bodies=[m])
 
-        class _MeshColl:
-            """meshBodies-style: REALISTIC - no itemByName, only count + item(i)."""
-            def __init__(self, d):
-                self._list = list(d.values())
-            @property
-            def count(self):
-                return len(self._list)
-            def item(self, i):
-                return self._list[i] if 0 <= i < len(self._list) else None
-
-        class _SubComp:
-            """The sub-COMPONENT that owns the mesh (reachable via design.allComponents)."""
-            name = "Scanned"
-            bRepBodies = _Coll({})
-            meshBodies = _MeshColl({"Occ_Scan": m})
-
-        sub = _SubComp()
-
-        class _Occ:
+        class _Occ(FakeOccurrence):
             """The occurrence of that component: bRepBodies reads fine, meshBodies RAISES."""
-            bRepBodies = _Coll({})
-            component = sub
             @property
             def meshBodies(self):
                 raise AttributeError("MeshBodies is not readable on an Occurrence")
 
-        class _RootComp:
-            name = "Root"
-            bRepBodies = _Coll({})
-            meshBodies = _MeshColl({})
-            allOccurrences = [_Occ()]
+        root = MakeComp(name="Root", mesh_bodies=[],
+                        all_occurrences=[_Occ(path="Scanned:1", component=sub)])
+        # findEntityByToken answers nothing, so the lookup takes the NAME path.
+        design = MakeDesign(comp=root, all_components=[root, sub])
 
-        root = _RootComp()
-
-        class FakeDesign:
-            rootComponent = root
-            allComponents = _NamedCollection([root, sub])
-            def findEntityByToken(self, h):
-                return []   # not a handle -> force the name path
-
-        inp._common.design = lambda: FakeDesign()
+        inp._common.design = lambda: design
         # target_component is the root (which has NO matching mesh) -> resolution must reach the
         # sub-component through the component walk, not through the occurrence.
         inp._common.target_component = lambda d: root
@@ -2107,39 +1934,18 @@ def _install_ambiguous_bodies(*, handle_map=None, occ_bodies=()):
     can match several distinct proxies. `occ_bodies` = list of (name -> body) dicts, one per occurrence.
     handle_map feeds the precise-handle path."""
     import adsk.fusion
-    adsk.fusion.BRepBody = FakeBRep
+    adsk.fusion.BRepBody = BRepBody
     adsk.fusion.MeshBody = MeshBody
     handle_map = handle_map or {}
 
-    class _BColl:
-        """bRepBodies: itemByName answering the name AS SPELLED, plus the count/item protocol - so a
-        case-variant match can only come from the iteration pass, never from the named lookup."""
-        def __init__(self, m): self._m = m
-        def itemByName(self, n): return self._m.get(n)
-        @property
-        def count(self): return len(self._m)
-        def item(self, i): return list(self._m.values())[i]
-
-    class _Occ:
-        # A real Occurrence always answers `component`; a read that RAISES is the unresolved-reference
-        # signal, and the shared census keeps such a row out of the body walk.
-        def __init__(self, m, i):
-            self.bRepBodies = _BColl(m)
-            self.component = types.SimpleNamespace(name=f"Sub-{i}")
-
-    occs = [_Occ(m, i) for i, m in enumerate(occ_bodies)]
-
-    class _Root:
-        bRepBodies = _BColl({})
-        allOccurrences = occs
-
-    class FakeDesign:
-        rootComponent = _Root()
-        def findEntityByToken(self, h):
-            e = handle_map.get(h)
-            return [e] if e is not None else []
-    root = _Root()
-    inp._common.design = lambda: FakeDesign()
+    # bRepBodies matches the name AS SPELLED, so a case-variant match can only come from the
+    # iteration pass, never from the named lookup.
+    occs = [make_occurrence(path=f"Sub-{i}:1", component=MakeComp(name=f"Sub-{i}"),
+                            bodies=list(m.values()))
+            for i, m in enumerate(occ_bodies)]
+    root = MakeComp(name="Root", all_occurrences=occs)
+    design = MakeDesign(comp=root, tokens=handle_map)
+    inp._common.design = lambda: design
     inp._common.target_component = lambda d=None: root
     return root
 
@@ -2153,17 +1959,17 @@ def _install_native_and_proxy(comp_bodies=(), occ_bodies=(), comp_name="Probe"):
     import adsk.fusion
     adsk.fusion.BRepBody = BRepBody
     adsk.fusion.MeshBody = MeshBody
-    comp = types.SimpleNamespace(name=comp_name, bRepBodies=_NamedCollection(comp_bodies))
+    comp = MakeComp(name=comp_name, bodies=list(comp_bodies))
     for b in comp_bodies:
         b.parentComponent = comp
     # component: a real Occurrence always answers it; a read that RAISES is the unresolved-reference
     # signal the shared census filters on.
-    occs = [types.SimpleNamespace(name=path, fullPathName=path, bRepBodies=_NamedCollection(bodies),
-                                  component=types.SimpleNamespace(name=path.split(":")[0]))
+    occs = [make_occurrence(path=path, component=MakeComp(name=path.split(":")[0]),
+                            bodies=list(bodies))
             for path, bodies in occ_bodies]
-    root = types.SimpleNamespace(name="Root", bRepBodies=_NamedCollection([]), allOccurrences=occs)
-    design = types.SimpleNamespace(rootComponent=root, allComponents=None,
-                                   findEntityByToken=lambda h: [])
+    root = MakeComp(name="Root", all_occurrences=occs)
+    # findEntityByToken answers nothing, so every lookup takes the NAME path.
+    design = MakeDesign(comp=root, all_components=[root, comp])
     inp._common.design = lambda: design
     inp._common.target_component = lambda d=None: comp
     return comp
@@ -2192,8 +1998,7 @@ class TestTheXrefBodyFixture:
         assert a is not b and a.entityToken == b.entityToken
         assert (a.parentComponent.parentDesign.parentDocument.dataFile.id
                 != b.parentComponent.parentDesign.parentDocument.dataFile.id)
-        pa = body_proxy(a, types.SimpleNamespace(name="P2a-Gimbal:1",
-                                                 fullPathName="P2a-Gimbal:1"))
+        pa = body_proxy(a, make_occurrence(path="P2a-Gimbal:1"))
         assert pa.entityToken != a.entityToken and pa.nativeObject is a
 
 
@@ -2209,8 +2014,7 @@ class TestXrefBodiesAreNotOneBody:
         refusal and nothing in the payload saying so."""
         host_body = BRepBody("Frame", entity_token=_XREF_TOKEN)
         xref = _body_from_document("Frame", _XREF_TOKEN, _URN_A, comp_name="P2a-Gimbal")
-        proxy = body_proxy(xref, types.SimpleNamespace(name="P2a-Gimbal:1",
-                                                       fullPathName="P2a-Gimbal:1"))
+        proxy = body_proxy(xref, make_occurrence(path="P2a-Gimbal:1"))
         _install_native_and_proxy(comp_bodies=[], comp_name="Host",
                                   occ_bodies=[("P2a-Gimbal:1", [proxy])])
         # The host's own body sits at the ROOT, where a body modelled before anything was inserted
@@ -2247,8 +2051,7 @@ class TestXrefBodiesAreNotOneBody:
         # The pair's other direction, with a readable document at both ends: the native and its own
         # proxy must NOT become two candidates, or every placed body is ambiguous with itself.
         native = _body_from_document("Frame", _XREF_TOKEN, _URN_A, comp_name="P2a-Gimbal")
-        proxy = body_proxy(native, types.SimpleNamespace(name="P2a-Gimbal:1",
-                                                         fullPathName="P2a-Gimbal:1"))
+        proxy = body_proxy(native, make_occurrence(path="P2a-Gimbal:1"))
         _install_native_and_proxy(comp_bodies=[native], comp_name="P2a-Gimbal",
                                   occ_bodies=[("P2a-Gimbal:1", [proxy])])
         val, err = inp.BodyRef("body").resolve("Frame")
@@ -2256,12 +2059,22 @@ class TestXrefBodiesAreNotOneBody:
         assert val is proxy                      # the PLACEMENT, which carries the context
 
 
+def _pin_in(path, token):
+    """A body named 'Pin' placed at assembly path `path`. Two of these are DISTINCT physical bodies
+    that happen to share a name, so each carries its own entityToken - grouped on one token they
+    would be a single candidate and the name would not be ambiguous at all."""
+    body = FakeBRep("Pin", is_solid=True, entity_token=token)
+    body.assemblyContext = types.SimpleNamespace(fullPathName=path)
+    return body
+
+
+def _two_pins():
+    return _pin_in("Sub-A:1", "TOK-PIN-A"), _pin_in("Sub-B:1", "TOK-PIN-B")
+
+
 class TestBodyNameAmbiguity:
     def test_ambiguous_name_is_refused_with_candidates(self):
-        pin_a = FakeBRep("Pin", is_solid=True)
-        pin_b = FakeBRep("Pin", is_solid=True)
-        pin_a.assemblyContext = type("O", (), {"fullPathName": "Sub-A:1"})()
-        pin_b.assemblyContext = type("O", (), {"fullPathName": "Sub-B:1"})()
+        pin_a, pin_b = _two_pins()
         _install_ambiguous_bodies(occ_bodies=[{"Pin": pin_a}, {"Pin": pin_b}])
         val, err = inp.BodyRef("body").resolve("Pin")
         assert val is None
@@ -2289,17 +2102,13 @@ class TestBodyNameAmbiguity:
     def test_ambiguity_lists_each_candidate_in_the_qualified_form(self):
         # the refusal must hand back the string that RESOLVES - '<occurrence-or-component>:<body>' -
         # not just a prose "in Sub-A:1", so the caller can re-issue without a second lookup.
-        pin_a, pin_b = FakeBRep("Pin", is_solid=True), FakeBRep("Pin", is_solid=True)
-        pin_a.assemblyContext = type("O", (), {"fullPathName": "Sub-A:1"})()
-        pin_b.assemblyContext = type("O", (), {"fullPathName": "Sub-B:1"})()
+        pin_a, pin_b = _two_pins()
         _install_ambiguous_bodies(occ_bodies=[{"Pin": pin_a}, {"Pin": pin_b}])
         val, err = inp.BodyRef("body").resolve("Pin")
         assert val is None and "'Sub-A:1:Pin'" in err and "'Sub-B:1:Pin'" in err
 
     def test_qualified_scope_body_name_picks_one_of_the_candidates(self):
-        pin_a, pin_b = FakeBRep("Pin", is_solid=True), FakeBRep("Pin", is_solid=True)
-        pin_a.assemblyContext = type("O", (), {"fullPathName": "Sub-A:1"})()
-        pin_b.assemblyContext = type("O", (), {"fullPathName": "Sub-B:1"})()
+        pin_a, pin_b = _two_pins()
         _install_ambiguous_bodies(occ_bodies=[{"Pin": pin_a}, {"Pin": pin_b}])
         val, err = inp.BodyRef("body").resolve("Sub-B:1:Pin")
         assert err is None and val is pin_b
@@ -2309,28 +2118,28 @@ class TestBodyNameAmbiguity:
         # lookups run (one answers the spelling, the other the case variants + meshes). De-dup keys on
         # the entityToken and, when THAT is unreadable, on (name, scope) - never on object identity,
         # which would refuse ONE body as several candidates all printing the same name.
-        class _Unreadable:
-            name = "Pin"
-            isSolid = True
-            parentComponent = types.SimpleNamespace(name="Frame")
-            assemblyContext = None
+        owner = types.SimpleNamespace(name="Frame")
 
-            @property
-            def entityToken(self):
-                raise RuntimeError("3 : entityToken is unavailable")
+        def _unreadable():
+            body = BRepBody("Pin", parent_component=owner)
+            del body.entityToken            # the token read that does not answer
+            return body
 
         class _FreshColl:
-            """Every read mints a NEW wrapper of the one body, as the live collection does."""
+            """Every read mints a NEW wrapper of the one body, as the live collection does - which
+            is the whole point here and what a shared collection, handing back one object, cannot
+            model."""
             @property
             def count(self):
                 return 1
             def item(self, i):
-                return _Unreadable()
+                return _unreadable()
             def itemByName(self, n):
-                return _Unreadable() if n == "Pin" else None
+                return _unreadable() if n == "Pin" else None
 
-        root = types.SimpleNamespace(name="Frame", bRepBodies=_FreshColl(), allOccurrences=[])
-        design = types.SimpleNamespace(rootComponent=root, activeComponent=root)
+        root = MakeComp(name="Frame")
+        root.bRepBodies = _FreshColl()
+        design = MakeDesign(comp=root)
         inp._common.design = lambda: design
         inp._common.target_component = lambda d=None: root
         val, err = inp.BodyRef("body").resolve("Pin")
@@ -2339,9 +2148,7 @@ class TestBodyNameAmbiguity:
     def test_a_slash_qualified_label_resolves_like_the_colon_form(self):
         # model_extrude / model_fillet publish their body labels as '<scope>/<body>'; the
         # resolver accepts that spelling too, so a label a tool printed can be handed straight back.
-        pin_a, pin_b = FakeBRep("Pin", is_solid=True), FakeBRep("Pin", is_solid=True)
-        pin_a.assemblyContext = type("O", (), {"fullPathName": "Sub-A:1"})()
-        pin_b.assemblyContext = type("O", (), {"fullPathName": "Sub-B:1"})()
+        pin_a, pin_b = _two_pins()
         _install_ambiguous_bodies(occ_bodies=[{"Pin": pin_a}, {"Pin": pin_b}])
         val, err = inp.BodyRef("body").resolve("Sub-B:1/Pin")
         assert err is None and val is pin_b
@@ -2373,7 +2180,7 @@ class TestBodyNameAmbiguity:
         # token that is two candidates and the name is refused as ambiguous, listing the one body
         # under both contexts. Grouped by the PHYSICAL body it is one candidate: the placement.
         native = BRepBody("Probe", entity_token="TOK-NATIVE")
-        proxy = body_proxy(native, types.SimpleNamespace(name="Probe:1", fullPathName="Probe:1"))
+        proxy = body_proxy(native, make_occurrence(path="Probe:1"))
         assert proxy.entityToken != native.entityToken     # the measured pair, not a shared token
         assert proxy.nativeObject is native and native.nativeObject is None
         _install_native_and_proxy(comp_bodies=[native], occ_bodies=[("Probe:1", [proxy])])
@@ -2383,7 +2190,7 @@ class TestBodyNameAmbiguity:
 
     def test_a_body_reached_ONLY_as_a_proxy_still_resolves_to_that_proxy(self):
         native = BRepBody("Probe", entity_token="TOK-NATIVE")
-        proxy = body_proxy(native, types.SimpleNamespace(name="Probe:1", fullPathName="Probe:1"))
+        proxy = body_proxy(native, make_occurrence(path="Probe:1"))
         _install_native_and_proxy(comp_bodies=[], occ_bodies=[("Probe:1", [proxy])])
         val, err = inp.BodyRef("body").resolve("Probe")
         assert err is None and val is proxy
@@ -2402,8 +2209,8 @@ class TestBodyNameAmbiguity:
         # each placement is its own candidate, so the bare name is refused with both instance-qualified
         # spellings - picking either would target a placement the caller never chose.
         native = BRepBody("Pin", entity_token="TOK-NATIVE")
-        one = body_proxy(native, types.SimpleNamespace(name="Jaw:1", fullPathName="Jaw:1"))
-        two = body_proxy(native, types.SimpleNamespace(name="Jaw:2", fullPathName="Jaw:2"))
+        one = body_proxy(native, make_occurrence(path="Jaw:1"))
+        two = body_proxy(native, make_occurrence(path="Jaw:2"))
         _install_native_and_proxy(comp_bodies=[native], comp_name="Jaw",
                                   occ_bodies=[("Jaw:1", [one]), ("Jaw:2", [two])])
         val, err = inp.BodyRef("body").resolve("Pin")
@@ -2415,15 +2222,12 @@ class TestBodyNameAmbiguity:
         # Group members are keyed by each wrapper's OWN token, with the printable context only as a
         # fallback - keyed on the context, two placements whose fullPathName raises read the same
         # "Jaw" string, silently merge, and the ambiguity degrades to a first-placement pick.
-        class _RaisingPath:
-            def __init__(self, name):
-                self.name = name
-            @property
-            def fullPathName(self):
-                raise RuntimeError("4 : An API Object refers to a deleted Object")
+        def _raising_path(path):
+            return make_occurrence(path=path, raises_on={
+                "fullPathName": "4 : An API Object refers to a deleted Object"})
         native = BRepBody("Pin", entity_token="TOK-NATIVE")
-        one = body_proxy(native, _RaisingPath("Jaw:1"))
-        two = body_proxy(native, _RaisingPath("Jaw:2"))
+        one = body_proxy(native, _raising_path("Jaw:1"))
+        two = body_proxy(native, _raising_path("Jaw:2"))
         _install_native_and_proxy(comp_bodies=[native], comp_name="Jaw",
                                   occ_bodies=[("Jaw:1", [one]), ("Jaw:2", [two])])
         val, err = inp.BodyRef("body").resolve("Pin")
@@ -2433,8 +2237,8 @@ class TestBodyNameAmbiguity:
         # 'Jaw:Pin' names the component, which both instances answer to - so it is still ambiguous and
         # is refused with the instance-qualified spellings that are not.
         native = BRepBody("Pin", entity_token="TOK-NATIVE")
-        one = body_proxy(native, types.SimpleNamespace(name="Jaw:1", fullPathName="Jaw:1"))
-        two = body_proxy(native, types.SimpleNamespace(name="Jaw:2", fullPathName="Jaw:2"))
+        one = body_proxy(native, make_occurrence(path="Jaw:1"))
+        two = body_proxy(native, make_occurrence(path="Jaw:2"))
         _install_native_and_proxy(comp_bodies=[native], comp_name="Jaw",
                                   occ_bodies=[("Jaw:1", [one]), ("Jaw:2", [two])])
         val, err = inp.BodyRef("body").resolve("Jaw:Pin")
@@ -2444,8 +2248,8 @@ class TestBodyNameAmbiguity:
     def test_one_instance_of_a_twice_placed_component_resolves_by_its_own_name(self):
         # The way OUT of that refusal: the instance-qualified spelling the refusal listed resolves.
         native = BRepBody("Pin", entity_token="TOK-NATIVE")
-        one = body_proxy(native, types.SimpleNamespace(name="Jaw:1", fullPathName="Jaw:1"))
-        two = body_proxy(native, types.SimpleNamespace(name="Jaw:2", fullPathName="Jaw:2"))
+        one = body_proxy(native, make_occurrence(path="Jaw:1"))
+        two = body_proxy(native, make_occurrence(path="Jaw:2"))
         _install_native_and_proxy(comp_bodies=[native], comp_name="Jaw",
                                   occ_bodies=[("Jaw:1", [one]), ("Jaw:2", [two])])
         val, err = inp.BodyRef("body").resolve("Jaw:2:Pin")
@@ -2455,8 +2259,8 @@ class TestBodyNameAmbiguity:
         # The grouping is per PHYSICAL body: two bodies with their own native tokens group apart and
         # the ambiguity refusal stands, with both contexts listed.
         a, b = BRepBody("Pin", entity_token="TOK-A"), BRepBody("Pin", entity_token="TOK-B")
-        pa = body_proxy(a, types.SimpleNamespace(name="Jaw:1", fullPathName="Jaw:1"))
-        pb = body_proxy(b, types.SimpleNamespace(name="Clamp:1", fullPathName="Clamp:1"))
+        pa = body_proxy(a, make_occurrence(path="Jaw:1"))
+        pb = body_proxy(b, make_occurrence(path="Clamp:1"))
         _install_native_and_proxy(comp_bodies=[], occ_bodies=[("Jaw:1", [pa]), ("Clamp:1", [pb])])
         val, err = inp.BodyRef("body").resolve("Pin")
         assert val is None and "ambiguous" in err.lower()
@@ -2464,7 +2268,7 @@ class TestBodyNameAmbiguity:
 
     def test_the_key_of_a_proxy_IS_its_natives_identity(self):
         native = BRepBody("Probe", entity_token="TOK-NATIVE")
-        proxy = body_proxy(native, types.SimpleNamespace(name="Probe:1", fullPathName="Probe:1"))
+        proxy = body_proxy(native, make_occurrence(path="Probe:1"))
         assert inp._body_key(proxy) == inp._body_key(native) == ("TOK-NATIVE", None)
 
     def test_a_wrapper_that_does_not_answer_nativeObject_keys_on_its_OWN_token(self):
@@ -2486,7 +2290,7 @@ class TestBodyNameAmbiguity:
         # The constraint the document half must not break: a proxy resolves to the same native, so
         # both halves of the key are read off one entity even when the document IS readable.
         native = _body_from_document("Frame", _XREF_TOKEN, _URN_A)
-        proxy = body_proxy(native, types.SimpleNamespace(name="Frame:1", fullPathName="Frame:1"))
+        proxy = body_proxy(native, make_occurrence(path="Frame:1"))
         assert inp._body_key(proxy) == inp._body_key(native) == (_XREF_TOKEN, _URN_A)
 
     def test_an_unreadable_token_falls_back_to_name_and_scope(self):
@@ -2502,9 +2306,8 @@ class TestBodyNameAmbiguity:
 
     def test_a_handle_is_never_ambiguous_even_when_name_is_duplicated(self):
         # the precise path: two 'Pin' bodies exist by name, but a HANDLE resolves ONE directly
-        pin_a = FakeBRep("Pin", is_solid=True)
-        pin_b = FakeBRep("Pin", is_solid=True)
-        target = FakeBRep("Pin", is_solid=True)
+        pin_a, pin_b = _two_pins()
+        target = FakeBRep("Pin", is_solid=True, entity_token="TOK-PIN-TARGET")
         _install_ambiguous_bodies(handle_map={"HANDLE": target},
                                   occ_bodies=[{"Pin": pin_a}, {"Pin": pin_b}])
         val, err = inp.BodyRef("body").resolve("HANDLE")
@@ -2513,23 +2316,17 @@ class TestBodyNameAmbiguity:
 
 # ── ModeGuard: declarative precondition, error DERIVED from the requirement (non-invertible) ─────
 
-class _FakeModeDesign:
-    """A design whose designType maps to parametric/direct via the numeric convention (1/0)."""
-    def __init__(self, design_type=None, edit_object=None):
-        if design_type is not None:
-            self.designType = design_type
-        self.activeEditObject = edit_object
-
-
-class _FakeBaseFeature:
-    pass
+def _FakeModeDesign(design_type=None, edit_object=None):
+    """A design whose designType maps to parametric/direct via the numeric convention (1/0);
+    design_type None is the design that answers no mode read at all."""
+    return MakeDesign(design_type=design_type, active_edit_object=edit_object)
 
 
 def _install_mode():
     """Wire BaseFeature so current_design_type / _in_base_feature_scope work (the DesignTypes ints
     come seeded from live_api_facts)."""
     import adsk.fusion
-    adsk.fusion.BaseFeature = _FakeBaseFeature
+    adsk.fusion.BaseFeature = FakeBaseFeature
 
 
 class TestModeGuard:
@@ -2577,7 +2374,7 @@ class TestModeGuard:
 
     def test_base_feature_guard_passes_inside_a_base_feature_scope(self):
         _install_mode()
-        des = _FakeModeDesign(design_type=1, edit_object=_FakeBaseFeature())
+        des = _FakeModeDesign(design_type=1, edit_object=FakeBaseFeature())
         g = inp.ModeGuard(inp.MODE_BASE_FEATURE)
         ok, err = g.check(des)
         assert ok is True and err is None
@@ -2599,16 +2396,15 @@ class TestModeGuard:
 
 def _profile_sketch_fake(name, profs, ntexts=0, compute_deferred=None):
     """One sketch as the profile resolvers read it: `name`, the counted `profiles` collection an
-    index selector addresses, and the counted `sketchTexts` behind the 'text:<i>' address space.
-    Each text is tagged '<sketch>#<i>' so a test can tell WHICH one resolved. `compute_deferred`
-    sets isComputeDeferred; left None the member is ABSENT, so the read raises."""
-    sk = types.SimpleNamespace(
-        name=name,
-        profiles=_NamedCollection(list(profs)),
-        sketchTexts=_NamedCollection([types.SimpleNamespace(tag=f"{name}#{i}")
-                                      for i in range(ntexts)]))
-    if compute_deferred is not None:
-        sk.isComputeDeferred = compute_deferred
+    index selector addresses, and the counted `sketchTexts` behind the 'text:<i>' address space -
+    a member the shared sketch fake does not carry. Each text is tagged '<sketch>#<i>' so a test can
+    tell WHICH one resolved. `compute_deferred` sets isComputeDeferred; left None the member is
+    DROPPED, so the read raises."""
+    sk = Sketch(name=name, profiles=list(profs), is_compute_deferred=bool(compute_deferred))
+    sk.sketchTexts = _NamedCollection([types.SimpleNamespace(tag=f"{name}#{i}")
+                                       for i in range(ntexts)])
+    if compute_deferred is None:
+        del sk.isComputeDeferred
     return sk
 
 
@@ -3171,43 +2967,11 @@ class TestProfileSelectorSketchScope:
         adsk.fusion.Profile = Profile
         p = Profile("sub-profile")
 
-        class _Profiles:
-            count = 1
-            def item(self, i):
-                return p if i == 0 else None
-
-        class _SkColl:
-            def __init__(self, sks):
-                self._sks = sks
-            @property
-            def count(self):
-                return len(self._sks)
-            def item(self, i):
-                return self._sks[i]
-            def itemByName(self, n):
-                for s in self._sks:
-                    if s.name == n:
-                        return s
-                return None
-
-        sub_sketch = type("Sk", (), {"name": "FrameSketch", "profiles": _Profiles()})()
-        root = type("C", (), {"name": "Root", "sketches": _SkColl([])})()
-        sub = type("C", (), {"name": "Frame", "sketches": _SkColl([sub_sketch])})()
-
-        class _CompColl:
-            _l = [root, sub]
-            @property
-            def count(self):
-                return len(self._l)
-            def item(self, i):
-                return self._l[i]
-
-        class FakeDesign:
-            rootComponent = root
-            allComponents = _CompColl()
-            def findEntityByToken(self, h):
-                return []
-        inp._common.design = lambda: FakeDesign()
+        root = MakeComp(name="Root")
+        sub = MakeComp(name="Frame", sketches=[Sketch(name="FrameSketch", profiles=[p])])
+        # findEntityByToken answers nothing, so the selector takes the NAME path.
+        design = MakeDesign(comp=root, all_components=[root, sub])
+        inp._common.design = lambda: design
         inp._common.target_component = lambda d: root
         val, err = inp.ProfileRef("profile").resolve({"sketch": "FrameSketch", "profile_index": 0})
         assert err is None and val is p
@@ -3253,45 +3017,12 @@ class TestProfileRefList:
 # whether or not a scope is honoured, so only the shared name shows a scope-blind resolver up - it
 # returns one of them with no error, and no caller learns which.
 
-class _ScopeProfiles:
-    def __init__(self, items):
-        self._items = items
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def item(self, i):
-        return self._items[i] if 0 <= i < len(self._items) else None
-
-
-class _ScopeSketch:
-    def __init__(self, name, profs):
-        self.name = name
-        self.profiles = _ScopeProfiles(profs)
-        self.sketchTexts = _ScopeProfiles([])
-
-
-class _ScopeSketches:
-    def __init__(self, sketches):
-        self._items = sketches
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def item(self, i):
-        return self._items[i] if 0 <= i < len(self._items) else None
-
-    def itemByName(self, n):
-        return next((s for s in self._items if s.name == n), None)
-
-
-class _ScopeComp:
-    def __init__(self, name, sketches):
-        self.name = name
-        self.sketches = _ScopeSketches(sketches)
-        self.entityToken = f"comp-{name}"
+def _scope_sketch(name, profs):
+    """A sketch carrying `profs` plus the empty sketchTexts collection the text address space reads,
+    which the shared sketch fake does not carry."""
+    sk = Sketch(name=name, profiles=list(profs))
+    sk.sketchTexts = _NamedCollection([])
+    return sk
 
 
 def _two_components_one_sketch_name(monkeypatch, name="Plate", shared=True):
@@ -3299,11 +3030,12 @@ def _two_components_one_sketch_name(monkeypatch, name="Plate", shared=True):
     (alpha_profile, beta_profile) - the two answers a scope has to choose between. shared=False
     leaves the name in Alpha ALONE, so the name identifies a sketch without any scope."""
     pa, pb = Profile("alpha"), Profile("beta")
-    alpha = _ScopeComp("Alpha", [_ScopeSketch(name, [pa])])
-    beta = _ScopeComp("Beta", [_ScopeSketch(name if shared else "Other", [pb])])
-    comps = _ScopeProfiles([alpha, beta])
-    design = types.SimpleNamespace(rootComponent=alpha, allComponents=comps,
-                                   findEntityByToken=lambda h: [])
+    alpha = MakeComp(name="Alpha", entity_token="comp-Alpha",
+                     sketches=[_scope_sketch(name, [pa])])
+    beta = MakeComp(name="Beta", entity_token="comp-Beta",
+                    sketches=[_scope_sketch(name if shared else "Other", [pb])])
+    # findEntityByToken answers nothing, so every lookup takes the NAME path.
+    design = MakeDesign(comp=alpha, all_components=[alpha, beta])
     monkeypatch.setattr(inp._common, "design", lambda: design)
     monkeypatch.setattr(inp._common, "target_component", lambda d: alpha)
     return pa, pb
@@ -3526,50 +3258,38 @@ class TestIsTextRef:
 _REF_UNREADABLE = object()
 
 
-class _FakeOcc:
+def _FakeOcc(name, full_path, token="", component="", is_reference=False):
     """An occurrence as the resolver reads it: both name forms plus the identity facts a collision
     refusal names - its component, whether it is an external reference, and its entityToken.
 
-    ``is_reference=_REF_UNREADABLE`` makes the property RAISE, the third state ``_common.read_flag``
-    answers None for. A caller that renders a definite "local" there has published a reference state
-    nothing read."""
-
-    def __init__(self, name, full_path, token="", component="", is_reference=False):
-        self.name = name
-        self.fullPathName = full_path
-        self.entityToken = token
-        self.component = types.SimpleNamespace(name=component or name.split(":")[0])
-        self._is_reference = is_reference
-
-    @property
-    def isReferencedComponent(self):
-        if self._is_reference is _REF_UNREADABLE:
-            raise RuntimeError("isReferencedComponent is not readable on this occurrence")
-        return self._is_reference
+    ``component`` is that component's NAME, or the component OBJECT itself where two instances have
+    to place the SAME one. ``is_reference=_REF_UNREADABLE`` makes that read RAISE, the third state
+    ``_common.read_flag`` answers None for. A caller that renders a definite "local" there has
+    published a reference state nothing read."""
+    unreadable = is_reference is _REF_UNREADABLE
+    return make_occurrence(
+        path=full_path, entity_token=token,
+        component=(MakeComp(name=component or name.split(":")[0])
+                   if isinstance(component, str) else component),
+        referenced=False if unreadable else is_reference,
+        raises_on=({"isReferencedComponent":
+                    "isReferencedComponent is not readable on this occurrence"}
+                   if unreadable else None))
 
 
 def _install_occurrences(*occs, tokens=None):
-    """Point _common.design() at a root whose allOccurrences are the given _FakeOcc list, with
+    """Point _common.design() at a root whose allOccurrences are the given occurrence list, with
     findEntityByToken answering from each occurrence's own entityToken (plus any extra `tokens`
     entries - the non-occurrence entity a handle can point at). adsk.fusion.Occurrence is wired to
-    the fake so the resolver's type check is real; the autouse fixture puts it back."""
+    the shared fake so the resolver's type check is real; the autouse fixture puts it back."""
     import adsk.fusion
-    adsk.fusion.Occurrence = _FakeOcc
+    adsk.fusion.Occurrence = FakeOccurrence
     by_token = dict(tokens or {})
     for o in occs:
         if getattr(o, "entityToken", ""):
             by_token.setdefault(o.entityToken, o)
-
-    class _Root:
-        allOccurrences = list(occs)
-
-    class FakeDesign:
-        rootComponent = _Root()
-
-        def findEntityByToken(self, token):
-            hit = by_token.get(token)
-            return [hit] if hit is not None else []
-    inp._common.design = lambda: FakeDesign()
+    design = MakeDesign(comp=MakeComp(name="Root", all_occurrences=occs), tokens=by_token)
+    inp._common.design = lambda: design
     return list(occs)
 
 
@@ -3589,7 +3309,7 @@ class TestOccurrenceRef:
         _install_occurrences(a, tokens={"tok-body": FakeBRep("Body1")})
         val, err = inp.OccurrenceRef("occ").resolve("tok-body")
         assert val is None
-        assert "FakeBRep" in err and "not an occurrence" in err
+        assert "BRepBody" in err and "not an occurrence" in err
 
     def test_an_unknown_handle_is_refused_not_guessed(self):
         # a stale/unknown token resolves to nothing and matches no name either - a refusal, never a
@@ -3923,61 +3643,26 @@ def _install_target(*, handle_map=None, occurrences=(), components=(), brep_name
     """A design wired for every TargetRef path: findEntityByToken (handle), allOccurrences (occurrence),
     allComponents (component), bRepBodies/meshBodies (body-by-name)."""
     import adsk.fusion
-    adsk.fusion.BRepBody = FakeBRep
+    adsk.fusion.BRepBody = BRepBody
     adsk.fusion.MeshBody = MeshBody
-    adsk.fusion.BRepFace = (FakePlanarFace, FakeCylFace)
+    adsk.fusion.BRepFace = BRepFace
     handle_map = handle_map or {}
     brep_named = brep_named or {}
     mesh_named = mesh_named or {}
 
-    class _BColl:
-        def __init__(self, m): self._m = m
-        def itemByName(self, n): return self._m.get(n)
-
-    class _MColl:
-        def __init__(self, m): self._l = list(m.values())
-        @property
-        def count(self): return len(self._l)
-        def item(self, i): return self._l[i] if 0 <= i < len(self._l) else None
-
-    class _Comp:
-        def __init__(self, name): self.name = name
-
-    class _CompColl:
-        """allComponents is a COUNTED collection (count + item(i)), not a plain list."""
-        def __init__(self, items): self._l = list(items)
-        @property
-        def count(self): return len(self._l)
-        def item(self, i): return self._l[i] if 0 <= i < len(self._l) else None
-    comp_objs = [_Comp(n) for n in components]
-    comp_coll = _CompColl([_Comp("Root")] + comp_objs)
-    # component -> its occurrences (for TargetRefList's component->occurrence mapping). A component named "X"
-    # maps to the occurrence(s) in `occurrences` whose component.name == "X"; an occurrence carries a
-    # .component back-pointer here so allOccurrencesByComponent can match it.
-    for occ in occurrences:
-        if getattr(occ, "component", None) is None:
-            occ.component = _Comp(occ.name.split(":")[0])
-
-    class _Root:
-        name = "Root"
-        allOccurrences = list(occurrences)
-        bRepBodies = _BColl(brep_named)
-        meshBodies = _MColl(mesh_named)
-        @staticmethod
-        def allOccurrencesByComponent(comp):
-            return [o for o in occurrences
-                    if getattr(getattr(o, "component", None), "name", None) == comp.name]
-
-    class FakeDesign:
-        rootComponent = _Root()
-        # allComponents lives on the DESIGN in the live API (Component has no such attribute)
-        allComponents = comp_coll
-        def findEntityByToken(self, h):
-            e = handle_map.get(h)
-            return [e] if e is not None else []
-    inp._common.design = lambda: FakeDesign()
-    inp._common.target_component = lambda d=None: FakeDesign().rootComponent
-    return FakeDesign()
+    root = MakeComp(name="Root", bodies=list(brep_named.values()),
+                    mesh_bodies=list(mesh_named.values()), all_occurrences=occurrences)
+    # component -> its occurrences (for TargetRefList's component->occurrence mapping). A component
+    # named "X" maps to the occurrence(s) whose component.name is "X".
+    root.allOccurrencesByComponent = lambda c: [
+        o for o in occurrences
+        if getattr(getattr(o, "component", None), "name", None) == c.name]
+    # allComponents lives on the DESIGN in the live API (Component has no such attribute)
+    design = MakeDesign(comp=root, all_components=[root] + [MakeComp(name=n) for n in components],
+                        tokens=handle_map)
+    inp._common.design = lambda: design
+    inp._common.target_component = lambda d=None: root
+    return design
 
 
 class TestTargetRef:
@@ -4070,10 +3755,10 @@ class TestTargetRef:
         # An ambiguous occurrence match across DIFFERENT components must propagate
         # _resolve_occurrence's ambiguity error (with the candidate fullPathNames), not fall through
         # to a generic "did not resolve" miss - there is no single answer to give.
-        a = _FakeOcc("Bolt:1", "Sub-A:1+Bolt:1")
-        b = _FakeOcc("Bolt:1", "Sub-B:1+Bolt:1")
-        a.component = type("C", (), {"name": "BoltA", "entityToken": "tA"})()
-        b.component = type("C", (), {"name": "BoltB", "entityToken": "tB"})()
+        a = _FakeOcc("Bolt:1", "Sub-A:1+Bolt:1",
+                     component=MakeComp(name="BoltA", entity_token="tA"))
+        b = _FakeOcc("Bolt:1", "Sub-B:1+Bolt:1",
+                     component=MakeComp(name="BoltB", entity_token="tB"))
         _install_target(occurrences=[a, b])
         res, err = inp.TargetRef("target").resolve("Bolt")
         assert res is None
@@ -4121,10 +3806,9 @@ class TestTargetRef:
         assert err is None and kind == "body" and ent is plate
 
     def _instances_of_one_component(self):
-        a = _FakeOcc("Bolt:1", "Sub-A:1+Bolt:1")
-        b = _FakeOcc("Bolt:1", "Sub-B:1+Bolt:1")
-        shared = type("C", (), {"name": "Bolt", "entityToken": "tBolt"})()
-        a.component = b.component = shared
+        shared = MakeComp(name="Bolt", entity_token="tBolt")
+        a = _FakeOcc("Bolt:1", "Sub-A:1+Bolt:1", component=shared)
+        b = _FakeOcc("Bolt:1", "Sub-B:1+Bolt:1", component=shared)
         _install_target(occurrences=[a, b])
         return shared
 
@@ -4151,10 +3835,10 @@ class TestTargetRef:
         assert res is None and "ambiguous" in err.lower()
 
     def test_the_opt_in_still_refuses_instances_of_DIFFERENT_components(self):
-        a = _FakeOcc("Bolt:1", "Sub-A:1+Bolt:1")
-        b = _FakeOcc("Bolt:1", "Sub-B:1+Bolt:1")
-        a.component = type("C", (), {"name": "BoltA", "entityToken": "tA"})()
-        b.component = type("C", (), {"name": "BoltB", "entityToken": "tB"})()
+        a = _FakeOcc("Bolt:1", "Sub-A:1+Bolt:1",
+                     component=MakeComp(name="BoltA", entity_token="tA"))
+        b = _FakeOcc("Bolt:1", "Sub-B:1+Bolt:1",
+                     component=MakeComp(name="BoltB", entity_token="tB"))
         _install_target(occurrences=[a, b])
         res, err = inp.TargetRef(
             "target", collapse_ambiguous_occurrences=True).resolve("Bolt")
@@ -4164,10 +3848,7 @@ class TestTargetRef:
         # The same propagation rule for the BODY step: two same-named bodies must surface
         # _resolve_any_body's ambiguity error (with each candidate's context), not fall through
         # to the generic "did not resolve" miss.
-        pin_a = FakeBRep("Pin", is_solid=True)
-        pin_b = FakeBRep("Pin", is_solid=True)
-        pin_a.assemblyContext = type("O", (), {"fullPathName": "Sub-A:1"})()
-        pin_b.assemblyContext = type("O", (), {"fullPathName": "Sub-B:1"})()
+        pin_a, pin_b = _two_pins()
         _install_ambiguous_bodies(occ_bodies=[{"Pin": pin_a}, {"Pin": pin_b}])
         res, err = inp.TargetRef("target").resolve("Pin")
         assert res is None
@@ -4205,8 +3886,7 @@ class TestTargetRefList:
         # a bare component name resolves to its single occurrence (CAM wants the Occurrence). The
         # component name deliberately does NOT substring-match the occurrence's own name, so
         # resolution FALLS THROUGH TargetRef's occurrence step to the component step + the mapping.
-        occ = _FakeOcc("stockInst:1", "stockInst:1")
-        occ.component = type("C", (), {"name": "StockDef"})()
+        occ = _FakeOcc("stockInst:1", "stockInst:1", component="StockDef")
         _install_target(occurrences=[occ], components=["StockDef"])
         val, err = inp.TargetRefList("stock").resolve(["StockDef"])
         assert err is None and val == [occ]        # mapped Component -> its Occurrence
@@ -4220,10 +3900,9 @@ class TestTargetRefList:
         # two instances of the same component -> ambiguous which to machine; refuse (never guess).
         # The component name ("JawDef") does not substring-match either occurrence name, so
         # resolution reaches the component branch and its multi-occurrence refusal.
-        a = _FakeOcc("jawInstA:1", "Vise:1+jawInstA:1")
-        b = _FakeOcc("jawInstB:1", "Vise:1+jawInstB:1")
-        comp = type("C", (), {"name": "JawDef"})()
-        a.component = comp; b.component = comp
+        comp = MakeComp(name="JawDef")
+        a = _FakeOcc("jawInstA:1", "Vise:1+jawInstA:1", component=comp)
+        b = _FakeOcc("jawInstB:1", "Vise:1+jawInstB:1", component=comp)
         _install_target(occurrences=[a, b], components=["JawDef"])
         val, err = inp.TargetRefList("models").resolve(["JawDef"])
         assert val is None and "ambiguous" in err.lower() and "fullPathName" in err
@@ -4261,28 +3940,17 @@ def _install_target_ext(handle_map):
     """A design wired for the EXTENDED TargetRef paths: findEntityByToken plus the BRepEdge /
     ConstructionAxis / ConstructionPlane types the new isinstance branches check."""
     import adsk.fusion
-    adsk.fusion.BRepBody = FakeBRep
+    adsk.fusion.BRepBody = BRepBody
     adsk.fusion.MeshBody = MeshBody
-    adsk.fusion.BRepFace = (FakePlanarFace, FakeCylFace)
-    adsk.fusion.BRepEdge = FakeEdge
+    adsk.fusion.BRepFace = BRepFace
+    adsk.fusion.BRepEdge = BRepEdge
     adsk.fusion.ConstructionAxis = _FakeConstructionAxis
     adsk.fusion.ConstructionPlane = _FakeConsPlane
 
-    class _Root:
-        name = "Root"
-        allOccurrences = []
-
-        @property
-        def allComponents(self):
-            return []
-
-    class FakeDesign:
-        rootComponent = _Root()
-        def findEntityByToken(self, h):
-            e = handle_map.get(h)
-            return [e] if e is not None else []
-    inp._common.design = lambda: FakeDesign()
-    inp._common.target_component = lambda d=None: FakeDesign().rootComponent
+    root = MakeComp(name="Root")
+    design = MakeDesign(comp=root, all_components=[], tokens=handle_map)
+    inp._common.design = lambda: design
+    inp._common.target_component = lambda d=None: root
 
 
 class TestTargetRefEdgeAndConstruction:
@@ -4326,22 +3994,6 @@ class TestTargetRefEdgeAndConstruction:
 # a JointOrigin entityToken. Non-unique JO names (two components sharing one) MUST refuse with the
 # qualified candidates - the house rule OccurrenceRef enforces for the occurrence name space.
 
-class _JOColl:
-    """A JointOrigins collection: count/item (the shared walk) + itemByName (scoped lookups)."""
-    def __init__(self, jos):
-        self._jos = list(jos)
-
-    @property
-    def count(self):
-        return len(self._jos)
-
-    def item(self, i):
-        return self._jos[i]
-
-    def itemByName(self, name):
-        return next((j for j in self._jos if j.name == name), None)
-
-
 class _JO:
     """A JointOrigin fake: name + a createForAssemblyContext that returns a DISTINCT proxy tagged with
     its occurrence, so a test can tell a proxy apart from the native and confirm the right occurrence.
@@ -4361,48 +4013,31 @@ class _JO:
         return p
 
 
-class _Comp:
-    def __init__(self, name, jos=()):
-        self.name = name
-        self.jointOrigins = _JOColl(jos)
+def _Comp(name, jos=()):
+    """A component carrying the Joint Origins the walk reads off it."""
+    return MakeComp(name=name, joint_origins=list(jos))
 
 
-class _OccJO:
-    def __init__(self, full, comp):
-        self.fullPathName = full
-        self.name = full
-        self.component = comp
+def _OccJO(full, comp):
+    """One occurrence placing `comp` at assembly path `full`."""
+    return make_occurrence(path=full, component=comp)
 
 
-class _RootJO(_Comp):
-    def __init__(self, name="Root", jos=(), occ_by_comp=None):
-        super().__init__(name, jos)
-        self._occ_by_comp = occ_by_comp or {}
-
-    def allOccurrencesByComponent(self, comp):
-        return self._occ_by_comp.get(getattr(comp, "name", None), [])
-
-    @property
-    def allOccurrences(self):
-        return [o for lst in self._occ_by_comp.values() for o in lst]
+def _RootJO(name="Root", jos=(), occ_by_comp=None):
+    """The root component, plus the {component name: [occurrences]} map both occurrence walks
+    answer from."""
+    by_comp = occ_by_comp or {}
+    root = _Comp(name, jos)
+    root.allOccurrencesByComponent = lambda c: by_comp.get(getattr(c, "name", None), [])
+    root.allOccurrences = [o for lst in by_comp.values() for o in lst]
+    return root
 
 
-class _DesignJO:
-    def __init__(self, root, subs=(), token_map=None):
-        self.rootComponent = root
-        self._subs = list(subs)
-        self._tokens = token_map or {}
-
-    @property
-    def allComponents(self):
-        # Like the live API: a COUNTED collection on the DESIGN that already CARRIES the root (a bare
-        # list models neither), which is what _common.all_components - the walk under the shared JO
-        # walk - reads with count/item.
-        return _NamedCollection([self.rootComponent] + self._subs)
-
-    def findEntityByToken(self, token):
-        e = self._tokens.get(token)
-        return [e] if e is not None else []
+def _DesignJO(root, subs=(), token_map=None):
+    """The design under the JO walk. allComponents is a COUNTED collection on the DESIGN that
+    already CARRIES the root (a bare list models neither), which is what _common.all_components -
+    the walk under the shared JO walk - reads with count/item."""
+    return MakeDesign(comp=root, all_components=[root] + list(subs), tokens=token_map)
 
 
 def _install_jo(design):
@@ -4715,11 +4350,13 @@ class TestJointOriginRefNativeSelector:
 
 # ── the shared collection walks: an unreadable member costs its own row, not the census ──
 
-class _WalkColl:
-    """A count/item(i) collection. `broken` indices raise on item(i); a None member is a hole."""
+class _WalkColl(_NamedCollection):
+    """The shared collection whose members break INDIVIDUALLY: `broken` indices raise on item(i),
+    which the shared raises/item_raises pair (all-or-nothing) cannot express. A None member is a
+    hole; `count_raises` is the count that will not read at all."""
 
     def __init__(self, items, broken=(), count_raises=False):
-        self._items = list(items)
+        super().__init__(items)
         self._broken = set(broken)
         self._count_raises = count_raises
 
@@ -4736,7 +4373,7 @@ class _WalkColl:
 
 
 def _tl_obj(name, index):
-    return types.SimpleNamespace(name=name, index=index, isGroup=False, entity=object())
+    return FakeTimelineObject(name=name, index=index, entity=object())
 
 
 class TestTimelineObjectsWalk:
@@ -4824,25 +4461,18 @@ class TestTimelineNameWhitespace:
         assert obj is None and "matches 2 timeline objects" in err
 
 
-class _SketchColl(_WalkColl):
-    """A component's sketches: the count/item(i) walk plus the EXACT itemByName the design-wide
-    sketch walk asks each component with."""
-
-    def itemByName(self, name):
-        return next((s for s in self._items if s.name == name), None)
-
-
 class TestSketchRefListRunsTheOneSharedWalk:
     """SketchRefList resolves through _common.find_sketch - the ONE design-wide sketch walk - so
     its census and its resolution cannot disagree about which sketches a name names."""
 
     def _comp(self, name, sketch_names, **kw):
-        sketches = [types.SimpleNamespace(name=n) for n in sketch_names]
-        return types.SimpleNamespace(name=name, sketches=_SketchColl(sketches, **kw))
+        comp = MakeComp(name=name)
+        # the sketches collection carries per-member breakage, which no MakeComp knob expresses
+        comp.sketches = _WalkColl([Sketch(name=n) for n in sketch_names], **kw)
+        return comp
 
     def _resolve(self, monkeypatch, comps, raw):
-        d = types.SimpleNamespace(rootComponent=comps[0], activeComponent=comps[0],
-                                  allComponents=_WalkColl(comps))
+        d = MakeDesign(comp=comps[0], all_components=comps)
         monkeypatch.setattr(inp._common, "design", lambda: d)
         return inp.SketchRefList("sketches").resolve(raw)
 
@@ -4975,7 +4605,7 @@ def _pin_placed(count, comp_name="Jaw", body_name="Pin"):
     occ_bodies = []
     for i in range(1, count + 1):
         path = f"{comp_name}:{i}"
-        occ = types.SimpleNamespace(name=path, fullPathName=path)
+        occ = make_occurrence(path=path)
         occ_bodies.append((path, [body_proxy(native, occ)]))
     _install_native_and_proxy(comp_bodies=[native], comp_name=comp_name, occ_bodies=occ_bodies)
 
@@ -4993,13 +4623,11 @@ def _case_variants(word, n):
     return out
 
 
-class _TokenBody(FakeBody):
+def _TokenBody(name, token, owner="Frame"):
     """A body carrying its own entityToken - what tells two same-named bodies in ONE scope apart
     (_body_key groups on the token first, and falls back to (name, scope), which they share)."""
-    def __init__(self, name, token, owner="Frame"):
-        super().__init__(name)
-        self.entityToken = token
-        self.parentComponent = types.SimpleNamespace(name=owner)
+    return BRepBody(name=name, entity_token=token,
+                    parent_component=types.SimpleNamespace(name=owner))
 
 
 class TestRefusalListsDiscloseTheirRemainder:
@@ -5256,7 +4884,7 @@ def _install_shared_body_name(monkeypatch, name="Body1", placements=("Bracket:1"
     sub_body.parentComponent = sub
     occs, proxies = [], []
     for path in placements:
-        occ = types.SimpleNamespace(name=path, fullPathName=path, component=sub)
+        occ = make_occurrence(path=path, component=sub)
         proxy = body_proxy(sub_body, occ)
         occ.bRepBodies = _NamedCollection([proxy])
         occs.append(occ)
@@ -5279,7 +4907,7 @@ def _install_cased_bodies(monkeypatch):
     upper, lower = BRepBody("Pin", entity_token="TOK-UPPER"), BRepBody("pin", entity_token="TOK-LOWER")
     sub = MakeComp(name="Bracket", bodies=[upper, lower], entity_token="TOKEN:Bracket")
     upper.parentComponent = lower.parentComponent = sub
-    occ = types.SimpleNamespace(name="Bracket:1", fullPathName="Bracket:1", component=sub)
+    occ = make_occurrence(path="Bracket:1", component=sub)
     proxies = (body_proxy(upper, occ), body_proxy(lower, occ))
     occ.bRepBodies = _NamedCollection(list(proxies))
     root = MakeComp(name="Carrier", occurrences=[occ], entity_token="TOKEN:Carrier")
@@ -5305,27 +4933,28 @@ def _install_unplaced_component(monkeypatch, body_names):
     return bodies
 
 
-class _UnnamedOcc:
+class _UnnamedOcc(FakeOccurrence):
     """An occurrence whose COMPONENT reads while its own fullPathName and name do not - what a scope
-    resolved by HANDLE can still be left holding."""
+    resolved by HANDLE can still be left holding. ``name`` is a plain attribute on the shared fake,
+    so a read that DECLINES there is only expressible here."""
 
     def __init__(self, comp):
-        self.component = comp
-
-    @property
-    def fullPathName(self):
-        raise RuntimeError("path unavailable")
+        super().__init__(component=comp, raises_on={"fullPathName": "path unavailable"})
 
     @property
     def name(self):
         raise RuntimeError("name unavailable")
+
+    @name.setter
+    def name(self, _value):
+        pass                    # the shared constructor assigns one; this instance never reads it
 
 
 def _install_unnamed_placement(monkeypatch):
     """A design whose handle 'OCCTOK' resolves to an occurrence that will not name itself."""
     import adsk.fusion
     monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
-    monkeypatch.setattr(adsk.fusion, "Occurrence", _UnnamedOcc, raising=False)
+    monkeypatch.setattr(adsk.fusion, "Occurrence", FakeOccurrence, raising=False)
     pin = BRepBody("Pin", entity_token="TOK-PIN")
     sub = MakeComp(name="Bracket", bodies=[pin], entity_token="TOKEN:Bracket")
     pin.parentComponent = sub

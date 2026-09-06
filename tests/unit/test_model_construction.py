@@ -135,13 +135,12 @@ _OriginPlane = collections.namedtuple("_OriginPlane", "kind name")
 def _datum_component():
     """The component the datums are built on: the three createInput/add collections plus the origin
     planes an 'xy'/'xz'/'yz' alias resolves to."""
-    comp = MakeComp(name="Comp")
+    comp = MakeComp(name="Comp", origin_planes=(_OriginPlane("plane", "XY"),
+                                                _OriginPlane("plane", "XZ"),
+                                                _OriginPlane("plane", "YZ")))
     comp.constructionPoints = _CollOut()
     comp.constructionAxes = _CollOut()
     comp.constructionPlanes = _CollOut()
-    comp.xYConstructionPlane = _OriginPlane("plane", "XY")
-    comp.xZConstructionPlane = _OriginPlane("plane", "XZ")
-    comp.yZConstructionPlane = _OriginPlane("plane", "YZ")
     return comp
 
 

@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import (FakeBoundingBox3D, FakePoint, MakeComp, MakeDesign, _NamedCollection,
-                      error_message, install, load_tool, payload)
+                      error_message, install, load_tool, make_occurrence, payload)
 
 mo = load_tool("design_move_occurrence")
 
@@ -45,17 +45,19 @@ def _path(node):
     return f"{_path(node.parent)}+{node.name}" if node.parent is not None else node.name
 
 
-def _proxy(des, node):
+def _proxy(des, node, path=None):
     """One occurrence WRAPPER, as the API hands them out: every read of the tree mints a fresh one,
     carrying a SNAPSHOT of the path it had when it was minted - which is why a wrapper held across a
     move keeps answering with its pre-move path (measured: it goes stale silently, never raising).
+    `path` overrides that snapshot for the wrapper minted with a path the tree does not hold.
 
     sourceComponent is the ROOT for every occurrence however deep (measured) - it names where the
     path BEGINS, not the immediate parent."""
-    p = SimpleNamespace(component=node.component, name=node.name, fullPathName=_path(node),
-                        isValid=True, sourceComponent=des.rootComponent)
-    p.boundingBox2 = (lambda types, n=node: None if n.corner is None else
-                      FakeBoundingBox3D(FakePoint(*n.corner), FakePoint(*n.corner)))
+    p = make_occurrence(
+        path=_path(node) if path is None else path, component=node.component,
+        bodies_bounding_box=None if node.corner is None else
+        FakeBoundingBox3D(FakePoint(*node.corner), FakePoint(*node.corner)))
+    p.sourceComponent = des.rootComponent
     p.moveToComponent = lambda target, n=node: _move(des, n, target)
     return p
 
@@ -114,13 +116,10 @@ def _move(des, node, target):
     if des.drift:
         node.corner = tuple(c + des.drift for c in (node.corner or (0.0, 0.0, 0.0)))
     _refresh(des)
-    returned = _proxy(des, node)                 # the new proxy: its path IS the assembly path
-    if des.stale_return:
-        # A returned wrapper answering a path the census does not carry - the same silent staleness a
-        # HELD wrapper is measured to have. Whatever produced it, that string names no occurrence the
-        # assembly reports, so it is not evidence of where this instance landed.
-        returned.fullPathName = was
-    return returned
+    # The new proxy's path IS the assembly path - unless stale_return mints it with the PRE-move
+    # path, a string the census does not carry, which is the same silent staleness a HELD wrapper is
+    # measured to have and so is not evidence of where this instance landed.
+    return _proxy(des, node, path=was if des.stale_return else None)
 
 
 def _make(names=("A", "B"), refuse=None, drift=0.0, corner=(1.0, 2.0, 3.0),

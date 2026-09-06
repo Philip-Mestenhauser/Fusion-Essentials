@@ -19,8 +19,8 @@ import types
 import pytest
 
 from conftest import (load_tool, make_source_document, make_bbox, BRepBody, Camera,
-                      FakeApplication, FakeDataFile, FakeFusionDocument, FakePoint,
-                      FakeVector3D, MakeComp, Viewport, _NamedCollection)
+                      FakeApplication, FakeDataFile, FakeFusionDocument, FakeOccurrence, FakePoint,
+                      FakeVector3D, MakeComp, MakeDesign, Viewport)
 
 iv = load_tool("view_set")
 
@@ -30,28 +30,25 @@ iv = load_tool("view_set")
 # Points and bounding boxes come from conftest's shared fakes (FakePoint / make_bbox); only the
 # occurrence/viewport/named-view graph below is local.
 
-class FakeOcc:
-    def __init__(self, name, full_path=None, bbox=None, parent=None,
-                 bulb=True, isolated=False):
-        self.name = name
-        self.fullPathName = full_path or name
-        self.boundingBox = bbox
-        self.assemblyContext = parent
-        self.isLightBulbOn = bulb
-        self.isIsolated = isolated
-        self.isVisible = bulb
-        # A real Occurrence always answers `component`; one whose read RAISES is an unresolved
-        # external reference, which the shared census keeps out of this walk.
-        self.component = types.SimpleNamespace(name=name.split(":")[0])
+def _occ_args(name, full_path=None, bbox=None, parent=None, bulb=True, isolated=False):
+    """The shared-fake arguments one occurrence of this rig is built from. A real Occurrence always
+    answers `component`; one whose read RAISES is an unresolved external reference, which the shared
+    census keeps out of this walk."""
+    return dict(path=full_path or name, component=MakeComp(name=name.split(":")[0]),
+                bounding_box=bbox, assembly_context=parent, light_bulb_on=bulb, isolated=isolated)
 
 
-class FakeRoot:
-    def __init__(self, occurrences, bodies=(), bbox=None):
-        self.allOccurrences = list(occurrences)
-        # the WHOLE-DESIGN box a fit frames - the denominator of the framing ratio
-        self.boundingBox = bbox if bbox is not None else make_bbox((0, 0, 0), (100, 100, 100))
-        # root-level bodies (conftest.BRepBody instances) - the body-level hide/show targets.
-        self.bRepBodies = _NamedCollection(bodies)
+def FakeOcc(*args, **kwargs):
+    """One occurrence of this rig on the shared occurrence fake."""
+    return FakeOccurrence(**_occ_args(*args, **kwargs))
+
+
+def FakeRoot(occurrences, bodies=(), bbox=None):
+    """The root component: the design-wide occurrence walk, the root-level bodies a body hide/show
+    targets, and the WHOLE-DESIGN box a fit frames - the denominator of the framing ratio."""
+    root = MakeComp(name="Root", all_occurrences=list(occurrences), bodies=list(bodies))
+    root.boundingBox = bbox if bbox is not None else make_bbox((0, 0, 0), (100, 100, 100))
+    return root
 
 
 class FakeNamedView:
@@ -99,10 +96,13 @@ class FakeNamedViews:
         return nv
 
 
-class FakeDesign:
-    def __init__(self, occurrences, named_views=None, bodies=(), bbox=None):
-        self.rootComponent = FakeRoot(occurrences, bodies, bbox)
-        self.namedViews = named_views if named_views is not None else FakeNamedViews()
+def FakeDesign(occurrences, named_views=None, bodies=(), bbox=None, all_components=None):
+    """The design behind a view write, on the shared design fake plus the namedViews collection
+    (NamedViews has no measured shape, so that half stays local). `all_components` replaces the
+    root-only census with the components a design-wide folder walk has to reach."""
+    design = MakeDesign(comp=FakeRoot(occurrences, bodies, bbox), all_components=all_components)
+    design.namedViews = named_views if named_views is not None else FakeNamedViews()
+    return design
 
 
 def _camera():
@@ -250,8 +250,8 @@ def _body(name, bulb=True, hidden_by_ancestor=False):
 
 
 def _install(monkeypatch, occurrences=(), named_views=None, doc_name="Doc", doc_id=None, bodies=(),
-             design_bbox=None):
-    design = FakeDesign(list(occurrences), named_views, bodies, design_bbox)
+             design_bbox=None, all_components=None):
+    design = FakeDesign(list(occurrences), named_views, bodies, design_bbox, all_components)
     app = _app(design, doc_name, doc_id=doc_id)
     monkeypatch.setattr(iv, "app", app)
     monkeypatch.setattr(iv._common, "app", app)
@@ -260,7 +260,7 @@ def _install(monkeypatch, occurrences=(), named_views=None, doc_name="Doc", doc_
     # real (absent) Fusion app.
     monkeypatch.setattr(iv._write_guard, "app", app)
     import adsk.fusion
-    monkeypatch.setattr(adsk.fusion.Design, "cast", lambda x: x if isinstance(x, FakeDesign) else None)
+    monkeypatch.setattr(adsk.fusion.Design, "cast", lambda x: x if isinstance(x, MakeDesign) else None)
     # adsk.core.VisualStyles.<Name> must resolve to an int for _do_style.
     import adsk.core
     vs = adsk.core.VisualStyles
@@ -408,12 +408,12 @@ class TestVisibility:
         assert res["isError"] is True and "Provide 'target'" in res["message"]
 
 
-class _StubbornOcc(FakeOcc):
+class _StubbornOcc(FakeOccurrence):
     """An occurrence that ACCEPTS a bulb/isolation write and keeps its old value - the platform
     swallowing a visibility change, which no read-back would catch."""
 
     def __init__(self, name, full_path=None, swallow=("isLightBulbOn", "isIsolated"), **kw):
-        super().__init__(name, full_path=full_path, **kw)
+        super().__init__(**_occ_args(name, full_path=full_path, **kw))
         object.__setattr__(self, "_swallow", tuple(swallow))
 
     def __setattr__(self, key, value):
@@ -1763,9 +1763,8 @@ class TestDisplay:
     def test_the_walk_reaches_every_component_not_just_the_root(self, monkeypatch):
         # display() writes through _view_common's walk, so a walk that merged two components would
         # leave the second one's folders lit while the payload counted only the components it saw.
-        design = _install(monkeypatch)
         a, b = _folder_comps()
-        design.allComponents = [a, b]
+        _install(monkeypatch, all_components=[a, b])
         out = _payload(iv.handler(action="display", visible=False))
         # 3 per category: the root component plus both of the colliding pair
         assert out["folders_set"] == {"sketches": 3, "construction": 3, "origins": 3, "joints": 3}
@@ -1780,10 +1779,9 @@ class TestDisplay:
         # both - so the component whose sketches were ON never gets them back, the write reads back
         # as the value it just wrote, and the restore reports full success. The wrong value is the
         # only observable, which is why it needs a differing pair to show up at all.
-        design = _install(monkeypatch)
         lit = _doc_comp("StockDoc", _URN_ONE, sketches=True)
         dark = _doc_comp("ViseDoc", _URN_TWO, sketches=False)
-        design.allComponents = [lit, dark]
+        _install(monkeypatch, all_components=[lit, dark])
 
         _payload(iv.handler(action="snapshot"))
         _payload(iv.handler(action="display", visible=False))
@@ -1802,11 +1800,10 @@ class TestDisplay:
     def test_a_component_whose_identity_does_not_read_is_left_alone(self, monkeypatch):
         # No identity means no key: storing such a component would put it under a key every other
         # unidentifiable component shares. It is skipped on both ends rather than restored wrong.
-        design = _install(monkeypatch)
         anon = MakeComp(name="Anon")                          # no token, no parentDesign
         for attr in _FOLDER_ATTRS:
             setattr(anon, attr, True)
-        design.allComponents = [anon]
+        _install(monkeypatch, all_components=[anon])
         _payload(iv.handler(action="snapshot"))
         _payload(iv.handler(action="display", visible=False))
         out = _payload(iv.handler(action="restore"))

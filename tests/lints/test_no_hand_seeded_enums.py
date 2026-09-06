@@ -4,7 +4,8 @@
 """Lint: a MEASURED adsk enum member is never hand-assigned in a unit test - it comes seeded.
 
 A line under tests/unit that installs a live_api_facts.ENUMS member by attribute, dict key, kwarg,
-a setattr loop over the member names, or a direct setattr/monkeypatch.setattr of one member fails;
+a setattr loop over the member names, or a setattr/monkeypatch.setattr of one member - named
+either as the second argument or as the tail of a dotted target string - fails;
 conftest seeds those onto the mock adsk modules.
 _ALLOWLIST files are exempt."""
 
@@ -41,15 +42,20 @@ def _is_setattr(func):
 
 def _setattr_seeded_linenos(path):
     """Lines where a setattr installs a measured member: a for-loop over a literal tuple/list of
-    member NAMES re-seeding a whole family at once, and the single site handing one quoted member
-    name straight to setattr/monkeypatch.setattr. The name sits beside neither an `=` nor a `:` in
-    either shape, so the three patterns above cannot see it."""
+    member NAMES re-seeding a whole family at once, the single site handing one quoted member
+    name straight to setattr/monkeypatch.setattr, and monkeypatch's dotted-target form, where the
+    member is the tail of the first argument's string. The name sits beside neither an `=` nor a
+    `:` in any of those shapes, so the three patterns above cannot see it."""
     hits = set()
     for node in ast.walk(_corpus.tree(path)):
         if isinstance(node, ast.Call) and _is_setattr(node.func) and len(node.args) >= 2:
             named = node.args[1]
             if isinstance(named, ast.Constant) and named.value in _MEMBER_SET:
                 hits.add(named.lineno)
+            target = node.args[0]
+            if isinstance(target, ast.Constant) and isinstance(target.value, str) \
+                    and target.value.rsplit(".", 1)[-1] in _MEMBER_SET:
+                hits.add(target.lineno)
         if not (isinstance(node, ast.For) and isinstance(node.iter, (ast.Tuple, ast.List))):
             continue
         if any(isinstance(n, ast.Call) and _is_setattr(n.func)

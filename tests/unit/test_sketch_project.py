@@ -26,12 +26,8 @@ def comp_with_axes(name="Comp1", token="comp-1"):
     the standard collections; a tool-specific surface is attached after construction (its own
     contract). The token is what a same-component test must compare on - wrappers are never
     identity-stable."""
-    comp = MakeComp(name=name)
-    comp.entityToken = token
-    comp.xConstructionAxis = object()
-    comp.yConstructionAxis = object()
-    comp.zConstructionAxis = object()
-    return comp
+    return MakeComp(name=name, entity_token=token,
+                    construction_axes=(object(), object(), object()))
 
 
 # ── fakes: a sketch whose projections grow its curve/point collections ────────

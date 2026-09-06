@@ -164,15 +164,19 @@ class FakeSketch(Sketch):
         self.sketchPoints = _NamedCollection([FakeSketchPoint(), FakeSketchPoint()])
 
 
+def _origin_planes():
+    """The three origin planes, each carrying the name a resolved surface reports."""
+    return tuple(SimpleNamespace(name=n) for n in ("XY", "XZ", "YZ"))
+
+
 def _design(sketches):
     """A design holding `sketches` in creation order, so the LAST entry is the most recent sketch -
     what a blank sketch_name resolves to."""
-    comp = MakeComp(name="Root", sketches=list(sketches))
-    # the origin plane a PlaneRef('xy') resolves to - the 'surface' operand's simplest form. It
+    # the origin planes a PlaneRef('xy') resolves to - the 'surface' operand's simplest form. It
     # resolves to a real plane OBJECT carrying its name, and the payload reports what the surface
     # RESOLVED to, so the name matters.
-    comp.xYConstructionPlane = SimpleNamespace(name="XY")
-    return make_design(comp=comp)
+    return make_design(comp=MakeComp(name="Root", sketches=list(sketches),
+                                     origin_planes=_origin_planes()))
 
 
 def _install(monkeypatch, sketches=None):
@@ -209,9 +213,7 @@ def _raiser(message):
 # scope filter run here; nothing about them is stubbed.
 
 def _multi_component(name, sketches):
-    comp = MakeComp(name=name, sketches=list(sketches))
-    comp.xYConstructionPlane = SimpleNamespace(name="XY")
-    return comp
+    return MakeComp(name=name, sketches=list(sketches), origin_planes=_origin_planes())
 
 
 def _install_multi(monkeypatch, pairs):

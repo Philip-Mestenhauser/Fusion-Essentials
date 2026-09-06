@@ -27,9 +27,10 @@ import adsk.cam
 import pytest
 
 from conftest import (_FakeObjectCollection, _NamedCollection, _Strategy, _make_object_collection,
-                      load_tool, make_cam, strategy_factory, wcs_params)
-from conftest import (FakeApplication, FakeCAMParameter, FakeCAMParameters, FakeMachine, FakeSetup,
-                      FakeCAMFolder, FakeOperation, FakeTool)
+                      load_tool, make_cam, make_occurrence, strategy_factory, wcs_params)
+from conftest import (FakeApplication, FakeCAMParameter, FakeCAMParameters, FakeDataFile,
+                      FakeDocumentReference, FakeMachine, FakeSetup, FakeCAMFolder, FakeOperation,
+                      FakeTool)
 
 cc = load_tool("_cam_common")
 cr = load_tool("_cam_read")
@@ -336,13 +337,10 @@ class TestErroredOpNeverReadsValid:
 
 # ── get_setup_references_handler: per-setup 'references_truncated' ──────────────────────────────
 
-class _RefOcc:
-    """An X-ref occurrence as the references walk reads it. The shared occurrence fake carries no
-    isReferencedComponent/documentReference pair, so this one stays local."""
-    def __init__(self, name):
-        self.name = name
-        self.isReferencedComponent = True
-        self.documentReference = None
+def _ref_occ(name):
+    """An occurrence placing an EXTERNAL component whose source link does not read - the row the
+    references walk counts but cannot name a file for."""
+    return make_occurrence(path=name, referenced=True)
 
 
 class _RefSetup(_Setup):
@@ -368,7 +366,7 @@ class TestReferencesFilterNamedBranch:
 
 class TestReferencesCap:
     def test_under_cap_untruncated(self, install, occurrence_cast_passthrough):
-        s = _RefSetup("S1", models=[_RefOcc("A"), _RefOcc("B")])
+        s = _RefSetup("S1", models=[_ref_occ("A"), _ref_occ("B")])
         install(FakeCAM([s]))
         out = _payload(cr.get_setup_references_handler())
         rec = out["setups"][0]
@@ -376,7 +374,7 @@ class TestReferencesCap:
         assert len(rec["references"]) == 2
 
     def test_at_cap_truncates_and_flags(self, install, occurrence_cast_passthrough):
-        many = [_RefOcc(f"O{i}") for i in range(cr._MAX_ITEMS + 4)]
+        many = [_ref_occ(f"O{i}") for i in range(cr._MAX_ITEMS + 4)]
         s = _RefSetup("S1", models=many)
         install(FakeCAM([s]))
         out = _payload(cr.get_setup_references_handler())
@@ -3322,10 +3320,12 @@ class TestSpindleScopedToActiveOps:
 
 def _xref_occ(name, source_id="urn:a", version=3, ood=False, source_name="Fixture.f3d",
               url="https://fusion/a", referenced=True):
-    df = SimpleNamespace(id=source_id, name=source_name, fusionWebURL=url)
-    return SimpleNamespace(name=name, isReferencedComponent=referenced,
-                           documentReference=SimpleNamespace(dataFile=df, version=version,
-                                                             isOutOfDate=ood))
+    """An occurrence placing an external component, with the source file its documentReference
+    names - the chain a reference row is built from."""
+    ref = FakeDocumentReference(
+        data_file=FakeDataFile(name=source_name, file_id=source_id, web_url=url),
+        version=version, out_of_date=ood)
+    return make_occurrence(path=name, referenced=referenced, document_reference=ref)
 
 
 class TestSetupReferences:

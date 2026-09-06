@@ -111,10 +111,8 @@ def scene(monkeypatch):
         # its own tested state - see test_an_unidentifiable_host_makes_the_count_unjudgeable.
         comp = MakeComp(name="Comp", entity_token="TOKEN:Comp",
                         bodies=[BRepBody(n, volume=SOURCE_VOLUME,
-                                                      parent_component=body_owner) for n in bodies])
-        comp.xYConstructionPlane = ("plane", "xy")
-        comp.xZConstructionPlane = ("plane", "xz")
-        comp.yZConstructionPlane = ("plane", "yz")
+                                                      parent_component=body_owner) for n in bodies],
+                        origin_planes=(("plane", "xy"), ("plane", "xz"), ("plane", "yz")))
         design = make_design(comp=comp, all_components=[comp, *extra_components])
         if tl is not None:
             design.timeline = tl

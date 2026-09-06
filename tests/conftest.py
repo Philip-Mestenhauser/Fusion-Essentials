@@ -2116,6 +2116,10 @@ class FakeOccurrence:
     NOTHING, which is what an instance placing no body gives. Left unset the occurrence carries no
     boundingBox2 at all, the state a body_aabb fallback is tested on.
 
+    ``isolated`` is ``isIsolated``, the isolate lock - a PLAIN attribute like the bulb, so a write
+    and its read-back drive the shared fake. Set only when a test asks: no measurement says what a
+    plain occurrence answers there.
+
     ONE class, so a test can point ``adsk.fusion.Occurrence`` at it and the shared occurrence
     resolver's isinstance check passes on a handle it resolved.
     """
@@ -2128,9 +2132,11 @@ class FakeOccurrence:
                  joints=None, grounded=None, bodies=None, bounding_box=None, entity_token=None,
                  ground_set_ok=True, ground_lies=False, referenced=None, delete_ok=True,
                  derived=False, document_reference=None, valid=True, light_bulb_on=True,
-                 bodies_bounding_box=_UNSET):
+                 bodies_bounding_box=_UNSET, isolated=None):
         self.isValid = valid
         self.isLightBulbOn = light_bulb_on
+        if isolated is not None:
+            self.isIsolated = bool(isolated)
         if bodies_bounding_box is not FakeOccurrence._UNSET:
             self.boundingBox2 = lambda _entity_types, _bb=bodies_bounding_box: _bb
         self._path = path
@@ -2308,21 +2314,22 @@ def make_occurrence(path="Comp:1", component=None, raises=None, transform2=None,
                     transform=None, joints=None, grounded=None, bodies=None, bounding_box=None,
                     entity_token=None, referenced=None, delete_ok=True, derived=False,
                     document_reference=None, valid=True, light_bulb_on=True,
-                    bodies_bounding_box=FakeOccurrence._UNSET):
+                    bodies_bounding_box=FakeOccurrence._UNSET, isolated=None):
     """An occurrence placing `component` at assembly path `path`, with the placement matrix
     ``transform2`` and the occurrence ``assembly_context`` that places it, the ground-to-parent lock
     ``ground_to_parent`` and the nested ``children`` a census descends into. Pass ``raises`` to model
     an unresolved external reference, where every read but ``name`` throws that message, or
     ``raises_on`` = {property: message} for the row where only that one read declines;
     ``delete_ok`` False is the deleteMe the platform refuses. ``valid``/``light_bulb_on``/
-    ``bodies_bounding_box`` pass through to FakeOccurrence."""
+    ``bodies_bounding_box``/``isolated`` pass through to FakeOccurrence."""
     return FakeOccurrence(path, component, raises, transform2, assembly_context,
                           ground_to_parent, children, raises_on, transform=transform,
                           joints=joints, grounded=grounded, bodies=bodies,
                           bounding_box=bounding_box, entity_token=entity_token,
                           referenced=referenced, delete_ok=delete_ok, derived=derived,
                           document_reference=document_reference, valid=valid,
-                          light_bulb_on=light_bulb_on, bodies_bounding_box=bodies_bounding_box)
+                          light_bulb_on=light_bulb_on, bodies_bounding_box=bodies_bounding_box,
+                          isolated=isolated)
 
 
 @fusion_fake(factory_for="FakeOccurrence")
@@ -3873,7 +3880,10 @@ class FakeDataFile:
     `child_refs` are the files this one references (`child_refs_raise` is the flag answering True
     over an enumeration that then throws), copy() lands a NEW file carrying the SOURCE name in the
     target folder - it takes no name, which is why a rename follows it - `copy_ok=False` is the copy
-    that answers nothing, and `rename_ok=False` the file whose name assignment RAISES."""
+    that answers nothing, and `rename_ok=False` the file whose name assignment RAISES.
+    `is_configured_design` is the Configured Design flag a DataFile carries (the data-world shape
+    dump lists isConfiguredDesign on the type), set only when a test asks - a file left alone does
+    not answer that read at all, which is the state every caller's default covers."""
     def __init__(self, name="Part", file_id=None, version=1, latest_version=None, extension="f3d",
                  parent_folder=None, parent_project=None, version_id=None, is_complete=True,
                  move_ok=True, delete_ok=True, web_url=None, parent_refs=(),
@@ -3881,7 +3891,7 @@ class FakeDataFile:
                  promote_ok=True, promote_raises=None, is_milestone=False, milestones=None,
                  child_refs=(),
                  child_refs_raise=False, copy_ok=True, rename_ok=True,
-                 date_created=1_700_000_000, description=""):
+                 date_created=1_700_000_000, description="", is_configured_design=None):
         self._rename_ok = rename_ok
         self._name = name
         self._child_refs = list(child_refs)
@@ -3896,6 +3906,8 @@ class FakeDataFile:
         self._is_milestone = is_milestone
         if milestones is not None:
             self.milestones = milestones
+        if is_configured_design is not None:
+            self.isConfiguredDesign = is_configured_design
         self._versions = list(versions)
         self._versions_raise = versions_raise
         self._promote_ok, self._promote_raises = promote_ok, promote_raises

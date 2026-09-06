@@ -6324,7 +6324,9 @@ def _judge(row, is_error, payload):
         return "FAIL", "; ".join(fails)
     if not lines:
         return "ERROR", "no verdict output"
-    return "PASS", "; ".join(ln[5:] for ln in lines)[:200]
+    # Nor a PASS: a shape dump's measured numbers sit at the END of its detail, and the --json
+    # archive is where they are kept. The console line slices for width on its own.
+    return "PASS", "; ".join(ln[5:] for ln in lines)
 
 
 # --- scratch-document bookkeeping -------------------------------------------------------------
