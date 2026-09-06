@@ -1,27 +1,27 @@
 """Unit tests for ``drawing_dimension.py`` - auto-dimension one view on the active drawing sheet.
 
-Covers: the strategy/datum maps pinned against the measured member names and resolved BY NAME (the
-adsk.drawing enums are not seeded by the measured-facts harness), the view-index bounds refusal, the
-input-did-not-take read-backs, and the honesty gate - autoDimension returning true while the document
-stays unmodified is a failure, and an UNREADABLE modified flag is published as null, never false,
-since adsk.drawing exposes no dimension entity to count. No live Fusion.
+Covers: the strategy/datum maps pinned against the measured member names and resolved BY NAME, the
+view-index bounds refusal, the input-did-not-take read-backs, and the honesty gate - autoDimension
+returning true while the document stays unmodified is a failure, and an UNREADABLE modified flag is
+published as null, never false, since adsk.drawing exposes no dimension entity to count. No live
+Fusion.
 """
 
 import inspect
 import json
-import sys
 import types
 
 import pytest
 
 import adsk  # the mock package conftest installed at import time
-from conftest import load_tool
+from conftest import (FakeSheet, FakeView, drawing_enum, load_tool, make_drawing,
+                      make_drawing_session)
 
 dim = load_tool("drawing_dimension")
 
 # The member names adsk.drawing carries on this Fusion build, written out here so the tool's own
 # maps are checked against something independent of them - a typo in either map fails the pin below
-# AND misses the fake enum, instead of quietly dimensioning with the input's default.
+# AND misses the measured enum, instead of quietly dimensioning with the input's default.
 EXPECTED_STRATEGY_MEMBERS = {
     "overall": "OverallDimensionStrategyType",
     "automatic": "AutomaticDimensionStrategyType",
@@ -40,32 +40,15 @@ EXPECTED_DATUM_MEMBERS = {
 }
 
 
-def _enum(member_names):
-    """A stand-in adsk.drawing enum over the EXPECTED_* member names - each gets its own int, and a
-    name outside them raises AttributeError, the way the live enum does."""
-    return types.SimpleNamespace(**{name: i for i, name in enumerate(member_names)})
-
-
 class _ViewIgnoringInput:
     """An AutoDimensionInput whose view assignment silently does not take - the SWIG-proxy shape the
-    handler's read-back guards against."""
+    handler's read-back guards against. AutoDimensionInput carries no shape dump."""
 
     view = property(lambda self: None, lambda self, value: None)
 
     def __init__(self):
         self.dimensionStrategy = None
         self.datumLocation = None
-
-
-class _UnreadableModifiedDoc:
-    """A drawing document whose isModified read RAISES - the flag the payload must publish as null."""
-
-    def __init__(self, drawing):
-        self.drawing = drawing
-
-    @property
-    def isModified(self):
-        raise RuntimeError("isModified unavailable")
 
 
 def _payload(res):
@@ -75,45 +58,24 @@ def _payload(res):
 
 @pytest.fixture
 def env(monkeypatch):
-    """An active drawing document: one sheet, four views, a recording AutoDimensionInput.
+    """An active drawing document: one sheet, four views, a recording AutoDimensionInput. The whole
+    adsk.drawing surface the tool and _drawing_common read goes in wholesale, so this file does not
+    depend on what a sibling drawing test file left behind in either collection order."""
+    state = types.SimpleNamespace()
 
-    The WHOLE adsk.drawing surface the tool and _drawing_common read is installed here (module
-    attribute + sys.modules), so the test does not depend on what another drawing test file left
-    behind, in either collection order.
-    """
-    state = {"auto_result": True, "modifies": True, "input": None, "auto_calls": []}
-    doc = types.SimpleNamespace(isModified=False)
-    view_objs = [types.SimpleNamespace(label=f"view{i}") for i in range(4)]
+    def _install(views=4, **document_or_sheet):
+        document_knobs = {k: document_or_sheet.pop(k) for k in ("modified_raises",)
+                          if k in document_or_sheet}
+        sheet = FakeSheet("Sheet1", views=[FakeView("view%d" % i) for i in range(views)],
+                          **document_or_sheet)
+        state.document = make_drawing(sheets=[sheet], **document_knobs)
+        state.sheet = sheet
+        make_drawing_session(monkeypatch, state.document)
+        return state.document
 
-    def _auto(inp):
-        state["auto_calls"].append(inp)
-        if state["modifies"]:
-            doc.isModified = True
-        return state["auto_result"]
-
-    def _create_input():
-        state["input"] = state.get("input_factory", lambda: types.SimpleNamespace(
-            dimensionStrategy=None, datumLocation=None, view=None))()
-        return state["input"]
-
-    views = types.SimpleNamespace(count=len(view_objs),
-                                  item=lambda i: view_objs[i] if 0 <= i < len(view_objs) else None)
-    sheet = types.SimpleNamespace(name="Sheet1", views=views,
-                                  createAutoDimensionInput=_create_input, autoDimension=_auto)
-    doc.drawing = types.SimpleNamespace(activeSheet=sheet)
-    holder = types.SimpleNamespace(activeDocument=doc)
-
-    fake_drawing = types.SimpleNamespace(
-        DrawingDocument=types.SimpleNamespace(
-            cast=lambda d: d if getattr(d, "drawing", None) is not None else None),
-        DimensionStrategyTypes=_enum(EXPECTED_STRATEGY_MEMBERS.values()),
-        DatumPositionsTypes=_enum(EXPECTED_DATUM_MEMBERS.values()),
-    )
-    monkeypatch.setattr(adsk, "drawing", fake_drawing, raising=False)
-    monkeypatch.setitem(sys.modules, "adsk.drawing", fake_drawing)
-    monkeypatch.setattr(adsk.core.Application, "get", lambda: holder)
-    return types.SimpleNamespace(state=state, doc=doc, holder=holder, sheet=sheet, views=views,
-                                 view_objs=view_objs, drawing=doc.drawing)
+    _install()
+    state.install = _install
+    return state
 
 
 class TestEnumMaps:
@@ -144,33 +106,32 @@ class TestHappyPath:
         assert (out["view_index"], out["view_count"]) == (2, 4)
         assert (out["strategy"], out["datum"]) == ("chain", "top_right")
         assert out["sheet"] == "Sheet1"
-        inp = env.state["input"]
-        assert inp.view is env.view_objs[2]                      # the INDEXED view, not the first
+        inp = env.sheet._auto_input
+        assert inp.view is env.sheet.views.item(2)            # the INDEXED view, not the first
         strategies = adsk.drawing.DimensionStrategyTypes
         assert inp.dimensionStrategy == getattr(strategies,
                                                 EXPECTED_STRATEGY_MEMBERS["chain"])
         datums = adsk.drawing.DatumPositionsTypes
         assert inp.datumLocation == getattr(datums, EXPECTED_DATUM_MEMBERS["top_right"])
-        assert env.state["auto_calls"] == [inp]                  # the input built here is the one used
+        assert env.sheet._auto_calls == [inp]                 # the input built here is the one used
 
     def test_defaults_are_baseline_from_the_bottom_left(self, env):
         out = _payload(dim.handler(view=0))
         assert (out["strategy"], out["datum"]) == ("baseline", "bottom_left")
-        inp = env.state["input"]
         strategies = adsk.drawing.DimensionStrategyTypes
-        assert inp.dimensionStrategy == getattr(strategies,
-                                                EXPECTED_STRATEGY_MEMBERS["baseline"])
+        assert env.sheet._auto_input.dimensionStrategy == getattr(
+            strategies, EXPECTED_STRATEGY_MEMBERS["baseline"])
 
     def test_each_strategy_lands_the_member_measured_for_it(self, env):
         for key, member in EXPECTED_STRATEGY_MEMBERS.items():
             _payload(dim.handler(view=0, strategy=key))
-            assert env.state["input"].dimensionStrategy == getattr(
+            assert env.sheet._auto_input.dimensionStrategy == getattr(
                 adsk.drawing.DimensionStrategyTypes, member), key
 
     def test_each_datum_lands_the_member_measured_for_it(self, env):
         for key, member in EXPECTED_DATUM_MEMBERS.items():
             _payload(dim.handler(view=0, datum=key))
-            assert env.state["input"].datumLocation == getattr(
+            assert env.sheet._auto_input.datumLocation == getattr(
                 adsk.drawing.DatumPositionsTypes, member), key
 
     def test_declared_returns_are_present(self, env):
@@ -195,7 +156,7 @@ class TestViewSelection:
         res = dim.handler()
         assert res["isError"] is True
         assert "0 to 3" in res["message"]
-        assert env.state["auto_calls"] == []
+        assert env.sheet._auto_calls == []
 
     def test_non_integer_view_is_refused(self, env):
         res = dim.handler(view="middle")
@@ -203,7 +164,7 @@ class TestViewSelection:
         assert "integer" in res["message"]
 
     def test_sheet_without_views_is_refused_naming_the_sheet(self, env):
-        env.views.count = 0
+        env.install(views=0)
         res = dim.handler(view=0)
         assert res["isError"] is True
         assert "Sheet1" in res["message"]
@@ -215,27 +176,28 @@ class TestInputGuards:
         res = dim.handler(view=0, strategy="diagonal")
         assert res["isError"] is True
         assert "ordinate" in res["message"]
-        assert env.state["auto_calls"] == []
+        assert env.sheet._auto_calls == []
 
     def test_enum_member_absent_on_this_fusion_version_is_refused(self, env, monkeypatch):
         # every member EXCEPT the baseline one - a version that lacks it must refuse, not silently
         # auto-dimension with the input's default strategy.
-        names = [n for k, n in EXPECTED_STRATEGY_MEMBERS.items() if k != "baseline"]
-        monkeypatch.setattr(adsk.drawing, "DimensionStrategyTypes", _enum(names))
+        kept = [n for k, n in EXPECTED_STRATEGY_MEMBERS.items() if k != "baseline"]
+        monkeypatch.setattr(adsk.drawing, "DimensionStrategyTypes",
+                            drawing_enum("DimensionStrategyTypes", keep=kept))
         res = dim.handler(view=0, strategy="baseline")
         assert res["isError"] is True
         assert "not available" in res["message"]
-        assert env.state["auto_calls"] == []
+        assert env.sheet._auto_calls == []
 
     def test_view_assignment_that_does_not_take_is_refused(self, env):
-        env.state["input_factory"] = _ViewIgnoringInput
+        env.install(auto_dimension_input=_ViewIgnoringInput)
         res = dim.handler(view=1)
         assert res["isError"] is True
         assert "reads back null" in res["message"]
-        assert env.state["auto_calls"] == []
+        assert env.sheet._auto_calls == []
 
-    def test_active_document_that_is_not_a_drawing_is_refused(self, env):
-        env.holder.activeDocument = types.SimpleNamespace(name="Design")
+    def test_active_document_that_is_not_a_drawing_is_refused(self, env, monkeypatch):
+        make_drawing_session(monkeypatch, object())
         res = dim.handler(view=0)
         assert res["isError"] is True
         assert "not a drawing" in res["message"]
@@ -243,26 +205,26 @@ class TestInputGuards:
 
 class TestEffectHonesty:
     def test_autodimension_false_is_a_failure(self, env):
-        env.state["auto_result"] = False
+        env.install(auto_dimension_ok=False)
         res = dim.handler(view=0)
         assert res["isError"] is True
         assert "returned false" in res["message"]
 
     def test_success_that_leaves_the_document_unmodified_is_a_failure(self, env):
-        env.state["modifies"] = False          # the API says true and changes nothing
+        env.install(modifies=False)             # the API says true and changes nothing
         res = dim.handler(view=0)
         assert res["isError"] is True
         assert "still unmodified" in res["message"]
 
     def test_already_modified_document_is_reported_as_inconclusive(self, env):
-        env.doc.isModified = True
+        env.document.isModified = True
         out = _payload(dim.handler(view=0))
         assert out["document_modified_before"] is True
         assert out["document_modified"] is True
         assert "ALREADY modified" in out["note"]
 
     def test_unreadable_modified_flag_is_published_as_null_not_false(self, env):
-        env.holder.activeDocument = _UnreadableModifiedDoc(env.drawing)
+        env.install(modified_raises="isModified unavailable")
         out = _payload(dim.handler(view=0))
         assert out["document_modified"] is None
         assert out["document_modified_before"] is None

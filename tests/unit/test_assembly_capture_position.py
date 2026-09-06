@@ -9,8 +9,8 @@ rather than computed.
 
 import pytest
 
-from conftest import (FakeMatrix3D, install, load_tool, make_design, make_placed_occurrence,
-                      payload)
+from conftest import (FakeMatrix3D, FakeSnapshot as _SharedSnapshot, _NamedCollection, install,
+                      load_tool, make_design, make_placed_occurrence, payload)
 
 ja = load_tool("assembly_capture_position")
 acom = load_tool("_assembly_common")
@@ -18,16 +18,17 @@ acom = load_tool("_assembly_common")
 
 # ── fakes ───────────────────────────────────────────────────────────────────
 #
-# Snapshot and Snapshots carry no SHAPES dump in tests/live_api_facts.py and no entry in
-# api_surface.py, so no shared conftest fake stands for either and both stay bespoke here.
+# The shared Snapshot and the shared collection protocol, each carrying the delete that LIES in the
+# way this tool has to catch.
 
-class FakeSnapshot:
+class FakeSnapshot(_SharedSnapshot):
+    """The shared marker plus the three lying deletes: one that reports success and stays, one that
+    leaves the collection LARGER, and one that gives up a DIFFERENT marker instead."""
     def __init__(self, name="Snapshot1", timeline_index=0, delete_ok=True, survives_delete=False,
                  spawns_on_delete=False, deletes_instead=None):
-        self.name = name
+        super().__init__(name=name, delete_ok=delete_ok,
+                         timeline_object=type("TL", (), {"index": timeline_index})())
         self.deleted = False
-        self.timelineObject = type("TL", (), {"index": timeline_index})()
-        self._delete_ok = delete_ok
         self._survives_delete = survives_delete   # simulate deleteMe()==True but no actual removal
         # deleteMe()==True and the collection ends up LARGER: the count moves the other way, which
         # is the only reading that tells the two numbers in the refusal apart
@@ -54,13 +55,15 @@ class FakeSnapshot:
         return True
 
 
-class FakeSnapshots:
+class FakeSnapshots(_NamedCollection):
+    """design.snapshots: the shared walk plus the pending-position flag, add/revert, and the count
+    that stops reading after one named mutation - the blind re-read a verdict has to survive."""
     def __init__(self, pending=False, items=(), revert_pending_ok=True, revert_pending_lies=False,
                  blind_after_revert=False, blind_count_after_delete=False,
                  blind_count_after_add=False, blind_count_after_discard=False,
                  blind_count_after_any_delete=False):
+        super().__init__(items)
         self._pending = pending
-        self._items = list(items)
         for it in self._items:
             it._parent = self
         self.added = False

@@ -100,7 +100,7 @@ class _Path:
         self.count = count
 
 
-class _Selection:
+class _CurveSelection:
     """A CurveSelection (chain/pocket/sketch/...). Records what was set - in `writes`, in order - and
     carries the read-back channel every kind inherits from CurveSelection: outputGeometry, value,
     hasError/error, hasWarning/warning - plus the per-kind knobs the appliers set."""
@@ -148,7 +148,7 @@ class _Selection:
         return (self.inputGeometry or []) if self._value is None else self._value
 
 
-class _DeafHoleDiameter(_Selection):
+class _DeafHoleDiameter(_CurveSelection):
     """A selection that keeps its default hole-diameter bound whatever is written to it - so the
     payload can only report the true value by READING it back."""
     @property
@@ -160,7 +160,7 @@ class _DeafHoleDiameter(_Selection):
         pass
 
 
-class _ClampingDepth(_Selection):
+class _ClampingDepth(_CurveSelection):
     """A selection that CLAMPS the pocket-depth bound to its own minimum (5.08 cm = 2 in) instead of
     keeping what was written - a read-back that is a wrong NUMBER, not a missing one."""
     @property
@@ -172,7 +172,7 @@ class _ClampingDepth(_Selection):
         pass
 
 
-class _UnreadableOpenRail(_Selection):
+class _UnreadableOpenRail(_CurveSelection):
     """A rail the operation reports back with no readable isOpen - the shape a selection class that
     carries no such property has, and the one a coerced read publishes as 'closed'."""
     @property
@@ -184,7 +184,7 @@ class _UnreadableOpenRail(_Selection):
         pass
 
 
-class _InertLoopType(_Selection):
+class _InertLoopType(_CurveSelection):
     """A selection that SWALLOWS a loopType assignment and keeps its default - the SWIG behaviour a
     set-then-read-back exists to catch."""
     @property
@@ -205,7 +205,7 @@ class _CurveSelections(_NamedCollection):
         self.cleared += 1
         self._items = []
     def _make(self, kind):
-        s = _Selection(kind); self._items.append(s); return s
+        s = _CurveSelection(kind); self._items.append(s); return s
     def createNewChainSelection(self):       return self._make("chain")
     def createNewPocketSelection(self):      return self._make("pocket")
     def createNewFaceContourSelection(self): return self._make("face")

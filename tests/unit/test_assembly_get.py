@@ -14,7 +14,8 @@ from types import SimpleNamespace
 import pytest
 
 import live_api_facts as _api_facts
-from conftest import (BRepBody, CylindricalJointMotion, FakeJoint, FakeMatrix3D, FakeMotionLink,
+from conftest import (BRepBody, CylindricalJointMotion, FakeAsBuiltJoint as _SharedAsBuiltJoint,
+                      FakeJoint, FakeMatrix3D, FakeMotionLink,
                       FakeOccurrence, FakePoint, FakeRigidGroup, FakeTimeline, FakeTimelineObject,
                       FakeVector3D, MakeComp, MakeDesign, _MotionLimits, _NamedCollection,
                       go_stale, install, load_tool, make_bbox, make_design, make_occurrence)
@@ -200,18 +201,15 @@ class _AsBuiltGeometry(_JointFrame):
                 self.entityOne.body = SimpleNamespace(parentComponent=owner)
 
 
-class FakeAsBuiltJoint:
-    """An AsBuiltJoint. It carries a single `geometry` and NO healthState, errorOrWarningMessage,
-    geometryOrOriginOne or geometryOrOriginTwo AT ALL - measured, every one of those raises
-    AttributeError, while `Joint` carries all four and no `geometry`. The class is built without
-    those attributes rather than by deleting them from a shared mock, so the absence cannot leak
-    into another test."""
+class FakeAsBuiltJoint(_SharedAsBuiltJoint):
+    """The shared as-built joint under a single `geometry`. Like the shared one it carries NO
+    healthState, errorOrWarningMessage, geometryOrOriginOne or geometryOrOriginTwo AT ALL -
+    measured, every one of those raises AttributeError, while `Joint` carries all four and no
+    `geometry`."""
     def __init__(self, name, motion_type, occ1, occ2, geometry=None, timeline=None,
                  motion_values=None):
-        self.name = name
-        self.jointMotion = _Motion(motion_type, **(motion_values or {}))
-        self.occurrenceOne = _joint_occ(occ1)
-        self.occurrenceTwo = _joint_occ(occ2)
+        super().__init__(name=name, motion=_Motion(motion_type, **(motion_values or {})),
+                         occurrence_one=_joint_occ(occ1), occurrence_two=_joint_occ(occ2))
         self.geometry = geometry
         if timeline is not None:
             self.timelineObject = timeline

@@ -6,8 +6,9 @@ import adsk.core
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, BRepEdge, MakeComp, MakeDesign, _NamedCollection, install,
-                      load_tool, make_sketch, make_sketch_curve, payload)
+from conftest import (BRepBody, BRepEdge, FakeFeature as _SharedFeature,
+                      FakeFeatures as _SharedFeatures, MakeComp, MakeDesign, install, load_tool,
+                      make_sketch, make_sketch_curve, payload)
 
 sc = load_tool("surface_extrude")
 surface_revolve = load_tool("surface_revolve")
@@ -42,10 +43,10 @@ def _comp(features, sketches=(), name="Root"):
     return comp
 
 
-class FakeFeature:
+class FakeFeature(_SharedFeature):
+    """The shared feature plus the extent a depth read-back reads."""
     def __init__(self, name="Surface1", bodies=None, extent_cm=None):
-        self.name = name
-        self.bodies = _NamedCollection(bodies if bodies is not None else [_body()])
+        super().__init__(name=name, bodies=bodies if bodies is not None else [_body()])
         if extent_cm is not None:
             # ExtrudeFeature.extentOne is a DistanceExtentDefinition (a SymmetricExtentDefinition
             # for a symmetric extrude) whose .distance is a ModelParameter reading CM, signed as
@@ -110,8 +111,10 @@ class FakeRevolveFeatures:
         return FakeFeature(bodies=self._result)
 
 
-class FakeFeatures:
+class FakeFeatures(_SharedFeatures):
+    """comp.features plus the three surface-build collections this tool reaches through."""
     def __init__(self, ef=None, rf=None, pf=None):
+        super().__init__()
         self.extrudeFeatures = ef
         self.revolveFeatures = rf
         self.patchFeatures = pf

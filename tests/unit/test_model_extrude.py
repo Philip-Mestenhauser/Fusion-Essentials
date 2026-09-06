@@ -14,8 +14,8 @@ import types
 import adsk.fusion
 
 from conftest import (
-    BRepBody, BRepFace, FakeUnitsManager, MakeComp, Profile, _NamedCollection, install, load_tool,
-    make_bbox, make_design, make_sketch, payload as _payload,
+    BRepBody, BRepFace, FakeFeature as _SharedFeature, FakeUnitsManager, MakeComp, Profile,
+    _NamedCollection, install, load_tool, make_bbox, make_design, make_sketch, payload as _payload,
 )
 
 ex = load_tool("model_extrude")
@@ -81,15 +81,11 @@ class FakeExtrudeInput:
         return self.next_result
 
 
-class FakeFeature:
+class FakeFeature(_SharedFeature):
+    """The shared feature plus isSolid - the solid/surface mode the read-back reports."""
     def __init__(self, name="Extrude1", is_solid=True):
-        self.name = name
+        super().__init__(name=name, bodies=[BRepBody("Body1", is_solid=is_solid)])
         self.isSolid = is_solid
-        class _Bodies:
-            count = 1
-            def item(self, i):
-                return type("B", (), {"name": "Body1"})()
-        self.bodies = _Bodies()
 
 
 class FakeExtrudeFeatures:

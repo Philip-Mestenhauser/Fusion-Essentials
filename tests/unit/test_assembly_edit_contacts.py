@@ -16,8 +16,9 @@ import pytest
 import adsk.core
 import adsk.fusion
 
-from conftest import (BRepBody, error_message, FakeOccurrence, install, load_tool, make_design,
-                      make_occurrence, MakeComp, MakeDesign, MeshBody, payload)
+from conftest import (BRepBody, error_message, FakeContactSet, FakeOccurrence, install, load_tool,
+                      make_design, make_occurrence, MakeComp, MakeDesign, MeshBody,
+                      _NamedCollection, payload)
 
 ec = load_tool("assembly_edit_contacts")
 
@@ -35,19 +36,20 @@ class _Raw:
     BRepBody.cast accepts, so it counts toward len() but carries no name."""
 
 
-class _ContactSet:
-    """name / isSuppressed / occurencesAndBodies (ONE 'r' - the real property) / deleteMe() -> bool.
-
-    A member list stores an occurrence as itself and a BODY as a _Raw, mirroring the measured
-    read-back. Assigning `occurrencesAndBodies` (the correctly spelled name) lands on a dead
-    attribute here exactly as it does on the live SWIG proxy: nothing changes."""
+class _ContactSet(FakeContactSet):
+    """The shared set with the two properties that MISBEHAVE as the platform's do: a name another
+    set already holds is auto-deduped to 'Name (1)' with no raise (measured), and a member list
+    stores an occurrence as itself and a BODY as a _Raw. Assigning `occurrencesAndBodies` (the
+    correctly spelled name) lands on a dead attribute here exactly as it does on the SWIG proxy."""
 
     def __init__(self, name, members=(), suppressed=False, delete_ok=True, home=None):
+        self.home = home
+        super().__init__(name=name, suppressed=suppressed, delete_ok=delete_ok)
+        # written past both properties: a subclass whose name or member write is SWALLOWED must
+        # still start out holding what it was built with.
         self._name = name
         self._members = [self._store(m) for m in members]
-        self.isSuppressed = suppressed
         self.delete_ok = delete_ok
-        self.home = home
 
     @staticmethod
     def _store(m):
@@ -125,27 +127,17 @@ class _StickyName(_ContactSet):
         pass
 
 
-class _ContactSets:
-    """design.contactSets: count/item/itemByName plus add(list) -> ContactSet."""
+class _ContactSets(_NamedCollection):
+    """design.contactSets: the shared walk plus add(list) -> ContactSet."""
 
     def __init__(self, items=(), add_returns_none=False, raise_on_add="", mint_on_raise=True):
-        self._items = list(items)
+        super().__init__(items)
         for cs in self._items:
             cs.home = self
         self.add_returns_none = add_returns_none
         self.raise_on_add = raise_on_add
         self.mint_on_raise = mint_on_raise
         self.last_add = None
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def item(self, i):
-        return self._items[i] if 0 <= i < len(self._items) else None
-
-    def itemByName(self, name):
-        return next((cs for cs in self._items if cs.name == name), None)
 
     def _mint(self, members):
         cs = _ContactSet(f"ContactSet{len(self._items) + 1}", members=members, home=self)

@@ -59,21 +59,11 @@ substring hit) locks the defect in place, so when a handler's behavior is correc
 asserted the wrong behavior SHOULD go red — that red is the signal to update the assertion to the
 correct value, not evidence the change was wrong.
 
-## The legacy bespoke pattern exists in most files — do not copy it
-
-Most of the suite predates the shared fakes: a test file defines its own local `_install(...)`
-function that pokes module-level seams imperatively (`mod.app = FakeApp()`), plus its own `Fake*`
-class hierarchy. Most test files still carry that bespoke shape; a growing minority (the newest
-test files) use the shared `make_design(...)`/`install(mod, ...)` pair the way a new test needing a
-fuller fake object model should. This is why `conftest.py` carries a large snapshot/restore autouse
-fixture — it compensates for state the bespoke pattern leaves behind, which is also why the suite
-still passes under `-p randomly` despite the leak surface.
-
-**Do not copy the bespoke pattern for a new test.** Migrating an existing bespoke fake onto the
-matching shared fake is welcome — and for a fake of a type that has a live SHAPES dump it is the
-green-lit direction: the shared fake is swept against that dump by `test_fake_shapes_exist.py`,
-which a bespoke copy never is. A type with no measured shape has no shared fake to migrate onto, so
-leave its bespoke fake alone. Either way, don't block unrelated work on it.
+Every unit test stands on the shared fakes in `conftest.py`. A type whose shape live Fusion was
+measured for (a key of `live_api_facts.SHAPES`) uses its shared fake - import it, or subclass it
+and add only the extra the test needs; `test_fake_shapes_exist.py` refuses a free-standing local
+double of such a type, because the shape sweep never reaches a local copy. A type with no shape
+dump has no shared fake to stand on and keeps a local double, whose one-line docstring says that.
 
 ## The dual-seam trap
 

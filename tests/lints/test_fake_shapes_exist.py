@@ -4,7 +4,8 @@
 """Lint: every public attribute a SHARED fake exposes exists on its live adsk counterpart, and
 every shared fake declares the live type it stands for plus the MEASURED rows behind it.
 A fake-shaped conftest class maps to a SHAPES key (by name or by its own @fusion_fake declaration)
-or fails; a mapped fake cites row ids that resolve against measure_api.ROWS."""
+or fails; a mapped fake cites row ids that resolve against measure_api.ROWS; and a tests/unit class
+named for a measured type stands on the shared fake instead of doubling it."""
 
 import ast
 import os
@@ -16,6 +17,7 @@ import live_api_facts
 
 TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _CONFTEST = os.path.join(TESTS_DIR, "conftest.py")
+_UNIT_DIR = os.path.join(TESTS_DIR, "unit")
 
 sys.path.insert(0, os.path.join(TESTS_DIR, "live"))
 import measure_api  # noqa: E402  the claim-id registry - ROWS, one dict per row, keyed 'id'
@@ -364,3 +366,158 @@ class TestApiFactProvenance:
         assert "shape-dump-design-world" in decls["FakeOccurrence"]["facts"]
         assert decls["body_proxy"]["factory_for"] == "_OccurrenceProxy"
         assert decls["_EntityProxy"]["scenario_double"].strip()
+
+
+# The reuse arm, over tests/unit: the two arms above sweep conftest's fakes, and a unit test that
+# hand-rolls its own double of a MEASURED type is exactly the shape they cannot see.
+
+
+def _shared_unit_classes():
+    """{class name: ClassDef} for the tests/unit/_*.py fake modules other test files import from -
+    a base defined there is followed like one defined in the file itself."""
+    found = {}
+    for path in _corpus.py_files(_UNIT_DIR):
+        if os.path.basename(path).startswith("_"):
+            found.update({n.name: n for n in _corpus.tree(path).body
+                          if isinstance(n, ast.ClassDef)})
+    return found
+
+
+def _base_refs(cls_node):
+    """(name, dotted) per base: a bare `Sketch` reads ('Sketch', False) and a `conftest.Sketch`
+    ('Sketch', True) - the dotted one names the module attribute itself, so no binding can shadow
+    it, while the bare one is only ever whatever this file bound that name to."""
+    refs = []
+    for base in cls_node.bases:
+        if isinstance(base, ast.Name):
+            refs.append((base.id, False))
+        elif (isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
+              and base.value.id == "conftest"):
+            refs.append((base.attr, True))
+    return refs
+
+
+def _conftest_bindings(tree, conftest, shared):
+    """The names this file BINDS to a shared fake: `from conftest import X [as Y]`, `_Y = X` over
+    one of those, `_Y = conftest.X`, and an import of a tests/unit/_*.py fake that itself stands on
+    one. A name any OTHER import, def or assignment binds is dropped, so a base is judged by what
+    the file bound it to and never by the conftest class it happens to be SPELLED like."""
+    bound, taken = {}, set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for imported in node.names:
+                name = imported.asname or imported.name
+                if ((node.module == "conftest" and imported.name in conftest)
+                        or (node.module or "").startswith("_") and imported.name in shared):
+                    bound[name] = imported.name
+                else:
+                    taken.add(name)
+        elif isinstance(node, ast.Import):
+            for imported in node.names:
+                taken.add((imported.asname or imported.name).split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            taken.add(node.name)
+    for node in tree.body:
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        target, value = node.targets[0], node.value
+        pairs = (list(zip(target.elts, value.elts))
+                 if isinstance(target, ast.Tuple) and isinstance(value, ast.Tuple)
+                 else [(target, value)])
+        for name, expr in pairs:
+            if not isinstance(name, ast.Name):
+                continue
+            if isinstance(expr, ast.Name) and expr.id in bound and expr.id not in taken:
+                bound[name.id] = bound[expr.id]
+            elif (isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name)
+                  and expr.value.id == "conftest" and expr.attr in conftest):
+                bound[name.id] = expr.attr
+            else:
+                taken.add(name.id)
+    return set(bound) - taken
+
+
+def _stands_on_conftest(cls_node, local, bound, conftest, seen=()):
+    """True when the class inherits a shared fake - through a name this file BOUND to one, through
+    a dotted conftest attribute, or up a chain of local subclasses. A base the file defines ITSELF
+    is what the name resolves to, so `local` is read first."""
+    for base, dotted in _base_refs(cls_node):
+        if dotted:
+            if base in conftest:
+                return True
+        elif base in local and local[base] is not cls_node:
+            if base not in seen and _stands_on_conftest(local[base], local, bound, conftest,
+                                                        seen + (base,)):
+                return True
+        elif base in bound:
+            return True
+    return False
+
+
+def _standing_shared(conftest):
+    """The tests/unit/_*.py fake classes that stand on a conftest fake IN THEIR OWN file - the ones
+    another test file can legitimately reach a shared fake through by importing them."""
+    standing = set()
+    for path in _corpus.py_files(_UNIT_DIR):
+        if not os.path.basename(path).startswith("_"):
+            continue
+        tree = _corpus.tree(path)
+        own = _named_classes(tree)
+        bound = _conftest_bindings(tree, conftest, set())
+        standing |= {n for n, node in own.items()
+                     if _stands_on_conftest(node, own, bound, conftest)}
+    return standing
+
+
+def _named_classes(tree):
+    """Every class the file binds to a name of its own: module scope and inside a def. One defined
+    in another class BODY is a member of that namespace - the stand-in adsk modules
+    test_sys_get_api_doc introspects hold their types that way - and is left to its owner."""
+    inner = {id(child) for node in ast.walk(tree) if isinstance(node, ast.ClassDef)
+             for child in node.body if isinstance(child, ast.ClassDef)}
+    return {n.name: n for n in ast.walk(tree)
+            if isinstance(n, ast.ClassDef) and id(n) not in inner}
+
+
+def _local_doubles(shapes, conftest):
+    """[(file, class, live type)] for every tests/unit class named after a MEASURED type that
+    stands on no conftest fake - the hand-rolled doubles the shape sweep never reaches."""
+    shared = _standing_shared(conftest)
+    out = []
+    for path in _corpus.py_files(_UNIT_DIR):
+        tree = _corpus.tree(path)
+        own = _named_classes(tree)
+        bound = _conftest_bindings(tree, conftest, shared)
+        for name, node in sorted(own.items()):
+            live = _stripped(name)
+            if live in shapes and not _stands_on_conftest(node, own, bound, conftest):
+                out.append((os.path.basename(path), name, live))
+    return out
+
+
+class TestUnitFakesStandOnTheSharedOnes:
+    def test_no_unit_test_hand_rolls_a_double_of_a_measured_type(self):
+        offenders = _local_doubles(live_api_facts.SHAPES, _conftest_classes())
+        assert not offenders, (
+            "unit tests define their own double of a type live Fusion was MEASURED for, so the "
+            "double teaches a surface nothing swept - import the shared fake from conftest, or "
+            "subclass it and add only the extra the test needs:\n  "
+            + "\n  ".join(f"{f}: {c} doubles live {live}" for f, c, live in offenders))
+
+    def test_the_scan_reads_the_real_unit_tests(self):
+        # a scan that found no candidate, or a base walk answering the same for everything, would
+        # pass the gate above green over any tests/unit at all.
+        conftest = _conftest_classes()
+        tree = ast.parse("from conftest import Sketch as _S\nfrom elsewhere import Plane\n"
+                         "class A(_S): pass\nclass B: pass\nclass C(Plane): pass")
+        bound = _conftest_bindings(tree, conftest, set())
+        derived, plain, collided = [n for n in tree.body if isinstance(n, ast.ClassDef)]
+        assert _stands_on_conftest(derived, {}, bound, conftest)
+        assert not _stands_on_conftest(plain, {}, bound, conftest)
+        # the hardening: `Plane` is a conftest class NAME, but this file bound it elsewhere
+        assert not _stands_on_conftest(collided, {}, bound, conftest)
+        assert _shared_unit_classes(), "tests/unit/_*.py defines no class - the file walk is dead"
+        in_scope = [n.name for path in _corpus.py_files(_UNIT_DIR)
+                    for n in ast.walk(_corpus.tree(path))
+                    if isinstance(n, ast.ClassDef) and _stripped(n.name) in live_api_facts.SHAPES]
+        assert in_scope, "no tests/unit class is named for a measured type - the scope is dead"

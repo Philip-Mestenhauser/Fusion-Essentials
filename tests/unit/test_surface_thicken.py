@@ -6,8 +6,9 @@ import adsk.core
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, BRepEdge, BRepFace, MakeComp, _NamedCollection, go_stale, install,
-                      load_tool, make_design, make_source_document, payload)
+from conftest import (BRepBody, BRepEdge, BRepFace, FakeFeature as _SharedFeature, MakeComp,
+                      _NamedCollection, go_stale, install, load_tool, make_design,
+                      make_source_document, payload)
 
 se = load_tool("surface_thicken")
 
@@ -37,13 +38,15 @@ def _wire(thicken_features, handle_map=None, standing_bodies=()):
     return comp
 
 
-class FakeFeature:
-    """A ThickenFeature: its result bodies, the faces it created, and the thickness ModelParameter
-    (CM); thickness_cm None gives a wall whose own length parameter cannot be read at all."""
+class FakeFeature(_SharedFeature):
+    """A ThickenFeature: the shared feature plus the thickness ModelParameter (CM); thickness_cm
+    None gives a wall whose own length parameter cannot be read at all, faces None one whose
+    created faces cannot be read either."""
     def __init__(self, name="Feat1", bodies=None, faces=None, thickness_cm=None):
-        self.name = name
-        self.bodies = _NamedCollection(bodies if bodies is not None else [])
-        if faces is not None:
+        super().__init__(name=name, bodies=bodies or ())
+        if faces is None:
+            del self.faces
+        else:
             self.faces = _NamedCollection(faces)
         if thickness_cm is not None:
             self.thickness = types.SimpleNamespace(value=thickness_cm)

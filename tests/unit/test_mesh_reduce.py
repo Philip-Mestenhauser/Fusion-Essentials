@@ -3,17 +3,11 @@
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, FakeBaseFeature, FakeBaseFeatures, FakeFeatures, MakeComp,
-                      MeshBody, _NamedCollection, install, load_tool, make_design, payload)
+from conftest import (BRepBody, FakeBaseFeature, FakeBaseFeatures, FakeFeatures,
+                      FakeValueInput as _FakeValueInput, MakeComp, MeshBody, _NamedCollection,
+                      install, load_tool, make_design, payload)
 
 mo = load_tool("mesh_reduce")
-
-
-class _FakeValueInput:
-    """The marker ValueInput.createByReal returns here; realValue is the live read-back property."""
-    def __init__(self, real):
-        self.real = real
-        self.realValue = real
 
 
 class _ReduceInput:
@@ -121,7 +115,7 @@ class TestMeshReduce:
         # value is the PERCENT as-is (30 = 30%), not 0.30.
         vi = getattr(feats.last_input, "proportion", None)
         assert isinstance(vi, _FakeValueInput)
-        assert abs(vi.real - 30.0) < 1e-9
+        assert abs(vi.realValue - 30.0) < 1e-9
 
     def test_proportion_out_of_range_rejected(self):
         self._setup()
@@ -136,7 +130,7 @@ class TestMeshReduce:
         # is carried as a real (500.0).
         vi = getattr(feats.last_input, "facecount", None)
         assert isinstance(vi, _FakeValueInput)
-        assert abs(vi.real - 500.0) < 1e-9
+        assert abs(vi.realValue - 500.0) < 1e-9
 
     def test_facecount_below_one_rejected(self):
         self._setup()
@@ -171,7 +165,7 @@ class TestMeshReduce:
         out = payload(mo.handler(mesh="H", target="face_count", value=1))
         assert out["reduced"] is True
         assert out["face_count_target"] == 1
-        assert abs(feats.last_input.facecount.real - 1.0) < 1e-9
+        assert abs(feats.last_input.facecount.realValue - 1.0) < 1e-9
 
     def test_an_integral_float_facecount_is_accepted_and_echoed(self):
         # 10.0 IS a whole count (the wire carries numbers, not ints) - accepted, and the integer that
@@ -180,7 +174,7 @@ class TestMeshReduce:
         out = payload(mo.handler(mesh="H", target="face_count", value=10.0))
         assert out["reduced"] is True
         assert out["face_count_target"] == 10
-        assert abs(feats.last_input.facecount.real - 10.0) < 1e-9
+        assert abs(feats.last_input.facecount.realValue - 10.0) < 1e-9
 
     def test_the_applied_facecount_target_is_only_published_for_face_count(self):
         # a proportion reduce has no face-count target to report
@@ -195,7 +189,7 @@ class TestMeshReduce:
         assert out["reduced"] is True
         vi = getattr(feats.last_input, "maximumDeviation", None)
         assert isinstance(vi, _FakeValueInput)
-        assert abs(vi.real - 0.1) < 1e-9
+        assert abs(vi.realValue - 0.1) < 1e-9
 
     def test_add_failure_surfaces(self):
         self._setup(raise_on_add=True)

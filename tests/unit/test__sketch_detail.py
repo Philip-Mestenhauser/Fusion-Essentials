@@ -19,7 +19,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import (FakeBoundingBox3D, FakeOccurrence, FakePoint, MakeComp, Profile, Sketch,
+from conftest import (FakeBoundingBox3D, FakeOccurrence, FakePoint,
+                      FakeSketchPoint as _SharedSketchPoint, MakeComp, Profile, Sketch,
                       SketchCurves, _NamedCollection, install, load_tool, make_design,
                       make_occurrence)
 
@@ -73,10 +74,11 @@ class TangentConstraint:
         self.curveOne, self.curveTwo = a, b
 
 
-class FakeSketchPoint:
+class FakeSketchPoint(_SharedSketchPoint):
+    """The shared point plus the entityToken a '<sketch>:point:<i>' address is resolved through."""
     def __init__(self, tok, x, y):
+        super().__init__(geometry=FakePoint(x, y))
         self.entityToken = tok
-        self.geometry = FakePoint(x, y)
 
 
 class _Coll(_NamedCollection):

@@ -530,6 +530,7 @@ def _do_visibility(design, action, target):
     if action == "clear_isolation":
         cleared = 0
         stuck = []
+        unconfirmed = []
         occs, truncated = _capped_occurrences(design)
         for o in occs:
             if safe(lambda o=o: o.isIsolated):
@@ -540,8 +541,12 @@ def _do_visibility(design, action, target):
                     stuck.append(nm)
                     continue
                 # Read it back: a write the platform swallows would otherwise be counted as cleared.
-                if _common.read_flag(lambda o=o: o.isIsolated) is False:
+                # A read-back that DECLINES saw no value at all, so it is neither cleared nor stuck.
+                got = _common.read_flag(lambda o=o: o.isIsolated)
+                if got is False:
                     cleared += 1
+                elif got is None:
+                    unconfirmed.append(nm)
                 else:
                     stuck.append(nm)
         out = {"action": action, "cleared_count": cleared}
@@ -555,6 +560,10 @@ def _do_visibility(design, action, target):
             out["stuck"] = stuck[:20]
             note += (f" WARNING: {len(stuck)} occurrence(s) still read isIsolated true after the "
                      "clear - see 'stuck'.")
+        if unconfirmed:
+            out["not_confirmed"] = unconfirmed[:20]
+            note += (f" WARNING: isIsolated did not read back on {len(unconfirmed)} occurrence(s), "
+                     "so the clear is unconfirmed there - see 'not_confirmed'.")
         if note:
             out["note"] = note.strip()
         return ok(out)

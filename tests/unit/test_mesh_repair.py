@@ -24,8 +24,9 @@ import types
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, FakeBaseFeature, FakeBaseFeatures, FakeFeatures, MakeComp,
-                      MakeDesign, MeshBody, install, load_tool, payload, error_message)
+from conftest import (BRepBody, FakeBaseFeature, FakeBaseFeatures, FakeFeatures,
+                      FakeValueInput as _ValueInput, MakeComp, MakeDesign, MeshBody, install,
+                      load_tool, payload, error_message)
 
 mr = load_tool("mesh_repair")
 
@@ -34,13 +35,6 @@ _REBUILDS = adsk.fusion.MeshRepairRebuildTypes
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────────────────────────
-
-class _ValueInput:
-    """Stands in for the adsk.core.ValueInput that MeshRepairFeatureInput.density/offset are typed
-    to take. Carries the real number so a scaling assertion can read it back."""
-    def __init__(self, real):
-        self.real = real
-
 
 def _mesh(name="Scan1", tri=1000, nodes=502, is_closed=False, volume=0.0, **kw):
     """conftest's shared MeshBody with this file's scan defaults: an OPEN 1000-triangle scan, whose
@@ -150,9 +144,9 @@ class _RepairFeatures:
         feat = types.SimpleNamespace(name=self._feat_name)
         inp = self.last_input
         dens = (self._feature_density if self._feature_density is not None
-                else getattr(getattr(inp, "density", None), "real", None))
+                else getattr(getattr(inp, "density", None), "realValue", None))
         off = (self._feature_offset if self._feature_offset is not None
-               else getattr(getattr(inp, "offset", None), "real", None))
+               else getattr(getattr(inp, "offset", None), "realValue", None))
         if dens is not None:
             feat.density = types.SimpleNamespace(value=float(dens))
         if off is not None:
@@ -344,21 +338,21 @@ class TestInputGuards:
 class TestValueInputs:
     def test_density_crosses_as_a_value_input_carrying_the_number(self, rig):
         payload(mr.handler(mesh="H", repair_type="rebuild", density=64))
-        assert rig.feats.last_input.density.real == 64.0
+        assert rig.feats.last_input.density.realValue == 64.0
 
     def test_offset_is_scaled_from_the_call_units_to_internal_cm(self, rig):
         payload(mr.handler(mesh="H", repair_type="rebuild", rebuild_method="accurate",
                            offset=2.5, units="mm"))
-        assert rig.feats.last_input.offset.real == pytest.approx(0.25)
+        assert rig.feats.last_input.offset.realValue == pytest.approx(0.25)
 
     def test_offset_in_inches_is_scaled_by_2_54(self, rig):
         payload(mr.handler(mesh="H", repair_type="rebuild", rebuild_method="accurate",
                            offset=1.0, units="in"))
-        assert rig.feats.last_input.offset.real == pytest.approx(2.54)
+        assert rig.feats.last_input.offset.realValue == pytest.approx(2.54)
 
     def test_a_zero_offset_is_still_sent(self, rig):
         payload(mr.handler(mesh="H", repair_type="rebuild", rebuild_method="accurate", offset=0))
-        assert rig.feats.last_input.offset.real == 0.0
+        assert rig.feats.last_input.offset.realValue == 0.0
 
     def test_unknown_units_are_refused(self, rig):
         assert "units" in error_message(mr.handler(mesh="H", repair_type="rebuild",

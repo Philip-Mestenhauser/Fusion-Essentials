@@ -34,9 +34,9 @@ class FakeCurve:
         self.isFixed = False
 
 
-class FakePlane:
+class FakePlanarEntity:
     """A BRepFace/ConstructionPlane - what the *_to_surface constraints take as their second
-    argument, and what a PlaneRef resolves to. Not a sketch entity."""
+    argument, and what a PlaneRef resolves to. Not a sketch entity, and not adsk.core.Plane."""
     def __init__(self, name):
         self.name = name
         self.kind = "plane"
@@ -357,7 +357,8 @@ def _component(sketches, name="Root"):
     """A component holding `sketches` plus the origin plane a PlaneRef('xy') resolves to - the
     'surface' operand's simplest form."""
     return MakeComp(name=name, sketches=list(sketches),
-                    origin_planes=(FakePlane("XY"), FakePlane("XZ"), FakePlane("YZ")))
+                    origin_planes=(FakePlanarEntity("XY"), FakePlanarEntity("XZ"),
+                                   FakePlanarEntity("YZ")))
 
 
 @pytest.fixture

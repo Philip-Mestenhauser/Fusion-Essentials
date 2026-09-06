@@ -8,7 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, error_message, MakeComp, _NamedCollection
+from conftest import (load_tool, error_message, FakePMIHoleThreadNote, FakePMILeaderLineNote,
+                      MakeComp, _NamedCollection, make_pmi_tolerance, make_pmi_value)
 
 pg = load_tool("pmi_get")
 
@@ -22,11 +23,15 @@ def _payload(result):
 
 def _ann(name="Note1", suffix="PMILeaderLineNote", text="DEBURR", visible=True,
          out_of_date=False, warning="", **extra):
-    a = SimpleNamespace(name=name, objectType="adsk::fusion::" + suffix, plainText=text,
-                        isVisible=visible, isOutOfDate=out_of_date, isSuppressed=False,
-                        errorOrWarningMessage=warning)
-    for k, v in extra.items():
-        setattr(a, k, v)
+    """One annotation of `suffix`'s kind over the shared note fakes; `extra` seeds the callout
+    members a detail slice reads. An IMPORTED suffix carries the leader note's surface under that
+    kind label - the imported classes have no shape dump of their own."""
+    cls = (FakePMIHoleThreadNote if suffix.endswith("HoleThreadNote")
+           else FakePMILeaderLineNote)
+    a = cls(name=name, object_type="adsk::fusion::" + suffix, text=text, visible=visible,
+            out_of_date=out_of_date, warning=warning)
+    for key, value in extra.items():
+        setattr(a, key, value)
     return a
 
 
@@ -34,15 +39,12 @@ def _tol(raw):
     """A symmetric PMIGeometricValueTolerance holding `raw` on both bounds. Each fixture below
     writes a bound in the same number system it writes that bound's value in, so a test can pin
     which conversion the read applies to it."""
-    return SimpleNamespace(hasTolerances=True, toleranceType=0,
-                           hasUpperTolerance=True, upperTolerance=raw,
-                           hasLowerTolerance=True, lowerTolerance=raw,
-                           hasToleranceClass=False, hasShaftToleranceClass=False)
+    return make_pmi_tolerance(upper=raw, lower=raw)
 
 
 def _gv(raw, tol=None):
     """A PMIGeometricValue holding `raw`, the unconverted number the read scales."""
-    return SimpleNamespace(hasValue=True, value=raw, isOverriddenValue=False, tolerance=tol)
+    return make_pmi_value(raw, tolerance=tol)
 
 
 @pytest.fixture

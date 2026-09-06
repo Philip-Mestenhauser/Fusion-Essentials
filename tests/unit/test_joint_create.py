@@ -15,9 +15,10 @@ import adsk.core
 import adsk.fusion
 
 from conftest import (BRepBody, BRepEdge, BRepFace, Circle3D, Cone, CylindricalJointMotion,
-                      Cylinder, FakeJoint, FakeJoints, FakeOccurrence, FakeTimelineObject, Line3D,
-                      MakeComp, Plane, RevoluteJointMotion, SliderJointMotion, _MotionLimits,
-                      _NamedCollection, _Vertex, install, load_tool, make_bbox, make_design)
+                      Cylinder, FakeJoint, FakeJointInput, FakeJoints, FakeOccurrence,
+                      FakeTimelineObject, Line3D, MakeComp, Plane, RevoluteJointMotion,
+                      SliderJointMotion, _MotionLimits, _NamedCollection, _Vertex, install,
+                      load_tool, make_bbox, make_design)
 from conftest import payload as _payload
 
 joint = load_tool("joint_create")
@@ -41,32 +42,11 @@ def _jos(*names):
 
 # ── _apply_motion: dispatch + fallthrough ──────────────────────────────────
 
-class _JointInput:
-    """Records which motion setter was called; each returns True (success)."""
-    def __init__(self):
-        self.called = None
-
-    def setAsRigidJointMotion(self):
-        self.called = "rigid"; return True
-
-    def setAsRevoluteJointMotion(self, ax):
-        self.called = ("revolute", ax); return True
-
-    def setAsSliderJointMotion(self, ax):
-        self.called = ("slider", ax); return True
-
-    def setAsPlanarJointMotion(self, ax):
-        self.called = ("planar", ax); return True
-
-    def setAsCylindricalJointMotion(self, ax):
-        self.called = ("cylindrical", ax); return True
-
-    def setAsBallJointMotion(self, a, b):
-        self.called = "ball"; return True
-
-    def setAsPinSlotJointMotion(self, rot, slide, *rest):
-        # rest = (customRotationAxisEntity[, customSlideDirectionEntity]) when a custom axis is used.
-        self.called = ("pin_slot", rot, slide, rest); return True
+class _JointInput(FakeJointInput):
+    """The shared input, with `called` this file's read of the setter it recorded."""
+    @property
+    def called(self):
+        return self._motion
 
 
 class TestApplyMotion:
@@ -74,7 +54,7 @@ class TestApplyMotion:
         ji = _JointInput()
         ok, err = joint._apply_motion(ji, "rigid", 2)
         assert ok is True and err is None
-        assert ji.called == "rigid"
+        assert ji.called == ("rigid",)
 
     def test_slider_uses_axis_index(self):
         ji = _JointInput()
@@ -625,11 +605,12 @@ class _CreateJointInput:
         self.called = ("ball", a, b); return self._ok
 
 
-def _install_create(monkeypatch, jo_names=("JO_A", "JO_B"), snapshots=None):
+def _install_create(monkeypatch, jo_names=("JO_A", "JO_B"), snapshots=None, joint_input=None):
     """A design whose root carries these Joint Origins plus a joints collection answering one
     JointInput and handing back one Joint. Returns (design, that collection)."""
     root = MakeComp(name="Root", joint_origins=[_jo(n) for n in jo_names])
-    joints_coll = FakeJoints(joint_input=_CreateJointInput(), new_joint=FakeJoint(name="Joint1"))
+    joints_coll = FakeJoints(joint_input=joint_input if joint_input is not None
+                             else _CreateJointInput(), new_joint=FakeJoint(name="Joint1"))
     root.joints = joints_coll
     # install() points both design seams at it: the JO-name inputs resolve through the
     # JointOriginRef kind (joint._inputs._common), the handler through joint._common.
@@ -1223,10 +1204,13 @@ class TestCreateHandlerFailurePaths:
         assert res["isError"] is True and "createInput returned nothing" in res["message"]
 
     def test_a_motion_setter_returning_false_is_not_a_success(self, monkeypatch):
+        # The setter answered False and said nothing else, so the refusal falls back to naming the
+        # bool it read - the only thing a caller can act on when the platform gives no reason.
         _, coll = _install_create(monkeypatch)
-        coll._input = _CreateJointInput(ok=False)
+        coll._input = _JointInput(sets_ok=False)
         res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")
-        assert res["isError"] is True and "Could not set rigid motion" in res["message"]
+        assert res["isError"] is True
+        assert "Could not set rigid motion: setter returned false" in res["message"]
         assert _added(coll) is None                      # never reached joints.add
 
     def test_an_offset_that_cannot_be_valued_is_reported(self, monkeypatch):

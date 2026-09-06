@@ -76,10 +76,17 @@ def _body_collection(name):
     return types.SimpleNamespace(count=1, item=lambda i, b=body: b)
 
 
+def _origin_planes(owner):
+    """One component's three origin planes, each named for its owner - the read that tells a sketch
+    built in the ACTIVE component's frame from one built in root's."""
+    return tuple(types.SimpleNamespace(name=f"{owner} {axes}") for axes in ("XY", "XZ", "YZ"))
+
+
 def _two_component_design(build):
     """A design whose ACTIVE component is not its root, with `build(name)` attaching the recorder
     the tool under test writes through to each. Returns (design, root, active)."""
-    root, active = MakeComp("Root"), MakeComp("Mast")
+    root = MakeComp("Root", origin_planes=_origin_planes("Root"))
+    active = MakeComp("Mast", origin_planes=_origin_planes("Mast"))
     for comp in (root, active):
         build(comp)
     design = MakeDesign(comp=root, all_components=[root, active])
@@ -93,7 +100,6 @@ def sketch_design(monkeypatch):
     collection, and 'Mast' is the active one."""
     def build(comp):
         comp.sketches = _RecordingSketches(comp.name)
-        comp.xYConstructionPlane = types.SimpleNamespace(name=f"{comp.name} XY")
 
     design, root, active = _two_component_design(build)
     install(sk, design)

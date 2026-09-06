@@ -9,7 +9,8 @@ import os
 import pytest
 
 import live_api_facts as _api_facts
-from conftest import (FakeApplication, FakeBaseFeature, FakeBaseFeatures, FakeCAMParameter,
+from conftest import (FakeAppearance, FakeAppearances, FakeUnitsManager,
+                      FakeApplication, FakeBaseFeature, FakeBaseFeatures, FakeCAMParameter,
                       FakeDataFile, FakeDataFolder, FakeExportManager, FakeFusionDocument,
                       _ExportOptions,
                       FakeDocumentReference, FakeFeature, FakeFeatures, FakeJoint, FakeJoints,
@@ -511,6 +512,59 @@ class TestAssemblyPlacement:
         assert root.allOccurrencesByComponent(MakeComp("Other", entity_token="OTHER")).count == 0
         # A component carrying no token cannot be matched at all - that is not "placed nowhere".
         assert root.allOccurrencesByComponent(MakeComp("Untokened")).count == 0
+
+
+class TestAppearanceWorld:
+    def test_a_copy_under_a_name_the_collection_already_holds_is_refused(self):
+        # DECLARED, not measured: the refusal is this fake's guard against a caller that mints
+        # BLIND. Without it, a handler that skipped its look-up-first reuse path would get a second
+        # same-named asset back and read that as success, leaving the document carrying two.
+        apps = FakeAppearances([FakeAppearance("AgentColor_1E8E3E")])
+        assert apps.addByCopy(FakeAppearance("Base"), "AgentColor_1E8E3E") is None
+        assert apps.count == 1 and apps._copied == []
+
+    def test_a_copy_keeps_its_sources_asset_id_and_its_colour_channels(self):
+        # MEASURED: a copy shares the base's asset id, so the NAME is the only axis telling two
+        # overrides minted off one base apart - and it exposes the base's own channels, which is
+        # what an albedo write then looks for.
+        base = FakeAppearance("Base", color_props=("opaque_albedo", "opaque_luminance_modifier"),
+                              appearance_id="asset:Base")
+        apps = FakeAppearances()
+        made = apps.addByCopy(base, "AgentColor_FF0000")
+        assert made.id == "asset:Base" and made.name == "AgentColor_FF0000"
+        assert [p.id for p in made.appearanceProperties] == ["opaque_albedo",
+                                                             "opaque_luminance_modifier"]
+        assert apps.itemByName("AgentColor_FF0000") is made and apps._copied[0][0] is base
+
+
+class TestUnitsWorld:
+    """MEASURED by units-manager-internal-units-and-convert: internalUnits is a SENTINEL string,
+    polymorphic across the length/angle boundary, and convert's three refusals carry three
+    different messages."""
+
+    def test_the_sentinel_from_unit_lifts_a_database_number_into_either_dimension(self):
+        # ONE call shape converts a length and an angle, which is what lets _param_summary hand
+        # internalUnits straight through whatever the parameter's own unit turns out to be.
+        um = FakeUnitsManager()
+        assert um.convert(1.0, um.internalUnits, "mm") == 10.0
+        assert um.convert(1.0, um.internalUnits, "deg") == pytest.approx(math.degrees(1.0))
+
+    def test_a_literal_from_unit_converts_within_one_dimension_and_refuses_across(self):
+        # Only the sentinel crosses: a caller reaching an angle out of a centimetre is refused
+        # rather than handed the number a table lookup alone would produce.
+        um = FakeUnitsManager()
+        assert um.convert(1.0, "cm", "mm") == 10.0
+        with pytest.raises(RuntimeError, match="not compatible"):
+            um.convert(1.0, "cm", "deg")
+
+    def test_an_empty_to_unit_and_an_unknown_one_are_refused_APART(self):
+        # Two different measured messages: collapsing them would let a caller read "no units at
+        # all" as "a unit I do not know", which are different repairs.
+        um = FakeUnitsManager()
+        with pytest.raises(RuntimeError, match="Bad units parameter"):
+            um.convert(1.0, um.internalUnits, "")
+        with pytest.raises(RuntimeError, match="not a valid unit string"):
+            um.convert(1.0, um.internalUnits, "furlong")
 
 
 class TestSketchWorld:

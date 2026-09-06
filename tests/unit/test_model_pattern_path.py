@@ -14,17 +14,18 @@ import adsk.core
 import adsk.fusion
 import pytest
 
-from conftest import (BRepEdge, MakeComp, _NamedCollection, error_message, install, load_tool,
-                      make_design, make_sketch, make_sketch_curve, payload)
+from conftest import (BRepEdge, FakeFeature, MakeComp, _NamedCollection, error_message, install,
+                      load_tool, make_design, make_sketch, make_sketch_curve, payload)
 
 pp = load_tool("model_pattern_path")
 
 
 # ── fakes: only the feature-collection graph this tool drives ────────────────────────────────────
 
-class _Feature:
+class _Feature(FakeFeature):
+    """The shared feature plus patternElements - the count a pattern read-back reports."""
     def __init__(self, name="Path-Pattern1", elements=3):
-        self.name = name
+        super().__init__(name=name)
         self.patternElements = _NamedCollection([None] * elements)
 
 

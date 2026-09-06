@@ -8,7 +8,8 @@ refusal every joint CREATE shares.
 
 import pytest
 
-from conftest import MakeComp, install, load_tool, make_design, make_occurrence, payload
+from conftest import (MakeComp, _NamedCollection, install, load_tool, make_design, make_occurrence,
+                      payload)
 
 ja = load_tool("joint_create_as_built")
 jn = load_tool("_joints")
@@ -17,16 +18,16 @@ jc = load_tool("assembly_capture_position")   # the other consumer of the shared
 
 # ── fakes ───────────────────────────────────────────────────────────────────
 #
-# Snapshots, AsBuiltJointInput and AsBuiltJoints carry no SHAPES dump in tests/live_api_facts.py, so
-# no shared conftest fake stands for them and all three stay bespoke here. The members the two joint
-# fakes take a position on are the ones api_surface.py records for the live types.
+# AsBuiltJointInput has no SHAPES dump, so it stays bespoke here. The members the two joint fakes
+# take a position on are the ones api_surface.py records for the live types.
 
-class FakeSnapshots:
-    """design.snapshots as this tool reads it: the pending-position flag, plus the captured walk."""
+class FakeSnapshots(_NamedCollection):
+    """design.snapshots as this tool reads it: the shared captured walk plus the pending-position
+    flag, whose read RAISES when `_blind` is set - the flag being unknown, not a False."""
 
     def __init__(self, pending=False, items=()):
+        super().__init__(items)
         self._pending = pending
-        self._items = list(items)
         self._blind = False
 
     @property
@@ -34,13 +35,6 @@ class FakeSnapshots:
         if self._blind:
             raise RuntimeError("pending flag unreadable")
         return self._pending
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def item(self, i):
-        return self._items[i]
 
 
 class FakeAsBuiltInput:
@@ -84,13 +78,14 @@ class FakeAsBuiltInput:
         return self._set("PinSlotJointMotion", a, 2)
 
 
-class FakeAsBuiltJoints:
-    """asBuiltJoints: createInput(occ1, occ2, geometry) + add(input). The created joint reports the
-    motion the input carries, unless motion_class forces another (the platform-lies case: '' models a
-    joint whose motion cannot be read at all)."""
+class FakeAsBuiltJoints(_NamedCollection):
+    """asBuiltJoints: the shared walk plus createInput(occ1, occ2, geometry) + add(input). The
+    created joint reports the motion the input carries, unless motion_class forces another (the
+    platform-lies case: '' models a joint whose motion cannot be read at all)."""
 
     def __init__(self, motion_class=None, geometry_readback="ANCHOR", add_returns=True,
                  name_sticks=True):
+        super().__init__()
         self.last = None
         self.last_input = None
         self.added = 0

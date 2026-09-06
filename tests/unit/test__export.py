@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import adsk
 import pytest
 
-from conftest import load_tool
+from conftest import MakeDesign, load_tool
 
 ex = load_tool("_export")
 
@@ -122,26 +122,12 @@ class _Comp:
         self.name = name
 
 
-class _CompColl:
-    """allComponents is a COUNTED collection (count + item(i)), not a plain list."""
-    def __init__(self, items):
-        self._l = list(items)
-
-    @property
-    def count(self):
-        return len(self._l)
-
-    def item(self, i):
-        return self._l[i] if 0 <= i < len(self._l) else None
-
-
-class _Design:
+class _Design(MakeDesign):
+    """The shared design over this file's root, whose allComponents is the COUNTED collection the
+    census walks. An empty design has no allOccurrences, which is what most tests want."""
     def __init__(self, comps, occurrences=()):
-        self.rootComponent = _Comp("Root")
-        # the design-wide occurrence census reads root.allOccurrences (the fast path); an empty
-        # design has none, which is what most of these tests want
+        super().__init__(comp=_Comp("Root"), all_components=list(comps))
         self.rootComponent.allOccurrences = list(occurrences)
-        self.allComponents = _CompColl(comps)
 
 
 def _occ(path, comp):

@@ -21,7 +21,7 @@ import pytest
 
 from conftest import FakeTimeline as _SharedTimeline
 from conftest import FakeTimelineObject as _SharedTimelineObject
-from conftest import error_message, load_tool, make_design, payload
+from conftest import _NamedCollection, error_message, load_tool, make_design, payload
 
 et = load_tool("design_edit_timeline")
 
@@ -150,25 +150,18 @@ class FakeTimelineGroup(FakeTimelineObject):
         return True
 
 
-class FakeTimelineGroups:
-    """The timelineGroups collection: count/item plus add(startIndex, endIndex) -> group or None.
-    __len__ makes an empty collection FALSY, as an adsk collection is."""
+class FakeTimelineGroups(_NamedCollection):
+    """The timelineGroups collection: the shared walk plus add(startIndex, endIndex) -> group or
+    None. __len__ makes an empty collection FALSY, as an adsk collection is."""
 
     def __init__(self, timeline, groups=(), add_returns="auto", add_lands=True):
+        super().__init__(groups)
         self._timeline = timeline
-        self._items = list(groups)
         for g in self._items:
             g.groups = self
         self._add_returns = add_returns
         self._add_lands = add_lands
         self.add_calls = []
-
-    @property
-    def count(self):
-        return len(self._items)
-
-    def item(self, i):
-        return self._items[i] if 0 <= i < len(self._items) else None
 
     def __len__(self):
         return len(self._items)

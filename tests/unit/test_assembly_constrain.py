@@ -9,8 +9,8 @@ repositioned.
 import pytest
 
 import live_api_facts as _api_facts
-from conftest import (FakeMatrix3D, FakeTimeline, FakeTimelineObject, MakeComp, install, load_tool,
-                      make_design, make_placed_occurrence, payload)
+from conftest import (FakeMatrix3D, FakeTimeline, FakeTimelineObject, MakeComp, _NamedCollection,
+                      install, load_tool, make_design, make_placed_occurrence, payload)
 
 ja = load_tool("assembly_constrain")
 
@@ -68,13 +68,14 @@ def created_constraint(health=_HEALTHY, message="", count=0, blind_health=False,
         "healthState": property(_health)})()
 
 
-class FakeAssemblyConstraints:
-    """assemblyConstraints: createInput() + add(input). The created constraint carries the health the
-    test asks for and the relationship count the input actually received; on_add runs the assembly
-    recompute the add triggers - what moves a part or breaks an existing joint."""
+class FakeAssemblyConstraints(_NamedCollection):
+    """assemblyConstraints: the shared walk plus createInput() + add(input). The created constraint
+    carries the health the test asks for and the relationship count the input actually received;
+    on_add runs the assembly recompute the add triggers - what moves a part or breaks a joint."""
 
     def __init__(self, health=_HEALTHY, message="", blind_health=False, blind_count=False,
                  count=None, on_add=None):
+        super().__init__()
         self.last_input = None
         self.added = 0
         self._health = health

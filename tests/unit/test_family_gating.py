@@ -18,7 +18,7 @@ import types
 
 import pytest
 
-from conftest import load_tool, TOOLS_DIR
+from conftest import FakeProducts, load_tool, make_cam, TOOLS_DIR
 
 wo = load_tool("workspace_orient")
 
@@ -123,22 +123,9 @@ class _Coll:
         return self._items[i]
 
 
-class _FakeCAM:
-    def __init__(self):
-        self.setups = _Coll([])
-
-
-class _FakeProducts:
-    def __init__(self, cam):
-        self._cam = cam
-
-    def itemByProductType(self, kind):
-        return self._cam if kind == "CAMProductType" else None
-
-
 class _FakeDoc:
     def __init__(self, cam):
-        self.products = _FakeProducts(cam)
+        self.products = FakeProducts(cam=cam)
 
 
 def _payload(res):
@@ -152,7 +139,7 @@ def small_design_with_cam(monkeypatch):
     'assembly_structure'/'geometry' pointers plus a 'cam' pointer (CAM data present) - everything
     else in the object model is left unset and swallowed by the handler's own safe() wrapping."""
     design = types.SimpleNamespace()
-    cam = _FakeCAM()
+    cam = make_cam()
     doc = _FakeDoc(cam)
     ui = types.SimpleNamespace(activeWorkspace=types.SimpleNamespace(name="Design"),
                                 activeSelections=_Coll([]))
@@ -164,7 +151,7 @@ def small_design_with_cam(monkeypatch):
     import adsk.fusion
     import adsk.cam
     monkeypatch.setattr(adsk.fusion.Design, "cast", lambda x: design if x is design else None)
-    monkeypatch.setattr(adsk.cam.CAM, "cast", lambda x: x if isinstance(x, _FakeCAM) else None)
+    monkeypatch.setattr(adsk.cam.CAM, "cast", lambda x: x if x is cam else None)
     monkeypatch.setattr(wo._cam_common, "get_cam", lambda: (cam, None))
     return wo
 

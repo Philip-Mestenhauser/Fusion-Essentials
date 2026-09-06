@@ -21,20 +21,13 @@ import types
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, FakeFeatures, MakeComp, MakeDesign, MeshBody, install, load_tool,
-                      payload, error_message)
+from conftest import (BRepBody, FakeFeatures, FakeValueInput as _ValueInput, MakeComp, MakeDesign,
+                      MeshBody, install, load_tool, payload, error_message)
 
 ms = load_tool("mesh_shell")
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────────────────────────
-
-class _ValueInput:
-    """Stands in for the adsk.core.ValueInput that MeshShellFeatureInput.thickness is typed to take.
-    Carries the real number so a scaling assertion can read it back."""
-    def __init__(self, real):
-        self.real = real
-
 
 class _MeshComp(MakeComp):
     """A component whose meshBodies read RAISES once `dead` is set - the census host that stops
@@ -103,7 +96,7 @@ class _ShellFeatures:
         if self.none_feature:
             return None
         landed = (self._feature_thickness if self._feature_thickness is not None
-                  else getattr(getattr(self.last_input, "thickness", None), "real", None))
+                  else getattr(getattr(self.last_input, "thickness", None), "realValue", None))
         feat = types.SimpleNamespace(name="MeshShell1")
         if landed is not None:
             feat.thickness = types.SimpleNamespace(value=float(landed))
@@ -158,15 +151,15 @@ def rig(monkeypatch):
 class TestThicknessInput:
     def test_thickness_crosses_as_a_value_input_in_internal_cm(self, rig):
         payload(ms.handler(mesh="H", thickness=2.0, units="mm"))
-        assert rig.feats.last_input.thickness.real == pytest.approx(0.2)
+        assert rig.feats.last_input.thickness.realValue == pytest.approx(0.2)
 
     def test_thickness_in_inches_is_scaled_by_2_54(self, rig):
         payload(ms.handler(mesh="H", thickness=1.0, units="in"))
-        assert rig.feats.last_input.thickness.real == pytest.approx(2.54)
+        assert rig.feats.last_input.thickness.realValue == pytest.approx(2.54)
 
     def test_thickness_in_cm_passes_through_unscaled(self, rig):
         payload(ms.handler(mesh="H", thickness=0.5, units="cm"))
-        assert rig.feats.last_input.thickness.real == pytest.approx(0.5)
+        assert rig.feats.last_input.thickness.realValue == pytest.approx(0.5)
 
     def test_a_raw_number_on_thickness_would_be_refused_by_the_api(self, rig):
         # the fake input rejects a non-ValueInput exactly as the live typed property does

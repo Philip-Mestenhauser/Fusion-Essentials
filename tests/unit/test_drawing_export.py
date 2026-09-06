@@ -5,92 +5,25 @@ Covers: the three formats and their factories/extensions, the format-scoped opti
 DWG format member selected by NAME off the live enum, the active-doc-must-be-a-drawing guard, path
 defaulting + extension, and the file-landed gate - execute() returning true is NOT proof, and the
 wait POLLS because the write can finish after the call returns.
-No live Fusion - a fake adsk.drawing + a fake export manager.
+No live Fusion.
 """
 
 import json
-import sys
-import types
 
 import pytest
 
 import adsk  # the mock package conftest installed at import time
-from conftest import load_tool
-
-
-# ── fake adsk.drawing (DrawingDocument.cast + the DWGFormats enum) ────────────
-
-# The MEASURED DWGFormats family: the tool selects a member by name off the live enum, and the
-# fake carries the measured values (Simplified is 0 - falsy - so truthiness cannot carry it).
 import live_api_facts
-_DWG_FORMATS = types.SimpleNamespace(**live_api_facts.ENUMS["drawing.DWGFormats"])
+from conftest import FakeDrawingExportManager, load_tool, make_drawing, make_drawing_session
 
+# The MEASURED DWGFormats family: the tool selects a member by name off the live enum (Simplified is
+# 0 - falsy - so truthiness cannot carry it).
+_DWG_FORMATS = live_api_facts.ENUMS["drawing.DWGFormats"]
 
-def _ignoring_opts(path):
-    """An options object that silently IGNORES every assignment - the SWIG-proxy behaviour
-    set_verified's read-back exists to catch. The attributes carry the measured factory defaults, so
-    only a value that DIFFERS from its default exposes the dropped assignment."""
-    return type("IgnoringOpts", (), {"__setattr__": lambda self, k, v: None,
-                                     "path": path, "format": None,
-                                     "exportSplinesAsSplines": False,
-                                     "useLineWeights": True, "sheetRange": "", "openPDF": False})()
-
-
-class FakeDrawingExportManager:
-    """drawing.exportManager - a DrawingExportManager, whose PDF/DXF/DWG factories are its own and
-    not the fusion ExportManager's, so the shared FakeExportManager does not stand for it."""
-    def __init__(self):
-        self.opts = None
-        self.factory_used = None
-        self.execute_result = True
-        self.write_file = True
-        self.raise_exc = None
-        self.opts_factory = None
-
-    def _make_opts(self, path, factory):
-        self.factory_used = factory
-        if self.raise_exc:
-            raise self.raise_exc
-        # A SimpleNamespace is setattr-able, so the handler's option assignments land on it and the
-        # tests can assert them.
-        self.opts = (self.opts_factory or (lambda p: types.SimpleNamespace(path=p)))(path)
-        return self.opts
-
-    def createPDFExportOptions(self, path):
-        return self._make_opts(path, "createPDFExportOptions")
-
-    def createDXFExportOptions(self, path):
-        return self._make_opts(path, "createDXFExportOptions")
-
-    def createDWGExportOptions(self, path):
-        return self._make_opts(path, "createDWGExportOptions")
-
-    def execute(self, opts):
-        if self.write_file:
-            with open(opts.path, "w") as f:
-                f.write("DRAWING-STUB")
-        return self.execute_result
-
-
-class FakeDrawingDoc:
-    def __init__(self, em):
-        self.drawing = types.SimpleNamespace(exportManager=em)
-
-
-class FakeDrawingDocumentCast:
-    @staticmethod
-    def cast(doc):
-        return doc if isinstance(doc, FakeDrawingDoc) else None
-
-
-def _make_drawing_module():
-    d = types.ModuleType("adsk.drawing")
-    d.DrawingDocument = FakeDrawingDocumentCast
-    d.DWGFormats = _DWG_FORMATS
-    return d
-
-
-_DRAWING = _make_drawing_module()
+# The factory defaults an options object reads back, and the assignments a SWIG proxy can silently
+# swallow - only a value that DIFFERS from its default exposes the dropped write.
+_OPTION_DEFAULTS = {"format": None, "exportSplinesAsSplines": False, "useLineWeights": True,
+                    "sheetRange": "", "openPDF": False}
 
 de = load_tool("drawing_export")
 
@@ -99,12 +32,9 @@ _SHIPPED_DEADLINE_S = de._LAND_DEADLINE_S
 
 
 @pytest.fixture(autouse=True)
-def drawing_env(monkeypatch):
-    """Install this file's fake adsk.drawing and shorten the bounded file-landed wait. Both are
-    undone after each test, so no other test file inherits these fakes; the wait's loop and its
-    give-up branch are unchanged, only the clock is."""
-    monkeypatch.setattr(adsk, "drawing", _DRAWING)
-    monkeypatch.setitem(sys.modules, "adsk.drawing", _DRAWING)
+def shortened_wait(monkeypatch):
+    """Shorten the bounded file-landed wait for the test clock: its loop and its give-up branch are
+    unchanged, only the clock is, and monkeypatch undoes both with the test."""
     monkeypatch.setattr(de, "_LAND_DEADLINE_S", 0.5)
     monkeypatch.setattr(de, "_LAND_POLL_SLEEP", 0.001)
 
@@ -113,18 +43,23 @@ def drawing_env(monkeypatch):
 def install(monkeypatch):
     """Install an active document (a drawing unless asked otherwise) and hand back its export
     manager. The active-document seam is adsk.core.Application.get - the ONE read _drawing_common's
-    cast goes through - and monkeypatch owns it, so the patch is undone with the test rather than
-    left for the next one."""
+    cast goes through - and monkeypatch owns it, so the patch is undone with the test."""
     def _install(*, active_doc="drawing"):
         em = FakeDrawingExportManager()
         if active_doc == "drawing":
-            active_doc = FakeDrawingDoc(em)
+            active_doc = make_drawing(export_manager=em)
         elif active_doc == "notdrawing":
             active_doc = object()
-        holder = types.SimpleNamespace(activeDocument=active_doc)
-        monkeypatch.setattr(adsk.core.Application, "get", lambda: holder)
+        make_drawing_session(monkeypatch, active_doc)
         return em, active_doc
     return _install
+
+
+def _ignores_every_assignment(em):
+    """Turn the manager's options bag into the SWIG proxy that ACCEPTS an assignment and keeps the
+    factory default - the shape the tool's read-back exists to catch."""
+    em._drops = tuple(_OPTION_DEFAULTS)
+    em._seeded = dict(_OPTION_DEFAULTS)
 
 
 def _payload(res):
@@ -155,7 +90,7 @@ class TestHappyPath:
         em, _ = install()
         out = _payload(_run(format="pdf", file_path=str(tmp_path / "noext")))
         assert out["file_path"].lower().endswith(".pdf")
-        assert em.opts.path.lower().endswith(".pdf")
+        assert em._opts.path.lower().endswith(".pdf")
 
     def test_declared_returns_are_present(self, install, tmp_path):
         install()
@@ -174,14 +109,14 @@ class TestFormats:
     def test_dxf_uses_the_dxf_factory_and_extension(self, install, tmp_path):
         em, _ = install()
         out = _payload(_run(format="dxf", file_path=str(tmp_path / "plate")))
-        assert em.factory_used == "createDXFExportOptions"
+        assert em._factory_used == "createDXFExportOptions"
         assert out["file_path"].lower().endswith(".dxf")
         assert out["format"] == "dxf"
 
     def test_dwg_uses_the_dwg_factory_and_extension(self, install, tmp_path):
         em, _ = install()
         out = _payload(_run(format="dwg", file_path=str(tmp_path / "plate")))
-        assert em.factory_used == "createDWGExportOptions"
+        assert em._factory_used == "createDWGExportOptions"
         assert out["file_path"].lower().endswith(".dwg")
         assert out["format"] == "dwg"
 
@@ -199,18 +134,18 @@ class TestDxfOptions:
         em, _ = install()
         out = _payload(_run(format="dxf", file_path=str(tmp_path / "s.dxf"),
                             splines_as_splines=True))
-        assert em.opts.exportSplinesAsSplines is True
+        assert em._opts.exportSplinesAsSplines is True
         assert out["splines_as_splines"] is True
 
     def test_splines_default_is_false(self, install, tmp_path):
         em, _ = install()
         out = _payload(_run(format="dxf", file_path=str(tmp_path / "d.dxf")))
-        assert em.opts.exportSplinesAsSplines is False
+        assert em._opts.exportSplinesAsSplines is False
         assert out["splines_as_splines"] is False
 
     def test_an_option_that_does_not_take_is_an_error(self, install, tmp_path):
         em, _ = install()
-        em.opts_factory = _ignoring_opts       # assignment silently ignored, as a SWIG proxy can
+        _ignores_every_assignment(em)
         res = _run(format="dxf", file_path=str(tmp_path / "i.dxf"), splines_as_splines=True)
         assert res["isError"] is True
         assert "did not take" in res["message"].lower()
@@ -222,14 +157,14 @@ class TestDwgVariant:
     def test_default_variant_is_autocad(self, install, tmp_path):
         em, _ = install()
         out = _payload(_run(format="dwg", file_path=str(tmp_path / "a.dwg")))
-        assert em.opts.format == _DWG_FORMATS.AutoCADDWGFormat
+        assert em._opts.format == _DWG_FORMATS["AutoCADDWGFormat"]
         assert out["dwg_variant"] == "autocad"
 
     def test_simplified_selects_the_simplified_member(self, install, tmp_path):
         em, _ = install()
         out = _payload(_run(format="dwg", file_path=str(tmp_path / "s.dwg"),
                             dwg_variant="simplified"))
-        assert em.opts.format == _DWG_FORMATS.SimplifiedDWGFormat
+        assert em._opts.format == _DWG_FORMATS["SimplifiedDWGFormat"]
         assert out["dwg_variant"] == "simplified"
 
     def test_unknown_variant_rejected(self, install, tmp_path):
@@ -239,8 +174,8 @@ class TestDwgVariant:
         assert "acad2000" in res["message"] and "simplified" in res["message"]
 
     def test_missing_enum_member_is_reported_not_guessed(self, install, tmp_path, monkeypatch):
-        em, _ = install()
-        monkeypatch.delattr(_DRAWING, "DWGFormats")
+        install()
+        monkeypatch.delattr(adsk.drawing, "DWGFormats")
         res = _run(format="dwg", file_path=str(tmp_path / "n.dwg"))
         assert res["isError"] is True
         assert "not available on this fusion version" in res["message"].lower()
@@ -280,13 +215,13 @@ class TestFormatScoping:
         assert "splines_as_splines" in res["message"] and "format=dxf" in res["message"]
 
     def test_each_option_is_accepted_by_its_own_format(self, install, tmp_path):
-        em, _ = install()
+        install()
         assert _payload(_run(format="pdf", file_path=str(tmp_path / "ok.pdf"),
                              sheet_range="1", line_weights=False))["line_weights"] is False
-        em2, _ = install()
+        install()
         assert _payload(_run(format="dxf", file_path=str(tmp_path / "ok.dxf"),
                              splines_as_splines=True))["splines_as_splines"] is True
-        em3, _ = install()
+        install()
         assert _payload(_run(format="dwg", file_path=str(tmp_path / "ok.dwg"),
                              dwg_variant="simplified"))["dwg_variant"] == "simplified"
 
@@ -297,42 +232,42 @@ class TestSheetSelection:
     def test_sheet_range_is_passed_to_options_and_echoed(self, install, tmp_path):
         em, _ = install()
         out = _payload(_run(file_path=str(tmp_path / "r.pdf"), sheet_range="1-2,5"))
-        assert em.opts.sheetRange == "1-2,5"      # range set on the export options
+        assert em._opts.sheetRange == "1-2,5"      # range set on the export options
         assert out["sheet_range"] == "1-2,5"
 
     def test_no_range_defaults_to_all_and_sets_no_range(self, install, tmp_path):
         em, _ = install()
         out = _payload(_run(file_path=str(tmp_path / "a.pdf")))
         assert out["sheet_range"] == "all"
-        assert not hasattr(em.opts, "sheetRange")  # empty range leaves the all-sheets default
+        assert not hasattr(em._opts, "sheetRange")  # empty range leaves the all-sheets default
 
     def test_line_weights_default_true_and_togglable(self, install, tmp_path):
         em, _ = install()
         out = _payload(_run(file_path=str(tmp_path / "lw.pdf")))
-        assert em.opts.useLineWeights is True
+        assert em._opts.useLineWeights is True
         assert out["line_weights"] is True
         em2, _ = install()
         out2 = _payload(_run(file_path=str(tmp_path / "lw2.pdf"), line_weights=False))
-        assert em2.opts.useLineWeights is False
+        assert em2._opts.useLineWeights is False
         assert out2["line_weights"] is False
 
     def test_openpdf_is_forced_false(self, install, tmp_path):
         em, _ = install()
         _payload(_run(file_path=str(tmp_path / "o.pdf")))
-        assert em.opts.openPDF is False           # never auto-open (would drive UI we can't dismiss)
+        assert em._opts.openPDF is False           # never auto-open (would drive UI we can't dismiss)
 
     def test_a_pdf_option_that_does_not_take_is_an_error(self, install, tmp_path):
         # The PDF options read back (measured), so a dropped assignment is caught here too - not
         # only on the DXF/DWG branches.
         em, _ = install()
-        em.opts_factory = _ignoring_opts
+        _ignores_every_assignment(em)
         res = _run(file_path=str(tmp_path / "i.pdf"), line_weights=False)
         assert res["isError"] is True
         assert "did not take" in res["message"].lower()
 
     def test_a_sheet_range_that_does_not_take_is_an_error(self, install, tmp_path):
         em, _ = install()
-        em.opts_factory = _ignoring_opts
+        _ignores_every_assignment(em)
         res = _run(file_path=str(tmp_path / "i2.pdf"), sheet_range="2")
         assert res["isError"] is True
         assert "sheet_range" in res["message"]
@@ -343,7 +278,7 @@ class TestSheetSelection:
 class TestFileLandedGate:
     def test_execute_true_but_no_file_is_a_failure(self, install, tmp_path):
         em, _ = install()
-        em.write_file = False        # execute() lies: returns true, writes nothing
+        em._writes = False           # execute() lies: returns true, writes nothing
         res = _run(format="pdf", file_path=str(tmp_path / "ghost.pdf"))
         assert res["isError"] is True
         assert "no file was written" in res["message"].lower()
@@ -352,7 +287,7 @@ class TestFileLandedGate:
         # Measured: the write can finish AFTER execute() returns, so the gate polls. verify_written
         # reports nothing on the first two looks and the file appears on the third.
         em, _ = install()
-        em.write_file = False
+        em._writes = False
         real = de._export.verify_written
         state = {"calls": 0}
 
@@ -370,7 +305,7 @@ class TestFileLandedGate:
 
     def test_the_wait_gives_up_and_reports_the_miss(self, install, tmp_path, monkeypatch):
         em, _ = install()
-        em.write_file = False
+        em._writes = False
         real = de._export.verify_written
         state = {"calls": 0}
 
@@ -391,7 +326,7 @@ class TestFileLandedGate:
         # first two samples, so the settle gate alone would report it as this call's deliverable.
         # The wait carries the pre-export snapshot, so an unchanged file never settles.
         em, _ = install()
-        em.write_file = False              # execute() lies: returns true, writes nothing
+        em._writes = False                 # execute() lies: returns true, writes nothing
         path = tmp_path / "stale.pdf"
         path.write_text("a PDF from an earlier export")
         res = _run(format="pdf", file_path=str(path))
@@ -400,7 +335,7 @@ class TestFileLandedGate:
 
     def test_a_pre_existing_zero_byte_file_is_not_a_landing(self, install, tmp_path):
         em, _ = install()
-        em.write_file = False
+        em._writes = False
         path = tmp_path / "empty.dwg"
         path.write_bytes(b"")            # the file EXISTS but carries no export
         res = _run(format="dwg", file_path=str(path))
@@ -410,7 +345,7 @@ class TestFileLandedGate:
     def test_a_size_still_climbing_is_not_reported_as_landed(self, install, tmp_path, monkeypatch):
         # Two consecutive EQUAL samples are the gate, so a size read mid-write is never the one
         # reported: the sizes below climb 10 -> 20 before holding.
-        em, _ = install()
+        install()
         sizes = [10, 20]
         monkeypatch.setattr(de._export, "verify_written",
                             lambda path, before=None: (sizes.pop(0) if sizes else 20, None))
@@ -418,7 +353,7 @@ class TestFileLandedGate:
         assert out["size_bytes"] == 20            # the settled size, not the first non-zero one
 
     def test_a_file_that_never_settles_is_refused(self, install, tmp_path, monkeypatch):
-        em, _ = install()
+        install()
         state = {"size": 0}
 
         def growing(path, before=None):
@@ -432,15 +367,30 @@ class TestFileLandedGate:
 
     def test_execute_false_is_a_failure(self, install, tmp_path):
         em, _ = install()
-        em.execute_result = False
-        em.write_file = False
+        em._execute_ok = False
+        em._writes = False
         res = _run(format="pdf", file_path=str(tmp_path / "x.pdf"))
         assert res["isError"] is True
         assert "returned false" in res["message"].lower()
 
+    def test_execute_false_is_a_failure_even_when_a_file_did_land(self, install, tmp_path):
+        # the two gates are SEPARATE: execute() answering false is a failure on its own, whatever
+        # the disk says. A gate that consulted the file would settle on the landed bytes here and
+        # publish exported=true over a write Fusion said it did not make.
+        em, _ = install()
+        em._execute_ok = False            # execute() writes the file AND answers false
+        path = tmp_path / "landed.pdf"
+        res = _run(format="pdf", file_path=str(path))
+        assert path.exists() and path.stat().st_size > 0     # the bytes DID land
+        assert res["isError"] is True
+        assert "returned false" in res["message"].lower()
+        # the file-landed wait's own wordings are what a disk-consulting gate would answer instead
+        assert "no file was written" not in res["message"]
+        assert "still growing" not in res["message"]
+
     def test_export_exception_is_reported(self, install, tmp_path):
         em, _ = install()
-        em.raise_exc = RuntimeError("disk full")
+        em._raises = RuntimeError("disk full")
         res = _run(format="pdf", file_path=str(tmp_path / "x.pdf"))
         assert res["isError"] is True
         assert "disk full" in res["message"]

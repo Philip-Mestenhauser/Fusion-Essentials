@@ -11,16 +11,18 @@ test stays offline; occurrence resolution goes through the real _inputs kind aga
 import json
 
 from conftest import (FakeApplication, FakeData, FakeDataFile, FakeMatrix3D, FakePoint,
-                      FakeVector3D, MakeComp, MakeDesign, load_tool, make_occurrence)
+                      FakeVector3D, MakeComp, MakeDesign, _NamedCollection, load_tool,
+                      make_occurrence)
 
 io = load_tool("doc_insert_occurrence")
 
 
-class FakeOccurrences:
-    """component.occurrences as an insert reaches it: addByInsert records the transform and the
-    as-reference flag and answers the occurrence `insert_result` names, 'default' being an inserted
-    reference that reads back valid. Occurrences has a live shape dump but no shared fake."""
+class FakeOccurrences(_NamedCollection):
+    """component.occurrences as an insert reaches it: the shared walk plus addByInsert, which
+    records the transform and the as-reference flag and answers the occurrence `insert_result`
+    names, 'default' being an inserted reference that reads back valid."""
     def __init__(self):
+        super().__init__()
         self.last_transform = None
         self.last_as_ref = None
         self.insert_result = "default"

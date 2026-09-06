@@ -4,30 +4,31 @@ Pinned: the material search (exact name across document + libraries), the docume
 no-match candidate hint, the cross-library ambiguity refusal, per-body density read-back, and
 partial-success reporting across a multi-body target.
 
-Material and MaterialLibrary have no shared fake, so those two are built locally; the design, its
-components and its bodies come from conftest, and ``install`` wires BOTH design seams (the tool's own
-``_common`` and ``_inputs._common``) to the same design - the dual-seam trap - so TargetRef('')
-resolves against the same root component the handler reads.
+Material has no shape dump, so that one double is built locally; the library catalog, the design,
+its components and its bodies come from conftest, and ``install`` wires BOTH design seams (the
+tool's own ``_common`` and ``_inputs._common``) to the same design - the dual-seam trap - so
+TargetRef('') resolves against the same root component the handler reads.
 """
 
 from types import SimpleNamespace
 
 import pytest
 
-from conftest import (load_tool, install, make_design, payload as _payload,
-                      BRepBody, MakeComp, MakeDesign, _NamedCollection)
+from conftest import (load_tool, install, make_design, make_material_library,
+                      payload as _payload, BRepBody, FakeMaterialLibraries, MakeComp, MakeDesign,
+                      _NamedCollection)
 
 mm = load_tool("model_set_material")
 
 
 def _material(name):
+    """One catalog material - a name is its whole surface here; Material has no shape dump."""
     return SimpleNamespace(name=name)
 
 
-class _Lib:
-    def __init__(self, name, materials):
-        self.name = name
-        self.materials = _NamedCollection(materials)
+def _Lib(name, materials):
+    """One loaded library holding `materials`, over the shared MaterialLibrary fake."""
+    return make_material_library(name, materials=materials)
 
 
 class _Body(BRepBody):
@@ -72,7 +73,7 @@ def wired(monkeypatch):
         design.materials = _NamedCollection(doc_materials)
         install(mm, design)
         monkeypatch.setattr(mm, "app",
-                            SimpleNamespace(materialLibraries=_NamedCollection(libraries)))
+                            SimpleNamespace(materialLibraries=FakeMaterialLibraries(libraries)))
         return design
     return _make
 

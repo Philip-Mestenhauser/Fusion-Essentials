@@ -6,9 +6,9 @@ import adsk.fusion
 import pytest
 
 import live_api_facts
-from conftest import (BRepBody, FakeBaseFeature, FakeBaseFeatures, FakeFeatures, MakeComp,
-                      MakeDesign, MeshBody, _FakeTriangleMesh, _MeshBodies, install, load_tool,
-                      payload)
+from conftest import (BRepBody, FakeBaseFeature, FakeBaseFeatures, FakeFeatures, FakeMeshManager,
+                      MakeComp, MakeDesign, MeshBody, _FakeTriangleMesh, _MeshBodies, install,
+                      load_tool, make_mesh_manager, payload)
 
 mx = load_tool("save_as_mesh")
 
@@ -29,30 +29,6 @@ class _AddingMeshBodies(_MeshBodies):
         self.add_args = (coords, coord_idx, normals, normal_idx)
         self._items.append(self._result)
         return self._result
-
-
-class FakeMeshCalculator:
-    def __init__(self, tm, raise_on_calc=False):
-        self._tm = tm
-        self.raise_on_calc = raise_on_calc
-        self.quality = None
-
-    def setQuality(self, q):
-        self.quality = q
-        return True
-
-    def calculate(self):
-        if self.raise_on_calc:
-            raise RuntimeError("calculate blew up")
-        return self._tm
-
-
-class FakeMeshManager:
-    def __init__(self, calc):
-        self._calc = calc
-
-    def createMeshCalculator(self):
-        return self._calc
 
 
 @pytest.fixture(autouse=True)
@@ -76,14 +52,21 @@ def _wire(comp, design_type=0, handles=None):
     return install(mx, MakeDesign(comp=comp, tokens=handles, design_type=design_type))
 
 
-def _mesh_source(name="SolidA", tri=12, nodes=8, parent_comp=None, raise_on_calc=False):
+def _mesh_source(name="SolidA", tri=12, nodes=8, parent_comp=None, calculate_raises=None,
+                 quality_ok=True):
     """A BRep body wired with a meshManager that yields a TriangleMesh of the given counts.
 
     A live TriangleMesh exposes no normal index list, so the one the handler passes on is empty."""
     tm = _FakeTriangleMesh(tri, nodes, coords=[0.0] * (nodes * 3),
                            node_indices=list(range(tri * 3)), normals=[0.0] * (nodes * 3))
-    calc = FakeMeshCalculator(tm, raise_on_calc=raise_on_calc)
-    return BRepBody(name, parent_component=parent_comp, mesh_manager=FakeMeshManager(calc))
+    return BRepBody(name, parent_component=parent_comp,
+                    mesh_manager=make_mesh_manager(tm, quality_ok=quality_ok,
+                                                   calculate_raises=calculate_raises))
+
+
+def _calculator(body):
+    """The ONE calculator the body's mesh manager hands out - what the tessellation ran on."""
+    return body.meshManager.createMeshCalculator()
 
 
 def _quality_family_without(member):
@@ -171,14 +154,33 @@ class TestSaveAsMesh:
         out = payload(mx.handler(body="H", quality="very_high"))
         assert out["quality"] == "very_high"
         assert out["quality_requested"] == "very_high"
-        # the calculator received the VeryHigh quality enum value
-        assert src.meshManager._calc.quality == 15
+        # the calculator received the VeryHigh quality enum value...
+        assert _calculator(src)._quality == 15
+        # ...and setQuality moved surfaceTolerance off the zero a fresh calculator reads
+        assert _calculator(src).surfaceTolerance != 0.0
+
+    def test_a_quality_the_platform_declines_is_an_error_not_a_default_tessellation(self):
+        # setQuality answers a bool. A false leaves the calculator at its own level of detail, so
+        # reporting the requested quality would name a level of detail the mesh does not have.
+        comp = _comp()
+        src = _mesh_source("SolidA", parent_comp=comp, quality_ok=False)
+        _wire(comp, design_type=0, handles={"H": src})
+        res = mx.handler(body="H", quality="high")
+        assert res["isError"] is True and "setQuality returned false" in res["message"]
+
+    def test_a_mesh_manager_that_hands_out_no_calculator_is_refused(self):
+        comp = _comp()
+        src = BRepBody("SolidA", parent_component=comp,
+                       mesh_manager=FakeMeshManager(calculator=None))
+        _wire(comp, design_type=0, handles={"H": src})
+        res = mx.handler(body="H")
+        assert res["isError"] is True and "createMeshCalculator" in res["message"]
 
     def test_quality_that_never_reached_setquality_is_published_null(self, monkeypatch):
         # the tessellation ran at the calculator's DEFAULT LOD, so publishing the requested key as
         # 'quality' would report a level of detail the mesh does not have.
         out, src = self._tessellate_without_the_quality_member(monkeypatch)
-        assert src.meshManager._calc.quality is None      # setQuality was never called
+        assert _calculator(src)._quality is None           # setQuality was never called
         assert out["quality"] is None
         assert out["quality_requested"] == "high"
 
@@ -218,7 +220,7 @@ class TestSaveAsMesh:
 
     def test_calculate_failure_surfaces(self):
         comp = _comp()
-        src = _mesh_source("SolidA", parent_comp=comp, raise_on_calc=True)
+        src = _mesh_source("SolidA", parent_comp=comp, calculate_raises="calculate blew up")
         _wire(comp, design_type=0, handles={"H": src})
         res = mx.handler(body="H")
         assert res["isError"] is True and "tessellation" in res["message"].lower()

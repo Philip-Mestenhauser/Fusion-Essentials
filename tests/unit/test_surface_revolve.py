@@ -6,8 +6,9 @@ import adsk.core
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, MakeComp, MakeDesign, _NamedCollection, install, load_tool,
-                      make_sketch, make_sketch_curve, payload)
+from conftest import (BRepBody, FakeFeature as _SharedFeature, FakeFeatures as _SharedFeatures,
+                      MakeComp, MakeDesign, install, load_tool, make_sketch, make_sketch_curve,
+                      payload)
 
 sc = load_tool("surface_revolve")
 
@@ -34,10 +35,10 @@ def _comp(features, sketches=(), name="Root"):
     return comp
 
 
-class FakeFeature:
+class FakeFeature(_SharedFeature):
+    """The shared feature plus the extent a depth read-back reads."""
     def __init__(self, name="Surface1", bodies=None, extent_cm=None):
-        self.name = name
-        self.bodies = _NamedCollection(bodies if bodies is not None else [_body()])
+        super().__init__(name=name, bodies=bodies if bodies is not None else [_body()])
         if extent_cm is not None:
             # ExtrudeFeature.extentOne is a DistanceExtentDefinition (a SymmetricExtentDefinition
             # for a symmetric extrude) whose .distance is a ModelParameter reading CM, signed as
@@ -69,8 +70,10 @@ class FakeRevolveFeatures:
         return FakeFeature(bodies=self._result)
 
 
-class FakeFeatures:
+class FakeFeatures(_SharedFeatures):
+    """comp.features plus the three surface-build collections this tool reaches through."""
     def __init__(self, ef=None, rf=None, pf=None):
+        super().__init__()
         self.extrudeFeatures = ef
         self.revolveFeatures = rf
         self.patchFeatures = pf
@@ -125,6 +128,8 @@ class TestSurfaceRevolve:
         out = payload(sc.handler(sketch_name="S", axis="y", angle_deg=180))
         assert out["is_solid"] is False
         assert out["axis"] == "y-axis"
+        # the LABEL agreeing is not the entity agreeing: pin which origin axis reached createInput
+        assert rf.last_input.axis == ("axis", "y")
         assert rf.last_input.isSolid is False
 
     def test_reports_result_is_solid_read_back(self, wire):

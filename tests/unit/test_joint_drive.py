@@ -16,9 +16,9 @@ import pytest
 
 from conftest import (CylindricalJointMotion, FakeApplication, FakeDataFile, FakeFusionDocument,
                       FakeJoint, FakeMatrix3D, FakeMotionLink, FakeOccurrence, FakeTimelineObject,
-                      FakeVector3D, MakeComp, RevoluteJointMotion, SliderJointMotion,
-                      _MotionLimits, _NamedCollection, install, load_tool, make_design,
-                      make_occurrence, payload)
+                      FakeVector3D, MakeComp, RevoluteJointMotion, RigidJointMotion,
+                      SliderJointMotion, _MotionLimits, _NamedCollection, install, load_tool,
+                      make_design, make_occurrence, payload)
 
 jd = load_tool("joint_drive")
 
@@ -42,10 +42,6 @@ _Revolute, _Slider, _Cylindrical = RevoluteJointMotion, SliderJointMotion, Cylin
 # What the FLAT occurrence walk throws with where a census has to take the recursed one - measured:
 # allOccurrences raises on a subtree holding an unresolved reference.
 _UNREADABLE_WALK = "2 : InternalValidationError : occ"
-
-
-class RigidJointMotion:
-    """A rigid motion: no shared fake and no SHAPES dump, so its NAME is all it carries."""
 
 
 class _DrivenOccurrence(FakeOccurrence):

@@ -12,7 +12,7 @@ import adsk.fusion
 import pytest
 
 from conftest import (load_tool, make_design, install, entity_proxy, go_stale, payload,
-                      error_message, MakeComp, BRepBody, BRepFace, _NamedCollection)
+                      error_message, MakeComp, BRepBody, BRepFace, FakeFeature)
 
 sdf = load_tool("surface_delete_face")
 
@@ -42,10 +42,10 @@ def _body(name="Srf1", is_solid=False, face_count=0, faces=None, entity_token=No
     return body
 
 
-class _Feature:
+class _Feature(FakeFeature):
+    """A DeleteFaceFeature - the shared feature under this tool's result name."""
     def __init__(self, name="DeleteFace1", bodies=()):
-        self.name = name
-        self.bodies = _NamedCollection(bodies)
+        super().__init__(name=name, bodies=bodies)
 
 
 class _DelFeatures:

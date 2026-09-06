@@ -6,8 +6,8 @@ import adsk.core
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, BRepEdge, BRepFace, MakeComp, _NamedCollection, install,
-                      load_tool, make_design, payload)
+from conftest import (BRepBody, BRepEdge, BRepFace, FakeFeature as _SharedFeature, MakeComp,
+                      install, load_tool, make_design, payload)
 
 se = load_tool("surface_trim")
 surface_common_mod = load_tool("_surface_common")
@@ -39,11 +39,11 @@ def _wire(trim_features, handle_map=None):
     return comp
 
 
-class FakeFeature:
-    """A TrimFeature: its name and the result bodies the area read-back walks."""
+class FakeFeature(_SharedFeature):
+    """A TrimFeature: the shared feature under the result bodies the area read-back walks."""
     def __init__(self, name="Feat1", bodies=None):
-        self.name = name
-        self.bodies = _NamedCollection(bodies if bodies is not None else [_body("Body1")])
+        super().__init__(name=name,
+                         bodies=bodies if bodies is not None else [_body("Body1")])
 
 
 class FakeBRepCell:

@@ -398,8 +398,10 @@ class _FakeOccurrence(FakeOccurrence):
         self.configurationRow = row
 
 
-class _Occurrences:
+class _Occurrences(_NamedCollection):
+    """comp.occurrences: the shared walk plus addFromConfiguration - the insert seam."""
     def __init__(self):
+        super().__init__()
         self.inserted = []
     def addFromConfiguration(self, row, transform):
         occ = _FakeOccurrence(row)

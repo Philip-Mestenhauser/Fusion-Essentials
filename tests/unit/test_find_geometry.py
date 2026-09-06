@@ -13,7 +13,7 @@ import json
 
 import adsk.core
 
-from conftest import MeshBody, load_tool, _NamedCollection
+from conftest import MakeDesign, MeshBody, load_tool, _NamedCollection
 
 fg = load_tool("find_geometry")
 
@@ -151,10 +151,11 @@ class FakeRoot:
             b.parentComponent = self
 
 
-class FakeDesign:
+class FakeDesign(MakeDesign):
+    """The shared design over this file's root. activeComponent is the edit target the body walk
+    also scans - None makes it the root, as live."""
     def __init__(self, occs, root_bodies=(), all_occs=None, meshes=(), active=None):
-        self.rootComponent = FakeRoot(occs, root_bodies, all_occs, meshes)
-        # activeComponent is the edit target the body walk also scans (None => the root, as live).
+        super().__init__(comp=FakeRoot(occs, root_bodies, all_occs, meshes))
         self.activeComponent = active
 
 

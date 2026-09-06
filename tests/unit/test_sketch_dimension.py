@@ -12,8 +12,8 @@ from types import SimpleNamespace
 
 import adsk.core
 import adsk.fusion
-from conftest import (BRepFace, Cylinder, MakeComp, Sketch, SketchCurves, _NamedCollection,
-                      install, load_tool, make_design)
+from conftest import (BRepFace, Cylinder, FakeSketchPoint as _SharedSketchPoint, MakeComp, Sketch,
+                      SketchCurves, _NamedCollection, install, load_tool, make_design)
 
 sd = load_tool("sketch_dimension")
 
@@ -135,8 +135,9 @@ class FakeArc:
     centerSketchPoint = "arc_center_sp"
 
 
-class FakeSketchPoint:
-    """A bare SketchPoint: no endpoints and no center, so it completes to itself."""
+class FakeSketchPoint(_SharedSketchPoint):
+    """The shared point answering null to the two CURVE anchors a dimension completes through, so
+    it completes to itself."""
     startSketchPoint = None
     centerSketchPoint = None
 

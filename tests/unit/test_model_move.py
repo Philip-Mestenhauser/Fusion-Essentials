@@ -302,9 +302,11 @@ class TestSubComponentHosting:
 
 # -- an axis HANDLE native to another component takes the same lift the body took ---------------
 
-def _foreign_edge(owner, token="e9"):
-    """A straight edge whose BODY belongs to `owner` and which is NOT already a proxy."""
-    edge = BRepEdge(Line3D(FakePoint(0, 0, 0), FakePoint(10, 0, 0)), entity_token=token)
+def _foreign_edge(owner, token="e9", proxy=BRepEdge._UNSET):
+    """A straight edge whose BODY belongs to `owner` and which is NOT already a proxy; `proxy` is
+    what its createForAssemblyContext hands back."""
+    edge = BRepEdge(Line3D(FakePoint(0, 0, 0), FakePoint(10, 0, 0)), entity_token=token,
+                    assembly_proxy=proxy)
     edge.assemblyContext = None
     edge.body = BRepBody(name="RailBody", parent_component=owner)
     return edge
@@ -334,9 +336,8 @@ class TestForeignAxisHandle:
         # "3 : Invalid entity" at defineAs
         body, owner = _body("Block"), MakeComp(name="Rail")
         owner.entityToken = "TOKEN:Rail"
-        edge = _foreign_edge(owner)
         proxy = object()
-        edge.createForAssemblyContext = lambda occ, p=proxy: p
+        edge = _foreign_edge(owner, proxy=proxy)
         feats = self._root_design(monkeypatch, body, edge, owner, "Assy:1+Rail:1")
         out = payload(mm.handler(mode="along_entity", bodies=["Block"], axis="e9", distance=30))
         assert feats.last_input.definition[1] is proxy
@@ -345,8 +346,7 @@ class TestForeignAxisHandle:
     def test_a_foreign_axis_handle_from_a_twice_placed_component_is_refused(self, monkeypatch):
         body, owner = _body("Block"), MakeComp(name="Rail")
         owner.entityToken = "TOKEN:Rail"
-        edge = _foreign_edge(owner)
-        edge.createForAssemblyContext = lambda occ: object()
+        edge = _foreign_edge(owner, proxy=object())
         feats = self._root_design(monkeypatch, body, edge, owner,
                                   "Assy:1+Rail:1", "Assy:1+Rail:2")
         res = mm.handler(mode="along_entity", bodies=["Block"], axis="e9", distance=30)

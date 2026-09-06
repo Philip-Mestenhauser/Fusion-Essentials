@@ -15,7 +15,7 @@ import adsk.fusion
 import pytest
 
 from conftest import (load_tool, make_design, install, payload, error_message, MakeComp,
-                      BRepBody, BRepFace, _NamedCollection)
+                      BRepBody, BRepFace, FakeFeature)
 
 srn = load_tool("surface_reverse_normal")
 
@@ -34,12 +34,10 @@ def _body(name, is_solid=False, faces=()):
     return body
 
 
-class _Feature:
-    """ReverseNormalFeature: the result bodies and the faces it consumed."""
+class _Feature(FakeFeature):
+    """A ReverseNormalFeature - the shared feature under this tool's result name."""
     def __init__(self, name="ReverseNormal1", bodies=(), faces=()):
-        self.name = name
-        self.bodies = _NamedCollection(bodies)
-        self.faces = _NamedCollection(faces)
+        super().__init__(name=name, bodies=bodies, faces=faces)
 
 
 class _RevFeatures:

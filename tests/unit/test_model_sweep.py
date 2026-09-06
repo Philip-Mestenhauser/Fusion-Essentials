@@ -12,8 +12,8 @@ import types
 import adsk.fusion
 
 from conftest import (load_tool, make_design, install, make_sketch, payload as _payload,
-                      error_message, assert_no_active_design, BRepBody, BRepEdge, Line3D,
-                      Profile, _NamedCollection)
+                      error_message, assert_no_active_design, BRepBody, BRepEdge,
+                      FakeFeatures as _SharedFeatures, Line3D, Profile, _NamedCollection)
 
 sw = load_tool("model_sweep")
 
@@ -79,8 +79,10 @@ def _built_path(count):
     return types.SimpleNamespace(count=count)
 
 
-class FakeFeatures:
+class FakeFeatures(_SharedFeatures):
+    """comp.features plus the sweep collection and the createPath factory a sweep drives."""
     def __init__(self, sweepfeatures):
+        super().__init__()
         self.sweepFeatures = sweepfeatures
         self.path_calls = []
         self.path_returns = _built_path(1)

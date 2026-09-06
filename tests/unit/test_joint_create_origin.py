@@ -15,10 +15,10 @@ import adsk.core
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, BRepEdge, BRepFace, Cylinder, FakeInfiniteLine3D, FakeMatrix3D,
-                      FakePoint, FakeVector3D, Line3D, MakeComp, MeshBody, Plane, Sketch,
-                      _NamedCollection, _Vertex, install, load_tool, make_bbox, make_design,
-                      make_occurrence, payload as _payload)
+from conftest import (BRepBody, BRepEdge, BRepFace, Cylinder, FakeInfiniteLine3D, FakeJointOrigin,
+                      FakeJointOriginInput, FakeMatrix3D, FakePoint, FakeVector3D, Line3D,
+                      MakeComp, MeshBody, Plane, Sketch, _NamedCollection, _Vertex, install,
+                      load_tool, make_bbox, make_design, make_occurrence, payload as _payload)
 
 jo = load_tool("joint_create_origin")
 
@@ -208,35 +208,35 @@ class TestGeometryAnchor:
 
 # ── handler(): guards, coordinate-anchor scaling, and the created-origin report ─────────────────
 
-class _FakeJointOriginInput:
+class _FakeJointOriginInput(FakeJointOriginInput):
+    """The shared input carrying this file's frame - Z primary, X secondary."""
     def __init__(self):
-        self.primaryAxisVector = SimpleNamespace(x=0.0, y=0.0, z=1.0)
-        self.secondaryAxisVector = SimpleNamespace(x=1.0, y=0.0, z=0.0)
-        self.thirdAxisVector = SimpleNamespace(x=0.0, y=1.0, z=0.0)
-        self.offsetX = self.offsetY = self.offsetZ = None   # set by the handler for anchor=coordinates
+        super().__init__(primary=SimpleNamespace(x=0.0, y=0.0, z=1.0),
+                         secondary=SimpleNamespace(x=1.0, y=0.0, z=0.0),
+                         third=SimpleNamespace(x=0.0, y=1.0, z=0.0))
 
 
-class _FakeJointOrigin:
+class _FakeJointOrigin(FakeJointOrigin):
+    """The shared origin with its offsetX/Y/Z ModelParameters at zero - each carries .value in cm
+    plus a dNN .name, and add() repopulates them from the input."""
     def __init__(self):
-        self.name = "JointOrigin1"
-        # offsetX/Y/Z ModelParameters (each carries .value in cm + a dNN .name) - populated by add()
-        # from the input.
-        self.offsetX = SimpleNamespace(value=0.0, name="d5")
-        self.offsetY = SimpleNamespace(value=0.0, name="d6")
-        self.offsetZ = SimpleNamespace(value=0.0, name="d7")
+        super().__init__(offsets={"offsetX": SimpleNamespace(value=0.0, name="d5"),
+                                  "offsetY": SimpleNamespace(value=0.0, name="d6"),
+                                  "offsetZ": SimpleNamespace(value=0.0, name="d7")})
 
 
-class _FakeJointOrigins:
+class _FakeJointOrigins(_NamedCollection):
+    """comp.jointOrigins: the shared walk plus createInput/add - the create seam."""
     def __init__(self, owner=None):
-        self.count = 0
+        super().__init__()
         self.owner = owner          # the component this collection hangs off
 
     def createInput(self, geom):
         return _FakeJointOriginInput()
 
     def add(self, jo_input):
-        self.count += 1
         origin = _FakeJointOrigin()
+        self._items.append(origin)
         # A created JO belongs to the component owning the collection it was added to: sub-component
         # jointOrigins.add lands a JO whose parentComponent IS that sub-component.
         origin.parentComponent = self.owner

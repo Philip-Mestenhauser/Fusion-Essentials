@@ -9,8 +9,8 @@ those designs to ONE tool module, which is all the three files differ in.
 import json
 from types import SimpleNamespace
 
-from conftest import (MakeComp, Profile, Sketch, SketchCurves, _NamedCollection, install,
-                      make_design)
+from conftest import (FakeSketchPoint, MakeComp, Profile, Sketch, SketchCurves, _NamedCollection,
+                      install, make_design)
 
 
 class _Curve:
@@ -21,10 +21,8 @@ class _Curve:
         self.endSketchPoint = type("SP", (), {})()
 
 
-class _SketchPoint:
+class _SketchPoint(FakeSketchPoint):
     """A SketchPoint the sketch owns - the 'point:<index>' address space sketchPoints indexes."""
-    def __init__(self):
-        self.isConstruction = False
 
 
 class _Coll(_NamedCollection):

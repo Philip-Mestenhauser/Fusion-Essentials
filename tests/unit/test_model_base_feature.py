@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from conftest import load_tool
+from conftest import FakeBaseFeature, FakeFeatures, FakeTimeline, MakeDesign, load_tool
 
 dm = load_tool("model_base_feature")
 dc = load_tool("_design_common")
@@ -22,13 +22,12 @@ def _wire_modes(monkeypatch):
     monkeypatch.setattr(adsk.fusion, "BaseFeature", _FakeBaseFeature)
 
 
-class _FakeBaseFeature:
-    """While a base feature is in edit, the API hides it from its owning collection (count drops,
-    itemByName returns None) and the design reads direct - so the only handle to it is the object add()
-    returned. startEdit/finishEdit toggle that visibility via the back-reference its collection sets on
-    add()."""
+class _FakeBaseFeature(FakeBaseFeature):
+    """The shared base feature, hiding itself through the back-reference its collection sets on
+    add(): while it is in edit the API drops it from count and itemByName, so the only handle to it
+    is the object add() returned."""
     def __init__(self, name="BaseFeature1"):
-        self.name = name
+        super().__init__(name=name)
         self.editing = False
         self.start_returns = True
         self.finish_count = 0
@@ -111,9 +110,10 @@ class _Coll:
             self._hidden.remove(bf)
 
 
-class _Features:
+class _Features(FakeFeatures):
+    """comp.features carrying the baseFeatures collection this tool opens a scope in."""
     def __init__(self, base_features):
-        self.baseFeatures = base_features
+        super().__init__(base_features=base_features)
 
 
 class _Comp:
@@ -122,40 +122,22 @@ class _Comp:
         self.features = _Features(base_features if base_features is not None else _Coll())
 
 
-class _AllComponents:
-    def __init__(self, comps):
-        self._comps = comps
-
-    @property
-    def count(self):
-        return len(self._comps)
-
-    def item(self, i):
-        return self._comps[i] if 0 <= i < len(self._comps) else None
-
-
-class _Timeline:
+class _Timeline(FakeTimeline):
+    """The shared timeline sized to `count` entries - the one read this tool takes off it."""
     def __init__(self, count):
-        self._count = count
-
-    @property
-    def count(self):
-        return self._count
+        super().__init__(items=[None] * count)
 
 
-class FakeDesign:
-    """A design exposing designType (numeric), an optional timeline, a root component with
-    baseFeatures, and an activeEditObject for base-feature-scope detection."""
+class FakeDesign(MakeDesign):
+    """The shared design under this tool's reads: designType, the activeEditObject a scope check
+    looks at, and a root whose features carry baseFeatures. `no_timeline` is the design whose
+    timeline does not read at all."""
     def __init__(self, design_type=1, timeline_count=0, base_features=None,
                  edit_object=None, no_timeline=False):
-        self.designType = design_type
-        if not no_timeline:
-            self.timeline = _Timeline(timeline_count)
         bf = base_features if base_features is not None else _Coll()
-        self.rootComponent = _Comp("Root", base_features=bf)
-        self.activeComponent = self.rootComponent
-        self.allComponents = _AllComponents([self.rootComponent])
-        self.activeEditObject = edit_object
+        super().__init__(comp=_Comp("Root", base_features=bf), design_type=design_type,
+                         active_edit_object=edit_object,
+                         timeline=None if no_timeline else _Timeline(timeline_count))
 
 
 def _install(monkeypatch, design):

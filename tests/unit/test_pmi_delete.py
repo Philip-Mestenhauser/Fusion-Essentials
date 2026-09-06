@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, error_message, MakeComp
+from conftest import load_tool, error_message, FakePMILeaderLineNote, MakeComp
 
 pd = load_tool("pmi_delete")
 
@@ -16,20 +16,7 @@ def _payload(result):
     return json.loads(result["content"][0]["text"])
 
 
-class _FakeAnn:
-    def __init__(self, name="Note1", deletable=True, delete_result=True):
-        self.name = name
-        self.objectType = "adsk::fusion::PMILeaderLineNote"
-        self.isDeletable = deletable
-        self._delete_result = delete_result
-        self.deleted = False
-
-    def deleteMe(self):
-        self.deleted = self._delete_result
-        return self._delete_result
-
-
-class _DeadHandle(_FakeAnn):
+class _DeadHandle(FakePMILeaderLineNote):
     """A deleted proxy that refuses every read - the shape read_flag answers None for, and the one
     an isValid coerced to False would misread as proof the annotation is gone."""
 
@@ -40,7 +27,7 @@ class _DeadHandle(_FakeAnn):
 
 @pytest.fixture
 def rig(monkeypatch):
-    ann = _FakeAnn()
+    ann = FakePMILeaderLineNote()
     comp = MakeComp("Root")
     # holes = (components_unreadable, items_unreadable) the post-delete re-walk reports; (0, 0) is
     # a COMPLETE walk, the only shape in which zero hits proves the annotation is gone.
@@ -48,7 +35,7 @@ def rig(monkeypatch):
 
     def find(d, name, component=""):
         # after a successful delete the annotation no longer resolves
-        if state.ann.deleted:
+        if state.ann._deleted:
             return None, None, f"No PMI named '{name}'. Available: none."
         return state.ann, state.comp, None
 
@@ -56,7 +43,7 @@ def rig(monkeypatch):
         if stats is not None:
             stats["components_unreadable"] = state.holes[0]
             stats["items_unreadable"] = state.holes[1]
-        return ([] if state.ann.deleted else [(state.ann, state.comp)]), []
+        return ([] if state.ann._deleted else [(state.ann, state.comp)]), []
     monkeypatch.setattr(pd._common, "design", lambda: object())
     monkeypatch.setattr(pd._pmi, "find_annotation", find)
     monkeypatch.setattr(pd._pmi, "annotation_hits", hits)
@@ -72,10 +59,10 @@ class TestDelete:
     def test_not_deletable_is_refused_without_change(self, rig):
         rig.ann.isDeletable = False
         msg = error_message(pd.handler(annotation="Note1"))
-        assert "isDeletable=false" in msg and rig.ann.deleted is False
+        assert "isDeletable=false" in msg and rig.ann._deleted is False
 
     def test_a_declined_delete_is_an_error(self, rig):
-        rig.ann._delete_result = False
+        rig.ann._delete_ok = False
         assert "declined" in error_message(pd.handler(annotation="Note1"))
 
     def test_a_survivor_after_success_is_an_error(self, rig):

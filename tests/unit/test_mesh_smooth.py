@@ -20,8 +20,8 @@ import types
 
 import pytest
 
-from conftest import (FakeFeatures, MakeComp, MakeDesign, MeshBody, install, load_tool, payload,
-                      error_message)
+from conftest import (FakeFeatures, FakeValueInput as _ValueInput, MakeComp, MakeDesign, MeshBody,
+                      install, load_tool, payload, error_message)
 
 msm = load_tool("mesh_smooth")
 
@@ -31,12 +31,6 @@ _SMOOTHED_COORDS = [0.4997, 0.4997, 0.4997, 0.4997, 0.4997, 0.5003, 0.4997, 0.50
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────────────────────────
-
-class _ValueInput:
-    """Stands in for the adsk.core.ValueInput MeshSmoothFeatureInput.smoothness is typed to take."""
-    def __init__(self, real):
-        self.real = real
-
 
 def _mesh(name="Scan1", coords=None, **kw):
     """conftest's shared MeshBody carrying this file's box node coordinates by default."""
@@ -92,7 +86,7 @@ class _SmoothFeatures:
             self._on_add()
         if self.none_feature:
             return None
-        asked = getattr(getattr(self.last_input, "smoothness", None), "real", None)
+        asked = getattr(getattr(self.last_input, "smoothness", None), "realValue", None)
         landed = self._feature_smoothness
         if landed is None:
             landed = asked if asked is not None else self._default_smoothness
@@ -142,7 +136,7 @@ def rig(monkeypatch):
 class TestSmoothnessInput:
     def test_smoothness_crosses_as_a_value_input_carrying_the_bare_factor(self, rig):
         payload(msm.handler(mesh="H", smoothness=0.5))
-        assert rig.feats.last_input.smoothness.real == pytest.approx(0.5)
+        assert rig.feats.last_input.smoothness.realValue == pytest.approx(0.5)
 
     def test_an_omitted_smoothness_leaves_the_property_unset(self, rig):
         payload(msm.handler(mesh="H"))

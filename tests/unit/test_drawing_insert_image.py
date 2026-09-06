@@ -12,33 +12,19 @@ count, item or delete. No live Fusion.
 
 import json
 import math
-import sys
 import types
 
 import pytest
 
 import adsk  # the mock package conftest installed at import time
-import live_api_facts
-from conftest import load_tool
+from conftest import FakeImages, FakeSheet, load_tool, make_drawing, make_drawing_session
 
 ins = load_tool("drawing_insert_image")
-
-# The DrawingUnitTypes member names this build carries; the ints come SEEDED from the generated
-# live_api_facts.py (conftest wires the strict enum), so a name absent from the measured family
-# raises here instead of minting a fabricated value.
-EXPECTED_UNIT_MEMBERS = {
-    name: getattr(adsk.drawing.DrawingUnitTypes, name)
-    for name in ("InchDrawingUnitType", "MillimeterDrawingUnitType")
-}
-
-# The MEASURED DrawingStandardTypes values. ISO is 0 - a FALSY member - so a truthiness test in the
-# decode drops every ISO drawing.
-_STANDARDS = types.SimpleNamespace(**live_api_facts.ENUMS["drawing.DrawingStandardTypes"])
 
 
 class _PathIgnoringInput:
     """An ImageInsertInput whose imageFilePath assignment silently does not take - the SWIG-proxy
-    shape the handler's read-back guards against."""
+    shape the handler's read-back guards against. ImageInsertInput carries no shape dump."""
 
     imageFilePath = property(lambda self: "", lambda self, value: None)
 
@@ -48,7 +34,7 @@ class _PathIgnoringInput:
 
 
 class _RecordingInput:
-    """An ImageInsertInput that RECORDS which properties were assigned.
+    """An ImageInsertInput that RECORDS which properties were assigned; no shape dump exists for it.
 
     rotationAngle's API default is 0.0, so a payload read alone cannot tell an omitted rotation from
     one written as zero - the assignment set can."""
@@ -76,17 +62,6 @@ class _RotationIgnoringInput(_RecordingInput):
         super().__setattr__(name, value)
 
 
-class _UnreadableModifiedDoc:
-    """A drawing document whose isModified read RAISES - the flag the payload must publish as null."""
-
-    def __init__(self, drawing):
-        self.drawing = drawing
-
-    @property
-    def isModified(self):
-        raise RuntimeError("isModified unavailable")
-
-
 def _payload(res):
     assert res["isError"] is False, res
     return json.loads(res["content"][0]["text"])
@@ -94,50 +69,31 @@ def _payload(res):
 
 @pytest.fixture
 def env(monkeypatch):
-    """An active drawing document with one millimetre sheet and a recording Images collection.
+    """An active drawing document with one ISO A3 millimetre sheet and a recording Images
+    collection. The whole adsk.drawing surface the tool and _drawing_common read goes in wholesale,
+    so this file does not depend on what a sibling drawing test file left behind."""
+    state = types.SimpleNamespace()
 
-    The WHOLE adsk.drawing surface the tool and _drawing_common read is installed here (module
-    attribute + sys.modules), so the test does not depend on what another drawing test file left
-    behind, in either collection order.
-    """
-    state = {"insert_result": True, "modifies": True, "input": None, "insert_calls": [],
-             "create_calls": 0}
-    doc = types.SimpleNamespace(isModified=False)
+    def _install(units="mm", standard="iso", width=420.0, height=297.0, modified_raises=None,
+                 **sheet_knobs):
+        # width/height are MILLIMETRES on every drawing whatever the drawing's own units read -
+        # they are what an anchor is bounded against.
+        sheet = FakeSheet("Sheet1", images=FakeImages(input_factory=_RecordingInput),
+                          width=width, height=height, **sheet_knobs)
+        sheet.images._sheet = sheet
+        state.document = make_drawing(sheets=[sheet], units=units, standard=standard,
+                                      modified_raises=modified_raises)
+        state.sheet = sheet
+        state.images = sheet.images
+        state.settings = state.document.drawing.documentSettings
+        make_drawing_session(monkeypatch, state.document)
+        monkeypatch.setattr(adsk.core.Point2D, "create", lambda x, y: ("pt", x, y))
+        return state.document
 
-    def _create_input():
-        state["create_calls"] += 1
-        state["input"] = state.get("input_factory", _RecordingInput)()
-        return state["input"]
-
-    def _insert(inp):
-        state["insert_calls"].append(inp)
-        if state["modifies"]:
-            doc.isModified = True
-        return state["insert_result"]
-
-    images = types.SimpleNamespace(createInput=_create_input, insert=_insert)
-    # width/height are MILLIMETRES on every drawing (an ISO A3 sheet here) whatever the drawing's
-    # own units read - they are what an anchor is bounded against.
-    sheet = types.SimpleNamespace(name="Sheet1", images=images, width=420.0, height=297.0)
-    # units (the DIMENSION display unit) and standard (what fixes the coordinate unit) are separate
-    # settings, and drawing_create can mint them split - so they are separately settable here.
-    settings = types.SimpleNamespace(units=EXPECTED_UNIT_MEMBERS["MillimeterDrawingUnitType"],
-                                     standard=_STANDARDS.ISODrawingStandardType)
-    doc.drawing = types.SimpleNamespace(activeSheet=sheet, documentSettings=settings)
-    holder = types.SimpleNamespace(activeDocument=doc)
-
-    fake_drawing = types.SimpleNamespace(
-        DrawingDocument=types.SimpleNamespace(
-            cast=lambda d: d if getattr(d, "drawing", None) is not None else None),
-        DrawingUnitTypes=types.SimpleNamespace(**EXPECTED_UNIT_MEMBERS),
-        DrawingStandardTypes=_STANDARDS,
-    )
-    monkeypatch.setattr(adsk, "drawing", fake_drawing, raising=False)
-    monkeypatch.setitem(sys.modules, "adsk.drawing", fake_drawing)
-    monkeypatch.setattr(adsk.core.Application, "get", lambda: holder)
-    monkeypatch.setattr(adsk.core.Point2D, "create", lambda x, y: ("pt", x, y))
-    return types.SimpleNamespace(state=state, doc=doc, holder=holder, sheet=sheet,
-                                 settings=settings, drawing=doc.drawing)
+    _install()
+    state.install = _install
+    state.last_input = lambda: state.images._inputs[-1]
+    return state
 
 
 @pytest.fixture
@@ -155,16 +111,16 @@ class TestHappyPath:
         assert out["position"] == [60.0, 100.0]
         assert out["scale"] == 0.25
         assert out["sheet"] == "Sheet1"
-        inp = env.state["input"]
+        inp = env.last_input()
         assert inp.imageFilePath == image_file
         assert inp.position == ("pt", 60.0, 100.0)      # x/y in sheet order, not swapped
         assert inp.scale == 0.25
-        assert env.state["insert_calls"] == [inp]
+        assert env.images._inserts == [inp]
 
     def test_omitted_scale_leaves_the_api_default_and_reports_null(self, env, image_file):
         out = _payload(ins.handler(image_path=image_file, x=1, y=2))
         assert out["scale"] is None
-        assert env.state["input"].scale is None         # never assigned - no invented 1.0
+        assert env.last_input().scale is None           # never assigned - no invented 1.0
 
     def test_declared_returns_are_present(self, env, image_file):
         out = _payload(ins.handler(image_path=image_file, x=1, y=2))
@@ -180,7 +136,7 @@ class TestRotation:
     @pytest.mark.parametrize("deg, rad", [(180, math.pi), (90, math.pi / 2), (-45, -math.pi / 4)])
     def test_degrees_are_converted_to_radians_on_the_input(self, env, image_file, deg, rad):
         out = _payload(ins.handler(image_path=image_file, x=1, y=2, rotate_deg=deg))
-        assert env.state["input"].rotationAngle == pytest.approx(rad)
+        assert env.last_input().rotationAngle == pytest.approx(rad)
         assert out["rotate_deg"] == float(deg)              # what the caller passed, back verbatim
         assert out["rotation_radians"] == pytest.approx(rad)
 
@@ -188,31 +144,31 @@ class TestRotation:
         # the conversion's DIRECTION: 180 landing as 180.0 would be degrees-into-a-radians property,
         # the exact silent mis-rotation the measurement rules out
         ins.handler(image_path=image_file, x=1, y=2, rotate_deg=180)
-        assert env.state["input"].rotationAngle != 180.0
+        assert env.last_input().rotationAngle != 180.0
 
     def test_zero_degrees_is_still_written_and_reported(self, env, image_file):
         # 0 is falsy - a truthiness test here would silently drop an explicit no-rotation request
         out = _payload(ins.handler(image_path=image_file, x=1, y=2, rotate_deg=0))
-        assert "rotationAngle" in env.state["input"].assigned
+        assert "rotationAngle" in env.last_input().assigned
         assert out["rotate_deg"] == 0.0 and out["rotation_radians"] == 0.0
 
     def test_omitted_rotation_is_never_assigned_and_reports_null(self, env, image_file):
         out = _payload(ins.handler(image_path=image_file, x=1, y=2))
-        assert "rotationAngle" not in env.state["input"].assigned   # the API's own default stands
+        assert "rotationAngle" not in env.last_input().assigned   # the API's own default stands
         assert out["rotate_deg"] is None and out["rotation_radians"] is None
 
     def test_non_numeric_rotation_is_refused_naming_the_value(self, env, image_file):
         res = ins.handler(image_path=image_file, x=1, y=2, rotate_deg="sideways")
         assert res["isError"] is True
         assert "rotate_deg" in res["message"] and "'sideways'" in res["message"]
-        assert env.state["create_calls"] == 0
+        assert env.images._inputs == []
 
     def test_a_rotation_that_does_not_take_is_refused_before_the_insert(self, env, image_file):
-        env.state["input_factory"] = _RotationIgnoringInput
+        env.images._input_factory = _RotationIgnoringInput
         res = ins.handler(image_path=image_file, x=1, y=2, rotate_deg=90)
         assert res["isError"] is True
         assert "did not take" in res["message"]
-        assert env.state["insert_calls"] == []      # no unrotated image left on the sheet
+        assert env.images._inserts == []      # no unrotated image left on the sheet
 
     def test_the_rotation_input_states_degrees_about_the_position(self):
         props = ins.tool.to_dict()["inputSchema"]["properties"]
@@ -243,7 +199,7 @@ class TestImageFormats:
         assert "'.gif'" in res["message"]
         for ext in self.MEASURED:
             assert ext in res["message"]
-        assert env.state["create_calls"] == 0       # refused before Fusion is touched
+        assert env.images._inputs == []       # refused before Fusion is touched
 
     def test_the_extension_check_is_case_insensitive(self, env, tmp_path):
         p = tmp_path / "LOGO.PNG"
@@ -268,12 +224,12 @@ class TestSheetUnits:
     def test_units_follow_the_drawings_own_setting(self, env, image_file):
         out = _payload(ins.handler(image_path=image_file, x=1, y=2))
         assert out["sheet_units"] == "mm"
-        env.settings.units = EXPECTED_UNIT_MEMBERS["InchDrawingUnitType"]
+        env.install(units="in")
         out = _payload(ins.handler(image_path=image_file, x=1, y=2))
         assert out["sheet_units"] == "in"
 
     def test_unreadable_units_are_published_as_null_not_guessed_mm(self, env, image_file):
-        env.drawing.documentSettings = None
+        env.document.drawing.documentSettings = None
         out = _payload(ins.handler(image_path=image_file, x=1, y=2))
         assert out["sheet_units"] is None
 
@@ -289,13 +245,13 @@ class TestCoordinateUnit:
         # standard='iso' with units='inch' is mintable by drawing_create's own split Choices, and
         # sheet coordinates are drawing length units - millimetres when the standard includes ISO.
         # Labelling x/y with the dimension unit is wrong by 25.4x on this very drawing.
-        env.settings.units = EXPECTED_UNIT_MEMBERS["InchDrawingUnitType"]
+        env.install(units="in", standard="iso")
         out = _payload(ins.handler(image_path=image_file, x=60, y=100))
         assert out["coordinate_unit"] == "mm"
         assert out["sheet_units"] == "in"
 
     def test_an_asme_drawing_places_in_inches(self, env, image_file):
-        env.settings.standard = _STANDARDS.ASMEDrawingStandardType
+        env.install(standard="asme")
         out = _payload(ins.handler(image_path=image_file, x=1, y=2))
         assert out["coordinate_unit"] == "in"
         assert out["sheet_units"] == "mm"
@@ -332,7 +288,7 @@ class TestInputGuards:
         res = ins.handler(image_path=str(tmp_path / "nope.png"), x=1, y=2)
         assert res["isError"] is True
         assert "not found" in res["message"]
-        assert env.state["create_calls"] == 0          # nothing entered the Fusion transaction
+        assert env.images._inputs == []                # nothing entered the Fusion transaction
 
     def test_empty_path_is_refused(self, env):
         res = ins.handler(x=1, y=2)
@@ -343,7 +299,7 @@ class TestInputGuards:
         res = ins.handler(image_path=image_file, x=1)
         assert res["isError"] is True
         assert "'x' and 'y'" in res["message"]
-        assert env.state["create_calls"] == 0
+        assert env.images._inputs == []
 
     def test_non_numeric_position_is_refused(self, env, image_file):
         res = ins.handler(image_path=image_file, x="left", y=2)
@@ -354,17 +310,17 @@ class TestInputGuards:
         res = ins.handler(image_path=image_file, x=1, y=2, scale=0)
         assert res["isError"] is True
         assert "greater than 0" in res["message"]
-        assert env.state["create_calls"] == 0
+        assert env.images._inputs == []
 
     def test_image_path_that_does_not_take_is_refused(self, env, image_file):
-        env.state["input_factory"] = _PathIgnoringInput
+        env.images._input_factory = _PathIgnoringInput
         res = ins.handler(image_path=image_file, x=1, y=2)
         assert res["isError"] is True
         assert "did not take" in res["message"]
-        assert env.state["insert_calls"] == []
+        assert env.images._inserts == []
 
-    def test_active_document_that_is_not_a_drawing_is_refused(self, env, image_file):
-        env.holder.activeDocument = types.SimpleNamespace(name="Design")
+    def test_active_document_that_is_not_a_drawing_is_refused(self, env, image_file, monkeypatch):
+        make_drawing_session(monkeypatch, object())
         res = ins.handler(image_path=image_file, x=1, y=2)
         assert res["isError"] is True
         assert "not a drawing" in res["message"]
@@ -381,8 +337,8 @@ class TestOffSheetPosition:
         assert "off sheet 'Sheet1'" in res["message"] and "0 to 420.0" in res["message"]
         # an ISO position IS millimetres, so the converted figure is the number the caller gave
         assert "(500.0, 100.0) mm is 500.0 x 100.0 mm" in res["message"]
-        assert env.state["create_calls"] == 0
-        assert env.state["insert_calls"] == []
+        assert env.images._inputs == []
+        assert env.images._inserts == []
 
     def test_a_negative_position_is_refused(self, env, image_file):
         res = ins.handler(image_path=image_file, x=10, y=-1)
@@ -398,8 +354,7 @@ class TestOffSheetPosition:
         # measured: on a 508 x 254 mm ASME sheet an image anchored at (5, 3) rendered at the 5in =
         # 127mm spot and one at (100, 50) rendered nothing - the position is INCHES while the
         # extent stays millimetres, so comparing the raw numbers would pass an anchor 2540 mm out
-        env.settings.standard = _STANDARDS.ASMEDrawingStandardType
-        env.sheet.width, env.sheet.height = 508.0, 254.0
+        env.install(standard="asme", width=508.0, height=254.0)
         out = _payload(ins.handler(image_path=image_file, x=5, y=3))
         assert out["inserted"] is True and out["position_bounds_checked"] is True
         res = ins.handler(image_path=image_file, x=100, y=50)
@@ -420,7 +375,7 @@ class TestOffSheetPosition:
     def test_an_unmeasurable_sheet_says_the_position_was_not_checked(self, env, image_file):
         # nothing is guessed when the extent cannot be read - the caller is told the one thing it
         # then has to check itself
-        del env.sheet.width
+        env.install(width_raises="the sheet proxy will not report a width")
         out = _payload(ins.handler(image_path=image_file, x=9999, y=9999))
         assert out["sheet_extent"] == [None, 297.0]
         assert out["position_bounds_checked"] is False
@@ -454,7 +409,7 @@ class TestOffSheetPosition:
             "420.0 x 0 to 297.0 mm. An off-sheet insert returns success and renders nothing, and "
             "an image cannot be read back or moved afterwards, so nothing was placed. Pass a "
             "position inside the sheet.")
-        assert env.state["create_calls"] == 0 and env.state["insert_calls"] == []
+        assert env.images._inputs == [] and env.images._inserts == []
 
     def test_a_missing_file_with_a_good_position_still_reads_as_the_file_refusal_alone(
             self, env, tmp_path):
@@ -495,11 +450,11 @@ class TestPathReadBack:
                                       lambda self, v: object.__setattr__(
                                           self, "_p", v.replace("/", "\\"))),
             "position": None, "scale": None})
-        env.state["input_factory"] = normalising
+        env.images._input_factory = normalising
         res = ins.handler(image_path=forward, x=1, y=2)
         assert res["isError"] is True
         assert "did not take" in res["message"]
-        assert env.state["insert_calls"] == []
+        assert env.images._inserts == []
 
     def test_a_forward_slash_path_that_reads_back_verbatim_is_accepted(self, env, tmp_path):
         p = tmp_path / "logo.png"
@@ -507,30 +462,30 @@ class TestPathReadBack:
         forward = str(p).replace("\\", "/")
         out = _payload(ins.handler(image_path=forward, x=1, y=2))
         assert out["image_path"] == forward
-        assert env.state["input"].imageFilePath == forward
+        assert env.last_input().imageFilePath == forward
 
 
 class TestEffectHonesty:
     def test_insert_false_is_a_failure(self, env, image_file):
-        env.state["insert_result"] = False
+        env.images._insert_ok = False
         res = ins.handler(image_path=image_file, x=1, y=2)
         assert res["isError"] is True
         assert "returned false" in res["message"]
 
     def test_success_that_leaves_the_document_unmodified_is_a_failure(self, env, image_file):
-        env.state["modifies"] = False          # the API says true and changes nothing
+        env.images._modifies = False           # the API says true and changes nothing
         res = ins.handler(image_path=image_file, x=1, y=2)
         assert res["isError"] is True
         assert "still unmodified" in res["message"]
 
     def test_already_modified_document_is_reported_as_inconclusive(self, env, image_file):
-        env.doc.isModified = True
+        env.document.isModified = True
         out = _payload(ins.handler(image_path=image_file, x=1, y=2))
         assert out["document_modified_before"] is True
         assert "ALREADY modified" in out["note"]
 
     def test_unreadable_modified_flag_is_published_as_null_not_false(self, env, image_file):
-        env.holder.activeDocument = _UnreadableModifiedDoc(env.drawing)
+        env.install(modified_raises="isModified unavailable")
         out = _payload(ins.handler(image_path=image_file, x=1, y=2))
         assert out["document_modified"] is None
         assert out["document_modified_before"] is None

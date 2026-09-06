@@ -33,11 +33,15 @@ class TestEnumFamiliesMeasured:
             + ", ".join(missing))
 
     def test_every_consumed_behavior_key_is_measured(self):
-        missing = sorted(_consumed_behavior_keys() - set(live_api_facts.BEHAVIOR))
+        # A PENDING key is read through an `in` gate, so the harness imports without it; the
+        # staleness check below is what stops the excuse outliving the regen.
+        missing = sorted(_consumed_behavior_keys() - set(live_api_facts.BEHAVIOR)
+                         - set(_PENDING_REGEN))
         assert not missing, (
             "The harness consumes BEHAVIOR keys live_api_facts.py does not carry - add a "
             "measurement row (facts_on_pass or a FACT line) to tests/live/measure_api.py and "
-            "regenerate against live Fusion. Missing: " + ", ".join(missing))
+            "regenerate against live Fusion, or a reasoned _PENDING_REGEN entry until that run "
+            "happens. Missing: " + ", ".join(missing))
 
     def test_every_flag_a_shared_fake_stands_on_is_read_by_it(self):
         # The other direction, for the rows that name a SHARED fake as what encodes them: the
@@ -103,8 +107,8 @@ _UNCONSUMED_OK = {
 
 # Emitted keys the generated facts file does not carry YET - each is a measurement-row rename or
 # addition awaiting the next live regen (a fully-PASSING py -3 tests/live/measure_api.py rewrites
-# BEHAVIOR and empties this table). Shrink-only; the staleness check below fails the moment the
-# regen lands the key, so an entry cannot outlive its excuse.
+# BEHAVIOR and empties this table), and a harness read of one goes through an `in` gate meanwhile.
+# Shrink-only; the staleness check below fails the moment the regen lands the key.
 _PENDING_REGEN = {}
 
 

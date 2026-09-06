@@ -15,10 +15,10 @@ import adsk.core
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, BRepEdge, BRepFace, Circle3D, Cone, Cylinder, FakeJoint, FakeJoints,
-                      FakeMatrix3D, FakePoint, FakeTimelineObject, FakeVector3D, Line3D, MakeComp,
-                      Plane, Torus, _Vertex, install, load_tool, make_design, make_occurrence,
-                      payload as _payload)
+from conftest import (BRepBody, BRepEdge, BRepFace, Circle3D, Cone, Cylinder, FakeJoint,
+                      FakeJointInput, FakeJoints, FakeMatrix3D, FakePoint, FakeTimelineObject,
+                      FakeVector3D, Line3D, MakeComp, Plane, Torus, _NamedCollection, _Vertex,
+                      install, load_tool, make_design, make_occurrence, payload as _payload)
 
 jg = load_tool("joint_at_geometry")
 
@@ -410,20 +410,11 @@ class TestJointGeometryRules:
 
 # ── handler guards + wiring ─────────────────────────────────────────────────
 
-class _FakeJointInput:
-    def __init__(self):
-        self.motion = None
-    # *args so we capture the optional custom-axis-entity 2nd arg
-    def setAsRigidJointMotion(self):
-        self.motion = ("rigid",); return True
-    def setAsRevoluteJointMotion(self, *args):
-        self.motion = ("revolute",) + args; return True
-    def setAsSliderJointMotion(self, *args):
-        self.motion = ("slider",) + args; return True
-    def setAsCylindricalJointMotion(self, *args):
-        self.motion = ("cyl",) + args; return True
-    def setAsBallJointMotion(self, a, b):
-        self.motion = ("ball", a, b); return True
+class _FakeJointInput(FakeJointInput):
+    """The shared input, with `motion` this file's read of the setter it recorded."""
+    @property
+    def motion(self):
+        return self._motion
 
 
 def _install_design(monkeypatch, token_map, joint_health=_FHS.HealthyFeatureHealthState,
@@ -549,7 +540,7 @@ class TestHandler:
     def test_cylindrical_named_axis_is_frame_relative(self, monkeypatch):
         joints = _install_design(monkeypatch, {"a": _face(_ST.CylinderSurfaceType), "b": _face(_ST.CylinderSurfaceType)})
         _payload(jg.handler(handle_one="a", handle_two="b", motion="cylindrical", axis="y"))
-        assert joints._input.motion == ("cyl", _JD.YAxisJointDirection)
+        assert joints._input.motion == ("cylindrical", _JD.YAxisJointDirection)
 
     def test_auto_axis_with_no_geometry_axis_falls_back_to_frame_z(self, monkeypatch):
         # PLANAR faces give _axis_entity nothing -> 'auto' can't derive an axis; the motion uses the
@@ -994,10 +985,11 @@ class TestModelParameters:
         assert jg.motion_param_names(j) == {"offset": "d12", "angle": "d11"}
 
 
-class _Snapshots:
-    """Design.snapshots: the moved-but-uncaptured position flag. `blind` makes the read RAISE, which
-    is the flag being UNKNOWN - not a False."""
+class _Snapshots(_NamedCollection):
+    """Design.snapshots: the shared walk plus the moved-but-uncaptured position flag. `blind` makes
+    the flag read RAISE, which is the flag being UNKNOWN - not a False."""
     def __init__(self, pending=False, blind=False):
+        super().__init__()
         self._pending = pending
         self._blind = blind
 

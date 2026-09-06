@@ -11,9 +11,10 @@ The HoleFeatureInput fake RECORDS the calls so we can assert the exact builder p
 
 import pytest
 
-from conftest import (load_tool, FakePoint, FakeVector3D, BRepEdge, Circle3D, Cylinder, Line3D,
-                      FakeMatrix3D, MakeComp, _NamedCollection, _make_object_collection, install,
-                      make_design, make_occurrence, payload as _payload)
+from conftest import (load_tool, FakeFeatures, FakePoint, FakeSketchPoint, FakeVector3D, BRepEdge,
+                      Circle3D, Cylinder, Line3D, FakeMatrix3D, MakeComp, Sketch,
+                      _NamedCollection, _make_object_collection, install, make_design,
+                      make_occurrence, payload as _payload)
 
 mh = load_tool("model_hole")
 
@@ -250,21 +251,29 @@ class FakeThreadFeatures:
 
 # sketch / point machinery ----------------------------------------------------
 
-class _SketchPoint:
+class _SketchPoint(FakeSketchPoint):
+    """The shared point, built from the placement coordinate a hole was positioned at."""
     def __init__(self, xyz):
-        self.geometry = xyz
+        super().__init__(geometry=xyz)
 
 
-class _SketchPoints:
+class _SketchPoints(_NamedCollection):
+    """sketch.sketchPoints: the shared walk plus add(point) - what a hole placement lands on."""
     def __init__(self):
-        self.items = []
+        super().__init__()
+        self.items = self._items
+
     def add(self, pt):
-        sp = _SketchPoint(pt); self.items.append(sp); return sp
+        sp = _SketchPoint(pt)
+        self._items.append(sp)
+        return sp
 
 
-class _Sketch:
+class _Sketch(Sketch):
+    """The shared sketch plus the model/sketch space mapping a placement converts through and the
+    deleteMe whose answer decides whether the helper sketch actually went."""
     def __init__(self, name="Sketch1", to_sketch=None, parent=None, delete_answer=True):
-        self.name = name
+        super().__init__(name=name, parent_component=parent)
         self.sketchPoints = _SketchPoints()
         self.deleted = False
         # What deleteMe answers. True marks the sketch deleted; False models a platform that
@@ -275,7 +284,6 @@ class _Sketch:
         # sketch's own 2D space. `to_sketch` is the mapping a live sketch applies; None models one
         # that cannot convert at all. `parent` is what decides WHOSE model space it maps from.
         self._to_sketch = to_sketch
-        self.parentComponent = parent
 
     def modelToSketchSpace(self, p):
         if self._to_sketch is None:
@@ -295,9 +303,11 @@ class _Sketch:
         return True
 
 
-class _Sketches:
+class _Sketches(_NamedCollection):
+    """component.sketches: the shared walk plus the add() a hole's helper sketch is created by."""
     def __init__(self, owner=None):
-        self._byname = {}
+        super().__init__()
+        self._byname = {}          # the created sketches by name, for a test asserting on one
         self.created_on = []
         self.to_sketch = None      # the model -> sketch mapping every sketch created here applies
         self.owner = owner         # the component they report as parentComponent
@@ -311,13 +321,15 @@ class _Sketches:
         s = _Sketch("HolePts%d" % len(self.created_on), to_sketch=self.to_sketch, parent=self.owner,
                     delete_answer=self.delete_answer)
         self.created_on.append(plane)
-        self._byname[s.name] = s; return s
-    def itemByName(self, n):
-        return self._byname.get(n)
+        self._items.append(s)
+        self._byname[s.name] = s
+        return s
 
 
-class _Features:
+class _Features(FakeFeatures):
+    """comp.features plus the two collections a hole build reaches through."""
     def __init__(self, owner=None):
+        super().__init__()
         self.holeFeatures = FakeHoleFeatures(parent=owner)
         self.threadFeatures = FakeThreadFeatures()
 

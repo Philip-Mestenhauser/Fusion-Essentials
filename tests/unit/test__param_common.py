@@ -8,41 +8,25 @@ DATABASE-unit conversion), ``_owner_facts`` (a model parameter's maker), and ``_
 import json
 from types import SimpleNamespace
 
-from conftest import (FakeFeature, FakeModelParameter, FakeUserParameter, FakeUserParameters,
-                      MakeDesign, load_tool)
+import pytest
+
+from conftest import (FakeFeature, FakeModelParameter, FakeUnitsManager, FakeUserParameter,
+                      FakeUserParameters, MakeDesign, load_tool)
 
 params = load_tool("_param_common")
 
+# the shared units manager: convert() lifts a database number out of the internalUnits SENTINEL
+# into the parameter's own display unit, which is the call shape _param_summary makes.
+_UM = FakeUnitsManager
+
 
 # ── _param_summary: numeric vs text value ──────────────────────────────────
-
-class _UM:
-    """A units manager: internal units are cm/radians, convert() scales into the target unit."""
-    internalUnits = "cm"
-    _FACTOR = {"mm": 10.0, "cm": 1.0, "in": 1 / 2.54, "deg": 180.0 / 3.141592653589793}
-
-    def convert(self, value, from_unit, to_unit):
-        return value * self._FACTOR[to_unit]
-
-
-class _TextParameter(FakeUserParameter):
-    """A text parameter double: `value` raises here, so the summary has to fall back to `.textValue`."""
-
-    @property
-    def value(self):
-        raise RuntimeError("text parameter has no numeric value")
-
-    @value.setter
-    def value(self, _v):
-        pass
-
 
 class TestParamSummary:
     def test_value_is_reported_in_the_parameters_OWN_unit(self):
         # Parameter.value is in DATABASE units: a "50 mm" length reads 5.0. Reporting 5.0 beside
         # unit='mm' is a 10x error for any caller doing arithmetic on it.
-        p = FakeUserParameter(name="StockX", expression="50 mm", unit="mm", value=5.0,
-                              text_value="ignored")
+        p = FakeUserParameter(name="StockX", expression="50 mm", unit="mm", value=5.0)
         out = params._param_summary(p, units_manager=_UM())
         assert out["value"] == 50.0                  # mm, matching out["unit"]
         assert out["value_units"] == "mm"
@@ -73,10 +57,19 @@ class TestParamSummary:
         assert out["value"] == 5.0
         assert out["value_units"] == "internal (cm/radians)"
 
+    def test_a_conversion_the_units_manager_refuses_is_labelled_internal_too(self):
+        # The other route to the same honest fallback: the manager is there and convert() RAISES.
+        # The raw db number then has to be published under the internal frame - naming it as the
+        # parameter's own unit would present an unconverted number as a converted one.
+        p = FakeUserParameter(name="Odd", expression="1", unit="furlong", value=5.0)
+        out = params._param_summary(p, units_manager=_UM())
+        assert out["value"] == 5.0
+        assert out["value_units"] == "internal (cm/radians)"
+
     def test_text_param_falls_back_to_textValue(self):
         # A text parameter: .value raises, so summary must use .textValue.
-        p = _TextParameter(name="Label", expression="'Roughing'", unit="",
-                           text_value="Roughing")
+        p = FakeUserParameter(name="Label", expression="'Roughing'", unit="",
+                              text_value="Roughing")
         out = params._param_summary(p)
         assert out["value"] == "Roughing"
 
@@ -184,7 +177,9 @@ class TestOwnerFacts:
             "unit": "mm",
             "comment": "half the diametral clearance",
             "favorite": False,              # isFavorite reads on a model parameter too
-            "value": -0.0125,               # -0.00125 cm -> mm, the parameter's own unit
+            # -0.00125 cm -> mm, the parameter's own unit; approx because the conversion runs
+            # through a float factor and the last bit is not part of the promise
+            "value": pytest.approx(-0.0125),
             "value_internal": -0.00125,
             "value_units": "mm",
         }

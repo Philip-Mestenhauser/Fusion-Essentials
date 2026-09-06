@@ -24,7 +24,9 @@ from conftest import (
     FakeDataProject,
     FakeDocumentReference,
     FakeFusionDocument,
+    FakeJoint as _SharedJoint,
     FakeOperation,
+    FakeSetup as _SharedSetup,
     FakeProducts,
     FakeSelection,
     FakeSelections,
@@ -100,10 +102,10 @@ def FakeOcc(name, comp=None, children=0, bodies=1, grounded=False, xref=False,
                            bodies=[None] * bodies, grounded=grounded, referenced=xref)
 
 
-class FakeJoint:
+class FakeJoint(_SharedJoint):
+    """The shared joint narrowed to the name and health an orientation rollup reads."""
     def __init__(self, name, health=0):
-        self.name = name
-        self.healthState = health
+        super().__init__(name=name, health=health)
 
 
 class FakeTL:
@@ -191,10 +193,10 @@ def FakeDesign(root, timeline=(), units="mm", design_type=1, parameters=0, sub_c
     return des
 
 
-class FakeSetup:
+class FakeSetup(_SharedSetup):
+    """The shared setup taking its operations positionally, as this file's rollups build it."""
     def __init__(self, ops, name="Setup1"):
-        self.allOperations = _Coll(ops)
-        self.name = name
+        super().__init__(name, ops=ops)
 
 
 class _OpFolder:

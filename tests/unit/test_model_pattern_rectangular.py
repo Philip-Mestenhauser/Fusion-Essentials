@@ -196,8 +196,9 @@ def _install_body_in_subcomponent():
     return sub_rf, sub_cf, root_rf, root_cf
 
 
-def _linear_edge():
-    return BRepEdge(curve=Line3D(start=FakePoint(0, 0, 0), end=FakePoint(1, 0, 0)))
+def _linear_edge(proxy=BRepEdge._UNSET):
+    return BRepEdge(curve=Line3D(start=FakePoint(0, 0, 0), end=FakePoint(1, 0, 0)),
+                    assembly_proxy=proxy)
 
 
 def _curved_edge():
@@ -223,9 +224,10 @@ def _install_with_direction_handles(handle_map):
     return rf, cf
 
 
-def _edge_owned_by(component, context=None):
-    """A straight edge whose BODY belongs to `component`. context=None is a NATIVE entity."""
-    edge = _linear_edge()
+def _edge_owned_by(component, context=None, proxy=BRepEdge._UNSET):
+    """A straight edge whose BODY belongs to `component`. context=None is a NATIVE entity; `proxy`
+    is what its createForAssemblyContext hands back."""
+    edge = _linear_edge(proxy=proxy)
     edge.assemblyContext = context
     edge.body = BRepBody(parent_component=component)
     return edge
@@ -234,9 +236,7 @@ def _edge_owned_by(component, context=None):
 def _foreign_edge(component):
     """(native edge owned by `component`, the proxy its createForAssemblyContext hands back)."""
     proxy = _edge_owned_by(component, context="ASSEMBLY-CONTEXT")
-    edge = _edge_owned_by(component)
-    edge.createForAssemblyContext = lambda occ, p=proxy: p
-    return edge, proxy
+    return _edge_owned_by(component, proxy=proxy), proxy
 
 
 def _place(root, component, *full_paths):
@@ -537,6 +537,25 @@ class TestDirectionFromAnotherComponent:
                                      direction_one="E")
         assert res["isError"] is True and "not placed in the assembly" in res["message"]
         assert rf.last_input is None
+
+    def test_an_edge_that_will_not_proxy_is_refused_not_handed_over_native(self):
+        # The lift can fail in two shapes - a createForAssemblyContext that ANSWERS NOTHING, and an
+        # edge carrying no such factory at all - and both are one refusal naming the occurrence.
+        # Falling back to the native edge hands add() the very entity it refuses.
+        for proxy_kw in ({"proxy": None}, {}):
+            handles = {}
+            rf, _ = _install_with_direction_handles(handles)
+            root = pt.app.activeProduct.rootComponent
+            rail = _other_component()
+            _place(root, rail, "Assy:1+Rail:1")
+            handles["E"] = _edge_owned_by(rail, **proxy_kw)
+            res = pt.handler(occurrences="Block:1", quantity_one=2, spacing_one=10,
+                             direction_one="E")
+            assert res["isError"] is True, (proxy_kw, res)
+            assert "could not be brought into the pattern's assembly context (Assy:1+Rail:1)" \
+                in res["message"]
+            assert "world axis (x/y/z)" in res["message"]
+            assert rf.last_input is None and rf.add_calls == 0
 
     def test_edge_already_in_context_passes_untouched(self):
         handles = {}

@@ -13,7 +13,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool
+from conftest import (FakePMIDisplaySettings, FakePMIGeometricValueTolerance,
+                      FakePMIHoleThreadNote, FakePMILeaderLineNote, FakePMILineBreakSegment,
+                      FakePMISegmentVector, FakePMISymbolSegment, FakePMITextSegment, FakePoint,
+                      FakeVector3D, Plane, load_tool, make_pmi_component, make_pmi_value)
 
 pm = load_tool("_pmi")
 
@@ -22,6 +25,9 @@ import adsk.fusion  # noqa: E402
 
 
 def _ann(name="Note1", suffix="PMILeaderLineNote", **extra):
+    """An annotation carrying EXACTLY the members a case gives it. Bespoke: the imported PMI
+    classes have no shape dump, and an ABSENT member (plainText on an imported note) is precisely
+    what the record's conditional keys are read against."""
     a = SimpleNamespace(name=name, objectType="adsk::fusion::" + suffix)
     for k, v in extra.items():
         setattr(a, k, v)
@@ -29,10 +35,7 @@ def _ann(name="Note1", suffix="PMILeaderLineNote", **extra):
 
 
 def _comp(name, annotations=()):
-    anns = list(annotations)
-    return SimpleNamespace(
-        name=name,
-        pmiAnnotations=SimpleNamespace(count=len(anns), item=lambda i: anns[i]))
+    return make_pmi_component(name, annotations)
 
 
 # ── the design-wide walk + the raw name resolution ────────────────────────────────────────────
@@ -151,24 +154,49 @@ class TestAnnotationHits:
         assert hits == [] and "Other" in available
 
 
+# ── the {symbol} markup codec ─────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def segments(monkeypatch):
+    """The three document-free segment factories, so what build_segments emits is inspectable."""
+    for name, cls in (("PMITextSegment", FakePMITextSegment),
+                      ("PMISymbolSegment", FakePMISymbolSegment),
+                      ("PMILineBreakSegment", FakePMILineBreakSegment)):
+        monkeypatch.setattr(pm.adsk.fusion, name, cls)
+
+
+class TestBuildSegments:
+    def test_a_token_becomes_a_symbol_ahead_of_its_text_and_a_newline_breaks_the_line(self,
+                                                                                      segments):
+        # order is load-bearing: the symbol precedes the text it qualifies, and the line break
+        # arrives before the second line's own segments.
+        segs, err = pm.build_segments("{flatness}0.05\nDEBURR")
+        assert err is None
+        assert [type(s).__name__ for s in segs] == [
+            "FakePMISymbolSegment", "FakePMITextSegment", "FakePMILineBreakSegment",
+            "FakePMITextSegment"]
+        assert segs[0].pmiSymbolType == adsk.fusion.PMISymbolTypes.FlatnessPMISymbolType
+        assert segs[1].text == "0.05" and segs[3].text == "DEBURR"
+
+    def test_the_segments_round_trip_back_through_the_markup_encoder(self, segments):
+        segs, _err = pm.build_segments("{flatness}0.05\nDEBURR")
+        note = FakePMILeaderLineNote(segments=FakePMISegmentVector(segs))
+        assert pm.segments_markup(note) == "{flatness}0.05\nDEBURR"
+
+
 # ── the alignment / perpendicular / extension read-back gates ─────────────────────────────────
 
-class _Note:
+def _Note(ignore=()):
     """A note whose format properties can be made to IGNORE an assignment - the exact platform
-    shape every read-back gate exists for."""
+    shape every read-back gate exists for. The ignored property still READS its old value, which is
+    the shared fake's `swallows`."""
+    return FakePMILeaderLineNote(leader_extension=0.5, swallows=ignore)
 
-    def __init__(self, ignore=()):
-        object.__setattr__(self, "_ignore", set(ignore))
-        # seeded past __setattr__ so an IGNORED property still READS - the platform shape is a
-        # value that stays at its old reading, not one that vanishes.
-        for key, value in (("horizontalAlignment", None), ("verticalAlignment", None),
-                           ("isPerpendicularLine", False), ("leaderLineExtension", 0.5)):
-            object.__setattr__(self, key, value)
 
-    def __setattr__(self, key, value):
-        if key != "_ignore" and key in getattr(self, "_ignore", ()):
-            return
-        object.__setattr__(self, key, value)
+def _hole(ignore=(), **flags):
+    """A hole callout carrying `flags` as its own state, with `ignore` naming the flags whose
+    WRITE is then swallowed."""
+    return FakePMIHoleThreadNote(leader_extension=0.5, flags=flags, swallows=ignore)
 
 
 class TestApplyNoteFormat:
@@ -231,12 +259,9 @@ class TestNormalizeExtension:
         assert note.leaderLineExtension == pm.LEADER_EXT_FLOOR
 
     def test_a_repair_that_raises_names_the_recreate_path(self):
-        class Bricked:
-            leaderLineExtension = 0.1
-
-            def __setattr__(self, key, value):
-                raise RuntimeError("Leader line extension is too small")
-        err = pm.normalize_extension(Bricked())
+        bricked = FakePMILeaderLineNote(leader_extension=0.1,
+                                        declines=["leaderLineExtension"])
+        err = pm.normalize_extension(bricked)
         assert err and "recreate" in err and "pmi_delete" in err
 
 
@@ -244,35 +269,29 @@ class TestNormalizeExtension:
 
 class TestApplyHoleFlags:
     def test_a_flag_that_does_not_read_back_is_an_error(self):
-        note = _Note()
-        note.isThrough = False
-        object.__setattr__(note, "_ignore", {"isThrough"})
+        note = _hole(ignore=["isThrough"], isThrough=False)
         applied, err = pm.apply_hole_flags(note, {"through": True})
         assert applied is None and "'through'=True did not take" in err
 
     def test_every_flag_that_takes_is_reported_back(self):
-        note = _Note()
-        note.isThrough = False
-        note.isThreaded = False
+        note = _hole(isThrough=False, isThreaded=False)
         applied, err = pm.apply_hole_flags(note, {"through": True, "threaded": False})
         assert err is None and applied == {"through": True, "threaded": False}
 
     def test_an_unknown_flag_lists_the_vocabulary(self):
-        applied, err = pm.apply_hole_flags(_Note(), {"bogus": True})
+        applied, err = pm.apply_hole_flags(_hole(), {"bogus": True})
         assert applied is None and "bogus" in err and "quantity_note" in err
 
     def test_a_non_object_flags_payload_is_refused(self):
-        applied, err = pm.apply_hole_flags(_Note(), ["through"])
+        applied, err = pm.apply_hole_flags(_hole(), ["through"])
         assert applied is None and "must be an object" in err
 
 
 class TestApplyHoleValues:
-    def _hole(self):
-        return SimpleNamespace(
-            diameter=SimpleNamespace(hasValue=True, value=0.0, isOverriddenValue=False,
-                                     tolerance=None),
-            depth=SimpleNamespace(hasValue=True, value=0.0, isOverriddenValue=False,
-                                  tolerance=None))
+    def _hole(self, **values):
+        fields = {"diameter": make_pmi_value(), "depth": make_pmi_value()}
+        fields.update(values)
+        return FakePMIHoleThreadNote(values=fields)
 
     def test_a_non_numeric_value_is_refused_in_the_pre_pass(self):
         # Decidable from the request alone, so it refuses beside the other refusal classes -
@@ -288,50 +307,23 @@ class TestApplyHoleValues:
         assert applied is None and "'diameter' must be a number" in err
 
     def test_a_bad_angle_value_names_degrees_in_the_refusal(self):
-        note = SimpleNamespace(countersinkAngle=SimpleNamespace(
-            hasValue=True, value=0.0, isOverriddenValue=False, tolerance=None))
+        note = FakePMIHoleThreadNote(values={"countersink_angle_deg": make_pmi_value()})
         applied, err = pm.apply_hole_values(note, {"countersink_angle_deg": None or "wide"}, 0.1)
         assert applied is None and "degrees" in err
 
     def test_a_value_that_will_not_read_back_stops_at_that_key(self):
-        note = self._hole()
-        note.depth = SimpleNamespace(hasValue=False, value=0.0, isOverriddenValue=False,
-                                     tolerance=None)
+        note = self._hole(depth=make_pmi_value(has_value=False))
         applied, err = pm.apply_hole_values(note, {"depth": 3}, 0.1)
         assert applied is None and "'depth' did not read back" in err
 
 
 # ── the tolerance codec ───────────────────────────────────────────────────────────────────────
 
-class _Tol:
-    """Records which setter the codec chose and what it was handed."""
-
-    def __init__(self, accept=True):
-        self.calls = []
-        self._accept = accept
-        self.hasTolerances = True
-        self.toleranceType = 0
-        self.hasUpperTolerance = True
-        self.upperTolerance = 0.0
-        self.hasLowerTolerance = True
-        self.lowerTolerance = 0.0
-        self.hasToleranceClass = True
-        self.toleranceClassDeviation = "H"
-        self.toleranceClassGrade = "7"
-        self.hasShaftToleranceClass = True
-        self.shaftToleranceClassDeviation = "h"
-        self.shaftToleranceClassGrade = "6"
-
-    def _record(self, name):
-        def call(*args):
-            self.calls.append((name, args))
-            return self._accept
-        return call
-
-    def __getattr__(self, name):
-        if name.startswith("set"):
-            return self._record(name)
-        raise AttributeError(name)
+def _Tol(accept=True):
+    """A tolerance already carrying both bounds and both fit classes, recording which setter the
+    codec chose on its `_calls` walk."""
+    return FakePMIGeometricValueTolerance(accept=accept, upper=0.0, lower=0.0,
+                                          hole_fit="H7", shaft_fit="h6")
 
 
 @pytest.fixture
@@ -358,8 +350,8 @@ class TestBuildTolerance:
     def test_each_type_calls_its_own_setter_with_scaled_bounds(self, tol, spec, setter, args):
         built, err = pm.build_tolerance(spec, 0.1)
         assert err is None and built is tol[0]
-        assert len(tol[0].calls) == 1 and tol[0].calls[0][0] == setter
-        assert tol[0].calls[0][1] == pytest.approx(args)
+        assert len(tol[0]._calls) == 1 and tol[0]._calls[0][0] == setter
+        assert tol[0]._calls[0][1] == pytest.approx(args)
 
     @pytest.mark.parametrize("kind,setter", [
         ("fits_stacked", "setLimitsFitsStacked"),
@@ -371,7 +363,7 @@ class TestBuildTolerance:
         built, err = pm.build_tolerance(
             {"type": kind, "size": 20, "hole_fit": "H7", "shaft_fit": "h6"}, 0.1)
         assert err is None and built is tol[0]
-        assert tol[0].calls == [(setter, (2.0, "H7", "h6"))]
+        assert tol[0]._calls == [(setter, (2.0, "H7", "h6"))]
 
     def test_a_setter_returning_false_is_a_refusal_not_a_tolerance(self, monkeypatch):
         monkeypatch.setattr(pm.adsk.fusion, "PMIGeometricValueTolerance",
@@ -381,12 +373,12 @@ class TestBuildTolerance:
 
     def test_the_type_is_matched_case_insensitively(self, tol):
         built, err = pm.build_tolerance({"type": "Symmetric", "value": 5}, 0.1)
-        assert err is None and tol[0].calls[0][0] == "setSymmetric"
+        assert err is None and tol[0]._calls[0][0] == "setSymmetric"
 
 
 class TestToleranceRecord:
     def test_an_untoleranced_value_records_nothing(self):
-        assert pm.tolerance_record(SimpleNamespace(hasTolerances=False), 10.0) is None
+        assert pm.tolerance_record(FakePMIGeometricValueTolerance(), 10.0) is None
         assert pm.tolerance_record(None, 10.0) is None
 
     def test_bounds_and_both_fit_classes_are_published_scaled(self):
@@ -407,11 +399,8 @@ class TestToleranceRecord:
 
 class TestValueRecord:
     def test_an_angle_reports_degrees_and_a_length_reports_display_units(self):
-        angle = pm.value_record(SimpleNamespace(hasValue=True, value=math.radians(90),
-                                                isOverriddenValue=False, tolerance=None),
-                                10.0, angle=True)
-        length = pm.value_record(SimpleNamespace(hasValue=True, value=0.6,
-                                                 isOverriddenValue=False, tolerance=None), 10.0)
+        angle = pm.value_record(make_pmi_value(math.radians(90)), 10.0, angle=True)
+        length = pm.value_record(make_pmi_value(0.6), 10.0)
         assert angle["value"] == 90.0        # NOT 0.6 rad * 10
         assert length["value"] == 6.0
 
@@ -419,29 +408,31 @@ class TestValueRecord:
         t = _Tol()
         t.upperTolerance = t.lowerTolerance = math.radians(1)
         t.hasToleranceClass = t.hasShaftToleranceClass = False
-        rec = pm.value_record(SimpleNamespace(hasValue=True, value=math.radians(90),
-                                              isOverriddenValue=False, tolerance=t),
-                              10.0, angle=True)
+        rec = pm.value_record(make_pmi_value(math.radians(90), tolerance=t), 10.0, angle=True)
         assert rec["tolerance"]["upper"] == 1.0
 
     def test_an_overridden_value_says_so_and_an_unset_one_records_nothing(self):
-        rec = pm.value_record(SimpleNamespace(hasValue=True, value=0.6, isOverriddenValue=True,
-                                              tolerance=None), 10.0)
+        rec = pm.value_record(make_pmi_value(0.6, overridden=True), 10.0)
         assert rec["overridden"] is True
-        assert pm.value_record(SimpleNamespace(hasValue=False), 10.0) is None
+        assert pm.value_record(make_pmi_value(has_value=False), 10.0) is None
 
 
 # ── the display codec + the ONE display writer ────────────────────────────────────────────────
+
+def _display_note():
+    """A hole callout whose display settings read null until apply_display writes them."""
+    note = FakePMIHoleThreadNote()
+    note.primaryDisplaySettings = None
+    note.secondaryDisplaySettings = None
+    note.hasSecondaryDisplaySettings = False
+    return note
+
 
 @pytest.fixture(autouse=True)
 def display_settings(monkeypatch):
     """A FRESH PMIDisplaySettings per create() - the shared mock hands back one object, which
     would make a primary/secondary pair look identical however they were written."""
-    monkeypatch.setattr(
-        pm.adsk.fusion, "PMIDisplaySettings",
-        SimpleNamespace(create=lambda: SimpleNamespace(
-            precision=None, unitType=None, hasLeadingZeros=None, hasTrailingZeros=None,
-            hasUnitAbbreviation=None)))
+    monkeypatch.setattr(pm.adsk.fusion, "PMIDisplaySettings", FakePMIDisplaySettings)
 
 
 class TestDisplay:
@@ -458,18 +449,16 @@ class TestDisplay:
         assert ds is None and "must be an object" in err
 
     def test_display_record_reads_the_five_fields_back(self):
-        ds = SimpleNamespace(precision=2,
-                             unitType=adsk.fusion.PMIUnitTypes.MillimetersPMIUnitType,
-                             hasLeadingZeros=True, hasTrailingZeros=False,
-                             hasUnitAbbreviation=True)
+        ds = FakePMIDisplaySettings(
+            precision=2, unit_type=adsk.fusion.PMIUnitTypes.MillimetersPMIUnitType,
+            leading_zeros=True, trailing_zeros=False, unit_abbreviation=True)
         rec = pm.display_record(ds)
         assert rec["precision"] == 2 and rec["units"] == "millimeters"
         assert rec["leading_zeros"] is True and rec["trailing_zeros"] is False
         assert pm.display_record(None) is None
 
     def test_apply_display_writes_the_secondary_settings_and_turns_the_flag_on(self):
-        note = SimpleNamespace(primaryDisplaySettings=None, secondaryDisplaySettings=None,
-                               hasSecondaryDisplaySettings=False)
+        note = _display_note()
         err = pm.apply_display(note, {"precision": 2, "secondary": {"precision": 4}})
         assert err is None
         assert note.primaryDisplaySettings.precision == 2
@@ -477,14 +466,12 @@ class TestDisplay:
         assert note.secondaryDisplaySettings.precision == 4
 
     def test_a_bad_secondary_spec_is_refused_naming_the_secondary(self):
-        note = SimpleNamespace(primaryDisplaySettings=None, secondaryDisplaySettings=None,
-                               hasSecondaryDisplaySettings=False)
+        note = _display_note()
         err = pm.apply_display(note, {"secondary": {"units": "furlong"}})
         assert err and err.startswith("display.secondary:")
 
     def test_a_primary_only_spec_leaves_the_secondary_flag_alone(self):
-        note = SimpleNamespace(primaryDisplaySettings=None, secondaryDisplaySettings=None,
-                               hasSecondaryDisplaySettings=False)
+        note = _display_note()
         assert pm.apply_display(note, {"precision": 1}) is None
         assert note.hasSecondaryDisplaySettings is False
 
@@ -511,19 +498,32 @@ class TestEnumLabel:
 
 # ── the text-point projection ─────────────────────────────────────────────────────────────────
 
+class _SettlingNote(FakePMILeaderLineNote):
+    """A note whose stored text point lands `drift` cm off the one assigned - the float settle the
+    1e-6 cm read-back tolerance is drawn against, on either side of it."""
+
+    def __init__(self, drift):
+        super().__init__(leader_extension=0.5)
+        object.__setattr__(self, "_drift", drift)
+
+    def __setattr__(self, key, value):
+        if key == "annotationTextPoint" and value is not None:
+            value = FakePoint(value.x + self._drift, value.y, value.z)
+        super().__setattr__(key, value)
+
+
 class TestSetTextPoint:
     @pytest.fixture(autouse=True)
     def point3d(self, monkeypatch):
         monkeypatch.setattr(adsk.core.Point3D, "create",
                             staticmethod(lambda x, y, z: SimpleNamespace(x=x, y=y, z=z)))
 
-    def _note(self, plane):
-        return SimpleNamespace(leaderLineExtension=0.5, plane=plane, annotationTextPoint=None)
+    def _note(self, plane, **kwargs):
+        return FakePMILeaderLineNote(leader_extension=0.5, plane=plane, **kwargs)
 
     def test_an_off_plane_point_is_projected_onto_the_annotation_plane(self):
         # plane z=1, normal +z: a point at z=5 (mm) must land AT the plane, not above it.
-        plane = SimpleNamespace(normal=SimpleNamespace(x=0.0, y=0.0, z=1.0),
-                                origin=SimpleNamespace(x=0.0, y=0.0, z=1.0))
+        plane = Plane(FakeVector3D(0.0, 0.0, 1.0), FakePoint(0.0, 0.0, 1.0))
         note = self._note(plane)
         got, err = pm.set_text_point(note, [10, 20, 50], 0.1)
         assert err is None
@@ -531,8 +531,7 @@ class TestSetTextPoint:
 
     def test_a_non_unit_plane_normal_still_projects_exactly(self):
         # The projection divides by |n|^2, so a normal of length 3 must not scale the correction.
-        plane = SimpleNamespace(normal=SimpleNamespace(x=0.0, y=0.0, z=3.0),
-                                origin=SimpleNamespace(x=0.0, y=0.0, z=1.0))
+        plane = Plane(FakeVector3D(0.0, 0.0, 3.0), FakePoint(0.0, 0.0, 1.0))
         note = self._note(plane)
         got, err = pm.set_text_point(note, [0, 0, 50], 0.1)
         assert err is None and got.z == pytest.approx(1.0)
@@ -549,76 +548,34 @@ class TestSetTextPoint:
         assert note.annotationTextPoint is None
 
     def test_a_point_that_does_not_read_back_is_an_error(self):
-        class Stubborn:
-            leaderLineExtension = 0.5
-            plane = None
-
-            def __setattr__(self, key, value):
-                pass                    # accepts the assignment, keeps nothing
-
-            def __getattr__(self, key):
-                if key == "annotationTextPoint":
-                    return None
-                raise AttributeError(key)
-        got, err = pm.set_text_point(Stubborn(), [1, 2, 3], 0.1)
+        # accepts the assignment, keeps nothing
+        stubborn = self._note(None, swallows=["annotationTextPoint"])
+        got, err = pm.set_text_point(stubborn, [1, 2, 3], 0.1)
         assert got is None and "did not take" in err
 
     def test_a_point_that_reads_back_somewhere_else_is_an_error(self):
         # the platform accepts the assignment and the re-read WORKS - it just answers a different
         # place. Existence alone passes that; the comparison is what catches it, and without it the
         # payload publishes the wrong anchor as the new one.
-        class Drifting:
-            leaderLineExtension = 0.5
-            plane = None
-            annotationTextPoint = SimpleNamespace(x=9.0, y=9.0, z=9.0)
-
-            def __setattr__(self, key, value):
-                pass                    # accepts the assignment, keeps its own point
-        got, err = pm.set_text_point(Drifting(), [10, 20, 30], 0.1)
+        drifting = self._note(None, text_point=FakePoint(9.0, 9.0, 9.0),
+                              swallows=["annotationTextPoint"])
+        got, err = pm.set_text_point(drifting, [10, 20, 30], 0.1)
         assert got is None and "did not take" in err and "9.0" in err
 
     def test_a_sub_micron_settle_is_not_a_failed_move(self):
         # the exact boundary on the other side of 1e-6 cm: float settle must not fail the move
-        class Settling:
-            leaderLineExtension = 0.5
-            plane = None
-
-            def __setattr__(self, key, value):
-                if key == "annotationTextPoint":
-                    object.__setattr__(self, key, SimpleNamespace(
-                        x=value.x + 5e-7, y=value.y, z=value.z))
-                else:
-                    object.__setattr__(self, key, value)
-        got, err = pm.set_text_point(Settling(), [10, 20, 30], 0.1)
+        got, err = pm.set_text_point(_SettlingNote(5e-7), [10, 20, 30], 0.1)
         assert err is None and got.x == pytest.approx(1.0, abs=1e-5)
 
     def test_a_drift_just_over_the_tolerance_is_reported(self):
-        class Drifting:
-            leaderLineExtension = 0.5
-            plane = None
-
-            def __setattr__(self, key, value):
-                if key == "annotationTextPoint":
-                    object.__setattr__(self, key, SimpleNamespace(
-                        x=value.x + 1.1e-6, y=value.y, z=value.z))
-                else:
-                    object.__setattr__(self, key, value)
-        got, err = pm.set_text_point(Drifting(), [10, 20, 30], 0.1)
+        got, err = pm.set_text_point(_SettlingNote(1.1e-6), [10, 20, 30], 0.1)
         assert got is None and "did not take" in err
 
     def test_a_point_whose_coordinates_will_not_read_is_unknown_not_confirmed(self):
-        class Opaque:
-            leaderLineExtension = 0.5
-            plane = None
-
-            def __setattr__(self, key, value):
-                pass
-
-            def __getattr__(self, key):
-                if key == "annotationTextPoint":
-                    return SimpleNamespace()        # a point object with no x/y/z at all
-                raise AttributeError(key)
-        got, err = pm.set_text_point(Opaque(), [1, 2, 3], 0.1)
+        # a point object with no x/y/z at all
+        opaque = self._note(None, text_point=SimpleNamespace(),
+                            swallows=["annotationTextPoint"])
+        got, err = pm.set_text_point(opaque, [1, 2, 3], 0.1)
         assert got is None and "UNKNOWN" in err
 
 

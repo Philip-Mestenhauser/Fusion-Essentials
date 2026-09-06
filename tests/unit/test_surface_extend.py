@@ -6,8 +6,8 @@ import adsk.core
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, BRepEdge, BRepFace, MakeComp, _NamedCollection, install,
-                      load_tool, make_design, payload)
+from conftest import (BRepBody, BRepEdge, BRepFace, FakeFeature as _SharedFeature, MakeComp,
+                      install, load_tool, make_design, payload)
 
 se = load_tool("surface_extend")
 
@@ -37,12 +37,11 @@ def _wire(extend_features, handle_map=None):
     return comp
 
 
-class FakeFeature:
-    """An ExtendFeature: its result bodies plus the distance ModelParameter (CM) a read-back reads;
-    distance_cm None gives a feature whose length parameter cannot be read at all."""
+class FakeFeature(_SharedFeature):
+    """An ExtendFeature: the shared feature plus the distance ModelParameter (CM) a read-back
+    reads; distance_cm None gives a feature whose length parameter cannot be read at all."""
     def __init__(self, name="Feat1", bodies=None, distance_cm=None):
-        self.name = name
-        self.bodies = _NamedCollection(bodies if bodies is not None else [])
+        super().__init__(name=name, bodies=bodies or ())
         if distance_cm is not None:
             self.distance = types.SimpleNamespace(value=distance_cm)
 

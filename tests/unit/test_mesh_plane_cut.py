@@ -175,14 +175,15 @@ def _fusion_types(monkeypatch):
 
 def _component(features=None, mesh_bodies=None, origin_plane=None, name="Comp"):
     """A component carrying the plane-cut feature collection, its mesh bodies and an origin plane."""
-    comp = MakeComp(name, mesh_bodies=[])
+    # PlaneRef origin alias 'xy' -> key 'xY' -> comp.xYConstructionPlane; the two siblings come with
+    # it because a live component carries all three.
+    planes = None if origin_plane is None else (origin_plane, ConstructionPlane("OriginXZ"),
+                                                ConstructionPlane("OriginYZ"))
+    comp = MakeComp(name, mesh_bodies=[], origin_planes=planes)
     comp.features = features
     if mesh_bodies is not None:
         # comp.meshBodies - the non-parametric side-effect probe for plane cut reads its .count.
         comp.meshBodies = mesh_bodies
-    if origin_plane is not None:
-        # PlaneRef origin alias 'xy' -> key 'xY' -> getattr(comp, 'xYConstructionPlane')
-        comp.xYConstructionPlane = origin_plane
     return comp
 
 

@@ -10,8 +10,9 @@ import pytest
 
 import adsk.fusion
 
-from conftest import (FakeMotionLink, FakeMotionLinks, FakeVector3D, MakeComp, SliderJointMotion,
-                      _NamedCollection, install, load_tool, make_design, make_joint, payload)
+from conftest import (FakeMotionLink, FakeMotionLinks, FakeVector3D, MakeComp, RigidJointMotion,
+                      SliderJointMotion, _NamedCollection, install, load_tool, make_design,
+                      make_joint, payload)
 
 jml = load_tool("joint_motion_link")
 jt = load_tool("_joints")          # the ratio codec, to pin the payload against its own output
@@ -24,10 +25,6 @@ SLIDER_DOF = JMT.SliderJointSlideMotionType
 # The rack-and-pinion ratio the unit conversion is measured on: this many degrees of pinion per
 # millimetre of rack is 0.5 rad per cm, the pair Fusion actually couples on.
 RIG_RATIO_DEG_PER_MM = 2.8647889757
-
-
-class RigidJointMotion:
-    """A rigid motion: no shared fake and no SHAPES dump, so its NAME is all it carries."""
 
 
 def _joint(name, kind="revolute", **kw):

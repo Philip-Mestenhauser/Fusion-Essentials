@@ -2251,12 +2251,12 @@ ROWS = [
     {
         "id": "shape-dump-drawing-world",
         "claim": "The row makes and removes its OWN source, so nothing it measures depends on what a project happens to hold: it adds a scratch design carrying one placed box, saves it into the cloud project 'MCP Test Project' as MeasureDrawingSource, takes that document's DataFile as the createDrawingInput source, and in a finally closes the document and deletes the file. Right after saveAs the DataFile's id is the LOCAL cache path - the cloud urn: id lands asynchronously, about two seconds - so the row pumps doEvents under a 20 second clock bound until the urn: form answers and FAILS naming the timeout if it never does. Before saving, ONE listing of that folder's own dataFiles (never recursive) deletes any MeasureDrawingSource a previous run left behind; that listing LAGS its own deletes, so an entry it names can already be gone and the row reports the entries seen and the deletes that took rather than inferring a leftover from the difference. The same lag makes deleteMe RAISE InternalValidationError while a just-closed file is still settling, so the removal pumps doEvents and retries under a clock bound - measured taking two or three attempts. DrawingManager.get() answers a DrawingManager and createDrawingInput answers a CreateDrawingInput whose customSize hands out a CustomSheetSize already carrying a positive width and height and at least two zones each way, so 'a DEFAULT CustomSheetSize' is read rather than assumed. The deleting of the source is reported but does NOT gate the row: a False leaves the file for the next run's sweep and the detail names it. The eleven document-side types (DrawingDocument, Drawing, Sheets, Sheet, Views, View, DrawingSketches, DrawingSketch, Images, DrawingExportManager, DocumentSettings) come off their CLASS objects: adsk.core.DocumentTypes carries no drawing member at all, so documents.add cannot make one, and DrawingManager.createDrawing would mint a SECOND cloud file, which this row does not call. The class dump rests on the class-dir-equals-instance-dir-minus-'this' reading, re-measured here on CreateDrawingInput, which the row holds both of. The collection types are named Views/Images, NOT DrawingViews/DrawingImages, and the settings type is DocumentSettings - the labels are what the fake-shape lint maps a fake onto, so each live one is read back rather than assumed",
-        "encoded_in": ("no shared fake yet - the per-file doubles in test_drawing_get.py, "
-                       "test_drawing_create.py, test_drawing_edit_sheet.py, "
-                       "test_drawing_dimension.py, test_drawing_export.py, "
-                       "test_drawing_add_sketch.py and test_drawing_insert_image.py; "
-                       "_drawing_common.active_drawing_document and _drawing_common.sheet_facts "
-                       "read these types live"),
+        "encoded_in": ("tests/conftest.py's drawing world - FakeDrawingDocument, FakeDrawing, "
+                       "FakeSheets/FakeSheet, FakeViews/FakeView, FakeDrawingSketches/"
+                       "FakeDrawingSketch, FakeImages, FakeDrawingExportManager, "
+                       "FakeDocumentSettings, FakeDrawingManager, FakeCreateDrawingInput, "
+                       "FakeCustomSheetSize; _drawing_common.active_drawing_document and "
+                       "_drawing_common.sheet_facts read these types live"),
         "body": """
     import time as _clock
     SOURCE_NAME = "MeasureDrawingSource"
@@ -2401,9 +2401,13 @@ ROWS = [
     {
         "id": "shape-dump-appearance-world",
         "claim": "The appearance world dumps seven library types - MaterialLibraries off app.materialLibraries, the first MaterialLibrary carrying appearances, its Appearances, that library's first Appearance, the Appearance's appearanceProperties, the ColorProperty among them and the Color that property's value answers - and the row reads that Appearance.appearanceProperties answers a PROPERTIES collection: there is no type named AppearanceProperties in adsk.core or adsk.fusion. Beside them it reads the PLAIN answers a fresh scratch entity gives with no override applied, which is what a body/occurrence/face double has to start from: BRepBody.appearance is already a live Appearance (never None) and opacity reads 1.0, but visibleOpacity on the NATIVE body RAISES InternalValidationError while the same read through an assembly-context proxy answers 1.0; Occurrence.appearance reads None, its visibleOpacity 1.0, and Occurrence carries no opacity member at all; Component.opacity reads 1.0 and BRepFace.appearance is a live Appearance. The native visibleOpacity raise is CAUGHT and the row keeps reading, so a build that stops raising fails this row rather than passing it quietly",
-        "encoded_in": ("no shared fake yet - the per-file doubles in test_appearance_set.py and "
-                       "test_model_set_material.py; appearance_set._reads_as and "
-                       "appearance_set._apply_opacity read these members live"),
+        "encoded_in": ("tests/conftest.py FakeOccurrence - its appearance default and its absent "
+                       "opacity member; the body/face doubles are still per-file in "
+                       "test_appearance_set.py and test_model_set_material.py; "
+                       "appearance_set._reads_as and appearance_set._apply_opacity read these "
+                       "members live"),
+        "facts_on_pass": {"behavior.occurrence_appearance_none_by_default": True,
+                          "behavior.occurrence_has_no_opacity": True},
         "body": """
     libs = app.materialLibraries
     lib = None
@@ -2472,10 +2476,11 @@ ROWS = [
     {
         "id": "shape-dump-pmi-world",
         "claim": "PMI authoring runs on this installation, and the row proves it by CREATING what it dumps: in a scratch design holding a box with one hole, component.pmiAnnotations answers a PMIAnnotations, its leaderLineNotes a PMILeaderLineNotes whose createInput(planar face) answers a PMILeaderLineNoteInput and add() a PMILeaderLineNote, its holeThreadNotes a PMIHoleThreadNotes whose createInput([cylindrical face]) answers a PMIHoleThreadNoteInput and add() a PMIHoleThreadNote. A created note's segments answer a PMISegmentVector, and the six document-free factories - PMITextSegment.create(text), PMISymbolSegment.create(member), PMILineBreakSegment.create(), PMIGeometricValue.create(), PMIGeometricValueTolerance.create() and PMIDisplaySettings.create(), the last four taking NO argument - each answer their own type. Both adds are gated, so a session where the Design/Manufacturing Extension is not entitled FAILS this row naming the refusal instead of passing on the reads alone",
-        "encoded_in": ("no shared fake yet - the per-file doubles in test__pmi.py, "
-                       "test_pmi_get.py, test_pmi_create.py, test_pmi_edit.py and "
-                       "test_pmi_delete.py; _pmi.walk_annotations, _pmi.build_segments and "
-                       "_pmi.annotation_record read these types live"),
+        "encoded_in": ("tests/conftest.py's PMI world - FakePMIAnnotations, the two note "
+                       "collections and inputs, FakePMILeaderLineNote/FakePMIHoleThreadNote, the "
+                       "segment, value, tolerance and display-settings fakes; "
+                       "_pmi.walk_annotations, _pmi.build_segments and _pmi.annotation_record "
+                       "read these types live"),
         "body": """
     tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
     try:
@@ -2542,7 +2547,8 @@ ROWS = [
     {
         "id": "shape-dump-mesh-calculator-quality",
         "claim": "A BRepBody's meshManager answers a MeshManager whose createMeshCalculator() answers a TriangleMeshCalculator; a FRESH calculator reads all four of its knobs - maxNormalDeviation, surfaceTolerance, maxAspectRatio, maxSideLength - as 0.0, so it carries no tolerances of its own. setQuality returns True and writes surfaceTolerance ALONE: the other three stay 0.0 after it, and HighQualityTriangleMesh lands a strictly SMALLER surfaceTolerance than NormalQualityTriangleMesh on the same body, which is the comparison a quality that silently did nothing would fail. calculate() answers a TriangleMesh carrying nodes, and meshManager.displayMeshes answers a TriangleMeshList",
-        "encoded_in": ("no shared fake yet - the per-file doubles in test_save_as_mesh.py; "
+        "encoded_in": ("tests/conftest.py FakeMeshManager and FakeTriangleMeshCalculator (its "
+                       "four zero defaults and the surfaceTolerance setQuality writes); "
                        "save_as_mesh._tessellate reads meshManager, createMeshCalculator, the "
                        "BOOL setQuality returns and calculate live"),
         "need_box": True,
@@ -2609,12 +2615,61 @@ ROWS = [
 """,
     },
     {
+        "id": "units-manager-internal-units-and-convert",
+        "claim": "UnitsManager.internalUnits is not a unit name: it reads the SENTINEL string 'InternalUnits', and that sentinel is POLYMORPHIC - handed to convert() as the from-unit it means centimetres for a length target and radians for an angular one, so ONE call shape converts both. convert(1.0, sentinel, 'mm') answers 10.0, convert(1.0, sentinel, 'ft') 0.032808..., and convert(1.0, sentinel, 'deg') 57.295777... off the same 1.0. The refusals are the other half of the claim, because they are what a fake that scaled by a table would never produce: an EMPTY to-unit raises '3 : Bad units parameter' (so the sentinel cannot be converted into 'no units'), a literal 'cm' to 'deg' raises '6 : The input and output units are not compatible' (only the sentinel crosses the length/angle boundary), and a to-unit outside the vocabulary raises '6 : The units parameter is not a valid unit string'",
+        "encoded_in": ("tests/conftest.py FakeUnitsManager - its internalUnits reads the sentinel "
+                       "flag and its convert refuses the incompatible pair on the other; "
+                       "_param_common._param_summary passes units_manager.internalUnits straight "
+                       "through as convert's from-unit, so the sentinel is what makes that "
+                       "conversion work on a length AND on an angle"),
+        "facts_on_pass": {"behavior.units_manager_internal_units_sentinel": "InternalUnits",
+                          "behavior.units_manager_convert_refuses_incompatible": True},
+        "read_only": True,
+        "body": """
+    um = des.unitsManager
+    sentinel = um.internalUnits
+
+    def answer(value, src, dst):
+        try:
+            return um.convert(value, src, dst)
+        except Exception as exc:
+            return "raised " + str(exc)
+
+    mm = answer(1.0, sentinel, "mm")
+    ft = answer(1.0, sentinel, "ft")
+    deg = answer(1.0, sentinel, "deg")
+    blank = answer(1.0, sentinel, "")
+    incompatible = answer(1.0, "cm", "deg")
+    bad_unit = answer(1.0, "cm", "xyzzy")
+
+    def near(got, want):
+        return isinstance(got, float) and abs(got - want) < 1e-9
+
+    emit(sentinel == "InternalUnits"
+         and near(mm, 10.0) and near(ft, 0.032808398950131233)
+         and near(deg, 57.29577951308232)
+         and blank == "raised 3 : Bad units parameter"
+         and incompatible == "raised 6 : The input and output units are not compatible"
+         and bad_unit == "raised 6 : The units parameter is not a valid unit string",
+         "units-manager-internal-units-and-convert: internalUnits=" + repr(sentinel)
+         + "; 1.0 of it reads " + repr(mm) + " mm, " + repr(ft) + " ft, " + repr(deg)
+         + " deg - one sentinel, cm for a length and radians for an angle; to '' -> "
+         + repr(blank) + "; 'cm'->'deg' -> " + repr(incompatible)
+         + "; 'cm'->'xyzzy' -> " + repr(bad_unit))
+""",
+    },
+    {
         "id": "parameter-favorite-maker-text-value-and-fresh-appearances",
         "claim": "Four plain reads the parameter and appearance doubles stand on, measured on one scratch design carrying a dimensioned sketch, an extrude and one TEXT user parameter. (1) ModelParameter.isFavorite reads the bool False on every allParameters entry outside userParameters. (2) ModelParameter.createdBy never declines and never reads None: each one answers the entity that made it - the Sketch for a sketch dimension's parameter, the ExtrudeFeature for an extrude's - so a model parameter with no readable maker was not reachable here; the DECLINE belongs to UserParameter, which carries NO createdBy member at all and raises AttributeError on the read. (3) Parameter.value on a TEXT parameter RAISES 'Parameter is not numeric type' while textValue answers the unquoted string, so the textValue fallback is live code; a text parameter is made with units 'Text' and a QUOTED string-literal expression, an unquoted one is refused at add with 'Invalid expression', and the same unquoted string under empty units makes a NUMERIC parameter whose textValue raises 'Parameter is not text type' instead. (4) Design.appearances is an Appearances collection that starts EMPTY and fills from GEOMETRY, not from any apply: it counts 0 on a design with no bodies, still 0 after a sketch is drawn, and becomes 1 the moment the extrude brings a body in - that one entry is the body's default material appearance, named 'Steel - Satin'. The row reads the count at all three moments, so binding the collection early and asserting its count late (which reads the CURRENT count, never the captured one) cannot pass this claim",
         "encoded_in": ("tests/conftest.py FakeModelParameter (its owner-None branch and its "
-                       "isFavorite default) and MakeDesign's appearances default, plus the text "
-                       "double in test__param_common.py; _param_common._owner_facts and "
-                       "_param_common._param_summary branch on the first three"),
+                       "isFavorite default), FakeUserParameter (its absent createdBy and its "
+                       "text-parameter value read) and MakeDesign's appearances default; "
+                       "_param_common._owner_facts and _param_common._param_summary branch on the "
+                       "first three"),
+        "facts_on_pass": {"behavior.model_parameter_created_by_answers_maker": True,
+                          "behavior.user_parameter_has_no_created_by": True,
+                          "behavior.text_parameter_value_raises": True,
+                          "behavior.fresh_design_appearances_count": 0},
         "body": """
     tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
     try:
@@ -2928,11 +2983,13 @@ ROWS = [
     },
     {
         "id": "occurrence-plain-reads-valid-and-lit",
-        "claim": "A plain LOCAL occurrence made by addNewComponent, before anything is modelled in it, answers isValid True, isLightBulbOn True and isReferencedComponent False - a fresh instance is live and lit, so neither flag has an unset or declining state a fake may model. Its boundingBox2 asked for solid bodies answers NOTHING (None, not an empty box) while the component holds no body, and answers a BoundingBox3D once one extrude lands - the 1 cm cube's box, min (0,0,0) to max (1,1,1). boundingBox2 takes a BITWISE BoundingBoxEntityTypes value, not a list, and the row reads both moments on the SAME occurrence so the None is the bodyless state rather than a different object",
-        "encoded_in": ("tests/conftest.py FakeOccurrence - its valid and light_bulb_on knobs "
-                       "(installed as plain isValid/isLightBulbOn attributes) and its "
+        "claim": "A plain LOCAL occurrence made by addNewComponent, before anything is modelled in it, answers isValid True, isLightBulbOn True, isIsolated False, isVisible True and isReferencedComponent False - a fresh instance is live, lit, un-isolated and visible, so none of those flags has an unset or declining state a fake may model, and isIsolated in particular answers the bool False rather than nothing. Its boundingBox2 asked for solid bodies answers NOTHING (None, not an empty box) while the component holds no body, and answers a BoundingBox3D once one extrude lands - the 1 cm cube's box, min (0,0,0) to max (1,1,1). boundingBox2 takes a BITWISE BoundingBoxEntityTypes value, not a list, and the row reads both moments on the SAME occurrence so the None is the bodyless state rather than a different object",
+        "encoded_in": ("tests/conftest.py FakeOccurrence - its valid, light_bulb_on and isolated "
+                       "knobs (installed as plain isValid/isLightBulbOn/isIsolated reads) and its "
                        "bodies_bounding_box knob, whose None stands for the read that answers "
                        "nothing on an instance placing no body"),
+        "facts_on_pass": {"behavior.occurrence_plain_is_valid": True,
+                          "behavior.occurrence_plain_is_lit": True},
         "body": """
     tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
     try:
@@ -2941,6 +2998,8 @@ ROWS = [
         occ = d.rootComponent.occurrences.addNewComponent(adsk.core.Matrix3D.create())
         valid = occ.isValid
         lit = occ.isLightBulbOn
+        isolated = occ.isIsolated
+        visible = occ.isVisible
         referenced = occ.isReferencedComponent
         empty_box = occ.boundingBox2(solid)
         comp = occ.component
@@ -2954,11 +3013,14 @@ ROWS = [
         kind = type(box).__name__
         corners = None if box is None else (box.minPoint.x, box.minPoint.y, box.minPoint.z,
                                             box.maxPoint.x, box.maxPoint.y, box.maxPoint.z)
-        emit(valid is True and lit is True and referenced is False and empty_box is None
+        emit(valid is True and lit is True and isolated is False and visible is True
+             and referenced is False and empty_box is None
              and kind == "BoundingBox3D" and corners == (0.0, 0.0, 0.0, 1.0, 1.0, 1.0),
              "occurrence-plain-reads-valid-and-lit: a fresh local occurrence reads isValid="
-             + str(valid) + " isLightBulbOn=" + str(lit) + " isReferencedComponent="
-             + str(referenced) + " (expect True/True/False); boundingBox2(solid bodies) answers "
+             + str(valid) + " isLightBulbOn=" + str(lit) + " isIsolated=" + str(isolated)
+             + " isVisible=" + str(visible) + " isReferencedComponent="
+             + str(referenced)
+             + " (expect True/True/False/True/False); boundingBox2(solid bodies) answers "
              + repr(empty_box) + " while it places no body and " + kind + " once one extrude "
              "lands, cornered " + str(corners) + " (expect None then 0,0,0 to 1,1,1)")
     finally:

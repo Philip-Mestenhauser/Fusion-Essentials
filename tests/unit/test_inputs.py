@@ -1514,7 +1514,8 @@ class TestGeneration:
         assert "planar" in block.lower()
 
     def test_apply_to_tool_adds_properties_and_required(self):
-        class FakeTool:
+        class _Registrar:
+            """The mcp_primitives Tool as apply_to_tool drives it - not adsk.cam's cutting Tool."""
             def __init__(self):
                 self.props = {}
                 self.required = []
@@ -1522,7 +1523,7 @@ class TestGeneration:
                 self.props[n] = s; return self
             def add_required_input(self, n):
                 self.required.append(n); return self
-        t = FakeTool()
+        t = _Registrar()
         spec = [inp.GeometryHandle("on_face", require="planar_face", required=True),
                 inp.Choice("op", ["new"], default="new")]
         inp.apply_to_tool(t, spec)

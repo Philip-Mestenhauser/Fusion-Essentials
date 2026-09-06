@@ -13,7 +13,7 @@ import adsk.fusion
 import pytest
 
 from conftest import (load_tool, make_design, install, payload, error_message, MakeComp,
-                      BRepBody, BRepFace, _NamedCollection)
+                      BRepBody, BRepFace, FakeFeature)
 
 su = load_tool("surface_untrim")
 
@@ -24,12 +24,10 @@ def _face(area=1.0, body=None):
                     body=body if body is not None else BRepBody("Srf1", is_solid=False))
 
 
-class _Feature:
-    """UntrimFeature: the faces it created and the bodies they belong to."""
+class _Feature(FakeFeature):
+    """An UntrimFeature - the shared feature under this tool's result name."""
     def __init__(self, name="Untrim1", faces=(), bodies=()):
-        self.name = name
-        self.faces = _NamedCollection(faces)
-        self.bodies = _NamedCollection(bodies)
+        super().__init__(name=name, faces=faces, bodies=bodies)
 
 
 class _UntrimFeatures:

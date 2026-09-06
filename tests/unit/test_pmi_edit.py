@@ -8,7 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, error_message, MakeComp
+from conftest import (load_tool, error_message, FakePMIDisplaySettings,
+                      FakePMIGeometricValueTolerance, FakePMIHoleThreadNote,
+                      FakePMILeaderLineNote, MakeComp, make_pmi_value)
 
 pe = load_tool("pmi_edit")
 
@@ -18,33 +20,22 @@ def _payload(result):
     return json.loads(result["content"][0]["text"])
 
 
-class _FakeAnn:
-    """leaderLineExtension starts at _pmi.LEADER_EXT_DEFAULT rather than a literal: the floor the
-    tools refuse below is a tool constant, and the platform value behind it is UNMEASURED on this
-    build (PMI authoring is extension-gated), so a hand-typed number here would encode a fact
-    nothing measured.
+class _FakeAnn(FakePMILeaderLineNote):
+    """The leader note pmi_edit works on, seeded over the shared fake. leaderLineExtension starts
+    at _pmi.LEADER_EXT_DEFAULT rather than a literal: the floor the tools refuse below is a tool
+    constant, and the platform value behind it is UNMEASURED on this build (PMI authoring is
+    extension-gated), so a hand-typed number here would encode a fact nothing measured."""
 
-    markUpToDate() returning True AND clearing isOutOfDate is this fake's own contract, not a
-    measured one - probe P5 settles what the platform method actually returns and whether the flag
-    clears. The handler gates on BOTH the bool and the re-read, so it is correct against either
-    answer; what is unproven is only that this fake resembles the platform."""
+    def __init__(self, name="Note1", suffix="PMILeaderLineNote", out_of_date=False, **kwargs):
+        kwargs.setdefault("leader_extension", pe._pmi.LEADER_EXT_DEFAULT)
+        super().__init__(name=name, object_type="adsk::fusion::" + suffix,
+                         out_of_date=out_of_date, **kwargs)
 
-    def __init__(self, name="Note1", suffix="PMILeaderLineNote", out_of_date=False):
-        self.name = name
-        self.objectType = "adsk::fusion::" + suffix
-        self.plainText = "TEXT"
-        self.isVisible = True
-        self.isOutOfDate = out_of_date
-        self.isSuppressed = False
-        self.errorOrWarningMessage = ""
-        self.isLightBulbOn = True
-        self.leaderLineExtension = pe._pmi.LEADER_EXT_DEFAULT
-        self.isPerpendicularLine = False
-        self.segments = None
 
-    def markUpToDate(self):
-        self.isOutOfDate = False
-        return True
+def _hole_ann(name="Hole Note1", **kwargs):
+    """A hole/thread callout - the kind whose flags/values/display pmi_edit writes."""
+    kwargs.setdefault("leader_extension", pe._pmi.LEADER_EXT_DEFAULT)
+    return FakePMIHoleThreadNote(name=name, **kwargs)
 
 
 class _RefusingSet(_FakeAnn):
@@ -56,17 +47,13 @@ class _RefusingSet(_FakeAnn):
         super().__init__()
         for key, val in values.items():
             setattr(self, key, val)
-        self._raises = set(raises)
-
-    def __setattr__(self, key, value):
-        if key in getattr(self, "_raises", ()):
-            raise RuntimeError(f"'{key}' is read-only on this annotation")
-        object.__setattr__(self, key, value)
+        object.__setattr__(self, "_declines", set(raises))
 
 
 class _SuppressFlag:
     """A timeline feature's isSuppressed: 'raise_on' names the value whose write raises, 'drop'
-    swallows every write. Both are shapes the suppression read-back gates report."""
+    swallows every write. Both are shapes the suppression read-back gates report. Bespoke: the
+    shared timeline fake carries no refuse-this-write / swallow-this-write pair."""
 
     def __init__(self, value=True, raise_on=None, drop=False):
         object.__setattr__(self, "isSuppressed", value)
@@ -236,9 +223,11 @@ class TestUpToDateAndConvert:
         assert "Already up to date" in out["note"]
 
     def test_a_decline_is_an_error(self, rig):
-        rig.ann.isOutOfDate = True
-        rig.ann.markUpToDate = lambda: False
+        stubborn = _FakeAnn(out_of_date=True, up_to_date_ok=False)
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (stubborn, rig.comp, None))
         assert "declined" in error_message(pe.handler(action="mark_up_to_date", annotation="Note1"))
+        assert stubborn.isOutOfDate is True             # the flag never cleared either
 
     def test_dismisses_and_rereads(self, rig):
         rig.ann.isOutOfDate = True
@@ -257,8 +246,7 @@ class TestUpToDateAndConvert:
 
     def test_convert_reports_the_new_kind(self, rig):
         rig.ann.objectType = "adsk::fusion::PMIImportedDimension"
-        rig.ann.convertImportedToFusionPMI = lambda: _FakeAnn(name="Note1",
-                                                             suffix="PMIHoleThreadNote")
+        rig.ann.convertImportedToFusionPMI = lambda: _hole_ann(name="Note1")
         out = _payload(pe.handler(action="convert_imported", annotation="Note1"))
         assert out["converted_to"] == "hole_note"
 
@@ -343,9 +331,12 @@ class TestNewActions:
             pe.handler(action="set_leader_point", annotation="Note1", leader_point=[1, 2, 3]))
 
     def test_set_leader_point_gates_on_the_platform_bool(self, rig):
-        rig.ann.setAnnotationTargetPoint = lambda p: False
+        declining = _FakeAnn(target_ok=False)
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (declining, rig.comp, None))
         assert "declined" in error_message(
             pe.handler(action="set_leader_point", annotation="Note1", leader_point=[1, 2, 3]))
+        assert declining.annotationTargetPoint is None     # the refused point never landed
 
     def test_set_alignment_needs_at_least_one_knob(self, rig):
         assert "needs" in error_message(pe.handler(action="set_alignment", annotation="Note1"))
@@ -441,7 +432,7 @@ class TestNewActions:
             pe.handler(action="set_alignment", annotation="Note1", perpendicular=True))
 
     def test_set_display_writes_both_settings_through_the_shared_writer(self, rig):
-        hole = _FakeAnn(name="Hole Note1", suffix="PMIHoleThreadNote")
+        hole = _hole_ann()
         hole.primaryDisplaySettings = None
         hole.secondaryDisplaySettings = None
         hole.hasSecondaryDisplaySettings = False
@@ -458,7 +449,7 @@ class TestNewActions:
         assert seen == [(hole, {"precision": 2, "secondary": {"precision": 4}})]
 
     def test_set_display_surfaces_the_writers_refusal(self, rig):
-        hole = _FakeAnn(name="Hole Note1", suffix="PMIHoleThreadNote")
+        hole = _hole_ann()
         rig.monkeypatch.setattr(pe._pmi, "find_annotation",
                                 lambda d, n, c="": (hole, rig.comp, None))
         rig.monkeypatch.setattr(pe._pmi, "apply_display",
@@ -564,9 +555,14 @@ class TestSetPlane:
         assert seen[0][1] is face
 
     def test_set_plane_gates_on_the_platform_bool(self, rig):
-        self._armed(rig, accepts=False)
+        declining = _FakeAnn(plane_ok=False)
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (declining, rig.comp, None))
         assert "did not take" in error_message(
             pe.handler(action="set_plane", annotation="Note1", plane="xy"))
+        # the call DID reach the platform - the bool it answered is what refused the set
+        assert declining._plane_calls == [
+            (pe.adsk.fusion.LeaderLineNotePlaneTypes.PrincipalXYLeaderLineNotePlaneType,)]
 
     def test_set_plane_gates_on_the_reread_even_when_the_call_returns_true(self, rig):
         types = pe.adsk.fusion.LeaderLineNotePlaneTypes
@@ -639,7 +635,7 @@ class TestHoleCallouts:
 
     @pytest.fixture
     def hole(self, rig):
-        ann = _FakeAnn(name="Hole Note1", suffix="PMIHoleThreadNote")
+        ann = _hole_ann()
         rig.monkeypatch.setattr(pe._pmi, "find_annotation",
                                 lambda d, n, c="": (ann, rig.comp, None))
         return ann
@@ -668,12 +664,12 @@ class TestHoleCallouts:
 
     def test_set_display_republishes_the_secondary_settings_a_note_carries(self, hole, rig):
         mm = pe.adsk.fusion.PMIUnitTypes.MillimetersPMIUnitType
-        hole.primaryDisplaySettings = SimpleNamespace(
-            precision=2, unitType=mm, hasLeadingZeros=True, hasTrailingZeros=False,
-            hasUnitAbbreviation=True)
-        hole.secondaryDisplaySettings = SimpleNamespace(
-            precision=4, unitType=mm, hasLeadingZeros=True, hasTrailingZeros=False,
-            hasUnitAbbreviation=False)
+        hole.primaryDisplaySettings = FakePMIDisplaySettings(
+            precision=2, unit_type=mm, leading_zeros=True, trailing_zeros=False,
+            unit_abbreviation=True)
+        hole.secondaryDisplaySettings = FakePMIDisplaySettings(
+            precision=4, unit_type=mm, leading_zeros=True, trailing_zeros=False,
+            unit_abbreviation=False)
         hole.hasSecondaryDisplaySettings = True
         rig.monkeypatch.setattr(pe._pmi, "apply_display", lambda obj, spec: None)
         out = _payload(pe.handler(action="set_display", annotation="Hole Note1",
@@ -682,23 +678,16 @@ class TestHoleCallouts:
         assert out["display_secondary"]["precision"] == 4
 
 
-class _RecordingTolerance:
-    """Stands in for PMIGeometricValueTolerance.create(): records the number handed to
-    setSymmetric so a test can pin exactly what the tool sends, and reads it back unchanged."""
+class _RecordingTolerance(FakePMIGeometricValueTolerance):
+    """The shared bounds fake with setSymmetric READING BACK what it was handed, so a test can pin
+    exactly what the tool sent (the shared one records the call without storing a bound)."""
 
     def __init__(self):
-        self.symmetric = None
-        self.hasTolerances = True
-        self.toleranceType = 0
-        self.hasUpperTolerance = True
-        self.hasLowerTolerance = False
-        self.hasToleranceClass = False
-        self.hasShaftToleranceClass = False
-        self.upperTolerance = 0.0
+        super().__init__(upper=0.0)
 
-    def setSymmetric(self, v):
-        self.symmetric = v
-        self.upperTolerance = v
+    def setSymmetric(self, value):
+        self.symmetric = value
+        self.upperTolerance = value
         return True
 
 
@@ -708,13 +697,8 @@ class TestSetValues:
 
     @pytest.fixture
     def hole(self, rig):
-        ann = _FakeAnn(name="Hole Note1", suffix="PMIHoleThreadNote")
-        ann.countersinkAngle = SimpleNamespace(hasValue=True, value=0.0,
-                                               isOverriddenValue=False, tolerance=None)
-        ann.diameter = SimpleNamespace(hasValue=True, value=0.0,
-                                       isOverriddenValue=False, tolerance=None)
-        ann.depth = SimpleNamespace(hasValue=True, value=0.0,
-                                    isOverriddenValue=False, tolerance=None)
+        ann = _hole_ann(values={key: make_pmi_value()
+                                for key in ("countersink_angle_deg", "diameter", "depth")})
         made = []
 
         def _create():

@@ -123,9 +123,6 @@ def handler(include=None, sheet: str = "") -> dict:
         custom = _custom_size_facts(s)
         if custom is not None and facts.get("sheet_size") is None:
             facts["custom_size"] = dict(custom, unit=_drawing_common.coordinate_unit(dwg))
-        images = _common.counted(lambda s=s: s.images.count)
-        if images is not None:
-            facts["images"] = images
         if want_views:
             vrows, truncated = _views_rows(s, _MAX_VIEWS_PER_SHEET)
             facts["view_rows"] = vrows

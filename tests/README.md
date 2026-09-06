@@ -111,12 +111,13 @@ named to match Fusion's runtime type names (tools branch on `type(x).__name__`):
 actually reads.
 
 **When `MakeComp`/`MakeDesign` lack a surface your tool needs, extend the shared
-fake — do not fork a bespoke `Fake*` hierarchy into your test file.** Most of the
-older tests roll their own `Fake*` classes plus an imperative `_install()` that
-pokes module-level seams (`mod.app = ...`); that pattern leaks state into the next
-test and is the reason `conftest.py` carries a large snapshot/restore fixture to
-compensate. It's the anti-pattern, not the model. (Same "extend the kind, don't
-copy it" rule the tools themselves follow.)
+fake — do not fork a bespoke `Fake*` hierarchy into your test file.** (Same
+"extend the kind, don't copy it" rule the tools themselves follow.) A type whose
+shape live Fusion was measured for uses its shared fake: import it, or subclass it
+and add only the extra the test needs. `test_fake_shapes_exist.py` refuses a
+free-standing local double of such a type, because the shape sweep only reaches the
+shared fakes. A type with no shape dump keeps a local double, whose one-line
+docstring says so.
 
 ## Adding or updating a test
 

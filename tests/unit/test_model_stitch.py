@@ -6,17 +6,17 @@ import adsk.core
 import adsk.fusion
 import pytest
 
-from conftest import (load_tool, make_design, install, MakeComp, BRepBody, BRepFace, Profile,
-                      _NamedCollection)
+from conftest import (load_tool, make_design, install, MakeComp, BRepBody, BRepFace, FakeFeature,
+                      FakeFeatures, Profile)
 
 so = load_tool("model_stitch")
 
 
-class _FakeFeature:
+class _FakeFeature(FakeFeature):
+    """The shared feature plus isSolid - stitch reads the flag off the BODY, so a feature
+    carrying one is the state that proves which of the two the tool read."""
     def __init__(self, name, result_bodies, is_solid=None):
-        self.name = name
-        self.bodies = _NamedCollection(result_bodies)
-        # loft/unstitch read feature.isSolid; stitch reads body.isSolid. Provide both.
+        super().__init__(name=name, bodies=result_bodies)
         if is_solid is not None:
             self.isSolid = is_solid
 
@@ -39,8 +39,10 @@ class _FakeStitchFeatures:
         return _FakeFeature("Stitch1", self._result_bodies)
 
 
-class _FakeFeatures:
+class _FakeFeatures(FakeFeatures):
+    """comp.features: a per-kind collection is present only when the test wires one."""
     def __init__(self, loft=None, stitch=None, unstitch=None):
+        super().__init__()
         if loft is not None:
             self.loftFeatures = loft
         if stitch is not None:

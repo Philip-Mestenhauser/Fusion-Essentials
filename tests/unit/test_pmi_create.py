@@ -6,7 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import load_tool, error_message, BRepEdge, BRepFace, MakeComp, MakeDesign
+from conftest import (load_tool, error_message, BRepEdge, BRepFace, FakePMIAnnotations,
+                      FakePMIHoleThreadNote, FakePMIHoleThreadNoteInput, FakePMIHoleThreadNotes,
+                      FakePMILeaderLineNote, FakePMILeaderLineNoteInput, FakePMILeaderLineNotes,
+                      MakeComp, MakeDesign)
 
 pc = load_tool("pmi_create")
 
@@ -14,34 +17,6 @@ pc = load_tool("pmi_create")
 def _payload(result):
     assert result["isError"] is False, result
     return json.loads(result["content"][0]["text"])
-
-
-class _FakeAnn:
-    def __init__(self, name="Note1", suffix="PMILeaderLineNote", text="DEBURR"):
-        self.name = name
-        self.objectType = "adsk::fusion::" + suffix
-        self.plainText = text
-        self.isVisible = True
-        self.isOutOfDate = False
-        self.isSuppressed = False
-        self.errorOrWarningMessage = ""
-        self.segments = []
-
-
-class _FakeNotes:
-    """leaderLineNotes/holeThreadNotes: createInput captures, add returns the canned annotation."""
-    def __init__(self, ann, input_extension=0.5):
-        self.ann = ann
-        self.input = SimpleNamespace(leaderLineExtension=input_extension, segments=None)
-        self.added = None
-
-    def createInput(self, target):
-        self.input.target = target
-        return self.input
-
-    def add(self, note_input):
-        self.added = note_input
-        return self.ann
 
 
 def _face(comp):
@@ -52,13 +27,15 @@ def _face(comp):
 
 @pytest.fixture
 def rig(monkeypatch):
-    """A component whose PMI collections are fakes; geometry resolution is stubbed per-test."""
-    ann = _FakeAnn()
-    notes = _FakeNotes(ann)
-    hole_ann = _FakeAnn(name="Hole Note1", suffix="PMIHoleThreadNote", text="QTY")
-    hole_notes = _FakeNotes(hole_ann)
+    """A component whose PMI collections are the shared fakes; geometry resolution is stubbed
+    per-test. The notes hand out `_input` from createInput, record `_added` and answer `_note`."""
+    ann = FakePMILeaderLineNote(name="Note1", text="DEBURR", segments=[])
+    notes = FakePMILeaderLineNotes(note=ann, note_input=FakePMILeaderLineNoteInput())
+    hole_ann = FakePMIHoleThreadNote(name="Hole Note1", text="QTY", segments=[])
+    hole_notes = FakePMIHoleThreadNotes(note=hole_ann,
+                                        note_input=FakePMIHoleThreadNoteInput())
     comp = MakeComp("Root")
-    comp.pmiAnnotations = SimpleNamespace(leaderLineNotes=notes, holeThreadNotes=hole_notes)
+    comp.pmiAnnotations = FakePMIAnnotations(leader_notes=notes, hole_notes=hole_notes)
     design = MakeDesign(comp=comp)
     monkeypatch.setattr(pc._common, "design", lambda: design)
     monkeypatch.setattr(pc._pmi, "segments_markup", lambda a: None)
@@ -100,7 +77,7 @@ class TestHoleNoteGuards:
         rig.stub_geometry([_face(rig.comp)])
         out = _payload(pc.handler(kind="hole_note", geometry=["a"], text=" REAM FINAL"))
         assert out["annotation"] == "Hole Note1"
-        assert len(rig.hole_notes.ann.segments) == 1     # appended to the (empty) fake callout
+        assert len(rig.hole_notes._note.segments) == 1     # appended to the (empty) fake callout
 
     def test_hole_note_refuses_note_only_inputs(self, rig):
         rig.stub_geometry([_face(rig.comp)])
@@ -145,20 +122,20 @@ class TestCreate:
         rig.stub_geometry([_face(rig.comp)])
         out = _payload(pc.handler(kind="note", geometry=["a"], text="{flatness}0.05"))
         assert out["annotation"] == "Note1" and out["kind"] == "note"
-        assert rig.notes.added is rig.notes.input
-        assert len(rig.notes.input.segments) == 2      # symbol + text landed on the input
+        assert rig.notes._added is rig.notes._input
+        assert len(rig.notes._input.segments) == 2      # symbol + text landed on the input
 
     def test_low_input_extension_is_pinned_to_the_default(self, rig):
-        rig.notes.input.leaderLineExtension = pc._pmi.LEADER_EXT_FLOOR / 2   # under the floor
+        rig.notes._input.leaderLineExtension = pc._pmi.LEADER_EXT_FLOOR / 2   # under the floor
         rig.stub_geometry([_face(rig.comp)])
         _payload(pc.handler(kind="note", geometry=["a"], text="X"))
-        assert rig.notes.input.leaderLineExtension == pc._pmi.LEADER_EXT_DEFAULT
+        assert rig.notes._input.leaderLineExtension == pc._pmi.LEADER_EXT_DEFAULT
 
     def test_an_input_at_or_above_the_floor_is_left_alone(self, rig):
-        rig.notes.input.leaderLineExtension = pc._pmi.LEADER_EXT_FLOOR
+        rig.notes._input.leaderLineExtension = pc._pmi.LEADER_EXT_FLOOR
         rig.stub_geometry([_face(rig.comp)])
         _payload(pc.handler(kind="note", geometry=["a"], text="X"))
-        assert rig.notes.input.leaderLineExtension == pc._pmi.LEADER_EXT_FLOOR
+        assert rig.notes._input.leaderLineExtension == pc._pmi.LEADER_EXT_FLOOR
 
     def test_an_explicit_leader_extension_is_written_once_and_never_pre_pinned(self, rig):
         # The pin exists for the case the caller said nothing. When leader_extension IS given, the
@@ -176,7 +153,7 @@ class TestCreate:
 
         rec = _Recording()
         object.__setattr__(rec, "leaderLineExtension", pc._pmi.LEADER_EXT_FLOOR / 2)
-        rig.notes.input = rec
+        rig.notes._input = rec
         rig.stub_geometry([_face(rig.comp)])
         _payload(pc.handler(kind="note", geometry=["a"], text="X",
                             leader_extension=8, units="mm"))          # 8 mm = 0.8 cm
@@ -186,13 +163,16 @@ class TestCreate:
         rig.stub_geometry([_face(rig.comp)])
         msg = error_message(pc.handler(kind="note", geometry=["a"], text="X",
                                        leader_extension=1, units="mm"))   # 1 mm < 2.5 mm
-        assert "floor" in msg and rig.notes.added is None
+        assert "floor" in msg and rig.notes._added is None
 
     def test_null_add_is_an_error(self, rig):
-        rig.notes.add = lambda note_input: None
+        # the add that CREATES NOTHING: the input was taken and no annotation came back
+        empty = FakePMILeaderLineNotes(add_result=None)
+        rig.comp.pmiAnnotations.leaderLineNotes = empty
         rig.stub_geometry([_face(rig.comp)])
         assert "no annotation was created" in error_message(
             pc.handler(kind="note", geometry=["a"], text="X"))
+        assert empty.count == 0 and empty._added is not None
 
     def test_hole_note_created(self, rig):
         rig.stub_geometry([_face(rig.comp)])
@@ -200,15 +180,8 @@ class TestCreate:
         assert out["annotation"] == "Hole Note1" and out["kind"] == "hole_note"
 
     def test_rename_that_does_not_take_is_reported(self, rig):
-        class Stubborn(_FakeAnn):
-            @property
-            def name(self):
-                return "Note1"
-
-            @name.setter
-            def name(self, v):
-                pass
-        rig.notes.ann = Stubborn()
+        # a rename the platform SWALLOWS: the assignment is accepted and the name never moves
+        rig.notes._note = FakePMILeaderLineNote(name="Note1", segments=[], swallows=["name"])
         rig.stub_geometry([_face(rig.comp)])
         out = _payload(pc.handler(kind="note", geometry=["a"], text="X", name="MyNote"))
         assert "did not take" in out["rename_warning"]
@@ -221,27 +194,24 @@ class TestCreate:
     def test_a_declined_set_annotation_plane_is_an_error_not_a_created_note(self, rig):
         # setAnnotationPlane returns a bool; a False that is not gated leaves the note on the
         # PLATFORM's plane while the tool reports the requested one.
-        rig.notes.input.setAnnotationPlane = lambda *a: False
+        rig.notes._input = FakePMILeaderLineNoteInput(plane_ok=False)
         rig.stub_geometry([_face(rig.comp)])
         msg = error_message(pc.handler(kind="note", geometry=["a"], text="X", plane="xy"))
         assert "declined" in msg and "xy" in msg
-        assert rig.notes.added is None                 # nothing was added
+        assert rig.notes._added is None                 # nothing was added
 
     def test_a_raising_set_annotation_plane_names_the_plane_and_the_cause(self, rig):
-        def boom(*a):
-            raise RuntimeError("needs an adjacent face")
-        rig.notes.input.setAnnotationPlane = boom
+        rig.notes._input = FakePMILeaderLineNoteInput(plane_raises="needs an adjacent face")
         rig.stub_geometry([_face(rig.comp)])
         msg = error_message(pc.handler(kind="note", geometry=["a"], text="X", plane="face"))
         assert "setAnnotationPlane(face) failed" in msg and "adjacent face" in msg
 
     def test_an_accepted_plane_reaches_the_input_with_the_mapped_member(self, rig):
-        seen = []
-        rig.notes.input.setAnnotationPlane = lambda *a: (seen.append(a), True)[1]
         rig.stub_geometry([_face(rig.comp)])
         _payload(pc.handler(kind="note", geometry=["a"], text="X", plane="xy"))
         import adsk.fusion
-        assert seen == [(adsk.fusion.LeaderLineNotePlaneTypes.PrincipalXYLeaderLineNotePlaneType,)]
+        assert rig.notes._input._plane_calls == [
+            (adsk.fusion.LeaderLineNotePlaneTypes.PrincipalXYLeaderLineNotePlaneType,)]
 
     def test_a_hole_note_display_spec_goes_through_the_shared_writer(self, rig, monkeypatch):
         # pmi_create and pmi_edit run the SAME display writer - a second copy here is what drifts.

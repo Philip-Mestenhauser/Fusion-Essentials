@@ -11,21 +11,23 @@ endSketchPoint (so endpoints are shared, not duplicated), and adds the closing s
 record which point object each segment started from, so we can assert the chaining.
 """
 
-from conftest import load_tool, make_sketch
+from conftest import FakeSketchPoint as _SharedSketchPoint, load_tool, make_sketch
 
 sk = load_tool("sketch_add_geometry")
 
 
-# ── fakes for the types with no shared one: SketchPoint / SketchLine(s) / GeometricConstraints ──
+# ── the shared point, plus the SketchLine(s) / GeometricConstraints recorders ──
 
 _pid = [0]
 
 
-class FakeSketchPoint:
+class FakeSketchPoint(_SharedSketchPoint):
+    """The shared point holding its (x, y) as geometry, plus `id` - the identity that tells two
+    points at the same coordinates apart, which is what proves a chain SHARED one."""
     def __init__(self, x, y):
+        super().__init__(geometry=(x, y))
         _pid[0] += 1
         self.id = _pid[0]
-        self.x, self.y = x, y
 
 
 class FakeSketchLine:
@@ -110,7 +112,7 @@ class TestPolylineChaining:
         s, _ = self._draw([(0, 0), (10, 0), (10, 10), (0, 0)])
         lines = s.sketchCurves.sketchLines.lines
         first, closing_end = lines[0].startSketchPoint, lines[-1].endSketchPoint
-        assert (closing_end.x, closing_end.y) == (first.x, first.y)
+        assert closing_end.geometry == first.geometry
         assert not s.geometricConstraints.coincidents
 
     def test_needs_at_least_two_points(self):

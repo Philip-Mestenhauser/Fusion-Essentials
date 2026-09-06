@@ -9,8 +9,8 @@ modelling separate, jointable parts in an assembly.
 
 import json
 
-from conftest import (FakeMatrix3D, FakeOccurrence, MakeComp, MakeDesign, install, load_tool,
-                      make_occurrence)
+from conftest import (FakeMatrix3D, FakeOccurrence, MakeComp, MakeDesign, _NamedCollection,
+                      install, load_tool, make_occurrence)
 
 cc = load_tool("model_create_component")
 
@@ -87,16 +87,19 @@ class FakeMatrix(FakeMatrix3D):
         return True
 
 
-class FakeOccurrences:
+class FakeOccurrences(_NamedCollection):
+    """component.occurrences: the shared walk plus addNewComponent, which lands the new occurrence
+    IN the walk - so the count is read back off the collection, never kept beside it."""
     def __init__(self):
+        super().__init__()
         self.last_transform = None
-        self.count = 0
         self.ground = None          # what isGroundToParent reads on the occurrence this creates
 
     def addNewComponent(self, transform):
         self.last_transform = transform
-        self.count += 1
-        return _NewOccurrence(ground=self.ground)
+        occ = _NewOccurrence(ground=self.ground)
+        self._items.append(occ)
+        return occ
 
 
 class FakeParentOccurrences:

@@ -323,11 +323,15 @@ class TestTheBuildLacksTheFactory:
         assert calls["new_documents"] == 0
 
 
+def _origin_planes():
+    """The root's three origin planes - a DXF import resolves its target through the xY one."""
+    return tuple(types.SimpleNamespace(name=n) for n in ("XY", "XZ", "YZ"))
+
+
 class TestDxfImport:
     def _design_with_plane(self, sketches=()):
-        comp = MakeComp("Root", sketches=sketches)
-        comp.xYConstructionPlane = types.SimpleNamespace(name="XY")
-        return make_design(comp=comp)
+        return make_design(comp=MakeComp("Root", sketches=sketches,
+                                         origin_planes=_origin_planes()))
 
     def test_sketches_land_and_are_reported(self, wire, cad):
         design = self._design_with_plane()
@@ -611,8 +615,7 @@ class TestTheWorkspaceTheImportSwitchedAway:
 
     def test_the_dxf_arm_discloses_the_workspace_too(self, wire, cad):
         ui = _FakeUI()
-        comp = MakeComp("Root")
-        comp.xYConstructionPlane = types.SimpleNamespace(name="XY")
+        comp = MakeComp("Root", origin_planes=_origin_planes())
         design = make_design(comp=comp)
 
         def _side_effect():

@@ -422,6 +422,19 @@ class _StubbornOcc(FakeOccurrence):
         object.__setattr__(self, key, value)
 
 
+class _BlindAfterClear(FakeOccurrence):
+    """An occurrence that ACCEPTS the isolation clear and then DECLINES the read-back - a flag that
+    answers nothing, which is neither a confirmed clear nor an observed stuck lock."""
+
+    def __init__(self, name, full_path=None, **kw):
+        super().__init__(**_occ_args(name, full_path=full_path, isolated=True, **kw))
+
+    @FakeOccurrence.isIsolated.setter
+    def isIsolated(self, value):
+        FakeOccurrence.isIsolated.fset(self, value)
+        self._raises_on["isIsolated"] = "2 : InternalValidationError : isIsolated"
+
+
 class TestVisibilityReadBack:
     """Every occurrence write is read BACK: a swallowed hide/isolate/show is an error, and a
     mid-list failure names the targets it already changed."""
@@ -480,6 +493,16 @@ class TestVisibilityReadBack:
         _install(monkeypatch, [FakeOcc("A", full_path="A", isolated=True)])
         out = _payload(iv.handler(action="clear_isolation"))
         assert out["cleared_count"] == 1 and "stuck" not in out
+
+    def test_a_clear_whose_read_back_declines_is_published_as_not_confirmed(self, monkeypatch):
+        # An unreadable read-back is the shape a `is not True` gate would count as cleared, which
+        # claims an isolation was lifted on the one occurrence nothing was observed about.
+        _install(monkeypatch, [_BlindAfterClear("A", full_path="A")])
+        out = _payload(iv.handler(action="clear_isolation"))
+        assert out["cleared_count"] == 0
+        assert out["not_confirmed"] == ["A"]
+        assert "stuck" not in out
+        assert "did not read back" in out["note"]
 
 
 class TestBodyVisibility:

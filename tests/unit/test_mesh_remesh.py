@@ -3,17 +3,11 @@
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, FakeBaseFeature, FakeBaseFeatures, FakeFeatures, MakeComp,
-                      MeshBody, _NamedCollection, install, load_tool, make_design, payload)
+from conftest import (BRepBody, FakeBaseFeature, FakeBaseFeatures, FakeFeatures,
+                      FakeValueInput as _FakeValueInput, MakeComp, MeshBody, _NamedCollection,
+                      install, load_tool, make_design, payload)
 
 mo = load_tool("mesh_remesh")
-
-
-class _FakeValueInput:
-    """The marker ValueInput.createByReal returns here; realValue is the live read-back property."""
-    def __init__(self, real):
-        self.real = real
-        self.realValue = real
 
 
 class _Features(FakeFeatures):

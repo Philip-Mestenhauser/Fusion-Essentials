@@ -6,8 +6,9 @@ import adsk.core
 import adsk.fusion
 import pytest
 
-from conftest import (BRepBody, BRepEdge, BRepFace, MakeComp, _NamedCollection, body_proxy,
-                      go_stale, install, load_tool, make_design, make_source_document, payload)
+from conftest import (BRepBody, BRepEdge, BRepFace, FakeFeature as _SharedFeature, MakeComp,
+                      _NamedCollection, body_proxy, go_stale, install, load_tool, make_design,
+                      make_source_document, payload)
 
 se = load_tool("surface_offset")
 
@@ -37,12 +38,14 @@ def _wire(offset_features, handle_map=None):
     return comp
 
 
-class FakeFeature:
-    """An OffsetFeature: its result bodies, and the faces it created when those read at all."""
+class FakeFeature(_SharedFeature):
+    """An OffsetFeature: the shared feature, whose faces read RAISES when none are given - the
+    feature whose created faces cannot be read at all."""
     def __init__(self, name="Feat1", bodies=None, faces=None):
-        self.name = name
-        self.bodies = _NamedCollection(bodies if bodies is not None else [])
-        if faces is not None:
+        super().__init__(name=name, bodies=bodies or ())
+        if faces is None:
+            del self.faces
+        else:
             self.faces = _NamedCollection(faces)
 
 
