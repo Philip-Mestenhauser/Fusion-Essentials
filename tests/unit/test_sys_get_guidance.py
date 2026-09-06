@@ -29,6 +29,7 @@ _GUIDANCE_SRC = tuple(os.path.join(_REPO, "commands", "mcpServer", "guidance", n
                       for name in ("__init__.py", "loader.py", "render.py", "resources.py"))
 
 _IDS = list(gd.loader.SECTION_IDS)
+_RECIPE_IDS = list(gd.loader.RECIPE_IDS)
 
 # The most rules one section read answers with - the packaged number, which gen_guidance.validate
 # also refuses a section past (test_gen_guidance.py holds the two sides against each other).
@@ -51,12 +52,19 @@ def _rule(section_id, rule_id):
             "do": "d", "except": "e", "prove": [{"tool": "design_get", "observe": "o"}]}
 
 
-def _doctored(rule_count=1, section_id="kernel"):
+def _recipe_record(recipe_id, section_id="manufacture"):
+    return {"id": recipe_id, "section": section_id, "title": "T", "scenarios": ["simple_part"],
+            "use_when": "u", "steps": [{"tool": "cam_get", "do": "d", "read_back": "r"}],
+            "bar": {"measure": "m", "eyes": "e"}}
+
+
+def _doctored(rule_count=1, section_id="kernel", recipes=()):
     """A synthetic document with one section holding `rule_count` rules - the in-process stand-in
     for data the shipped file does not carry (an oversized section, a missing one)."""
     return {"guidance_id": "doctored", "title": "T", "scenarios": ["simple_part"],
-            "sections": [{"id": section_id, "title": "S",
-                          "rules": [_rule(section_id, f"r{i}") for i in range(rule_count)]}]}
+            "sections": [{"id": section_id, "title": "S", "use_when": "u",
+                          "rules": [_rule(section_id, f"r{i}") for i in range(rule_count)],
+                          "recipes": list(recipes)}]}
 
 
 @pytest.fixture
@@ -91,17 +99,31 @@ class TestSectionIndex:
         assert out["next_sections"] == _IDS
         assert out["guidance_id"] == _canonical()["guidance_id"]
 
-    def test_each_index_row_carries_its_title_and_rule_count(self):
-        counts = {sec["id"]: len(sec["rules"]) for sec in _canonical()["sections"]}
+    def test_each_index_row_carries_its_title_counts_and_use_when(self):
+        canonical = {sec["id"]: sec for sec in _canonical()["sections"]}
         rows = {row["id"]: row for row in _payload(gd.handler())["sections"]}
-        assert {i: rows[i]["rule_count"] for i in _IDS} == counts
-        assert all(rows[i]["title"] for i in _IDS)
+        for section_id in _IDS:
+            assert rows[section_id]["rule_count"] == len(canonical[section_id]["rules"])
+            assert rows[section_id]["recipe_count"] == len(canonical[section_id]["recipes"])
+            assert rows[section_id]["title"]
+            assert rows[section_id]["use_when"] == canonical[section_id]["use_when"]
 
-    def test_the_index_carries_no_rules_at_all(self):
+    def test_the_index_maps_every_recipe_by_id_section_title_and_use_when(self):
+        # the map an agent picks ONE recipe from: without it the recipe read is a call nobody can
+        # aim, since the ids live only in the schema enum.
+        canonical = [r for sec in _canonical()["sections"] for r in sec["recipes"]]
+        rows = _payload(gd.handler())["recipes"]
+        assert [r["id"] for r in rows] == [r["id"] for r in canonical]
+        for row, rec in zip(rows, canonical):
+            assert row == {"id": rec["id"], "section": rec["section"], "title": rec["title"],
+                           "use_when": rec["use_when"]}
+
+    def test_the_index_carries_no_rules_and_no_recipe_steps_at_all(self):
         # the whole point of an index: a client that asked for nothing is not sent the document.
         out = _payload(gd.handler())
         assert "rules" not in out
         assert all("rules" not in row for row in out["sections"])
+        assert all("steps" not in row and "bar" not in row for row in out["recipes"])
 
     def test_the_index_publishes_the_scenario_vocabulary_the_rules_declare_from(self):
         assert _payload(gd.handler())["scenarios"] == _canonical()["scenarios"]
@@ -141,6 +163,80 @@ class TestOneSection:
         index, section = _payload(gd.handler()), _payload(gd.handler(section="kernel"))
         assert section["guidance_id"] == index["guidance_id"]
         assert section["sha256"] == index["sha256"]
+
+    @pytest.mark.parametrize("section_id", _IDS)
+    def test_a_section_names_its_recipes_without_carrying_one(self, section_id):
+        # the section read is the RULES plus an index of what else this section offers: a recipe
+        # body here would flood the read an agent makes to orient within a section.
+        canonical = {sec["id"]: sec for sec in _canonical()["sections"]}[section_id]
+        out = _payload(gd.handler(section=section_id))
+        assert out["use_when"] == canonical["use_when"]
+        assert out["recipe_index"] == [{"id": r["id"], "title": r["title"],
+                                        "use_when": r["use_when"]}
+                                       for r in canonical["recipes"]]
+        assert all("steps" not in row for row in out["recipe_index"])
+
+
+# ── one recipe ──────────────────────────────────────────────────────────────
+
+class TestOneRecipe:
+    @pytest.mark.parametrize("recipe_id", _RECIPE_IDS)
+    def test_a_recipe_comes_back_whole_and_equals_the_canonical_record(self, recipe_id):
+        canonical = {r["id"]: r for sec in _canonical()["sections"] for r in sec["recipes"]}
+        out = _payload(gd.handler(recipe=recipe_id))
+        assert out["recipe"] == canonical[recipe_id]
+
+    def test_a_recipe_read_carries_the_same_id_and_hash_and_address_as_the_index(self):
+        index = _payload(gd.handler())
+        out = _payload(gd.handler(recipe=_RECIPE_IDS[0]))
+        assert out["guidance_id"] == index["guidance_id"]
+        assert out["sha256"] == index["sha256"]
+        assert out["resource_uri"] == index["resource_uri"]
+
+    def test_the_note_says_the_steps_are_ordered_and_what_the_bar_is(self):
+        # a recipe is a SEQUENCE; a client that reads its steps as a menu picks one and skips the
+        # read-backs, so the ordering and the read-back are what the note has to say.
+        note = _payload(gd.handler(recipe=_RECIPE_IDS[0]))["note"]
+        assert "ORDERED" in note and "read_back" in note and "'bar'" in note
+
+    def test_a_recipe_read_carries_no_rules(self):
+        out = _payload(gd.handler(recipe=_RECIPE_IDS[0]))
+        assert "rules" not in out and "sections" not in out
+
+    def test_asking_for_a_section_and_a_recipe_at_once_is_refused_naming_both(self):
+        # they are two different reads, and answering one of them silently would hand back a
+        # payload that does not match what was asked for.
+        result = gd.handler(section="finish", recipe=_RECIPE_IDS[0])
+        assert result["isError"] is True
+        assert "finish" in result["message"] and _RECIPE_IDS[0] in result["message"]
+
+    def test_a_recipe_id_the_document_does_not_carry_is_refused_naming_what_it_does(self, serve):
+        serve(_doctored(recipes=[_recipe_record("other-recipe")]))
+        result = gd.handler(recipe=_RECIPE_IDS[0])
+        assert result["isError"] is True
+        assert _RECIPE_IDS[0] in result["message"] and "other-recipe" in result["message"]
+
+    def test_a_document_carrying_no_recipe_at_all_says_so(self, serve):
+        # 'none' rather than nothing: a refusal ending in "It carries: ." reads as a bug.
+        serve(_doctored())
+        result = gd.handler(recipe=_RECIPE_IDS[0])
+        assert result["isError"] is True and "none" in result["message"]
+
+    def test_an_unknown_recipe_is_refused_naming_every_legal_id(self):
+        result = gd.handler(recipe="choose-a-strategy")
+        assert result["isError"] is True
+        for recipe_id in _RECIPE_IDS:
+            assert recipe_id in result["message"]
+
+    def test_a_bad_recipe_is_refused_before_the_document_is_even_read(self, monkeypatch):
+        reads = []
+        monkeypatch.setattr(gd.loader, "load",
+                            lambda path=None: (reads.append(1), ({}, ""))[1])
+        assert gd.handler(recipe="nope")["isError"] is True
+        assert reads == []
+
+    def test_an_empty_recipe_string_reads_as_no_recipe(self):
+        assert _payload(gd.handler(recipe=""))["section"] is None
 
 
 # ── the address the resource channel serves ─────────────────────────────────
@@ -269,7 +365,8 @@ class TestAscii:
     def test_every_string_the_payload_carries_is_pure_ascii(self):
         # the payload crosses the wire JSON-encoded with ensure_ascii, so a non-ASCII character
         # ships as a 6-character escape. Checked on the DECODED values, where it is still visible.
-        payloads = [_payload(gd.handler())] + [_payload(gd.handler(section=i)) for i in _IDS]
+        payloads = ([_payload(gd.handler())] + [_payload(gd.handler(section=i)) for i in _IDS]
+                    + [_payload(gd.handler(recipe=r)) for r in _RECIPE_IDS])
         bad = [(s, hex(ord(c))) for p in payloads for s in _strings(p)
                for c in s if ord(c) > 127]
         assert not bad, f"non-ASCII in the guidance payload: {bad}"
@@ -277,6 +374,12 @@ class TestAscii:
     def test_the_ascii_walk_reaches_the_rule_records(self):
         # the walk is only worth its lines while it descends into the nested rule dicts.
         assert "connected-reference-path" in set(_strings(_payload(gd.handler(section="assemble"))))
+
+    def test_the_ascii_walk_reaches_the_recipe_steps(self):
+        # a recipe nests one level deeper than a rule: its steps are dicts inside a list inside the
+        # record, and a walk that stopped short would clear a payload it never read.
+        strings = set(_strings(_payload(gd.handler(recipe=_RECIPE_IDS[0]))))
+        assert "read_back" in strings
 
 
 # ── the wire contract, through the real server ──────────────────────────────
@@ -313,6 +416,19 @@ class TestWireContract:
 
     def test_the_section_input_carries_the_closed_id_set_as_a_schema_enum(self, server):
         assert _entry(server)["inputSchema"]["properties"]["section"]["enum"] == _IDS
+
+    def test_the_recipe_input_carries_the_shipped_recipe_ids_as_a_schema_enum(self, server):
+        assert _entry(server)["inputSchema"]["properties"]["recipe"]["enum"] == _RECIPE_IDS
+
+    def test_one_recipe_comes_back_through_a_real_tools_call(self, server):
+        canonical = {r["id"]: r for sec in _canonical()["sections"] for r in sec["recipes"]}
+        out = _payload(_call(server, {"recipe": _RECIPE_IDS[0]}))
+        assert out["recipe"] == canonical[_RECIPE_IDS[0]]
+
+    def test_the_server_refuses_an_out_of_enum_recipe_before_dispatch(self, server):
+        result = _call(server, {"recipe": "no-such-recipe"})
+        assert result["isError"] is True
+        assert "Valid values:" in result["message"] and "'recipe'" in result["message"]
 
     def test_it_runs_off_the_main_thread(self):
         assert gd.item.run_on_main_thread is False
@@ -375,6 +491,18 @@ class TestLoader:
     def test_the_declared_section_ids_are_the_shipped_documents_own(self):
         doc, _sha = gd.loader.load()
         assert gd.loader.section_ids(doc) == _IDS
+
+    def test_the_declared_recipe_ids_are_the_shipped_documents_own(self):
+        # the tuple is what the schema enum is built from, so a recipe added to the JSON without
+        # it is a recipe no client can ask for.
+        doc, _sha = gd.loader.load()
+        assert [r["id"] for r in gd.loader.recipes(doc)] == _RECIPE_IDS
+
+    def test_find_recipe_matches_exactly_and_answers_none_otherwise(self):
+        doc, _sha = gd.loader.load()
+        assert gd.loader.find_recipe(doc, _RECIPE_IDS[0])["id"] == _RECIPE_IDS[0]
+        assert gd.loader.find_recipe(doc, _RECIPE_IDS[0][:-1]) is None
+        assert gd.loader.find_recipe(doc, _RECIPE_IDS[0].upper()) is None
 
     def test_the_document_loads_from_any_working_directory(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)

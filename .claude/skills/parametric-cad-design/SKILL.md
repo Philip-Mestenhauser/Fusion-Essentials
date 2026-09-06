@@ -2,82 +2,57 @@
 name: parametric-cad-design
 description: >-
   Use when designing or modelling in Fusion through the fusion-essentials tools - building a
-  part or an assembly, not running a fixed procedure. Task-agnostic practice: what to settle
-  before the first feature, how intent is carried in parameters and sketches, how an assembly's
-  degrees of freedom are structured, and the reads that prove what you built is what you meant.
-  Each rule states when it applies, what to do, where it does not apply, and what to read back.
-  Guidance to apply while the design is still moving, not a checklist to recite.
+  part, a surfaced product, an assembly, or a machining job, not running a fixed procedure.
+  Practice read out of Autodesk's own sample designs: what to settle before the first feature,
+  how a sketch carries intent, the feature order of a moulded or surfaced part, how an
+  assembly's freedom is structured, and which machining strategy fits. Rules say when they apply
+  and what to read back; recipes are ordered tool sequences with a bar for done and an exemplar
+  to X-ray.
 ---
 
 # Designing in Fusion
 
-Aimed at the gap automated checks miss.
+Rules for judgment, recipes for sequence, a bar for done - read out of the designs Autodesk ships as samples.
 
-## Kernel - every design
+## Kernel
 
 **declare-acceptance-and-interfaces**
-When you take on a brief: state what the design must satisfy, and each interface as a checkable expectation - seating faces, aligned axes, clearance. Except a throwaway probe. Prove `workspace_orient`: the active document and its units.
+When you take on a brief: write what the design must satisfy and each interface as a checkable number - seating faces, aligned axes, clearance, wall thickness. Except a throwaway probe. Prove `workspace_orient`: the active document, its units and what is already in it.
+
+**sequence-is-the-design**
+When the first feature is next: decide the feature order before drawing: form, then fillets, then shell, then bosses and holes, then cosmetics - a timeline built in that order edits cleanly, one built by accretion does not. Except a one-feature part. Prove `design_get`: the timeline reads as the order you planned.
 
 **encode-intended-changeability**
-When a value carries a decision: hold it in a named, commented parameter and derive the rest; a buried literal freezes while geometry moves. Except a measured value, in one parameter saying so; audits only read. Prove `param_get`: each driving parameter's expression and comment.
+When a value carries a decision: type a wall thickness or a pitch ONCE and reference it by name everywhere else; promote it to a named parameter only when a family or a configuration is expected. Except a measured value, held in one parameter saying so. Prove `sketch_get`: dimensions whose expression is another dimension's name, not a repeated literal.
 
 **build-and-observe-in-milestones**
-When a milestone lands: read it back against intent, not at the end; a half-turn seating error shows in a bounding box. Except a milestone already proved under verify-the-write. Prove `model_inspect`: the bounding box of what was built.
-
-**prove-structure-before-detail**
-When detail is next: prove the structure first - detail on a part sitting on the wrong plane is drawn twice. Except detail that is itself the requirement. Prove `model_measure_relation`: perpendicular, coaxial or concentric where claimed.
+When a milestone lands: read it back against intent before the next feature: a bounding box, a volume, a screenshot - never only at the end. Except a milestone a write already verified. Prove `model_inspect`: bounding box and volume against the numbers you wrote down.
 
 **compare-the-artifact-with-acceptance**
-When the design looks finished: compare it against the acceptance you wrote, and report each item you could not meet. Except acceptance the brief left open. Prove `view_screenshot`: whether it reads as the object it should be.
+When the design looks finished: compare it with the acceptance you wrote and say what you could not meet; a screenshot that reads as the object is part of the acceptance. Except acceptance the brief left open. Prove `view_screenshot`: does it read as the object it should be.
 
-## Plan
+## Playbooks
 
-**name-parts-for-what-they-are**
-When a part enters the tree: a made part takes a functional name, a bought part its supplier number. Except imported names. Prove `design_get`: the component names in the tree.
+- **Plan** (`plan`) - before the first component exists - naming, variants, what is bought. Read `playbooks/plan.md` or call `sys_get_guidance(section="plan")`.
+- **Sketch** (`sketch`) - any profile that must survive a size change or drive a feature. Read `playbooks/sketch.md` or call `sys_get_guidance(section="sketch")`.
+- **Model** (`model`) - turning sketches into a part - order, carving, patterns, frozen bodies. Read `playbooks/model.md` or call `sys_get_guidance(section="model")`.
+- **Surface** (`surface`) - a shell, skin or product form that no extrude or revolve describes. Read `playbooks/surface.md` or call `sys_get_guidance(section="surface")`.
+- **Assemble** (`assemble`) - more than one component - how they are held, joined and moved. Read `playbooks/assemble.md` or call `sys_get_guidance(section="assemble")`.
+- **Validate** (`validate`) - the geometry exists and must be proved against the brief. Read `playbooks/validate.md` or call `sys_get_guidance(section="validate")`.
+- **Finish** (`finish`) - handing the work on. Read `playbooks/finish.md` or call `sys_get_guidance(section="finish")`.
+- **Manufacture** (`manufacture`) - a machining job - setups, strategy choice, what a toolpath must prove. Read `playbooks/manufacture.md` or call `sys_get_guidance(section="manufacture")`.
 
-**variants-are-configurations**
-When the brief names several variants: author them as configurations of one document; check the active row before calling a failed compute a defect. Except a single variant. Prove `design_get`: the configuration table and the active row.
+## Recipes
 
-## Sketch
-
-**couple-what-moves-together**
-When two profiles must move together: draw them in one sketch so an edit carries; give independent features their own sketch; pick a profile by measured area, not index. Except geometry projected from a body. Prove `sketch_get`: each profile's area, centroid and handle.
-
-**constraints-carry-relationship**
-When a sketch must survive a size change: carry symmetry, coincidence, midpoint and tangency as constraints; dimensions set only size. Except a reference sketch you will not resize. Prove `sketch_get`: is_fully_constrained and the constraint list.
-
-## Model
-
-**pattern-only-identical-intent**
-When the same feature repeats: build one and pattern it; copies answering different requirements are modelled apart. Except copies that merely share a shape. Prove `design_get`: the pattern feature in the timeline.
-
-**let-the-process-shape-the-part**
-When the part will be manufactured: take terminations, draft and minimum internal radius from that process; treat edge treatment as design. Except an unsettled process, which is stated rather than assumed. Prove `find_geometry`: the resulting faces, their normals and radii.
-
-## Assemble
-
-**connected-reference-path**
-When an assembly has a fixed moving mechanism: establish one intentional reference path; do not ground parts to hide missing joints. Except floating or multiple independent mechanisms. Prove `assembly_get`: grounding and joint connectivity; `joint_drive`: home and representative extreme positions; `assembly_inspect_interference`: overlaps at each pose.
-
-**exercise-the-mechanism**
-When the mechanism has a driven joint: drive it to home and a representative extreme; keep moving joints few, the rest rigid. Except a joint with no travel of interest. Prove `joint_drive`: the value at each pose; `assembly_inspect_interference`: overlaps at each pose, intended fit or defect.
-Example: a nut overlapping a plain shaft is a thread modelled as a cylinder.
-
-## Validate
-
-**close-the-declared-interfaces**
-When the declared interfaces are built: measure each and report the number - contact where parts engage, clearance where they move. Except an interface the brief left open. Prove `model_measure_between`: the distance or angle at each interface.
-
-**grade-structure-not-counts**
-When counts and volumes look right: read plane normals, axis directions and containment - a flat stack passes every count while nothing nests. Except a genuinely planar design. Prove `find_geometry`: face normals and linear-edge directions.
-
-**measurements-test-the-brief**
-When a measurement disagrees with the brief: report the disagreement - a measurement is evidence about the artifact; intent comes from the brief. Except a brief quoting a measured fact about existing hardware. Prove `model_measure_between`: the measured value beside the brief's.
-
-## Finish
-
-**verify-the-write** (safety invariant)
-When a write reports success: confirm the effect through a read other than the tool's claim; read a refusal's reason before retrying. Except a deferred write, confirmed through the poller it names. Prove `design_get`: the timeline entry the write claims.
-
-**leave-the-artifact-openable**
-When the work is handed on: leave the saved state valid, look at the result, and say what you could not do. Except a scratch document. Prove `doc_get`: the document's save state.
+- `sketch-anchored-profile` (sketch) - a bracket, plate or revolved profile that must resize by intent. `sys_get_guidance(recipe="sketch-anchored-profile")`.
+- `sketch-link-between-bores` (sketch) - a rocker, lever, connecting link or any web joining round bosses. `sys_get_guidance(recipe="sketch-link-between-bores")`.
+- `sketch-organic-outline` (sketch) - a mouse, handle or shell silhouette that must stay smooth while its proportions change. `sys_get_guidance(recipe="sketch-organic-outline")`.
+- `model-moulded-part` (model) - a basket, cover, drawer front or housing with a wall, bosses and clips. `sys_get_guidance(recipe="model-moulded-part")`.
+- `model-frozen-body-with-interfaces` (model) - a purchased part, an imported STEP or a generative outcome that needs holes and seats. `sys_get_guidance(recipe="model-frozen-body-with-interfaces")`.
+- `model-parametric-family` (model) - one part in several sizes. `sys_get_guidance(recipe="model-parametric-family")`.
+- `surface-swept-bottle` (surface) - a container or housing whose section changes along a curved spine. `sys_get_guidance(recipe="surface-swept-bottle")`.
+- `surface-skin-into-parts` (surface) - a product whose top, base and middle share one outer surface. `sys_get_guidance(recipe="surface-skin-into-parts")`.
+- `assemble-part-modelled-in-place` (assemble) - a rocker, bracket or lever designed between parts that already sit where they belong. `sys_get_guidance(recipe="assemble-part-modelled-in-place")`.
+- `assemble-screw-motion` (assemble) - a threaded cap, lead screw or any turn-to-advance pair. `sys_get_guidance(recipe="assemble-screw-motion")`.
+- `manufacture-choose-a-strategy` (manufacture) - a face, pocket, wall, hole or free-form surface needs an operation. `sys_get_guidance(recipe="manufacture-choose-a-strategy")`.
+- `manufacture-prove-a-toolpath` (manufacture) - an operation generated and must be trusted. `sys_get_guidance(recipe="manufacture-prove-a-toolpath")`.

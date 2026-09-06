@@ -15,7 +15,25 @@ import os
 # The section order the document declares, named here so a caller can build a closed input over it
 # without opening the file (and so a load failure still leaves a tool with a schema). It is a fact
 # OF the JSON: test_sys_get_guidance.py holds this tuple against the shipped document's own ids.
-SECTION_IDS = ("kernel", "plan", "sketch", "model", "assemble", "validate", "finish")
+SECTION_IDS = ("kernel", "plan", "sketch", "model", "surface", "assemble", "validate", "finish",
+               "manufacture")
+
+# The recipe ids the document declares, the same kind of fact as SECTION_IDS and held the same way:
+# a closed input over them without opening the file, pinned to the shipped document by its test.
+RECIPE_IDS = ("sketch-anchored-profile", "sketch-link-between-bores", "sketch-organic-outline",
+              "model-moulded-part", "model-frozen-body-with-interfaces", "model-parametric-family",
+              "surface-swept-bottle", "surface-skin-into-parts",
+              "assemble-part-modelled-in-place", "assemble-screw-motion",
+              "manufacture-choose-a-strategy", "manufacture-prove-a-toolpath")
+
+# The recipe cam_get's strategies note points a caller at - a fact of the document like the ids
+# above, so the pointer and the served id are one string and gen_guidance can refuse a document
+# that does not declare it.
+STRATEGY_RECIPE_ID = "manufacture-choose-a-strategy"
+
+# The one section that holds for every scenario. It is rendered whole into the skill map, while
+# every other section is pointed at, so both the render and the authoring gate name it from here.
+KERNEL = "kernel"
 
 # The most rules ONE section may carry, held here so the serving side and the authoring gate read
 # the same number: sys_get_guidance truncates a section read at it, and gen_guidance.validate
@@ -68,8 +86,37 @@ def find_section(doc, section_id):
 
 
 def section_index(doc):
-    """[{id, title, rule_count}] per section - the compact rows a no-argument read answers with,
-    where the count says how much one section costs to ask for."""
-    return [{"id": sec.get("id"), "title": sec.get("title"),
-             "rule_count": len(sec.get("rules") or [])}
+    """[{id, title, use_when, rule_count, recipe_count}] per section - the compact rows a
+    no-argument read answers with, where use_when says when to ask and the counts say how much."""
+    return [{"id": sec.get("id"), "title": sec.get("title"), "use_when": sec.get("use_when"),
+             "rule_count": len(sec.get("rules") or []),
+             "recipe_count": len(sec.get("recipes") or [])}
             for sec in (doc.get("sections") or []) if isinstance(sec, dict)]
+
+
+def recipes(doc):
+    """Every recipe the document carries, in its own section-then-authored order."""
+    return [rec for sec in (doc.get("sections") or []) if isinstance(sec, dict)
+            for rec in (sec.get("recipes") or []) if isinstance(rec, dict)]
+
+
+def find_recipe(doc, recipe_id):
+    """The recipe carrying this id, or None. EXACT match, like find_section: the ids are a closed
+    set the caller already chose from."""
+    for rec in recipes(doc):
+        if rec.get("id") == recipe_id:
+            return rec
+    return None
+
+
+def recipe_map(doc):
+    """[{id, section, title, use_when}] for EVERY recipe - the map an agent picks one from."""
+    return [{"id": rec.get("id"), "section": rec.get("section"), "title": rec.get("title"),
+             "use_when": rec.get("use_when")} for rec in recipes(doc)]
+
+
+def recipe_index(sec):
+    """[{id, title, use_when}] for ONE section's recipes - what a section read names them by,
+    without carrying a body."""
+    return [{"id": rec.get("id"), "title": rec.get("title"), "use_when": rec.get("use_when")}
+            for rec in (sec.get("recipes") or []) if isinstance(rec, dict)]

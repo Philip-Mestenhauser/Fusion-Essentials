@@ -315,7 +315,7 @@ REQUIREMENTS:
 - D... |
 | · | `sys_find_tool` | SEARCH this server's tools by keyword when you do not know which tool does a job |
 | · | `sys_get_api_doc` | Search the LIVE Fusion API documentation (classes, methods, properties, enum values) by regex, returning names, signatures, and docstrings - read from the adsk.... |
-| · | `sys_get_guidance` | Read this server's packaged CAD DESIGN GUIDANCE: task-agnostic practice for building a part or an assembly - what to settle before the first feature, how design... |
+| · | `sys_get_guidance` | Read this server's packaged CAD DESIGN GUIDANCE: task-agnostic practice for building a part or an assembly, plus RECIPES - ordered feature sequences with a bar ... |
 | · | `sys_get_preferences` | Read the APPLICATION's preferences (app.preferences - settings that belong to no document) |
 | · | `sys_get_selection` | Read the user's CURRENT selection in Fusion and describe each selected entity so you can intuit what they meant |
 | ✎ | `sys_reload_addin` | Reload the Fusion-Essentials add-in to pick up code changes (developer tool) - use it after editing any tool, so its code and MCP schema take effect |

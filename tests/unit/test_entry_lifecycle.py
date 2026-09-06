@@ -206,8 +206,10 @@ class TestTheResourceCatalogEntryBuilds:
 
     def test_it_publishes_the_packaged_guidance(self, monkeypatch):
         catalog, log = self._catalog(monkeypatch)
-        assert [r["uri"] for r in catalog] == [
-            guidance_resources.uri_for("parametric-cad-design")]
+        whole = guidance_resources.uri_for("parametric-cad-design")
+        assert [r["uri"] for r in catalog] == [whole] + [
+            guidance_resources.section_uri_for("parametric-cad-design", s)
+            for s in guidance_loader.SECTION_IDS if s != guidance_loader.KERNEL]
         assert catalog[0]["text"].startswith("# ")
         assert log == []
 

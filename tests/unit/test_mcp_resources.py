@@ -31,9 +31,13 @@ from mcpServer.guidance import loader, render, resources  # noqa: E402
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _SKILL_PATH = os.path.join(_REPO, ".claude", "skills", "parametric-cad-design", "SKILL.md")
 
-# The one address this server publishes. Written out here rather than read back from the catalog:
-# a test that took the URI from the thing under test would pass whatever it became.
+# The addresses this server publishes: the whole document, then one per non-kernel section (the
+# kernel is IN every reading of the document, so it has no address of its own). Written out here
+# rather than read back from the catalog: a test that took the URI from the thing under test would
+# pass whatever it became.
 URI = "fusion-essentials://guidance/parametric-cad-design"
+SECTION_URIS = [f"{URI}/{s}" for s in loader.SECTION_IDS if s != loader.KERNEL]
+URIS = [URI] + SECTION_URIS
 
 
 @pytest.fixture(scope="module")
@@ -85,6 +89,12 @@ def _body():
     return render.body(doc)
 
 
+def _section_body(section_id):
+    """One section's Markdown, read the same way."""
+    doc, _sha = loader.load()
+    return render.section_text(doc, section_id)
+
+
 def _rows(server):
     return _result(_request(server, "resources/list"))["resources"]
 
@@ -119,10 +129,20 @@ class TestInitializeAdvertisesResourcesWhenTheCatalogLoaded:
 # ── resources/list ──────────────────────────────────────────────────────────
 
 class TestResourcesList:
-    def test_the_listing_names_the_packaged_guidance(self, served):
+    def test_the_listing_names_the_document_and_each_of_its_sections(self, served):
         rows = _rows(served)
-        assert [row["uri"] for row in rows] == [URI]
+        assert [row["uri"] for row in rows] == URIS
         assert rows[0]["name"] == "parametric-cad-design"
+        assert rows[1]["name"] == "parametric-cad-design/plan"
+
+    def test_a_section_row_offers_its_own_use_when_as_the_description(self, served):
+        # what a client chooses BY: the whole document's description says when to read the
+        # document, and a section's says when to read that section.
+        doc, _sha = loader.load()
+        plan = loader.find_section(doc, "plan")
+        row = {r["uri"]: r for r in _rows(served)}[f"{URI}/plan"]
+        assert row["title"] == plan["title"]
+        assert row["description"] == plan["use_when"]
 
     def test_the_row_carries_the_display_fields_a_client_shows(self, served):
         row = _rows(served)[0]
@@ -155,7 +175,8 @@ class TestResourcesList:
 
     def test_an_explicitly_null_cursor_is_not_a_refusal(self, served):
         # absent and null both mean "no cursor" - only a VALUE this server never issued is refused.
-        assert len(_result(_request(served, "resources/list", {"cursor": None}))["resources"]) == 1
+        assert (len(_result(_request(served, "resources/list", {"cursor": None}))["resources"])
+                == len(URIS))
 
     def test_params_that_are_not_an_object_are_refused(self, served):
         assert _error(_request(served, "resources/list", ["cursor"]))["code"] == -32602
@@ -165,7 +186,7 @@ class TestResourcesList:
         # call. Sent as the raw body, since a helper that omits the key would not exercise it.
         response = asyncio.run(served.handle_request(
             {"jsonrpc": "2.0", "id": _REQUEST_ID, "method": "resources/list", "params": None}))
-        assert [row["uri"] for row in _result(response)["resources"]] == [URI]
+        assert [row["uri"] for row in _result(response)["resources"]] == URIS
 
 
 # ── resources/read ──────────────────────────────────────────────────────────
@@ -175,6 +196,12 @@ class TestResourcesRead:
         contents = _result(_request(served, "resources/read", {"uri": URI}))["contents"]
         assert len(contents) == 1
         assert contents[0]["text"] == _body()
+
+    def test_reading_one_section_returns_that_section_alone(self, served):
+        contents = _result(_request(served, "resources/read",
+                                    {"uri": f"{URI}/assemble"}))["contents"]
+        assert contents[0]["text"] == _section_body("assemble")
+        assert "## Validate" not in contents[0]["text"]
 
     def test_the_content_row_names_its_uri_and_its_markdown_type(self, served):
         content = _result(_request(served, "resources/read", {"uri": URI}))["contents"][0]
@@ -369,7 +396,7 @@ class TestStartServerPublishesTheCatalogItWasHanded:
 
     def test_the_catalog_reaches_the_server_start_server_builds(self, no_transport):
         server = self._start(no_transport, resources.catalog())
-        assert [r["uri"] for r in server.resources] == [URI]
+        assert [r["uri"] for r in server.resources] == URIS
         assert server.resources[0]["text"] == _body()
 
     def test_that_server_advertises_and_serves_the_resource(self, no_transport):
@@ -389,10 +416,16 @@ class TestStartServerPublishesTheCatalogItWasHanded:
 # ── the catalog builder itself ──────────────────────────────────────────────
 
 class TestTheCatalogBuilder:
-    def test_it_publishes_one_entry_for_the_packaged_document(self):
+    def test_it_publishes_the_whole_document_then_one_entry_per_non_kernel_section(self):
         catalog = resources.catalog()
-        assert len(catalog) == 1
+        assert [e["uri"] for e in catalog] == URIS
         assert catalog[0]["text"] == _body()
+        assert catalog[1]["text"] == _section_body("plan")
+
+    def test_the_kernel_gets_no_address_of_its_own(self):
+        # it is carried by every reading of the document (and by the skill map), so a separate
+        # address for it would publish the same text twice.
+        assert f"{URI}/{loader.KERNEL}" not in [e["uri"] for e in resources.catalog()]
 
     def test_the_address_is_built_from_the_documents_own_id(self):
         doc, _sha = loader.load()
@@ -424,7 +457,7 @@ class TestTheCatalogBuilder:
 
 # ── parity: the resource body IS the committed skill's body ─────────────────
 
-class TestTheServedBodyIsTheCommittedSkillsBody:
+class TestTheServedTextIsTheCommittedPackage:
     def _committed_body(self):
         with open(_SKILL_PATH, encoding="utf-8") as fh:
             committed = fh.read()
@@ -432,18 +465,35 @@ class TestTheServedBodyIsTheCommittedSkillsBody:
         assert match, "the committed skill lost its frontmatter block"
         return committed[match.end():]
 
-    def test_the_served_markdown_equals_the_skill_without_its_frontmatter(self, served):
-        text = _result(_request(served, "resources/read", {"uri": URI}))["contents"][0]["text"]
-        assert text == self._committed_body()
+    def test_each_served_section_equals_the_committed_playbook_file(self, served):
+        # the two channels an agent can reach a playbook through - the resource read and the file
+        # on disk - are one render, not two that agree today.
+        for section_id in loader.SECTION_IDS:
+            if section_id == loader.KERNEL:
+                continue
+            text = _result(_request(served, "resources/read",
+                                    {"uri": f"{URI}/{section_id}"}))["contents"][0]["text"]
+            with open(gen_guidance.playbook_path(section_id), encoding="utf-8") as fh:
+                assert fh.read() == text, section_id
+
+    def test_the_committed_skill_is_the_map_while_the_resource_serves_the_document(self, served):
+        # the SKILL.md an agent carries is a MAP: the kernel plus where to fetch the rest. The
+        # resource channel is where the whole document lives, so they are NOT the same text.
+        doc, _sha = loader.load()
+        assert self._committed_body() == render.map_text(doc)
+        served_text = _result(_request(served, "resources/read", {"uri": URI}))["contents"][0]["text"]
+        assert served_text == _body() != self._committed_body()
 
     def test_the_frontmatter_a_skill_loader_needs_is_not_served(self, served):
         text = _result(_request(served, "resources/read", {"uri": URI}))["contents"][0]["text"]
         assert text.startswith("# Designing in Fusion")
         assert "name: parametric-cad-design" not in text
 
-    def test_the_generator_renders_through_the_shipped_function(self):
-        # the consolidation itself: one render function, imported by the generator, not a second
-        # copy that agrees today. A re-rolled copy in the generator fails here.
+    def test_the_generator_renders_through_the_shipped_functions(self):
+        # the consolidation itself: one set of render functions, imported by the generator, not a
+        # second copy that agrees today. A re-rolled copy in the generator fails here.
         assert gen_guidance.body is render.body
         assert gen_guidance.section_text is render.section_text
+        assert gen_guidance.map_text is render.map_text
+        assert gen_guidance.recipe_text is render.recipe_text
         assert gen_guidance.SECTION_IDS is loader.SECTION_IDS

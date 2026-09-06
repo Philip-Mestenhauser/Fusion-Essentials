@@ -1155,6 +1155,26 @@ class TestPointers:
         p = _payload(wo.handler())["pointers"]
         assert "kinematics" not in p
 
+    def test_the_guidance_pointer_ships_on_every_design_and_names_the_recipe_index(self):
+        # design practice is not tied to what this document happens to contain, so it is the one
+        # pointer that does not gate on a count - and it points at the INDEX, not a flood.
+        root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=3, bodies=5)
+        des = FakeDesign(root, timeline=[FakeTL(0)])
+        _install(active_product=des, doc=_doc(design=des))
+        pointer = _payload(wo.handler())["pointers"]["guidance"]
+        assert pointer.startswith("sys_get_guidance()")
+        assert "recipes" in pointer
+
+    def test_the_guidance_pointer_is_dropped_where_that_tool_is_not_registered(self, monkeypatch):
+        # the pointer follows the '<tool_name>(...)' shape exactly so _drop_unregistered_pointers
+        # can see which tool it names; written any other way it would survive as a dead pointer.
+        monkeypatch.setattr(wo.registry, "get_tools", lambda: {"design_get": object()})
+        monkeypatch.setattr(wo.registry, "has_tool", lambda name: name != "sys_get_guidance")
+        root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=3, bodies=5)
+        des = FakeDesign(root, timeline=[FakeTL(0)])
+        _install(active_product=des, doc=_doc(design=des))
+        assert "guidance" not in _payload(wo.handler())["pointers"]
+
 
 # ── data-model identity (where the doc lives: hub/project/folder + URN) ───────────────────────────
 

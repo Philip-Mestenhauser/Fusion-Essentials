@@ -22,11 +22,13 @@ _INPUT_TREE = os.path.join(REPO_ROOT, "commands", "mcpServer")
 # whole file is fingerprinted anyway, which costs a needless miss on an unrelated edit and never a
 # missed staleness.
 _OUTPUT_TREE = os.path.join(TESTS_DIR, "generated")
+# gen_guidance writes a whole PACKAGE - the map plus one playbook per section - so the tree is
+# walked rather than named file by file: a playbook added, renamed or deleted moves the digest.
+_SKILL_TREE = os.path.join(REPO_ROOT, ".claude", "skills", "parametric-cad-design")
 _OUTPUT_FILES = (
     os.path.join(TESTS_DIR, "api_surface.py"),
     os.path.join(REPO_ROOT, "CLAUDE.md"),
     os.path.join(REPO_ROOT, "commands", "mcpServer", "tools", "CLAUDE.md"),
-    os.path.join(REPO_ROOT, ".claude", "skills", "parametric-cad-design", "SKILL.md"),
 )
 
 
@@ -65,8 +67,9 @@ def _fingerprinted_paths():
         # .json admits the guidance data gen_guidance reads - an input, so a JSON-only edit misses
         # the cache and pays the full check instead of riding a stale fingerprint.
         paths.update(os.path.join(root, n) for n in names if n.endswith((".py", ".json")))
-    for root, _dirs, names in os.walk(_OUTPUT_TREE):
-        paths.update(os.path.join(root, n) for n in names)
+    for tree in (_OUTPUT_TREE, _SKILL_TREE):
+        for root, _dirs, names in os.walk(tree):
+            paths.update(os.path.join(root, n) for n in names)
     return tuple(sorted(p for p in paths if os.path.isfile(p)))
 
 
@@ -124,7 +127,8 @@ class TestTheFingerprintCoversEveryArtifact:
                          "tests/api_surface.py",
                          "CLAUDE.md",
                          "commands/mcpServer/tools/CLAUDE.md",
-                         ".claude/skills/parametric-cad-design/SKILL.md"):
+                         ".claude/skills/parametric-cad-design/SKILL.md",
+                         ".claude/skills/parametric-cad-design/playbooks/plan.md"):
             path = os.path.join(REPO_ROOT, *artifact.split("/"))
             assert os.path.isfile(path), f"{artifact} is not where this lint looks for it"
             assert path in watched, f"{artifact} is generated but not fingerprinted"

@@ -58,7 +58,7 @@ INSTRUCTIONS = (
     "accepts expect_document (a doc name or URN from a prior read): if the active document changed since "
     "that read, the write is REFUSED as active_document_changed - switch back with doc_activate and retry. "
     "Design practice for building a part or an assembly, rather than running a fixed procedure, is "
-    "discovered through sys_get_guidance - its section index first, then one section per call."
+    "discovered through sys_get_guidance - its index first, then one section or one recipe per call."
 )
 
 # Header names (Streamable HTTP transport).

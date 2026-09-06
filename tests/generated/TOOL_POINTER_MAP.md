@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 187  |  **description breadcrumbs:** 394  |  **note/error breadcrumbs:** 469
+**Tools:** 187  |  **description breadcrumbs:** 395  |  **note/error breadcrumbs:** 469
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -567,7 +567,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `cam_get`
 - Operation rows capped at
 - . Pass 'setup' to scope to one setup, or add 'default' to include for the per-setup operation_count.
-- rows; 'setup' scopes the read, strategy_count is the true total.
+- rows; 'setup' scopes it, strategy_count is the true total.
 - include=['parameters'] needs 'operation' - the operation whose settings to read (scope first with cam_get(setup=..., include=['operations'])); or 'setup' alone for that SETUP's own parameters (stoc...
 - include=['tool'] needs 'operation' - the operation whose tool to read.
 - '. Valid: mm, cm, in.
@@ -3026,7 +3026,11 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Invalid regex 'searchPattern':
 
 ### `sys_get_guidance`
+- Ask for one or the other: section='
+- ' returns that section's rules, recipe='
+- ' returns that one recipe. Call twice.
 - The packaged guidance document carries no section '
+- The packaged guidance document carries no recipe '
 
 ### `sys_get_preferences`
 - nest one level further, by product name: sys_set_preferences addresses those members as '<group>.<product>.<member>'. tier 'W' = sys_set_preferences can set it; tier 'R' = refused there, with the r...

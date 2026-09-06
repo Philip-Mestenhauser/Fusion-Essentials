@@ -17,6 +17,7 @@ from ._common import (CM_TO_UNIT, iter_collection, measured, named_with_remainde
                       read_flag, safe, terse)
 from ._cam_common import get_cam, find_setup, resolve_cam_node, resolve_operation
 from ._cam_presets import _preset_names, _presets_named
+from ..guidance.loader import STRATEGY_RECIPE_ID
 from . import _inputs
 
 app = adsk.core.Application.get()
@@ -122,13 +123,14 @@ _STRATEGY_NOISE = {"is_2d": False, "is_3d": False, "is_drilling": False, "is_mil
                    "is_suppressible": True}
 
 _STRATEGY_NOTE = (
-    "'allowed' is isGenerationAllowed. cam_create_operation REFUSES a strategy that "
-    "reads false, creating nothing. null means the flag would not read, and no refusal comes "
-    "from that. A classification flag is omitted at its usual value (false; is_suppressible true).")
+    "'allowed' is isGenerationAllowed; cam_create_operation REFUSES a false one. null means it "
+    "did not read, and no refusal follows. A classification flag at its usual value is dropped "
+    "(false; is_suppressible true). "
+    f"Which fits: sys_get_guidance(recipe='{STRATEGY_RECIPE_ID}').")
 
 # The empty 'strategies' list of a setup that never reported one reads exactly like a setup that
 # offers nothing, so the note says which whenever such a row is in the payload.
-_UNREADABLE_SETUPS = " strategies_read false: that setup's list did not read."
+_UNREADABLE_SETUPS = " strategies_read false: that list did not read."
 
 
 def _slice_strategies(cam, setup):
@@ -151,7 +153,7 @@ def _slice_strategies(cam, setup):
         if any(su.get("strategies_read") is False for su in payload.get("setups", [])):
             payload["note"] += _UNREADABLE_SETUPS
         if payload.get("truncated"):
-            payload["note"] = (f"Capped at {_STRATEGY_CAP} rows; 'setup' scopes the read, "
+            payload["note"] = (f"Capped at {_STRATEGY_CAP} rows; 'setup' scopes it, "
                                "strategy_count is the true total. " + payload["note"])
     return payload, err
 

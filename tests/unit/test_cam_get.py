@@ -362,7 +362,7 @@ class TestStrategiesSlice:
         row = out["setups"][0]["strategies"][0]
         assert row["is_2d"] is None                  # unreadable, not the quiet default
         assert "is_drilling" not in row              # read its usual false, dropped
-        assert "omitted at its usual value (false; is_suppressible true)" in out["note"]
+        assert "at its usual value is dropped (false; is_suppressible true)" in out["note"]
 
     def test_an_unreadable_entitlement_survives_the_razor_as_null(self, monkeypatch):
         # null is not the noise default, so it stays and pops - an unknown entitlement must never
@@ -384,7 +384,7 @@ class TestStrategiesSlice:
         assert len(out["setups"][0]["strategies"]) == cg._STRATEGY_CAP
         assert out["truncated"] is True
         assert f"Capped at {cg._STRATEGY_CAP} rows" in out["note"]
-        assert "'setup' scopes the read" in out["note"]
+        assert "'setup' scopes it" in out["note"]
 
     def test_exactly_the_cap_is_not_truncated(self, monkeypatch):
         # the other side of `emitted >= _STRATEGY_CAP`: a job that fits exactly may not be reported
@@ -429,8 +429,11 @@ class TestStrategiesSlice:
         note = out["note"]
         assert "isGenerationAllowed" in note
         assert "cam_create_operation REFUSES" in note
-        assert "no refusal comes from that" in note
+        assert "no refusal follows" in note
         assert "silently" not in note
+        # the strategies read is where an agent is CHOOSING, so it is where the recipe that
+        # teaches the choice is named - one call, not a second browse of the same list.
+        assert f"sys_get_guidance(recipe='{cg.STRATEGY_RECIPE_ID}')" in note
         # what a blocked op then does is taught where an agent meets it - the create's own refusal
         # and cam_generate's entitlement_blocked - not restated on every strategy browse.
         assert "entitlement_blocked" not in note

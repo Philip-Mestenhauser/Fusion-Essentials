@@ -683,6 +683,7 @@ def handler() -> dict:
             "features); refresh before relying on, machining, or inserting this part.")
     if has_cam:
         pointers["cam"] = "cam_get() for the machining job; " + _cam_pointer(cam)
+    pointers["guidance"] = "sys_get_guidance() - the index of recipes (one per call)."
     out["pointers"] = _drop_unregistered_pointers(pointers)
 
     # The gate matches is_healthy exactly, broken_relations included - a design whose only fault is

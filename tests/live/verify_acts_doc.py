@@ -42,14 +42,23 @@ _OVERTURE = [
                     for c in p["classes"])
                 and p["counts"]["classes"] == len(p["classes"])), None),
     # the packaged design guidance, the way a client with tools and no skill loader reads it: the
-    # section index, then ONE section - its rule records keyed by the ids the canonical document
-    # carries, beside the content hash that says which version answered.
-    ("sys_get_guidance", {}, "ok", None),
+    # index, then ONE section - its rule records keyed by the ids the canonical document carries,
+    # beside the content hash that says which version answered.
+    ("sys_get_guidance", {},
+     lambda p: (p.get("recipes") and all(r.get("id") and r.get("use_when") for r in p["recipes"])
+                and all("steps" not in r for r in p["recipes"])), None),
     ("sys_get_guidance", {"section": "assemble"},
      lambda p: ({"connected-reference-path", "exercise-the-mechanism"}
                 <= {r.get("id") for r in (p.get("rules") or [])}
                 and len(p.get("sha256") or "") == 64
                 and all(c in "0123456789abcdef" for c in p.get("sha256") or "")), None),
+    # and the third read: ONE recipe whole - the ordered steps, each with what to read back, and
+    # the bar. This is the id cam_get's strategies note tells a caller to ask for.
+    ("sys_get_guidance", {"recipe": "manufacture-choose-a-strategy"},
+     lambda p: (p["recipe"]["id"] == "manufacture-choose-a-strategy"
+                and len(p["recipe"]["steps"]) >= 3
+                and all(s.get("tool") and s.get("read_back") for s in p["recipe"]["steps"])
+                and p["recipe"]["bar"]["measure"] and p["recipe"]["bar"]["eyes"]), None),
     # each row's is_active is read off the workspace itself and a read that raises publishes null,
     # so exactly one row flagged active - and it is the one 'active_workspace' names - is the read.
     ("view_list_workspaces", {},
