@@ -824,9 +824,10 @@ def _tool_assigned(index):
     return check
 
 
-def _all_cut(setup, minimum):
-    """cam_get(include=['time']) over a whole setup: EVERY operation carries its own
-    getMachiningTime figure above zero.
+def _all_cut(setup, minimum, names=None):
+    """cam_get(include=['time']) over a setup: every operation carries its own getMachiningTime
+    figure above zero - or, with 'names', every operation NAMED does, which is the same reading
+    scoped to the rows a beat created rather than to whatever else the setup holds.
 
     That is the read that tells a cutting toolpath from an empty one - hasToolpath reads TRUE on
     both - so a job whose every row clears zero is a job where nothing generated into air. An
@@ -835,15 +836,35 @@ def _all_cut(setup, minimum):
     def check(p):
         recs = ((p.get("time") or {}).get("setups") or [])
         rec = next((r for r in recs if r.get("setup") == setup), None)
-        ops = (rec or {}).get("operations") or []
+        rows = (rec or {}).get("operations") or []
+        ops = ([r for r in rows if r.get("operation") in names] if names is not None else rows)
+        missing = ([n for n in names if n not in {r.get("operation") for r in rows}]
+                   if names is not None else [])
         idle = [r.get("operation") for r in ops
                 if not (_num(r.get("machining_time_seconds"))
                         and r["machining_time_seconds"] > 0)]
-        return _measured(f"every one of '{setup}'s operations cuts (machining time above zero)",
-                         {"operation_count": len(ops), "idle": idle,
+        label = (f"all {len(names)} named operations in '{setup}' cut" if names is not None
+                 else f"every one of '{setup}'s operations cuts (machining time above zero)")
+        return _measured(label,
+                         {"operation_count": len(ops), "idle": idle, "missing": missing,
                           "seconds": {r.get("operation"): r.get("machining_time_seconds")
                                       for r in ops}},
-                         len(ops) >= minimum and not idle)
+                         len(ops) >= minimum and not idle and not missing)
+    return check
+
+
+def _op_deleted(name_or_key):
+    """cam_delete: the entity went, and 'entity_type' is the RESOLVED node's kind - which is what
+    says an OPERATION was deleted rather than the setup or folder a shared name could have reached.
+    A key that _RECALL holds resolves to the platform-picked name it stored; anything else is the
+    literal name asked for."""
+    def check(p):
+        want = _RECALL.get(name_or_key, name_or_key)
+        return _measured(f"{want!r} deleted, and the node deleted was an operation",
+                         {"deleted": p.get("deleted"), "entity": p.get("entity"),
+                          "entity_type": p.get("entity_type")},
+                         p.get("deleted") is True and p.get("entity") == want
+                         and p.get("entity_type") == "operation")
     return check
 
 
@@ -1011,11 +1032,8 @@ _CAM_DELIVER = [
                                                             "a tool-less applied operation"),
                                       "tool_scope": "document", "tool_index": _DRILL},
      _tool_assigned(_DRILL), None),
-    # entity_type is the resolved node's kind: it is what says an OPERATION went, not the setup or
-    # folder a shared name could have reached.
     ("cam_delete", lambda c: {"entity": _ctx_get(c, "adaptive_op", "the created adaptive op")},
-     lambda p: p["deleted"] is True and p["entity"] == _RECALL.get("adaptive_op")
-     and p["entity_type"] == "operation", None),
+     _op_deleted("adaptive_op"), None),
     # SUPPRESSION, last of the job edits: the flag is a WRITE here, and it is what gives
     # include_suppressed's FILTERING its live reading. It sits after the post, the setup sheet and
     # the template because suppressing DISCARDS the operation's toolpath - here that costs no later

@@ -14,9 +14,11 @@ from verify_acts_cam import (
     CAM_SETUP, FLIP_SETUP, MACHINING_EXTENSION, _CAM, _CAM_DELIVER, _CAM_EXTENSION,
     _CAM_FB_DELIVER, _CAM_MULTI_POST, _CAM_SCOPE, _CAM_SECOND_SETUP, _CAM_STORY, _CAM_TURNING,
     _CAM_TURNING_POST, _MX_SETUP, _ROT_SETUP, _SW_SETUP, _SW_SETUP2, _SWARF_RIG, _TURN_SETUP)
+from verify_acts_census import (
+    _CENSUS_MILL, _CENSUS_MILL_READ, _CENSUS_TURN, _CENSUS_TURN_READ)
 from verify_acts_doc import _FINALE, _OVERTURE, _SHOWCASE
 from verify_acts_dump import _HUB_CONTOUR, _HUB_DUMP
-from verify_acts_hub import HUB_MILL_SETUP, _HUB, _HUB_JOB
+from verify_acts_hub import HUB_MILL_SETUP, HUB_TURN_SETUP, _HUB, _HUB_JOB
 from verify_acts_mesh import _MACHINING, _MESH, _NESTING
 from verify_acts_model import (
     _DETAILS, _DETAILS_FB, _RESIZE, _RESIZE_FB, _SOLIDS, _SOLIDS_FB)
@@ -117,6 +119,19 @@ _ACT_PROGRAM = [
      ("cam_get", {"include": ["operations"], "setup": HUB_MILL_SETUP}), _HUB_CONTOUR, []),
     ("ACT 10c6 - CAM: THE DUMP ORACLE",
      ("cam_get", {"include": ["operations"], "setup": HUB_MILL_SETUP}), _HUB_DUMP, []),
+    # THE CENSUS: the rest of each hub setup's strategy vocabulary, driven one geometry kind at a
+    # time. It runs AFTER the dump post, which writes every operation the milling setup holds. Each
+    # census act creates and launches; the read that stands on the generation is the act after it,
+    # because the poll that certifies a generation runs BETWEEN acts - and that poll's bounded
+    # 40 x 5 s is the budget every strategy in one act shares, which is what decides membership.
+    ("ACT 10c7 - CAM: THE MILLING CENSUS",
+     ("cam_get", {"include": ["operations"], "setup": HUB_MILL_SETUP}), _CENSUS_MILL, []),
+    ("ACT 10c8 - CAM: THE MILLING CENSUS READ",
+     ("cam_get", {"include": ["operations"], "setup": HUB_MILL_SETUP}), _CENSUS_MILL_READ, []),
+    ("ACT 10c9 - CAM: THE TURNING CENSUS",
+     ("cam_get", {"include": ["operations"], "setup": HUB_TURN_SETUP}), _CENSUS_TURN, []),
+    ("ACT 10c10 - CAM: THE TURNING CENSUS READ",
+     ("cam_get", {"include": ["operations"], "setup": HUB_TURN_SETUP}), _CENSUS_TURN_READ, []),
     # The last two acts machine the PART - the flip setup and the program that spans it and the
     # first - so each is gated on the job ACT 10a built, and falls back to nothing rather than to a
     # scratch world: every tool they drive is driven again by the scratch-stock fallbacks above, so
@@ -212,6 +227,9 @@ POLL_AFTER = {
     "ACT 10c2 - CAM: TURNING": {"narrative": _TURN_SETUP, "fallback": _TURN_SETUP},
     # the dump contour's own launch; its fallback lane is empty, so it leaves nothing generating.
     "ACT 10c5 - CAM: THE HUB CONTOUR": {"narrative": HUB_MILL_SETUP, "fallback": []},
+    # the census launches one setup per act, each certified before the read act that stands on it.
+    "ACT 10c7 - CAM: THE MILLING CENSUS": {"narrative": HUB_MILL_SETUP, "fallback": []},
+    "ACT 10c9 - CAM: THE TURNING CENSUS": {"narrative": HUB_TURN_SETUP, "fallback": []},
     # the flip act's fallback is EMPTY, so it launches nothing and there is nothing to certify -
     # an empty target list polls nothing rather than reading a setup that was never created.
     "ACT 10d - CAM: THE SECOND SETUP": {"narrative": FLIP_SETUP, "fallback": []},

@@ -58,6 +58,7 @@ drift from what it describes; test_generated_docs_current.py runs the check in t
 - gen_posture.py
 - gen_guidance.py
 - gen_api_surface.py
+- gen_strategies.py
 - gen_enforcement.py (this page)
 
 ## Typed seams - contracts enforced at construction, not by scanning

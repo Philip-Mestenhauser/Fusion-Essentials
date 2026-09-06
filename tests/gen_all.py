@@ -21,7 +21,7 @@ if TESTS not in sys.path:
     sys.path.insert(0, TESTS)
 
 _GENERATORS = ("gen_manifest", "gen_wiring", "gen_posture", "gen_guidance", "gen_api_surface",
-               "gen_enforcement")
+               "gen_strategies", "gen_enforcement")
 
 
 def exit_code(value):

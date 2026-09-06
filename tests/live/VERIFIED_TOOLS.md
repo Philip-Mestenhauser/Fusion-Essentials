@@ -29,7 +29,7 @@ recomputes the hash and fails on any difference, so a green suite cannot ride on
 run that never saw the current code or a weakened predicate. Only a run with zero
 FAIL/blocked/pass* steps rewrites this file.
 
-Stamp: source d63fcb11c3fded84ada761efafcd2336471f4cd32ebee97e4d9cded11be9d634 | Fusion 2705.1.4 | verified 2026-09-06
+Stamp: source 2691609e9abea60f690e60f5d9c62a366984e0bf75ed141eaacd5693a56f49b3 | Fusion 2705.1.4 | verified 2026-09-06
 
 154 covered / 0 called / 2 refusals-only / 31 skipped(reason) / 0 pending
 
@@ -59,6 +59,10 @@ Stamp: source d63fcb11c3fded84ada761efafcd2336471f4cd32ebee97e4d9cded11be9d634 |
 | ACT 10c4 - CAM: THE HUB JOB | narrative |
 | ACT 10c5 - CAM: THE HUB CONTOUR | narrative |
 | ACT 10c6 - CAM: THE DUMP ORACLE | narrative |
+| ACT 10c7 - CAM: THE MILLING CENSUS | narrative |
+| ACT 10c8 - CAM: THE MILLING CENSUS READ | narrative |
+| ACT 10c9 - CAM: THE TURNING CENSUS | narrative |
+| ACT 10c10 - CAM: THE TURNING CENSUS READ | narrative |
 | ACT 10d - CAM: THE SECOND SETUP | narrative |
 | ACT 10e - CAM: MULTI-SETUP POST | narrative |
 | FINALE | narrative |
