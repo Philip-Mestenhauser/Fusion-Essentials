@@ -2,7 +2,7 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """The dump-post reader: Autodesk's dump.cps writes every post event to a .dmp, and this turns one
-into the post's parameters plus its FIVE-AXIS motion rows - then judges WHERE the toolpath cut.
+into the post's parameters plus its motion rows - then judges WHERE the toolpath cut.
 
 Numbers are the dump's own, unconverted; DumpFile.units() hands back the unit rows it states.
 read_dump/parse_dump build a DumpFile; envelope, floor and tilt are the three verdicts over its
@@ -19,17 +19,19 @@ MAP_BLURB = ("the dump-post reader: read_dump/parse_dump turn a dump.cps .dmp in
 # lines only, and names every event kind it does not read in DumpFile.skipped.
 _EVENT = re.compile(r"^\s*(-?\d+):\s*([A-Za-z0-9_]+)\((.*)\)\s*$")
 
-# wire event -> (row kind, index of the feed argument or None), for the shapes a posted five-axis
-# dump measured: x/y/z are the first three arguments and a unit tool axis the next three, then
-# onLinear5D's feed. Its eighth argument is unread. Every other event lands in DumpFile.skipped.
+# wire event -> (row kind, where the unit tool axis starts or None, where the feed sits or None),
+# for the shapes posted dumps measured: onLinear5D(x, y, z, i, j, k, feed, _) - its eighth argument
+# unread - onRapid5D(x, y, z, i, j, k), onLinear(x, y, z, feed) and onRapid(x, y, z).
 _MOTION = {
-    "onRapid5D": ("rapid5d", None),
-    "onLinear5D": ("linear5d", 6),
+    "onRapid5D": ("rapid5d", 3, None),
+    "onLinear5D": ("linear5d", 3, 6),
+    "onRapid": ("rapid", None, None),
+    "onLinear": ("linear", None, 3),
 }
 
 # The rows envelope and floor judge: a cut has to stay inside the stock and above the floor, while
 # a rapid is free to sit above both.
-CUTTING_KINDS = ("linear5d",)
+CUTTING_KINDS = ("linear5d", "linear")
 
 
 def _split_args(text):
@@ -71,15 +73,23 @@ def _num(text):
 
 def _row(spec, args):
     """One motion row, or None where the position or the tool axis did not read as numbers."""
-    kind, feed_at = spec
-    if len(args) < 6:
+    kind, axis_at, feed_at = spec
+    need = 3 if axis_at is None else axis_at + 3
+    if len(args) < need:
         return None
-    values = [_num(a) for a in args[:6]]
+    values = [_num(a) for a in args[:need]]
     if None in values:
         return None
     feed = _num(args[feed_at]) if feed_at is not None and len(args) > feed_at else None
-    return {"kind": kind, "x": values[0], "y": values[1], "z": values[2],
-            "i": values[3], "j": values[4], "k": values[5], "feed": feed}
+    row = {"kind": kind, "x": values[0], "y": values[1], "z": values[2], "feed": feed}
+    if axis_at is not None:
+        row.update({key: values[axis_at + n] for n, key in enumerate("ijk")})
+    return row
+
+
+def _has_axis(row):
+    """True where the row states a tool axis - a 3-axis event states none."""
+    return all(key in row for key in "ijk")
 
 
 class DumpFile:
@@ -136,11 +146,12 @@ def read_dump(path):
         return parse_dump(fh.read())
 
 
-def _inside(row, box, tol):
-    """True where a row's point sits within `tol` of the box - on a face counts as inside."""
+def _inside(row, box, tol, up_tol):
+    """True where a row's point sits within `tol` of the box, `up_tol` above its TOP face alone."""
     lower, upper = box
-    return all(lower[n] - tol <= v <= upper[n] + tol
-               for n, v in enumerate((row["x"], row["y"], row["z"])))
+    point = (row["x"], row["y"], row["z"])
+    return all(lower[n] - tol <= v <= upper[n] + (up_tol if n == 2 else tol)
+               for n, v in enumerate(point))
 
 
 def _axis_angle(row):
@@ -152,12 +163,14 @@ def _axis_angle(row):
     return math.degrees(math.acos(max(-1.0, min(1.0, row["k"] / length))))
 
 
-def envelope(dump, tol=0.0):
-    """Verdict: every cut sits inside the stock box the dump states; tol is in the dump's units."""
+def envelope(dump, tol=0.0, up_tol=None):
+    """Verdict: every cut sits inside the stock box the dump states, up_tol (default tol) the slack
+    above its TOP face alone - all in the dump's units."""
     box = dump.box("stock")
+    up_tol = tol if up_tol is None else up_tol
     rows = [r for r in dump.rows if r["kind"] in CUTTING_KINDS]
-    outside = [r for r in rows if not _inside(r, box, tol)] if box else []
-    facts = {"stock_box": box, "cutting_rows": len(rows), "tol": tol,
+    outside = [r for r in rows if not _inside(r, box, tol, up_tol)] if box else []
+    facts = {"stock_box": box, "cutting_rows": len(rows), "tol": tol, "up_tol": up_tol,
              "outside_count": len(outside), "first_outside": outside[0] if outside else None}
     return bool(box) and bool(rows) and not outside, facts
 
@@ -171,11 +184,11 @@ def floor(dump, floor_z, tol=0.0):
 
 
 def tilt(dump, limit_deg=90.0):
-    """Verdict: every row's tool axis lies within limit_deg (degrees) of +Z."""
-    angles = [_axis_angle(r) for r in dump.rows]
+    """Verdict: every tool axis the file states lies within limit_deg (degrees) of +Z."""
+    angles = [_axis_angle(r) for r in dump.rows if _has_axis(r)]
     measured = [a for a in angles if a is not None]
-    # Every row this reader parses is a 5D event, so a file with no 5D event at all reads
-    # 'axis_rows' 0 - a caller that needs the file to BE five-axis reads that count, not the verdict.
+    # A 3-axis event states no tool axis, so a file holding only those reads 'axis_rows' 0 - a
+    # caller that needs the file to BE five-axis reads that count, not the verdict.
     over = [a for a in measured if a > limit_deg]
     facts = {"limit_deg": limit_deg, "axis_rows": len(angles),
              "unreadable_axes": len(angles) - len(measured),

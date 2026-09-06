@@ -48,9 +48,12 @@ _PAST_X = "567: onLinear5D(11, 0, -3, 0, 0, 1, 750, 2)"
 _BELOW_Z = "569: onLinear5D(0, 0, -21, 0, 0, 1, 750, 2)"
 _TILT_DEG = math.degrees(math.acos(0.8))
 
-# The 3-axis events, whose argument shape no posted dump has measured yet: the reader takes no row
-# off them and names them in skipped instead, which is what the sweep step reports.
-_THREE_AXIS = ("571: onLinear(1, 2, -3, 500)", "573: onRapid(0, 0, 5)")
+# The 3-axis events in the shape a posted 2D contour states them: position then feed, and no tool
+# axis at all. An arc rides beside them as an event the reader still takes no row off.
+_CUT3 = "571: onLinear(1, 2, -3, 500)"
+_RAPID3 = "573: onRapid(0, 0, 5)"
+_THREE_AXIS = (_CUT3, _RAPID3)
+_ARC3 = "575: onCircular(0, 0, 0, -3, 1, 2, -3, 500)"
 
 # The sample the counts below were read from - the hub's Multi-Axis Finishing1 posted through
 # dump.cps. It carries the poster's own account and document ids, so no copy lives in the repo;
@@ -88,15 +91,27 @@ class TestParse:
         assert (rows[1]["x"], rows[1]["y"], rows[1]["z"]) == (1.0, 2.0, -3.0)
         assert (rows[1]["i"], rows[1]["j"], rows[1]["k"], rows[1]["feed"]) == (0.0, 0.6, 0.8, 750.0)
 
+    def test_each_three_axis_kind_lands_with_its_position_and_no_tool_axis(self):
+        rows = _dump(_RAPID3, _CUT3).rows
+        assert [r["kind"] for r in rows] == ["rapid", "linear"]
+        assert (rows[0]["x"], rows[0]["y"], rows[0]["z"], rows[0]["feed"]) == (0.0, 0.0, 5.0, None)
+        assert (rows[1]["x"], rows[1]["y"], rows[1]["z"], rows[1]["feed"]) == (1.0, 2.0, -3.0, 500.0)
+        assert not [k for r in rows for k in "ijk" if k in r]
+
     def test_the_strategy_reads_off_the_parameter_block(self):
         assert _dump(_CUT).strategy == "moduleworks_multiaxis_finishing"
         assert _dump_reader.parse_dump("-1: onOpen()").strategy is None
 
     def test_every_unread_event_kind_is_named_with_its_count(self):
-        dump = _dump(_RAPID, _CUT, *_THREE_AXIS)
-        assert dump.rows == [r for r in dump.rows if r["kind"].endswith("5d")]
+        dump = _dump(_RAPID, _CUT, _ARC3, *_THREE_AXIS)
+        assert [r["kind"] for r in dump.rows] == ["rapid5d", "linear5d", "linear", "rapid"]
         assert dump.skipped == {"onOpen": 1, "onSection": 1, "onSectionEnd": 1, "onClose": 1,
-                                "onLinear": 1, "onRapid": 1}
+                                "onCircular": 1}
+
+    def test_a_three_axis_line_missing_its_position_is_skipped_not_zeroed(self):
+        dump = _dump("577: onLinear(1, 2, undefined, 500)", "579: onRapid(0, 0)")
+        assert dump.rows == []
+        assert (dump.skipped["onLinear"], dump.skipped["onRapid"]) == (1, 1)
 
     def test_a_motion_line_with_an_unreadable_coordinate_is_skipped_not_zeroed(self):
         dump = _dump("575: onLinear5D(1, 2, undefined, 0, 0, 1, 750, 2)")
@@ -133,6 +148,22 @@ class TestEnvelope:
         ok, facts = _dump_reader.envelope(_dump(_RAPID))
         assert (ok, facts["cutting_rows"], facts["outside_count"]) == (False, 0, 0)
 
+    def test_the_upper_slack_admits_a_cut_exactly_that_far_over_the_top_face(self):
+        over = _dump("583: onLinear(0, 0, 1, 500)")
+        assert _dump_reader.envelope(over, up_tol=1.0)[0] is True
+        ok, facts = _dump_reader.envelope(over, up_tol=0.999)
+        assert (ok, facts["outside_count"], facts["up_tol"]) == (False, 1, 0.999)
+
+    def test_the_upper_slack_loosens_no_other_face(self):
+        assert _dump_reader.envelope(_dump(_PAST_X), up_tol=5.0)[0] is False
+        assert _dump_reader.envelope(_dump(_BELOW_Z), up_tol=5.0)[0] is False
+        assert _dump_reader.envelope(_dump("585: onLinear(0, 0, 1, 500)"), tol=1.0)[0] is True
+
+    def test_a_three_axis_cut_is_judged_against_the_box_like_a_five_axis_one(self):
+        assert _dump_reader.envelope(_dump(_RAPID3, _CUT3))[0] is True
+        ok, facts = _dump_reader.envelope(_dump(_CUT3, "581: onLinear(11, 0, -3, 500)"))
+        assert (ok, facts["cutting_rows"], facts["outside_count"]) == (False, 2, 1)
+
 
 class TestFloor:
     def test_a_cut_exactly_at_the_floor_passes_and_one_step_below_it_fails(self):
@@ -152,6 +183,11 @@ class TestFloor:
         ok, facts = _dump_reader.floor(_dump(_RAPID), -20.0)
         assert (ok, facts["lowest_z"]) == (False, None)
 
+    def test_a_three_axis_cut_sets_the_lowest_z_and_its_rapid_does_not(self):
+        ok, facts = _dump_reader.floor(_dump(_RAPID3, _CUT3), -3.0)
+        assert (ok, facts["lowest_z"], facts["cutting_rows"]) == (True, -3.0, 1)
+        assert _dump_reader.floor(_dump(_RAPID3, _CUT3), -2.99)[0] is False
+
 
 class TestTilt:
     def test_an_axis_exactly_at_the_limit_passes_and_one_step_over_it_fails(self):
@@ -170,7 +206,11 @@ class TestTilt:
 
     def test_a_dump_carrying_no_five_axis_event_reports_no_axis_rows_at_all(self):
         ok, facts = _dump_reader.tilt(_dump(*_THREE_AXIS))
-        assert (ok, facts["axis_rows"]) == (True, 0)
+        assert (ok, facts["axis_rows"], facts["max_angle_deg"]) == (True, 0, None)
+
+    def test_a_three_axis_row_beside_a_five_axis_one_is_not_counted_as_an_axis(self):
+        ok, facts = _dump_reader.tilt(_dump(_CUT, *_THREE_AXIS), _TILT_DEG)
+        assert (ok, facts["axis_rows"], facts["unreadable_axes"]) == (True, 1, 0)
 
 
 class TestPostedSample:

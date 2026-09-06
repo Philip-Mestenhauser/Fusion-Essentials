@@ -15,7 +15,8 @@ from verify_acts_cam import (
     _CAM_FB_DELIVER, _CAM_MULTI_POST, _CAM_SCOPE, _CAM_SECOND_SETUP, _CAM_STORY, _CAM_TURNING,
     _CAM_TURNING_POST, _MX_SETUP, _ROT_SETUP, _SW_SETUP, _SW_SETUP2, _SWARF_RIG, _TURN_SETUP)
 from verify_acts_doc import _FINALE, _OVERTURE, _SHOWCASE
-from verify_acts_hub import _HUB, _HUB_JOB
+from verify_acts_dump import _HUB_CONTOUR, _HUB_DUMP
+from verify_acts_hub import HUB_MILL_SETUP, _HUB, _HUB_JOB
 from verify_acts_mesh import _MACHINING, _MESH, _NESTING
 from verify_acts_model import (
     _DETAILS, _DETAILS_FB, _RESIZE, _RESIZE_FB, _SOLIDS, _SOLIDS_FB)
@@ -108,6 +109,14 @@ _ACT_PROGRAM = [
     # The hub's own job, added AFTER the acts above have taken their library reads: this one appends
     # nine cutters, and every index those acts select by is read off the count before it.
     ("ACT 10c4 - CAM: THE HUB JOB", None, _HUB_JOB, []),
+    # WHERE the toolpath cuts, which no other beat reads: one contour on the hub's flange wall,
+    # then the dump post that writes its every motion event to a file the verdicts judge. The two
+    # are separate acts because only a generated toolpath posts, and the poll that certifies the
+    # generation runs BETWEEN acts.
+    ("ACT 10c5 - CAM: THE HUB CONTOUR",
+     ("cam_get", {"include": ["operations"], "setup": HUB_MILL_SETUP}), _HUB_CONTOUR, []),
+    ("ACT 10c6 - CAM: THE DUMP ORACLE",
+     ("cam_get", {"include": ["operations"], "setup": HUB_MILL_SETUP}), _HUB_DUMP, []),
     # The last two acts machine the PART - the flip setup and the program that spans it and the
     # first - so each is gated on the job ACT 10a built, and falls back to nothing rather than to a
     # scratch world: every tool they drive is driven again by the scratch-stock fallbacks above, so
@@ -201,6 +210,8 @@ POLL_AFTER = {
     "ACT 10c - CAM: EXTENSION STRATEGIES": {"narrative": [_SW_SETUP, _MX_SETUP, _ROT_SETUP],
                                             "fallback": [_SW_SETUP, _MX_SETUP, _ROT_SETUP]},
     "ACT 10c2 - CAM: TURNING": {"narrative": _TURN_SETUP, "fallback": _TURN_SETUP},
+    # the dump contour's own launch; its fallback lane is empty, so it leaves nothing generating.
+    "ACT 10c5 - CAM: THE HUB CONTOUR": {"narrative": HUB_MILL_SETUP, "fallback": []},
     # the flip act's fallback is EMPTY, so it launches nothing and there is nothing to certify -
     # an empty target list polls nothing rather than reading a setup that was never created.
     "ACT 10d - CAM: THE SECOND SETUP": {"narrative": FLIP_SETUP, "fallback": []},
@@ -722,7 +733,11 @@ STORY = {
                  "input to omit, and the as-is re-post that changes nothing. The rail program is "
                  "the other multi-setup post, and the one that meets the 5-axis refusal: it is "
                  "REFUSED while the swarf toolpath is active, naming the machine configuration a "
-                 "5-axis simultaneous toolpath needs, and posts once that operation is parked"),
+                 "5-axis simultaneous toolpath needs, and posts once that operation is parked. "
+                 "Then the LOCATION oracle: the hub's flange-wall contour posted through the "
+                 "shipped dump post, whose file carries every motion event - the cuts read back "
+                 "against the stock box the dump states and down on the rim they were aimed at, "
+                 "and the simultaneous job through the same post, where the tool axis is judged"),
     "cam_generate_setup_sheet": "write the machinist setup sheet with the file-landed gate",
     "cam_set_nc_comment": "stamp the NC program comment",
     "cam_save_template": ("save the setup as a run-stamped local CAM template - the stamp is what "
