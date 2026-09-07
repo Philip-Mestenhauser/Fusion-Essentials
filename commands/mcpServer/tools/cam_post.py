@@ -413,14 +413,14 @@ def _expand_ops(items):
 
 # The count semantics BOTH post arms publish - one sentence, since both arms publish the same keys
 # off _program_counts.
-_COUNTS_NOTE = ("program_operation_count is what the program HOLDS (filteredOperations), "
-                "posted_operations those reading hasToolpath True; "
-                "cam_get(include=['operations']) shows the ops left out.")
+_COUNTS_NOTE = ("program_operation_count is what the program HOLDS, posted_operations those "
+                "reading hasToolpath True. A suppressed operation is neither held nor posted: its "
+                "toolpath reads discarded and its moves are absent from the NC file.")
 
 
-# Held vs posted rests on ledger row FILTERED-1 (a SUPPRESSED op is excluded from
-# filteredOperations) and the sweep's cam_post act (1 <= posted_operations <=
-# program_operation_count); no script row can, since a setup-scoped NC program arms a modal dialog.
+# MEASURED: a program scoped over a list holding a suppressed operation omits it - filteredOperations
+# excludes it, postProcess answers True, and the file carries none of its moves. Suppressing a
+# generated operation flips hasToolpath False, so posted_operations counts 0 for it.
 def _program_counts(program) -> dict:
     """{program_operation_count, program_item_count, posted_operations, toolpath_unread?} - the
     operations the program HOLDS, the setups/folders it stores, and how many held rows read
@@ -764,11 +764,11 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
 
     if as_is:
         result["note"] = (f"Program '{prog_name}' posted AS-IS from its stored configuration - "
-                          f"{len(files)} file(s), nothing reconfigured. Read 'readiness' for the "
-                          "job's health. " + _COUNTS_NOTE)
+                          f"{len(files)} file(s), nothing reconfigured. 'readiness' carries its "
+                          "health. " + _COUNTS_NOTE)
     else:
         result["note"] = (f"Program '{prog_name}' {program_verb}, posted {len(files)} file(s). "
-                          "Read 'readiness' for the job's health. " + _COUNTS_NOTE)
+                          "'readiness' carries its health. " + _COUNTS_NOTE)
         if membership.get("membership_note"):
             # The program's own membership read disagreed with the scope, or could not be compared -
             # stated beside the file rather than left in a key the note never mentions.

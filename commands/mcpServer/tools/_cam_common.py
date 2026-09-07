@@ -70,14 +70,48 @@ def matched_quoting(current, request):
     return quote_expression(text), True
 
 
-def enumeration_remedy(message, written, read_call):
+def choice_expressions(p):
+    """The values a CHOICE parameter takes, off ChoiceParameterValue.getChoices() - which answers
+    (ok, titles, values) - or None where this parameter's value carries no choice set."""
+    got = safe(lambda: p.value.getChoices())
+    if not got or len(got) < 3 or not got[0]:
+        return None
+    values = safe(lambda: [str(v) for v in got[2]])
+    return values or None
+
+
+def enumeration_remedy(message, written, read_call, param=None):
     """The clause a platform refusal naming an INVALID ENUMERATION VALUE carries - the expression
-    this call actually wrote, and the `read_call` that shows the parameter's own expression. '' for
-    every other message."""
+    this call actually wrote, then `param`'s own values where getChoices answers them, else the
+    `read_call` that shows what it holds. '' for every other message."""
     if _ENUM_REFUSAL not in (message or "").lower():
         return ""
-    return (f" Fusion's message names an ENUMERATION value; the expression written was {written}. "
-            f"{read_call} reads the expression this parameter holds - pass one of its own values.")
+    lead = (f" Fusion's message names an ENUMERATION value; the expression written was {written}. ")
+    choices = choice_expressions(param) if param is not None else None
+    if choices:
+        return lead + f"This parameter's own values: {named_with_remainder(choices)}."
+    return lead + f"{read_call} reads the expression this parameter holds - pass one of its own values."
+
+
+# The operation's own 'strategy' CAM parameter, whose value is the platform's INTERNAL id
+# ('parallel_new') - a different vocabulary from Operation.strategy ('parallel'), which is the name
+# createInput takes. createInput('contour') raises: 'contour' is not a name in either.
+_STRATEGY_PARAM = "strategy"
+
+STRATEGY_PAIR_NOTE = (
+    "'strategy' is the operation's own strategy PARAMETER - the platform's internal id - and "
+    "'strategy_name' is Operation.strategy. cam_create_operation and "
+    "cam_get(include=['strategies']) take strategy_name; the id is not a name either of them "
+    "accepts.")
+
+
+def strategy_pair(op) -> dict:
+    """{strategy, strategy_name} for ONE operation: the internal id its 'strategy' parameter holds,
+    and the createInput name Operation.strategy reads. Either is null where it did not read."""
+    params = safe(lambda: op.parameters)
+    p = safe(lambda: params.itemByName(_STRATEGY_PARAM)) if params is not None else None
+    return {"strategy": unquote_expression(safe(lambda: p.expression)) if p is not None else None,
+            "strategy_name": safe(lambda: op.strategy)}
 
 
 def clamp_rows(max_results, default: int, ceiling: int) -> int:
@@ -489,6 +523,39 @@ def op_is_suppressed(facts: dict) -> bool:
     return bool(facts.get("is_suppressed") or facts.get("operation_state") == 2)
 
 
+def op_settled(facts: dict) -> bool:
+    """Whether an operation has nothing left to generate: error or suppressed, or IsValid (0) with a
+    toolpath to show for it - hasToolpath True, or the empty class's own flag shape. The isGenerating
+    FLAG can read true over such an operation, so no poll settles on that flag alone."""
+    if facts.get("has_error") or op_is_suppressed(facts):
+        return True
+    # MEASURED across one regeneration: the state leaves 0 the instant a launch lands (0 -> 3 -> 1)
+    # and returns to 0 only once the work is done, while isGenerating stayed true for a further
+    # 1.1 s after the Future completed - so the state leads the flag and cannot complete early.
+    if facts.get("operation_state") != 0:
+        return False
+    # A state-0 op with NO toolpath has produced nothing yet, so the second signal is what separates
+    # 'finished' from 'about to start' - is_empty_toolpath covers the op that generated and cuts
+    # nothing, which is finished too.
+    return facts.get("has_toolpath") is True or is_empty_toolpath(facts)
+
+
+def unsettled_count(tally: dict) -> int:
+    """How many operations a tally is still waiting on: the isGenerating count less the ones whose
+    own state has already answered."""
+    return max(0, (tally.get("generating", 0) or 0) - (tally.get("generating_settled", 0) or 0))
+
+
+def settled_clause(tally: dict) -> str:
+    """The disclosure for a scope holding operations that read isGenerating true over a state that
+    already answered - '' where the two counts agree."""
+    n = tally.get("generating_settled", 0) or 0
+    if not n:
+        return ""
+    return (f" {n} operation(s) read isGenerating true while their own state reads valid, errored "
+            "or suppressed; this read settles completion on those states, not on the flag.")
+
+
 def counts_as_warning(facts: dict) -> bool:
     """Whether an op's warning counts toward the readiness overlay - an errored op's warning adds
     nothing to its error, and suppression discards the toolpath, so neither demotes a verdict."""
@@ -565,10 +632,12 @@ def toolpath_present_tally(ops):
 
 
 def op_state_tally(ops) -> dict:
-    """{valid, out_of_date, errored, generating, suppressed, warnings, total, active, op_sample,
-    warning_sample} over a list of operations - the poll tally. An ERRORED op is its own bucket
-    (it never finishes generating); 'generating' and 'warnings' are overlays on the others."""
+    """{valid, out_of_date, errored, generating, generating_settled, suppressed, warnings, total,
+    active, op_sample, warning_sample} over a list of operations - the poll tally. An ERRORED op is
+    its own bucket (it never finishes generating); 'generating' and 'warnings' are overlays on the
+    others, and generating_settled counts the flagged ones whose state already answered."""
     valid = ood = errored = generating = suppressed = warnings = total = 0
+    generating_settled = 0
     active = None
     op_sample = None
     warning_sample = None
@@ -596,10 +665,13 @@ def op_state_tally(ops) -> dict:
             ood += 1
         if facts["is_generating"]:
             generating += 1
+            if op_settled(facts):
+                generating_settled += 1
             prog = facts["generating_progress"]
             if active is None or (prog and prog not in ("Pending", "0.0%")):
                 active = {"op": facts["name"], "progress": prog}
     return {"valid": valid, "out_of_date": ood, "errored": errored, "generating": generating,
+            "generating_settled": generating_settled,
             "suppressed": suppressed, "warnings": warnings, "total": total, "active": active,
             "op_sample": op_sample, "warning_sample": warning_sample}
 
@@ -812,6 +884,7 @@ def live_readiness():
     else:
         readiness = "no active operations to assess."
     return {"valid": valid, "out_of_date": ood, "errored": errored, "generating": tally["generating"],
+            "generating_settled": tally["generating_settled"],
             "suppressed": tally["suppressed"], "warnings": warned, "total": tally["total"],
             "active": tally["active"],
             "setups_errored": setups_errored, "programs_errored": programs_errored,
@@ -827,7 +900,11 @@ def op_primary_state(facts: dict) -> str:
         return "suppressed"
     if facts["has_error"]:
         return "error"
-    if facts["is_generating"]:
+    # The FLAG outranks the state EXCEPT over an operation reading IsValid with a toolpath to show:
+    # it stayed true for 1.1 s past the Future's completion (measured), and 'generating' there is
+    # read as unfinished work. Spelled out rather than via op_settled, which reaches back here.
+    if facts["is_generating"] and not (facts.get("operation_state") == 0
+                                       and facts.get("has_toolpath") is True):
         return "generating"
     if op_is_suppressed(facts):     # the STATE half; the flag half already answered above
         return "suppressed"

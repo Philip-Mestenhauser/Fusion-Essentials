@@ -19,6 +19,7 @@ from ._common import error, ok, safe
 from . import _common
 from . import _inputs
 from . import _sketch_detail
+from . import _view_common
 from . import _assert
 
 app = adsk.core.Application.get()
@@ -153,17 +154,17 @@ def _active_workspace():
 
 
 def _reactivate(ws_id):
-    """True when the workspace carrying this id reads back active after activate()."""
+    """True when the workspace carrying this id reads back active after the shared activate."""
+    # A restore that raises or declines is False, which the disclosure below names rather than
+    # sinking an import that already landed.
     ui = safe(lambda: app.userInterface)
     ws = safe(lambda: ui.workspaces.itemById(ws_id)) if ui is not None else None
     if ws is None:
         return False
     try:
-        if not ws.activate():
-            return False
+        return _view_common.activate_workspace(ui, ws)[0] is True
     except Exception:
         return False
-    return _active_workspace()[0] == ws_id
 
 
 def _workspace_disclosure(before):

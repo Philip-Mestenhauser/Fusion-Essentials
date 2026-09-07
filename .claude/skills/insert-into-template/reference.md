@@ -16,7 +16,10 @@ below exist to make that possible.
 
 A Component holds the CAD; the AU class names this slot role a "Component Container". A CAM
 setup's Model selection points at the *component*, not the geometry inside it -- so the setup
-keeps its selection even when the component's contents are replaced. A Body is just geometry and
+keeps its selection even when the component's contents are replaced (measured: `Setup.models`
+answers the same Occurrence after the component's only body is deleted and a different one
+extruded, and the setup stays valid; the relative stock box does *not* re-derive, which is why
+this procedure sizes the stock itself). A Body is just geometry and
 must live inside a Component; a Component can be empty (only its origin planes/axes).
 
 Consequence for crawling: a setup's `models` / `fixtures` / `stockSolids` entries are usually

@@ -155,6 +155,14 @@ class TestFlip:
         _payload(jt.handler(joint_name="BoomPivot", flip=False))
         assert joint.isFlipped is False
 
+    def test_a_second_flip_true_leaves_it_flipped_rather_than_toggling_back(self):
+        # 'flip' is a SET, so repeating a value is a no-op - a toggle would swing it back and the
+        # read-back gate would then call the second call a flip that did not take.
+        _, joint = _install(["BoomPivot"])
+        _payload(jt.handler(joint_name="BoomPivot", flip=True))
+        out = _payload(jt.handler(joint_name="BoomPivot", flip=True))
+        assert joint.isFlipped is True and out["flipped"] is True
+
 
 # ── motion type / axis ───────────────────────────────────────────────────────
 

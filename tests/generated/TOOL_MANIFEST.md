@@ -120,7 +120,7 @@ PRODUCES:
 | ✎ | `sketch_constrain` | Apply a geometric CONSTRAINT to sketch entities |
 | ✎ | `sketch_copy` | COPY existing sketch entities, placing the copies through a transform: 'dx'/'dy', 'rotation_deg' and 'scale_factor' about ('center_x','center_y') |
 | ✎ | `sketch_create` | Create a new sketch on a plane OR on an existing planar face |
-| ⚠ | `sketch_delete_entity` | Delete ONE sketch entity, constraint or text from a named sketch |
+| ⚠ | `sketch_delete_entity` | Delete ONE sketch entity, constraint, dimension or text from a named sketch |
 | ✎ | `sketch_dimension` | Add a DIMENSIONAL constraint to a sketch and optionally drive its value (sketch_constrain does the geometric half) |
 | ✎ | `sketch_edit_curve` | Edit an EXISTING sketch curve in place |
 | · | `sketch_get` | Read sketches by zoom level: a summary list of every sketch, or ONE sketch's overview - entity counts, is_fully_constrained, and a 'profiles' list (area, centro... |
@@ -152,7 +152,7 @@ PRODUCES:
 | · | `cam_get_status` | Read toolpath generation progress - generation runs in the background on its own, so this is a plain status read at whatever cadence you need |
 | · | `cam_inspect_toolpaths` | Check whether CAM toolpaths are generated and up to date, and name the operations that are not |
 | ✎ | `cam_post` | Create (or reuse) an NC Program for the chosen toolpaths, then post it to a G-code / NC file on disk - the final CAM step |
-| ✎ | `cam_reorder` | REORDER a CAM operation/folder/pattern in the machining sequence: move 'entity' to 'before' or 'after' 'reference' (both are item names from cam_get(include=['o... |
+| ✎ | `cam_reorder` | REORDER a CAM item in the machining sequence: move 'entity' to 'before' or 'after' 'reference' (both are item names from cam_get(include=['operations']) / cam_e... |
 | ✎ | `cam_save_template` | Bundle a subset of a setup's operations into a NEW toolpath template in the library |
 | ✎ | `cam_select_geometry` | SELECT the machining geometry on a CAM operation |
 | ✎ | `cam_set_nc_comment` | Set the COMMENT field of the active document's NC programs (post/output jobs) - what most posts emit near the top of the G-code |

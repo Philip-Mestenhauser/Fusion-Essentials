@@ -70,7 +70,7 @@ def _incomplete_note(live: dict) -> str:
                 "live_states.samples the first errored item. Waiting will NOT complete an errored "
                 "item: fix it, then re-run cam_generate. cam_get(include=['operations']) lists "
                 "every errored item with its full text.")
-    if live.get("generating", 0) == 0 and live.get("out_of_date", 0) > 0:
+    if _cam_common.unsettled_count(live) == 0 and live.get("out_of_date", 0) > 0:
         return ("Not complete. WARNING: nothing is actively generating yet out-of-date ops remain "
                 "- 'readiness' names what this installation will not generate at all. "
                 "cam_get(include=['operations']) shows why.")
@@ -80,8 +80,8 @@ def _incomplete_note(live: dict) -> str:
 # `completed` is a GENERATION-lifecycle flag: a document reading "0 of 34 active ops valid" still
 # polls completed:true once nothing is generating. The readiness pointer is a SEPARATE sentence, so
 # the paths reporting a Future alone can state the flag without promising a verdict they lack.
-_COMPLETED_MEANS = ("completed=true means nothing in scope is still generating - not a success "
-                    "verdict. 'readiness' is the verdict.")
+_COMPLETED_MEANS = ("completed=true means no operation in scope has generating left to do - not a "
+                    "success verdict. 'readiness' is the verdict.")
 
 _COUNT_IS_INSTANTANEOUS = (
     " operations_completed is numberOfCompleted at THIS read - it can fall between reads and read 0 "
@@ -304,9 +304,9 @@ def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
         return ok(payload)
 
     # The Future flips isGenerationCompleted a beat BEFORE live op state settles, so completed needs
-    # BOTH: the Future done AND nothing in THIS HANDLE'S OWN scope still generating. An errored op
-    # is its own bucket, never counted as generating, so this cannot hang on a fault.
-    completed = future_done and (live.get("generating", 0) == 0)
+    # BOTH: the Future done AND this handle's own scope settled - read off the OPERATIONS' states,
+    # since isGenerating stays true over an operation already reading valid.
+    completed = future_done and (_cam_common.unsettled_count(live) == 0)
     payload["completed"] = completed
     payload["completion_basis"] = basis   # whose operations settled this verdict
     payload["live_states"] = live  # valid/out_of_date/errored/generating/suppressed (+ setup/program for document)
@@ -323,7 +323,7 @@ def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
     health_note = _attach_op_health(payload, health_ops(), basis) if include_operations else ""
     payload["note"] = ("Generation complete. " + _COMPLETED_MEANS
                        + " cam_get(include=['operations']) for per-op detail."
-                       + health_note + count_caveat)
+                       + health_note + count_caveat + _cam_common.settled_clause(live))
 
     # Generation finished - drop the registry entry so it does not leak across the session.
     _GENERATIONS.pop(key, None)
@@ -339,7 +339,8 @@ def _op_tally(ops) -> dict:
     # warnings + warning_sample travel with the tally: they are what stops this SCOPED verdict
     # reading plainly ready over a job the document-level one would demote.
     return {"valid": t["valid"], "out_of_date": t["out_of_date"], "errored": t["errored"],
-            "generating": t["generating"], "suppressed": t["suppressed"],
+            "generating": t["generating"], "generating_settled": t["generating_settled"],
+            "suppressed": t["suppressed"],
             "warnings": t["warnings"], "total": t["total"],
             "active": t["active"], "setups_errored": 0, "programs_errored": 0,
             # the OWNING setup's blocked_by, filled by _scope_state - a scoped verdict reads the
@@ -409,7 +410,9 @@ def _status_live(target: str, include_operations: bool) -> dict:
         return error(serr)
 
     live = live or {}
-    completed = live.get("generating", 0) == 0
+    # Settled on the operations' own states: the isGenerating flag reads true over operations that
+    # already answered valid, and a poll waiting on that flag waits on finished work.
+    completed = _cam_common.unsettled_count(live) == 0
     payload = {
     "handle": None,                # live read: no self-minted handle needed
     "target": scope_label,
@@ -424,8 +427,11 @@ def _status_live(target: str, include_operations: bool) -> dict:
         return ok(payload)
 
     health_note = _attach_op_health(payload, health_ops(), scope_label) if include_operations else ""
-    payload["note"] = ("No operations are still generating in scope. " + _COMPLETED_MEANS
-                       + " cam_get(include=['operations']) for per-op detail." + health_note)
+    # The lead states the verdict this read actually settled on - not "nothing is generating", which
+    # is false exactly when settled_clause below names operations whose flag still reads true.
+    payload["note"] = ("No operation in scope has generating left to do. " + _COMPLETED_MEANS
+                       + " cam_get(include=['operations']) for per-op detail." + health_note
+                       + _cam_common.settled_clause(live))
     return ok(payload)
 
 

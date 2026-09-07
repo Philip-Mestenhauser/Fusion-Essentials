@@ -15,7 +15,8 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import (CM_TO_UNIT, iter_collection, measured, named_with_remainder, ok, error,
                       read_flag, safe, terse)
-from ._cam_common import get_cam, find_setup, resolve_cam_node, resolve_operation
+from ._cam_common import (STRATEGY_PAIR_NOTE, choice_expressions, get_cam, find_setup,
+                          resolve_cam_node, resolve_operation, strategy_pair)
 from ._cam_presets import _preset_names, _presets_named
 from ..guidance.loader import STRATEGY_RECIPE_ID
 from . import _inputs
@@ -310,6 +311,17 @@ _EDITABLE_NOTE = (
     "reject one by name before applying anything; a row with no editable key read isEditable True, "
     "and null means the flag did not read.")
 
+# Said only where a row actually carries the key: a parameters read with no choice row in it would
+# otherwise advertise a key nothing in the payload has.
+_CHOICES_NOTE = (
+    " A row's 'choices' are the values that parameter's own getChoices() answers - the only "
+    "expressions it takes; pass one of them verbatim.")
+
+
+def _any_choices(groups) -> bool:
+    """Whether any grouped row published a 'choices' set - what gates the note above."""
+    return any("choices" in row for rows in groups.values() for row in rows)
+
 
 def _grouped_visible_params(param_coll):
     """{section_title: [{name, title, expression}]} for the VISIBLE + ENABLED parameters, grouped by
@@ -334,6 +346,11 @@ def _grouped_visible_params(param_coll):
         editable = read_flag(lambda p=p: p.isEditable)
         if editable is not True:
             row["editable"] = editable
+        # A CHOICE row carries the set it accepts; every other parameter carries none, and the key
+        # is absent there rather than an empty list.
+        choices = choice_expressions(p)
+        if choices:
+            row["choices"] = choices
         groups.setdefault(current, []).append(row)
     # drop empty sections (a sentinel with no following values)
     return {g: rows for g, rows in groups.items() if rows}
@@ -388,7 +405,8 @@ def _slice_setup_parameters(cam, setup, units):
     groups = _grouped_visible_params(params)
     out = {"setup": safe(lambda: s.name), "sections": groups,
            "parameter_count": sum(len(v) for v in groups.values()),
-           "note": _SETUP_PARAM_NOTE + " " + _EDITABLE_NOTE}
+           "note": _SETUP_PARAM_NOTE + " " + _EDITABLE_NOTE
+                   + (_CHOICES_NOTE if _any_choices(groups) else "")}
     extents = _stock_extents(params, factor, (units or "mm").strip().lower())
     if extents:
         out["stock_extents"] = extents
@@ -409,10 +427,13 @@ def _slice_parameters(cam, operation, setup, units="mm"):
     if oerr:
         return None, oerr
     groups = _grouped_visible_params(safe(lambda: op.parameters))
-    return {"operation": safe(lambda: op.name), "strategy": safe(lambda: op.strategy),
-            "sections": groups,
-            "parameter_count": sum(len(v) for v in groups.values()),
-            "note": _EDITABLE_NOTE}, None
+    out = {"operation": safe(lambda: op.name),
+           "sections": groups,
+           "parameter_count": sum(len(v) for v in groups.values()),
+           "note": _EDITABLE_NOTE + (_CHOICES_NOTE if _any_choices(groups) else "")
+                   + " " + STRATEGY_PAIR_NOTE}
+    out.update(strategy_pair(op))
+    return out, None
 
 
 _TOOL_COPY_NOTE = (
@@ -597,7 +618,9 @@ def handler(include=None, setup: str = "", operation: str = "", preset: str = ""
     if want_default or "operations" in inc:
         lines.append(_VALIDITY_NOTE)
     if lines:
-        out["note"] = " ".join(lines)
+        # The setups slice's own note describes a state IN this payload, so it is kept ahead of the
+        # router's pointers rather than replaced by them.
+        out["note"] = " ".join(([out["note"]] if out.get("note") else []) + lines)
     return ok(out)
 
 

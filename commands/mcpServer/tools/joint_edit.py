@@ -379,7 +379,9 @@ tool = (
             description="pin_slot only: the perpendicular SLIDE direction.").as_property())
     .add_input_property(*_inputs.frame_axis("world_axis", default="",
             description="Re-point the motion to a TRUE WORLD axis - fixes a joint pivoting about the wrong world axis because the snap frame isn't world-aligned. Re-applies the current motion type when joint_type is omitted.").as_property())
-    .add_input_property("flip", {"type": "boolean", "description": "Toggle the joint direction."})
+    .add_input_property("flip", {"type": "boolean",
+            "description": "SET the joint direction flag: true flips the joint, false unflips it. "
+                           "Not a toggle - a second flip=true changes nothing."})
     .add_input_property("offset", {"type": "number", "description": "The joint ANCHOR offset (the offset ModelParameter, in 'units') along the joint FRAME'S Z axis - NOT a slider's slide value (joint_drive poses that)."})
     .add_input_property("angle", {"type": "number", "description": "Joint angle between the inputs (degrees)."})
     .add_input_property(*_inputs.units_property(description="Units for 'offset'."))

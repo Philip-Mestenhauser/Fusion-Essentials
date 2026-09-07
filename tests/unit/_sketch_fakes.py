@@ -62,9 +62,36 @@ class _Coll(_NamedCollection):
         made = [self._make(*a) for _ in range(n)]
         return made[0]
     # the various add* methods the handler calls
-    def addByTwoPoints(self, a, b): return self._make("line", a, b)
-    def addTwoPointRectangle(self, a, b): return self._make_many(4, "rect", a, b)
-    def addCenterPointRectangle(self, c, corner): return self._make_many(4, "crect", c, corner)
+    def addByTwoPoints(self, a, b):
+        # MEASURED: addByTwoPoints takes a SketchPoint in EITHER slot and the line ADOPTS that
+        # point (a Point3D makes a new one) - which is what lets a chain share endpoints and the
+        # closing segment weld onto the first. A Point3D carries .x here; a SketchPoint does not.
+        ln = self._make("line", a, b)
+        for slot, arg in (("startSketchPoint", a), ("endSketchPoint", b)):
+            if not hasattr(arg, "x"):
+                setattr(ln, slot, arg)
+        return ln
+    def _rect_lines(self, tag, x0, y0, x1, y1, *rec):
+        """The four sides a rectangle constructor lands, each carrying its OWN corner geometry -
+        the sides are axis-aligned and the corners are SHARED points, as measured live. Their
+        order is not a platform contract, so a consumer must classify by geometry."""
+        corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        pts = [_SketchPoint(geometry=type("G", (), {"x": cx, "y": cy, "z": 0.0})())
+               for cx, cy in corners]
+        made = []
+        for i in range(4):
+            ln = self._make(tag, *rec)
+            ln.startSketchPoint = pts[i]
+            ln.endSketchPoint = pts[(i + 1) % 4]
+            made.append(ln)
+        return made[0]
+
+    def addTwoPointRectangle(self, a, b):
+        return self._rect_lines("rect", a.x, a.y, b.x, b.y, "rect", a, b)
+
+    def addCenterPointRectangle(self, c, corner):
+        return self._rect_lines("crect", 2 * c.x - corner.x, 2 * c.y - corner.y,
+                                corner.x, corner.y, "crect", c, corner)
     def addByCenterRadius(self, c, r): return self._make("circle", c, r)
     def addByCenterStartSweep(self, c, s, sw): return self._make("arc", c, s, sw)
     # a scribed polygon lands one SketchLine per side, all from the one factory call
@@ -112,11 +139,23 @@ class _GeomConstraints:
     def __init__(self):
         self.raise_on_add = False
         self.added = []
+        self.axis = []             # ('horizontal'|'vertical', line) per rectangle side constrained
     def addCoincident(self, a, b):
         if self.raise_on_add:
             raise RuntimeError("addCoincident rejected by the API")
         self.added.append((a, b))
         return object()
+    # MEASURED: both rectangle constructors land ZERO constraints, so every one the sketch ends up
+    # with came from a caller. count is what a read-back delta is taken on.
+    def addHorizontal(self, line):
+        self.axis.append(("horizontal", line))
+        return object()
+    def addVertical(self, line):
+        self.axis.append(("vertical", line))
+        return object()
+    @property
+    def count(self):
+        return len(self.added) + len(self.axis)
 
 
 class FakeSketch(Sketch):

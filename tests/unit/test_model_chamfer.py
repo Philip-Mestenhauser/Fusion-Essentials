@@ -223,6 +223,9 @@ class FakeChamferFeatures:
         self.corner_override = None       # (value,) - what the FEATURE reports instead
         self.definition_override = None   # (distance_cm, angle_rad) - ditto, or False for absent
         self.chamfer_type_override = None
+        # The cm an EQUAL-DISTANCE chamfer's own definition reports; None leaves the feature
+        # answering no definition at all, which is how the read degrades when nothing answers.
+        self.equal_distance_cm = None
         # applied when a feature is added, so a test can model the geometry actually moving
         self.on_add = None
     def createInput(self, edges, tangent):
@@ -251,6 +254,9 @@ class FakeChamferFeatures:
                 self.result.chamferTypeDefinition = type("D", (), {
                     "distance": type("P", (), {"value": dist_cm})(),
                     "angle": type("P", (), {"value": angle_rad})()})()
+        elif self.equal_distance_cm is not None:
+            self.result.chamferTypeDefinition = type("D", (), {
+                "distance": type("P", (), {"value": self.equal_distance_cm})()})()
         return self.result
 
 
@@ -270,6 +276,39 @@ def _install(bodies):
     # BodyRef(kind='solid') does isinstance(body, adsk.fusion.BRepBody) + checks isSolid — make the
     # fake body pass the BRep type check.
     adsk.fusion.BRepBody = BRepBody
+    adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
+    return ff, cf
+
+
+class _NoNumberEngine(FakeUnitsManager):
+    """A units engine that RESOLVES an expression and answers something that is not a number, which
+    is the deliberate value_cm=None path of length_value_input."""
+
+    def evaluateExpression(self, expression, units=""):
+        return None
+
+
+def _edge_ent(token=None):
+    """A BRep edge resolved from a handle, or bounding a face. Its body's volume does not read, so
+    the material gate has nothing to judge."""
+    edge = BRepEdge(curve=None, entity_token=token)
+    edge.body = BRepBody(name="Block", volume=None)
+    return edge
+
+
+def _face_with_edges(edges):
+    """A BRep face carrying the edges that bound it - what a face-scoped chamfer expands."""
+    return BRepFace(surface=None, body_name="Block", edges=edges)
+
+
+def _install_handles(handle_map):
+    """Install a design whose findEntityByToken resolves `handle_map` - the seam a face/edge handle
+    list reads through before its isinstance(BRepEdge/BRepFace) gate."""
+    ff = FakeFilletFeatures(); cf = FakeChamferFeatures()
+    install(fl, make_design(comp=_component([], ff, cf), tokens=handle_map))
+    import adsk.fusion, adsk.core
+    adsk.fusion.BRepEdge = BRepEdge
+    adsk.fusion.BRepFace = BRepFace
     adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
     return ff, cf
 
@@ -295,12 +334,13 @@ def _parametric(monkeypatch, installer, *args, engine=None, **kw):
 
 class TestGuards:
 
-    def test_a_nonnumeric_chamfer_distance_is_still_just_not_a_number(self):
-        # Only the fillet RADIUS takes the expression form; the chamfer's distance is compared as a
-        # number against the created feature, so a string there is refused outright.
-        _install([make_body("B", [True])])
+    def test_an_unresolvable_distance_expression_is_refused_naming_it(self, monkeypatch):
+        # The distance takes a parameter expression, so a string naming no parameter is refused BY
+        # NAME by the units engine rather than reaching the feature.
+        _parametric(monkeypatch, _install, [make_body("B", [True])])
         res = fl.handler(body_name="B", distance="big", edge_filter="all")
-        assert res["isError"] is True and "'distance' must be a number." in res["message"]
+        assert res["isError"] is True
+        assert "'distance' expression 'big' did not evaluate" in res["message"]
 
 
 class TestFillet:
@@ -367,7 +407,7 @@ class TestChamfer:
         cf.refuse = "two"
         res = fl.handler(body_name="B", distance=2, distance_two=3, units="mm",
                                   edge_filter="all")
-        assert res["isError"] is True and "two-distance chamfer (2.0/3.0 mm)" in res["message"]
+        assert res["isError"] is True and "two-distance chamfer (2.0 mm / 3.0 mm)" in res["message"]
         assert cf.added == 0
 
 
@@ -612,15 +652,101 @@ class TestVolumeReadBack:
         assert out["chamfered"] is True and out["volume_delta_cm3"] == -0.25
 
 
-class TestRadiusTakesAParameterExpression:
+class TestDistanceTakesAParameterExpression:
 
-    """A fillet radius may be a parameter EXPRESSION, so the fillet is driven by a user parameter
-    rather than frozen at a number. Only the RADIUS: the chamfer's distance is compared as a number
-    against the distance the created feature reports, and 'chord_length' is not opened here - both
-    stay numeric, and their schemas say so."""
+    """The chamfer DISTANCE may be a parameter EXPRESSION, so the bevel follows a user parameter
+    rather than freezing at a number - the form model_fillet's radius takes. 'chord_length' is not
+    opened here and stays numeric, and the schemas say so."""
 
-    def test_a_chamfer_distance_is_still_a_number_only(self, monkeypatch):
-        # _chamfer_readback compares the created feature's distance against this number
-        _parametric(monkeypatch, _install, [make_body("B", [True])])
-        res = fl.handler(body_name="B", distance="Chamf", units="mm", edge_filter="all")
-        assert res["isError"] is True and "'distance' must be a number." in res["message"]
+    def test_an_expression_crosses_as_a_string_value_input_and_is_echoed(self, monkeypatch):
+        # createByString ties the feature to the live parameter; createByReal would freeze a number.
+        _, cf, _design = _parametric(monkeypatch, _install, [make_body("B", [True])])
+        cf.result = FakeCountingFeature("Chamfer1", faces=1)
+        out = _payload(fl.handler(body_name="B", distance="WallT/2", units="mm", edge_filter="all"))
+        assert cf.last.distance == ("string", "WallT/2")
+        assert out["distance"] == "WallT/2"
+        # this feature answers no definition, so the value is flagged unconfirmed, never echoed as read
+        assert out["distance_unverified"] is True
+
+    def test_a_landed_expression_is_read_back_off_the_feature(self, monkeypatch):
+        _, cf, _design = _parametric(monkeypatch, _install, [make_body("B", [True])])
+        cf.result = FakeCountingFeature("Chamfer1", faces=1)
+        cf.equal_distance_cm = 0.65                  # what 'WallT/2' evaluates to, in internal cm
+        out = _payload(fl.handler(body_name="B", distance="WallT/2", units="mm", edge_filter="all"))
+        assert out["distance"] == 6.5                # the FEATURE's number, in mm
+        assert out["distance_expression"] == "WallT/2"
+
+    def test_a_distance_the_feature_did_not_take_rolls_the_chamfer_back(self, monkeypatch):
+        _, cf, _design = _parametric(monkeypatch, _install, [make_body("B", [True])])
+        cf.result = FakeCountingFeature("Chamfer1", faces=1)
+        cf.equal_distance_cm = 0.30                  # not the 0.65 'WallT/2' evaluates to
+        res = fl.handler(body_name="B", distance="WallT/2", units="mm", edge_filter="all")
+        assert res["isError"] is True
+        assert "reads back 3.0, not the requested 6.5" in res["message"]
+        assert cf.result.deleted is True
+
+    def test_an_expression_answering_no_number_publishes_the_distance_unconfirmed(self, monkeypatch):
+        # value_cm is None here, so there is nothing to compare the feature's own distance against.
+        # Subtracting from it would RAISE after chamferFeatures.add() had already landed a feature -
+        # a mutation left in the model with no isError.
+        _, cf, _design = _parametric(monkeypatch, _install, [make_body("B", [True])],
+                                     engine=_NoNumberEngine())
+        cf.result = FakeCountingFeature("Chamfer1", faces=1)
+        cf.equal_distance_cm = 0.65
+        out = _payload(fl.handler(body_name="B", distance="WallT/2", units="mm", edge_filter="all"))
+        assert out["distance"] == "WallT/2"
+        assert out["distance_unverified"] is True
+        assert "distance_expression" not in out       # nothing was verified, so nothing is claimed
+
+    def test_a_single_read_back_field_reads_as_a_sentence(self):
+        # MEASURED LIVE: an expression chamfer verifies exactly ONE field, and the note read
+        # "distance are read back" - the plural is wrong for the common case.
+        body = make_body("B", [True], volume=10.0)
+        _, cf = _install([body])
+        cf.result = FakeCountingFeature("Chamfer1", faces=1)
+        cf.on_add = lambda: setattr(body, "volume", 9.75)
+        out = _payload(fl.handler(body_name="B", distance=2, units="mm", edge_filter="all",
+                                  corner_type="miter"))
+        assert "corner_type is read back off the created feature" in out["note"]
+
+    def test_exactly_the_read_back_band_lands_and_one_step_past_it_does_not(self):
+        # The band is 1e-6 cm. Measured against 0 so the subtraction is exact: a difference OF the
+        # band is the same distance, more than it is a value that did not take.
+        band = 1e-6
+        assert edge_common_mod._distance_mismatch(band, 0.0, 0.1) == ""
+        assert "reads back" in edge_common_mod._distance_mismatch(2 * band, 0.0, 0.1)
+
+
+class TestFaceScopedChamfer:
+
+    """'faces' bevels every edge of the named faces - the selection model_fillet's rule fillet
+    offers, expanded to edges here because a chamfer has no rule API."""
+
+    def test_every_edge_of_the_named_faces_is_taken_once(self):
+        # Two faces meeting at one edge: the shared edge belongs to both, and the same edge twice in
+        # the feature's edge set is a duplicate.
+        shared, only_a, only_b = _edge_ent("e0"), _edge_ent("e1"), _edge_ent("e2")
+        _, cf = _install_handles({"FA": _face_with_edges([shared, only_a]),
+                                  "FB": _face_with_edges([shared, only_b])})
+        out = _payload(fl.handler(faces=["FA", "FB"], distance=1))
+        assert out["edges_requested"] == 3
+        assert out["faces_selected"] == 2
+        assert out["edge_selection"] == "3 edge(s) of 2 face(s)"
+
+    def test_faces_override_an_edge_filter(self):
+        # the input says "overrides 'edge_filter'" - the faces decide the set and no body sweep runs
+        _install_handles({"FA": _face_with_edges([_edge_ent("e1"), _edge_ent("e2")])})
+        out = _payload(fl.handler(faces=["FA"], edge_filter="convex", distance=1))
+        assert out["edge_selection"] == "2 edge(s) of 1 face(s)"
+        assert "edges_convex" not in out
+
+    def test_faces_and_edges_together_are_refused(self):
+        _install_handles({"FA": _face_with_edges([_edge_ent("e1")]), "E1": _edge_ent("e1")})
+        res = fl.handler(faces=["FA"], edges=["E1"], distance=1)
+        assert res["isError"] is True and "'faces' or 'edges', not both" in res["message"]
+
+    def test_faces_that_answer_no_edges_refuse_before_any_feature_is_created(self):
+        _, cf = _install_handles({"FA": _face_with_edges([])})
+        res = fl.handler(faces=["FA"], distance=1)
+        assert res["isError"] is True and "answered any edges" in res["message"]
+        assert cf.added == 0

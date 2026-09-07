@@ -11,8 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import (FakeApplication, FakeOccurrence, MakeComp, MakeDesign, Viewport, load_tool,
-                      make_occurrence)
+from conftest import (BRepBody, FakeApplication, FakeOccurrence, MakeComp, MakeDesign, Viewport,
+                      _NamedCollection, install, load_tool, make_design, make_occurrence)
 
 gs = load_tool("view_screenshot")
 
@@ -132,6 +132,76 @@ class TestIsolateForFit:
         restore, _target, _err = gs._isolate_for_fit("A:1")
         assert stuck.isLightBulbOn is False           # the hide DID take
         assert restore() == ["Sub:1+B:1"]
+
+
+class TestFitToOnABody:
+    """A single-body ROOT design places no occurrence at all, so an occurrence-only fit_to has
+    nothing to frame there - the subject is the body."""
+
+    def _install_bodies(self, bodies):
+        comp = MakeComp(name="Root", all_occurrences=[])
+        comp.bRepBodies = _NamedCollection(bodies)
+        install(gs, make_design(comp=comp, tokens={b.entityToken: b for b in bodies}))
+        import adsk.fusion
+        adsk.fusion.BRepBody = BRepBody
+
+    def test_a_body_handle_frames_a_design_with_no_occurrences(self):
+        skin = BRepBody(name="skin", entity_token="SKIN")
+        self._install_bodies([skin])
+        restore, target, err = gs._isolate_for_fit("SKIN")
+        assert err is None and target is skin
+        assert skin.isLightBulbOn is True
+        assert restore() == []
+
+    def test_the_other_bodies_are_hidden_for_the_shot_and_restored(self):
+        skin, rib = BRepBody(name="skin", entity_token="SKIN"), BRepBody(name="rib",
+                                                                        entity_token="RIB")
+        self._install_bodies([skin, rib])
+        restore, _target, err = gs._isolate_for_fit("SKIN")
+        assert err is None
+        assert skin.isLightBulbOn is True and rib.isLightBulbOn is False
+        restore()
+        assert rib.isLightBulbOn is True
+
+    def test_a_name_matching_nothing_points_at_both_lookups(self):
+        self._install_bodies([BRepBody(name="skin", entity_token="SKIN")])
+        restore, _target, err = gs._isolate_for_fit("Ghost")
+        assert restore is None and "Ghost" in err
+
+    def test_a_resolved_proxy_matches_the_walked_body_by_native_identity(self):
+        # live findEntityByToken mints a FRESH proxy, so `is` is never true across the resolve and
+        # the visibility walk - a subject matched by object identity alone would be hidden by its
+        # own framing call, and the shot would frame everything except the subject.
+        walked = BRepBody(name="skin", entity_token="SKIN")
+        rib = BRepBody(name="rib", entity_token="RIB")
+        proxy = BRepBody(name="skin", entity_token="SKIN")     # what the token map hands back
+        comp = MakeComp(name="Root", all_occurrences=[])
+        comp.bRepBodies = _NamedCollection([walked, rib])
+        install(gs, make_design(comp=comp, tokens={"SKIN": proxy}))
+        import adsk.fusion
+        adsk.fusion.BRepBody = BRepBody
+        restore, target, err = gs._isolate_for_fit("SKIN")
+        assert err is None and target is proxy and proxy is not walked
+        assert walked.isLightBulbOn is True         # the subject stayed lit
+        assert rib.isLightBulbOn is False
+        restore()
+        assert rib.isLightBulbOn is True
+
+    def test_the_restore_message_names_bodies_not_occurrences(self):
+        class OneWayBody(BRepBody):
+            """A body bulb that switches OFF and then refuses to come back ON."""
+            def __setattr__(self, key, value):
+                if key == "isLightBulbOn" and value is True and getattr(self, "_armed", False):
+                    return
+                object.__setattr__(self, key, value)
+
+        stuck = OneWayBody(name="rib", entity_token="RIB")
+        object.__setattr__(stuck, "_armed", True)
+        self._install_bodies([BRepBody(name="skin", entity_token="SKIN"), stuck])
+        restore, _target, err = gs._isolate_for_fit("SKIN")
+        assert err is None and stuck.isLightBulbOn is False
+        msg = gs._restore_message(restore)
+        assert "hid the other bodies" in msg and "rib" in msg
 
 
 # ── active-component note: a non-root activation dims everything else to ghosts ──
@@ -300,7 +370,7 @@ class TestFitToRestoreDisclosure:
     def test_the_description_discloses_the_hide_and_restore(self):
         # disclosed on 'fit_to' itself - the input whose value triggers the visibility change
         desc = gs.tool.to_dict()["inputSchema"]["properties"]["fit_to"]["description"]
-        assert "hides the others" in desc
+        assert "hides the rest" in desc
         assert "restores them" in desc
 
 

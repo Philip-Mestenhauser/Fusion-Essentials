@@ -1,12 +1,13 @@
-"""Unit tests for ``sketch_delete_entity.py`` - surgically remove one sketch curve/point, constraint
-or text.
+"""Unit tests for ``sketch_delete_entity.py`` - surgically remove one sketch curve/point,
+constraint, dimension or text.
 
-The recovery tool for a wrong constraint: delete just that entity instead of rebuilding the
-whole sketch. Pinned here (no live Fusion): the '<type>:<index>' dispatch to the right collection
-(line/arc/circle/point via the shared resolver, constraint via geometricConstraints, text via
-sketchTexts), and the VERIFY-THE-EFFECT read-back - the collection count must actually drop, or the
-delete is an error (never a false ok). The fakes model real deletion: deleteMe() removes the entity
-from its collection so the before/after counts genuinely change (a delete that doesn't shrink the
+The recovery tool for a wrong constraint or dimension: delete just that entity instead of
+rebuilding the whole sketch. Pinned here (no live Fusion): the '<type>:<index>' dispatch to the
+right collection (line/arc/circle/point via the shared resolver, constraint via
+geometricConstraints, dimension via sketchDimensions, text via sketchTexts), and the
+VERIFY-THE-EFFECT read-back - the collection count must actually drop, or the delete is an error
+(never a false ok). The fakes model real deletion: deleteMe() removes the entity from its
+collection so the before/after counts genuinely change (a delete that doesn't shrink the
 collection must FAIL).
 """
 
@@ -65,6 +66,32 @@ class _UnreadableCount(_DelColl):
         return len(self._items)
 
 
+def FakeDimension(param_name, delete_ok=True):
+    """A SketchDimension: a deletable entity whose identity is its driving parameter's name."""
+    d = FakeEntity(param_name, delete_ok=delete_ok)
+    d.parameter = type("P", (), {"name": param_name})()
+    return d
+
+
+class _DeadAfterDelete(FakeEntity):
+    """A SketchDimension whose wrapper stops answering once it is deleted - the platform shape
+    VERIFIED_API_FACTS.md records ("API Object refers to a deleted Object"). Reading its parameter
+    AFTER the mutation raises, so only a name captured BEFORE reaches the payload."""
+    def __init__(self, param_name):
+        super().__init__(param_name)
+        self._gone = False
+
+    @property
+    def parameter(self):
+        if self._gone:
+            raise RuntimeError("3 : API Object refers to a deleted Object")
+        return type("P", (), {"name": self.name})()
+
+    def deleteMe(self):
+        self._gone = True
+        return super().deleteMe()
+
+
 def FakeText(content, delete_ok=True):
     """A SketchText: a deletable entity whose string is read off textParameter.expression, QUOTED
     (as it is live)."""
@@ -97,7 +124,7 @@ class FakeSketchCurves(SketchCurves):
 class FakeSketch(Sketch):
     """The shared Sketch fake whose curve, point, constraint and text collections model deletion."""
     def __init__(self, name, lines=(), arcs=(), circles=(), points=(), constraints=(), ellipses=(),
-                splines=(), cv_splines=(), fixed_splines=(), texts=()):
+                splines=(), cv_splines=(), fixed_splines=(), texts=(), dimensions=()):
         super().__init__(name=name,
                          curves=FakeSketchCurves(list(lines), list(arcs), list(circles),
                                                  list(ellipses), list(splines), list(cv_splines),
@@ -105,6 +132,7 @@ class FakeSketch(Sketch):
         self.sketchPoints = _DelColl(list(points))
         self.geometricConstraints = _DelColl(list(constraints))
         self.sketchTexts = _DelColl(list(texts))
+        self.sketchDimensions = _DelColl(list(dimensions))
 
 
 def _install(sketch):
@@ -329,6 +357,85 @@ class TestDeleteConstraint:
         _install(s)
         res = sd.handler(sketch_name="S", target="constraint:0")
         assert res["isError"] is True and "did not take" in res["message"].lower()
+
+
+# ── dimension deletion (the way off a wrong dimension without rebinding its expression) ─────────
+
+class TestDeleteDimension:
+    def test_delete_dimension_shrinks_collection_and_names_the_parameter(self):
+        s = FakeSketch("S", dimensions=[FakeDimension("d1"), FakeDimension("d2"),
+                                        FakeDimension("d3")])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="S", target="dimension:1"))
+        assert out["deleted"] is True
+        assert out["dimensions_before"] == 3 and out["dimensions_after"] == 2
+        # index = creation order, so d2 went - the parameter name is what says WHICH one
+        assert out["parameter"] == "d2"
+        assert [d.name for d in s.sketchDimensions._items] == ["d1", "d3"]
+
+    def test_dimension_out_of_range_errors_naming_the_count(self):
+        s = FakeSketch("S", dimensions=[FakeDimension("d1")])
+        _install(s)
+        res = sd.handler(sketch_name="S", target="dimension:9")
+        assert res["isError"] is True
+        assert "out of range" in res["message"] and "1 dimension(s)" in res["message"]
+        assert s.sketchDimensions.count == 1
+
+    def test_the_parameter_name_is_captured_BEFORE_the_delete(self):
+        # a deleted wrapper that stops answering is what makes the ORDERING load-bearing: read
+        # after deleteMe and the payload loses the one field saying which dimension went.
+        s = FakeSketch("S", dimensions=[FakeDimension("d1"), _DeadAfterDelete("d2")])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="S", target="dimension:1"))
+        assert out["parameter"] == "d2"
+        assert out["dimensions_before"] == 2 and out["dimensions_after"] == 1
+
+    def test_the_index_one_past_the_last_is_refused_and_the_last_one_deletes(self):
+        # the exact boundary of `idx >= n`: dimension:1 on a two-dimension sketch is the LAST one.
+        s = FakeSketch("S", dimensions=[FakeDimension("d1"), FakeDimension("d2")])
+        _install(s)
+        res = sd.handler(sketch_name="S", target="dimension:2")
+        # the RANGE refusal, not an incidental crash on an index the guard let through
+        assert res["isError"] is True
+        assert "out of range" in res["message"] and "2 dimension(s)" in res["message"]
+        out = _payload(sd.handler(sketch_name="S", target="dimension:1"))
+        assert out["parameter"] == "d2" and out["dimensions_after"] == 1
+
+    def test_a_dimension_delete_that_reports_true_but_removes_nothing_is_an_error(self):
+        # deleteMe() true while the count holds - the COUNT diff, not the bool, is what convicts.
+        d = FakeDimension("GHOST")
+        d.deleteMe = lambda: True
+        s = FakeSketch("S", dimensions=[d])
+        _install(s)
+        res = sd.handler(sketch_name="S", target="dimension:0")
+        assert res["isError"] is True
+        assert "dimension count 1 -> 1" in res["message"]
+        assert s.sketchDimensions.count == 1
+
+    def test_an_unreadable_dimension_after_count_is_refused_not_read_as_a_delete(self):
+        s = FakeSketch("S")
+        s.sketchDimensions = _UnreadableCount([FakeDimension("d1")], raise_on=(3,))
+        _install(s)
+        res = sd.handler(sketch_name="S", target="dimension:0")
+        assert res["isError"] is True
+        assert "UNVERIFIED" in res["message"] and "held 1 dimension(s)" in res["message"]
+
+    def test_a_dimension_count_that_never_reads_is_not_reported_as_zero(self):
+        s = FakeSketch("S")
+        s.sketchDimensions = _UnreadableCount([FakeDimension("d1")])
+        _install(s)
+        res = sd.handler(sketch_name="S", target="dimension:0")
+        assert res["isError"] is True
+        assert "not a count of zero" in res["message"]
+        assert "0 dimension(s)" not in res["message"]
+
+    def test_a_sketch_without_the_collection_is_an_honest_refusal(self):
+        s = FakeSketch("S")
+        del s.sketchDimensions
+        _install(s)
+        res = sd.handler(sketch_name="S", target="dimension:0")
+        assert res["isError"] is True
+        assert "no sketch dimensions collection" in res["message"]
 
 
 # ── sketch-text deletion (sketch_set_text's only un-doer besides Fusion's undo) ───────────────

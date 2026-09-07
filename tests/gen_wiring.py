@@ -409,7 +409,7 @@ def main():
             sys.exit(1)
         print("TOOL_POINTER_MAP.md is up to date.")
         return
-    with open(WIRING_PATH, "w", encoding="utf-8") as fh:
+    with open(WIRING_PATH, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(rendered + "\n")
     print(f"Wrote {WIRING_PATH}")
 

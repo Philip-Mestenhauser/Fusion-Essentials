@@ -47,13 +47,13 @@ _WHOLE_MODEL = (
     ("flat", "Flat", _FLAT_AT), ("horizontal", "Horizontal", _FLAT_AT),
 )
 
-# Driven on the hub by hand, each generating a non-empty toolpath with no selection at all, and left
-# OUT of the beats above because ONE of them eats most of the boundary poll's budget on its own:
-# (strategy, tool, generation seconds read off cam_get_status for that operation alone).
-MEASURED_NOT_SWEPT = (
-    ("ramp", "ball end mill", 105.2),
-    ("pocket_clearing", "flat end mill", 71.4),
+# The whole-model family in an act of its OWN because its generation eats most of a default boundary
+# poll's budget: (strategy, operation name, tool offset, the machining seconds it cut on the hub).
+# Its act carries a poll budget sized to it - see POLL_AFTER in verify_program.
+_LONG_FAMILIES = (
+    ("ramp", "Ramp", _BALL_AT, 2163.8),
 )
+_LONG_NAMES = [n for _s, n, _i, _secs in _LONG_FAMILIES]
 
 # The turned cycles that take no selection either, each with the insert kind it was measured to
 # take: adaptive roughing is on the GROOVING insert, since the general one errors "Tool (turning
@@ -204,17 +204,19 @@ _CENSUS_MILL = [
      _refused("isGenerationAllowed false in setup"), None),
     # REFUSED for a DIFFERENT reason: operations.add answers with a name for these two and the
     # setup's own count does not move, so nothing landed. The guard reads that count rather than the
-    # return, which is what turns a silent no-op into a refusal.
+    # return, which is what turns a silent no-op into a refusal - and the refusal names what does
+    # the job instead, which is the half a bare "did not land" left the caller to guess.
     ("cam_create_operation",
      lambda c: {"setup": HUB_MILL_SETUP, "strategy": "hole_recognition", "name": "HoleRecognition",
                 "tool_scope": "document",
                 "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _FLAT_AT},
-     _refused("did not land"), None),
+     _refused("did not land", "is not an operation", "cam_select_geometry(selection='holes')"),
+     None),
     ("cam_create_operation",
      lambda c: {"setup": HUB_MILL_SETUP, "strategy": "folder", "name": "StrategyFolder",
                 "tool_scope": "document",
                 "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _FLAT_AT},
-     _refused("did not land"), None),
+     _refused("did not land", "cam_edit_folders"), None),
 ] + _creates(HUB_MILL_SETUP, _WHOLE_MODEL, "hub_tool_base") + [
     # THE POCKET FLOOR: the flange pocket's arc slot, 12 mm wide on the bolt circle - a slot-shaped
     # closed contour, which is the shape the slot family wants and the bracket had none of (SLOT-1).
@@ -333,6 +335,41 @@ _CENSUS_MILL_READ = [
 ] + _reveal(_MILL_NAMES) + [
     ("cam_get", {"include": ["time"], "setup": HUB_MILL_SETUP},
      _all_cut(HUB_MILL_SETUP, len(_MILL_NAMES), names=_MILL_NAMES), None),
+]
+
+
+def _launched_op(name):
+    """cam_generate over ONE operation: the resolved node's kind beside the name asked for, so the
+    payload says the name reached an operation rather than a setup sharing it."""
+    def check(p):
+        return _measured(f"generation launched over operation '{name}'",
+                         {"launched": p.get("launched"), "target": p.get("target"),
+                          "handle": p.get("handle"), "launch_reasons": p.get("launch_reasons")},
+                         p.get("launched") is True and p.get("target") == f"operation '{name}'"
+                         and bool(p.get("handle")))
+    return check
+
+
+# ACT 10c8b: THE LONG FAMILY - the whole-model strategy whose GENERATION wall clock is the reason it
+# rides an act of its own rather than the census beat above. Nothing is selected: it cuts the setup's
+# own model, so one create is the whole beat. It is launched BY NAME: measured, a setup-scoped
+# generate rebuilds every operation the setup holds whatever skip_valid says, which over this setup
+# would be the census's sixteen as well.
+_CENSUS_LONG = [
+    _watch(HUB_COMP + ":1"),
+] + _creates(HUB_MILL_SETUP, [(s, n, i) for s, n, i, _secs in _LONG_FAMILIES],
+             "hub_tool_base") + [
+    ("cam_generate", {"target": n, "skip_valid": False}, _launched_op(n), None)
+    for n in _LONG_NAMES
+]
+
+
+# ACT 10c8c: the pair read, behind the boundary poll their own budget sizes.
+_CENSUS_LONG_READ = [
+    _watch(HUB_COMP + ":1"),
+] + _reveal(_LONG_NAMES) + [
+    ("cam_get", {"include": ["time"], "setup": HUB_MILL_SETUP},
+     _all_cut(HUB_MILL_SETUP, len(_LONG_NAMES), names=_LONG_NAMES), None),
 ]
 
 
@@ -487,10 +524,11 @@ PROVEN, MEASURED, CREATED, REFUSED, SKIPPED = (
     "proven", "measured", "created", "refused", "skipped")
 
 _LONG = tuple(
-    (name, MEASURED, "none - the setup's model", tool,
-     f"driven non-empty on the hub; its generation alone runs {secs:g} s, which is most of the act "
-     "boundary poll's whole budget, so it is not a beat and no receipt row stands behind it")
-    for name, tool, secs in MEASURED_NOT_SWEPT)
+    (strategy, PROVEN, "none - the setup's model",
+     "ball end mill" if offset == _BALL_AT else "flat end mill",
+     f"ACT 10c8b {name}, machining time read in ACT 10c8c - launched BY NAME, on an act poll budget "
+     f"of its own; it cut {secs:g} s of toolpath")
+    for strategy, name, offset, secs in _LONG_FAMILIES)
 
 CENSUS = _LONG + (
     # --- the census beats above ---------------------------------------------------------------
@@ -575,6 +613,10 @@ CENSUS = _LONG + (
     ("turning_chamfer", REFUSED, "chamfer positions - no route", "turning general insert",
      "the operation carries no curve-selection parameter this call routes, and it generates empty "
      "with 'Chamfers: Invalid chamfer positions selection.'; refused live by ACT 10c9"),
+    ("pocket_clearing", MEASURED, "none - the setup's model", "flat end mill",
+     "created and generated on the hub's milling setup with the 10 mm flat mill and read EMPTY - "
+     "cam_get's time slice returned no figure for it while its sibling in the same act cut; which "
+     "cutter or model it does clear is unmeasured, so it carries no beat"),
     # --- skipped, each on the message the platform answered with --------------------------------
     ("three_plus_two", SKIPPED, "orientation -> machiningDirections", "flat end mill",
      "one inclined face on the hub generated EMPTY: 'Toolpath is empty. Try checking the rest "
@@ -591,9 +633,10 @@ CENSUS = _LONG + (
     ("morph", SKIPPED, "chain -> curves", "ball end mill",
      "generated EMPTY on one rim chain with 'No passes to link' (ledger MORPH-1); whether a curve "
      "PAIR feeds it is unmeasured"),
-    ("turning_trace", SKIPPED, "model contour - no route", "turning general insert",
-     "'Model Contour: No model contour selected to machine.' and the operation carries no "
-     "curve-selection parameter this call routes"),
+    ("turning_trace", SKIPPED, "chain -> modelContour", "turning general insert",
+     "its drive input reads a CadContours2dParameterValue - the curve family - so a chain applies "
+     "to it (1 path, 4 segments on a measured box) and clears 'Model Contour: No model contour "
+     "selected to machine.'; no beat has yet generated one on a turning insert"),
     # The four second-spindle cycles, each CREATED on the machined turning setup and generated: all
     # four answer with the same error and no toolpath. The machine's own kinematics read one spindle
     # beside that, but the error is what the platform said, so the error is what ships.

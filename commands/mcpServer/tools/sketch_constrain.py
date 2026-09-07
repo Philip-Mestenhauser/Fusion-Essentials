@@ -28,7 +28,11 @@ _REQUIRES = {
     "perpendicular": "two lines",
     "parallel": "two lines",
     "tangent": "two curves",
-    "smooth": "two curves, at least one of them a spline",
+    # measured: a smooth refused with both operands satisfying the curve/spline rule, because an
+    # earlier smooth had moved the spline's end point off the line it had been coincident with.
+    "smooth": ("two curves, at least one of them a spline, meeting at a COINCIDENT point - when "
+               "both operands already satisfy that, check the shared endpoint is still coincident "
+               "(an earlier smooth can move it apart)"),
     # live-verified: equal refuses mismatched kinds, and refuses two ellipses, two fitted splines
     # or two control-point splines even though those kinds match ("3 : invalid argument value").
     "equal": "two lines, two arcs, or two circles",

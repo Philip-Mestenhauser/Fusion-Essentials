@@ -19,6 +19,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, all_sketch_names
 from . import _common
 from . import _inputs
+from . import _param_common
 # The SketchText readers live in _sketch_detail (the shared sketch X-ray helper) - a tool imports
 # from a helper, never the reverse.
 from ._sketch_detail import font_read_back as _font_read_back, unquote_text as _unquote
@@ -484,6 +485,47 @@ def _quote(text):
     return "'" + str(text).replace("'", "\\'") + "'"
 
 
+# The unit a TEXT parameter reads, and the one param_add takes to make one (measured: a text
+# parameter reads 'Text' where a length parameter reads 'mm').
+_TEXT_UNIT = "Text"
+
+
+def _find_text_parameter(design, name):
+    """(the user parameter `name`, error) - the string source a BOUND sketch text follows."""
+    p = _param_common._find_parameter(design, name)
+    if p is None:
+        return None, (f"No parameter named '{name}' to bind the text to. param_get lists the "
+                      "parameters this design carries.")
+    # Fusion ACCEPTS a length parameter in a text parameter's expression and renders its value as
+    # the label (measured), so this read is the only thing that refuses one.
+    unit = _common.safe(lambda: p.unit)
+    if unit != _TEXT_UNIT:
+        return None, (f"'{name}' is a {unit or 'unitless'} parameter, so binding the label to it "
+                      f"would render a dimension as the string. Bind a {_TEXT_UNIT} parameter "
+                      f"(param_add takes unit='{_TEXT_UNIT}').")
+    return p, ""
+
+
+def _bind_parameter(st, name, sk_name):
+    """Bind ONE sketch text to a user parameter and read the binding back, as (record, error)."""
+    # A text parameter's EXPRESSION carries the BARE parameter name for a binding; the same
+    # expression QUOTED is a literal string instead, which is what _quote writes.
+    before = safe(lambda st=st: st.textParameter.expression)
+    try:
+        st.textParameter.expression = name
+    except Exception as e:
+        return None, f"Could not bind the sketch text in '{sk_name}' to parameter '{name}': {e}."
+    landed = safe(lambda st=st: st.textParameter.expression)
+    if landed is None:
+        return None, (f"Binding the sketch text in '{sk_name}' to '{name}' cannot be confirmed - "
+                      "its textParameter did not read back an expression after the write.")
+    if str(landed).strip() != name:
+        return None, (f"Binding the sketch text in '{sk_name}' to '{name}' did not take - its "
+                      f"textParameter reads back '{landed}'.")
+    return {"parameter": name, "expression": str(landed).strip(),
+            "before": _unquote(before)}, ""
+
+
 def _texts_in_sketch(sk, comp_name):
     """Yield (component_name, sketch_name, sketch_text) for ONE sketch, ``comp_name`` being the
     owning component's name as its caller read it."""
@@ -519,7 +561,7 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
             units: str = "mm", mode: str = "", path: str = "", above_path: bool = None,
             align: str = "", character_spacing: float = None, angle_deg: float = None,
             flip_h: bool = None, flip_v: bool = None, font_name: str = "",
-            component: str = "") -> dict:
+            component: str = "", parameter: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     if text is None:
         return error("Provide 'text' - the string to display.")
@@ -527,6 +569,20 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
     design = _common.design()
     if not design:
         return error("No active design (open a document with sketch text).")
+
+    bind_to = (parameter or "").strip()
+    if bind_to:
+        if create:
+            return error("'parameter' binds an EXISTING sketch text, so it cannot ride a create. "
+                         "Create the text with its starting string first, then call again with "
+                         f"parameter='{bind_to}' to bind it.")
+        if (text or "").strip():
+            return error(f"'text' ('{text}') and parameter='{bind_to}' are two different string "
+                         "sources for one text. Pass 'parameter' alone to bind it, or 'text' alone "
+                         "to store a literal.")
+        _p, perr = _find_text_parameter(design, bind_to)
+        if perr:
+            return error(perr)
 
     if create:
         mode_key, merr = _MODE.resolve(mode)
@@ -633,6 +689,20 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
                 return error(f"Setting the font of sketch text in '{sk_name}' did not take - "
                              f"SketchText.fontName reads back '{font_now}', not '{font_name}'."
                              + _already_changed(changed))
+        if bind_to:
+            brec, berr = _bind_parameter(st, bind_to, sk_name)
+            if berr:
+                return error(berr + _already_changed(changed))
+            record = {"component": comp_name, "sketch": sk_name}
+            record.update(brec)
+            if height_cm is not None:
+                hrec, herr = _apply_height(st, height_cm, sk_name, k, units)
+                if herr:
+                    return error(herr + f" It WAS bound to '{bind_to}' before the resize was "
+                                 "checked." + _already_changed(changed))
+                record.update(hrec)
+            changed.append(record)
+            continue
         try:
             st.textParameter.expression = _quote(text)
         except Exception as e:
@@ -694,6 +764,12 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
     "note": ("Sketch text updated" + (" and design recomputed so any engraving/emboss that "
                 "consumes it rebuilt" if recomputed else "") + "." + _READ_BACK_POINTER),
     }
+    if bind_to:
+        out["bound_to"] = bind_to
+        out.pop("text")
+        out["note"] += (f" The string now FOLLOWS parameter '{bind_to}': each entry's 'expression' "
+                        "is the binding read back off the text, and param_set on that parameter "
+                        "restrings every text bound to it.")
     if _given(font_name):
         out["note"] += (f" Each entry's 'font' is what the text reports after applying "
                         f"'{font_name}'.")
@@ -713,7 +789,8 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
 TOOL_DESCRIPTION = (
 "Set the displayed string of sketch text (e.g. an engraved label), or add new text with "
 "create=true. Editing: 'sketch_name' limits the change to one sketch and 'index' to one text in "
-"it (omit both to update EVERY sketch text). Creating: 'mode' boxes the text at (x,y), or runs "
+"it (omit both to update EVERY sketch text); 'parameter' binds the string to a user parameter "
+"instead of a literal, so param_set drives the label. Creating: 'mode' boxes the text at (x,y), or runs "
 "it along the curve named by 'path' - along_path keeps normal glyph spacing, fit_on_path "
 "stretches the string over the whole curve, and a CLOSED path wraps it around. A create reports "
 "the landed text's measured width. Read sketch names and curve ids with sketch_get."
@@ -751,6 +828,10 @@ tool = (
             "description": "Rotation of new text, degrees from the sketch x-axis."})
     .add_input_property("flip_h", {"type": "boolean", "description": "Mirror new text horizontally."})
     .add_input_property("flip_v", {"type": "boolean", "description": "Mirror new text vertically."})
+    .add_input_property("parameter", {"type": "string",
+            "description": "BIND the string to this existing user parameter instead of storing a "
+                           "literal: param_set on it then restrings the text. Edit only, and "
+                           "excludes 'text'."})
     .add_input_property("font_name", {"type": "string",
             "description": "Font to use, on create AND edit. Case-sensitive: 'Arial' works, 'arial' is refused. Omit to keep the current."})
     .strict_schema()

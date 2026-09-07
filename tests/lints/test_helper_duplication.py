@@ -438,6 +438,10 @@ _DENYLIST = {
     # apply_named_view's 100 and disclosing nothing - one orient silently framing unlike the other.
     "standoff_distance": ("_view_common", "def"),
     "STANDOFF_FALLBACK_CM": ("_view_common", "assign"),
+    # The ONE workspace activate-then-read-back: Workspace.isActive first, the UI's own active
+    # workspace where that flag will not read. One home, so a switch and a restore cannot judge the
+    # same workspace by different reads.
+    "activate_workspace": ("_view_common", "def"),
 }
 
 

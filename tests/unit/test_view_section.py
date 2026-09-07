@@ -34,11 +34,12 @@ sv = load_tool("view_section")
 # The session, design, component and occurrence come from conftest's shared fakes; only the
 # section-analysis object graph below is local, SectionAnalysis carrying no shape dump.
 
-def _occ(name, bbox=None, full_path=None):
+def _occ(name, bbox=None, full_path=None, bodies_bbox=FakeOccurrence._UNSET):
     """One occurrence the 'through' path measures: the shared Occurrence fake placing a component
-    of the same base name, with its own bounding box."""
+    of the same base name, with its own bounding box. `bodies_bbox` is what boundingBox2 answers -
+    left unset the occurrence carries none, the state the plain-box fallback is measured on."""
     return FakeOccurrence(path=full_path or name, component=MakeComp(name=name.split(":")[0]),
-                          bounding_box=bbox)
+                          bounding_box=bbox, bodies_bounding_box=bodies_bbox)
 
 
 class FakeSectionInput:
@@ -275,6 +276,33 @@ class TestThroughCenter:
         out = _payload(sv.handler(action="cut", through="Part", auto_view=False))
         assert sections.last_input.entity == "PLANE_XZ"
         assert "xz plane" in out["where"]
+
+    def test_a_shown_construction_rectangle_does_not_carry_the_cut_off_the_body(self):
+        # The plain box spans z 0..40 because a construction rectangle is visible; the bodies-only
+        # box spans 2..4. Centred on the plain box the cut lands at z 20, clear of the body.
+        occ = _occ("Part", bbox=make_bbox((0, 0, 0), (10, 8, 40)),
+                   bodies_bbox=make_bbox((0, 0, 2), (10, 8, 4)))
+        sections = _install(occurrences=[occ])
+        out = _payload(sv.handler(action="cut", through="Part", plane="xy", auto_view=False))
+        assert sections.last_input.distance_cm == 3.0
+        assert out["centered_on"] == "solids"
+
+    def test_an_occurrence_placing_no_body_falls_back_to_its_whole_box(self):
+        occ = _occ("Sketchy", bbox=make_bbox((0, 0, 2), (10, 8, 4)), bodies_bbox=None)
+        sections = _install(occurrences=[occ])
+        out = _payload(sv.handler(action="cut", through="Sketchy", plane="xy", auto_view=False))
+        assert sections.last_input.distance_cm == 3.0
+        assert out["centered_on"] == "all_geometry"
+
+    def test_an_occurrence_with_no_readable_box_is_refused_rather_than_cut_at_the_origin(self):
+        # neither box reads, so there is no centre: cutting anyway puts the plane at the bare
+        # origin and publishes a 'centered_on' for a measurement that never happened.
+        occ = _occ("Opaque", bbox=None, bodies_bbox=None)
+        sections = _install(occurrences=[occ])
+        res = sv.handler(action="cut", through="Opaque", plane="xy", auto_view=False)
+        assert res["isError"] is True
+        assert "no readable bounding box" in res["message"] and "Opaque" in res["message"]
+        assert sections.last_input is None            # nothing was cut
 
     def test_through_substring_match(self):
         occ = _occ("Carrier Body:1", bbox=make_bbox((0, 0, 0), (2, 2, 2)))

@@ -499,7 +499,7 @@ tool = (
     .add_required_input("dim_type")
     .add_input_property("sketch_name", {"type": "string", "description": "Sketch to dimension (omit = most recent)."})
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
-    .add_input_property("entity_one", {"type": "string", "description": "First entity ref '<type>:<index>', optional anchor ':start/:end/:mid/:center'."})
+    .add_input_property("entity_one", {"type": "string", "description": "First entity ref '<type>:<index>', optional anchor ':start/:end/:mid/:center'. A BARE ref measures from the entity's own START point; a circle or ellipse, having none, measures from its CENTRE."})
     .add_input_property("entity_two", {"type": "string", "description": "Second entity ref; same anchor forms as entity_one."})
     .add_input_property("value", {"type": "string", "description": "Driven expression (e.g. '25 mm', 'StockX/2'); omit to keep measured."})
     .add_input_property(*_SURFACE.as_property())

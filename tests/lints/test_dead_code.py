@@ -275,6 +275,19 @@ class TestNoUnreferencedDefinitions:
                                "framework name belongs in _DEFINITION_EXEMPT with a reason):\n"
                                + "\n".join(offenders))
 
+    def test_a_conftest_re_export_alias_is_not_a_mention(self):
+        # Without the subtraction the re-export line counts as a use of every shared fake, and a
+        # fake each test stopped importing stays permanently referenced - unreachable by the rule
+        # above. The second import proves only the tests.fakes line is skipped.
+        tree = ast.parse("from tests.fakes.design import FakeBody\n"
+                         "from elsewhere import FakeBody as Other\n")
+        counts = {}
+        _count_into(tree, lambda n: counts.__setitem__(n, counts.get(n, 0) + 1),
+                    skip=_reexport_aliases(tree))
+        assert counts.get("FakeBody", 0) == 1, counts
+        assert _reexport_aliases(_parse(TESTS / "conftest.py")), \
+            "conftest imports no tests.fakes module - the subtraction reaches nothing"
+
     def test_definition_exempt_table_matches_reality(self):
         counts = _mention_counts()
         defined = set()

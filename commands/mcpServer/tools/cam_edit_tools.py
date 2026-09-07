@@ -280,8 +280,8 @@ def _quote(text):
     s = str(text)
     if "\\" not in s:
         return quote_expression(s)
-    # The tool-parameter store's spelling for a BACKSLASH is unmeasured, so a value holding one is
-    # doubled here rather than sent through the shared codec, which passes it through as written.
+    # Measured: the tool-parameter store spells a backslash DOUBLED. Sent through the shared codec
+    # as written, the expression is accepted and the parameter's value reads '<UNSPECIFIED>'.
     return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 

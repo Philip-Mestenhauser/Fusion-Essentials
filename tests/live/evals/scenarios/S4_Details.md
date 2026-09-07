@@ -6,21 +6,13 @@ fixture: P3-Gimbal (the S3 artifact - the jointed, motion-linked gyroscope at re
   PINNED first. The agent details the LIVING mechanism and saves AS A NEW document (P4-Gimbal);
   P3-Gimbal's cloud version must remain untouched. Missing fixture = ask - never create a project.
 budget:
-  max_tool_calls: 98
-  max_tokens: 136000
+  max_tool_calls: 110
+  max_tokens: 150000
 skill: parametric-cad-design
 substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
 perturbations: none (baseline)
 expected_refusals: none
 ---
-
-> OPEN DEFECT - the swing-clearance postcondition below CANNOT FAIL as written.
-> The pedestal sits below the ring plane and its top is a live flush contact with the carrier, so
-> the only mechanism-preserving place for a boss is the base at z <= -32 - geometrically remote
-> from every ring's swept envelope. A CORRECTLY placed boss can never overlap a ring at any pose,
-> and the contacts the sweep does find are the pre-existing ring-carrier collisions S3
-> characterised. Re-site this postcondition onto a feature that shares the rings' envelope, or
-> name where the boss must go, BEFORE trusting a PASS on it.
 
 # S4 - Details: real-part features on a living mechanism
 
@@ -55,8 +47,9 @@ GOAL - production details on the living mechanism:
   as turned geometry (a profile swung about that bore's own axis), so its concentricity is
   constructional, not coincidental. Report the bore you used and the read that proves the boss
   shares its axis.
-- One detail of YOUR choice on the pedestal or rotor that a machinist would thank you for
-  (a chamfered post tip, a keyway, spoke lightening holes - your call, named in the report).
+- One detail of YOUR choice that a machinist would thank you for, built as RAISED material (a
+  boss, a lug, a rib - not a cut) on a part that SWINGS: a ring, or the rotor. Name the detail
+  and the part carrying it.
 - The MECHANISM MUST STAY ALIVE: joints healthy, motion link intact, and the parts still at rest
   where you found them.
 
@@ -68,14 +61,15 @@ either drive PAST your declared extreme until the checker names a real contact (
 range sits inside the physical limit with margin), or derive the limit from geometry you read
 and state the arithmetic. The expected in-range result is ZERO overlapping pairs (the design's
 support engagements are flush contacts, not overlaps); name any overlap with its volume and the
-two bodies. That sweep grades the material you ADDED - a boss or your chosen detail is what can
-overlap a swinging ring. It cannot grade the mounting HOLES: a hole REMOVES material, so a hole
-bored straight into a ring's path still reports zero overlaps. Prove the holes by MEASUREMENT
-instead - at the pose where a ring comes CLOSEST to the holes, take a fresh minimum-distance read
-between the hole (its wall or its edge) and that ring and report the gap in mm for the worst hole,
-or derive it from geometry you read (the hole's distance from the swing axis and its radius
-against the ring's swept extent) and state the arithmetic. A gap that is zero or negative means
-the swing reaches the hole - a FAIL.
+two bodies. That sweep is a REGRESSION check on the mechanism, and it grades no clearance on its
+own: material sitting clear of every ring at every pose reports zero whether or not anyone
+measured it, and a mounting HOLE removes material, so a hole bored straight into a ring's path
+reports zero too. Prove clearance by MEASUREMENT instead, once per subject - the raised detail you
+chose, the turned boss, and the worst-placed mounting hole. For each, at the pose where a ring
+comes CLOSEST to it, take a fresh minimum-distance read naming BOTH targets and report the gap in
+mm, or derive it from geometry you read (the subject's distance from the swing axis and its own
+size against the ring's swept extent) and state the arithmetic. A gap that is zero or negative
+means the swing reaches that subject - a FAIL.
 
 Finally save AS A NEW document: P4-Gimbal into MCP Test Project / Pipeline-v1/{{RUN_FOLDER}} (create the folder path if missing; never a project).
 
@@ -89,15 +83,16 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
   features; your choice-detail exists and is named.
 - mechanism alive: fresh assembly read - all joints healthy, motion link present, rest pose
   unchanged from staging (orientation reads within float noise).
-- ADDED MATERIAL CLEARS THE SWING: the interference re-check ran at rest AND at each ring pivot's
-  two travel extremes, with each declared range JUSTIFIED (an out-of-range contact probe or
+- THE MECHANISM SURVIVED THE FEATURES: the interference re-check ran at rest AND at each ring
+  pivot's two travel extremes, with each declared range JUSTIFIED (an out-of-range contact probe or
   read-derived limit arithmetic); report the checker's output at each pose - zero overlapping
   pairs, or any overlap NAMED with its volume and the two bodies.
-- HOLES CLEAR THE SWING, BY MEASUREMENT: the interference check cannot grade the mounting holes
-  (removed material never overlaps anything), so report the MEASURED gap for the worst-placed
-  hole - a fresh minimum-distance read naming both targets, taken at the pose where the ring comes
-  closest, in mm - or the read-derived arithmetic that stands in for it (hole distance from the
-  swing axis and hole radius vs the ring's swept extent). Zero or negative is a FAIL.
+- EVERY SUBJECT CLEARS THE SWING, BY MEASUREMENT: three gaps in mm, one each for your raised
+  detail, the turned boss and the worst-placed mounting hole - a fresh minimum-distance read naming
+  both targets, taken at the pose where the ring comes closest, or the read-derived arithmetic that
+  stands in for it (the subject's distance from the swing axis and its own size vs the ring's swept
+  extent). Zero or negative is a FAIL. The interference check grades none of these: it reports zero
+  for material that never reaches a ring and for a hole, which removes material.
 - timeline healthy; doc_get -> saved as "P4-Gimbal", real URN, version >= 1, in MCP Test Project
   / Pipeline-v1/{{RUN_FOLDER}} - AND P3-Gimbal still at the version you found it.
 
@@ -123,13 +118,15 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   material changes (S3 established the baseline).
 - The free-choice detail is deliberate: grades judgment + honest naming, and varies the feature
   mix across runs (keeps the scenario from calcifying one workflow - the bingo-card rule).
-- Placement sanity for holes is graded by MEASUREMENT, not by the interference sweep: a hole is
-  REMOVED material, so a hole bored into the rings' path cannot produce an overlapping pair at any
-  pose - the sweep would certify a hole it never examined. The sweep still grades the material the
-  run ADDS (the turned boss, the free-choice detail), where a travel extreme is exactly where an
-  overlap appears (fixed mid-range poses sit under the binding threshold). Grade the two clauses
-  separately, and uphold the hole clause only from a distance read (or read-derived arithmetic)
-  with both targets and the pose named.
+- Placement is graded by MEASUREMENT, never by the interference sweep. A hole is REMOVED material,
+  so a hole bored into the rings' path produces no overlapping pair at any pose; and a feature the
+  mechanism's geometry keeps away from every ring reports zero without anyone having measured it -
+  a sweep verdict that cannot come out any other way grades nothing. So each of the three subjects
+  carries its own gap number, upheld only from a distance read (or read-derived arithmetic) naming
+  both targets and the pose. The sweep stays in as a REGRESSION check on the mechanism.
+- WHY THE FREE-CHOICE DETAIL IS PINNED to raised material on a swinging part: that is the one
+  subject whose clearance is a live question the run can get wrong, so it is where the gap number
+  has to bite. The choice of WHAT and WHERE is still the executor's - the bingo-card rule holds.
 - The mechanism is a crank-rotor motion link (crank -> rotor spin),
   NOT "two linked ring pivots" - the ring pivots are independent revolutes. Grade the staging
   description as the crank-rotor link it actually is.
@@ -139,5 +136,6 @@ NOTES: <short. Discoveries a description should have carried; every pushback + r
   required instead of optional diligence.
 - Staging: doc_open S3 artifact BY URN, confirm active; run the block. Budget: the last
   blind run_eval under the skill measures this scenario at 78 calls / 109k output tokens, which
-  ran tight against an 85/115k pin at 92% and 95%. 98 calls / 136k is that measurement plus ~25%
-  headroom.
+  ran tight against an 85/115k pin at 92% and 95%. The pin is 110 calls / 150k - that measurement
+  plus the raised detail and the two gap reads the clearance clause now asks for, which no run has
+  measured yet. RE-PIN it from the next blind run.

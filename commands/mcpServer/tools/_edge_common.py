@@ -18,10 +18,11 @@ from . import _geom
 from . import _inputs
 
 MAP_BLURB = (
-    "the edge-treatment substrate: EDGES/BODY/_EDGE_FILTER_DESC - the shared targeting inputs; "
-    "_edge_convexity + _collect_edges - the per-edge dihedral sign a convex/concave filter selects "
-    "by (BRepEdge exposes no convexity flag); _apply - the ONE build-and-verify path both tools "
-    "run, gating on the created faces, the health state and the body's own volume delta")
+    "the edge-treatment substrate: EDGES/FACES/BODY/_EDGE_FILTER_DESC - the targeting inputs, with "
+    "_edges_of_faces expanding a face set to its edges, each once; _edge_convexity + "
+    "_collect_edges - the per-edge dihedral sign a convex/concave filter selects by; "
+    "_apply - the ONE build-and-verify path both tools run, gating on "
+    "the created faces, the health state and the body's own volume delta")
 
 # Edge-handle-list input (closes the 'fillet THESE specific edges' gap; takes precedence over edge_filter).
 _EDGES = _inputs.GeometryHandleList("edges", require="edge",
@@ -29,6 +30,10 @@ _EDGES = _inputs.GeometryHandleList("edges", require="edge",
 # Body input: a find_geometry handle (precise) OR a name; resolved/kind-checked by BodyRef.
 _BODY = _inputs.BodyRef("body_name", kind="solid", required=False,
                         description="Body whose edges to work on (omit = most recent).")
+# Face-scoped targeting: the EDGES of the named faces. A chamfer has no rule-fillet twin, so the
+# face set is expanded to its edges here rather than handed to a rule API.
+_FACES = _inputs.GeometryHandleList("faces", require="face", required=False,
+    description="Work on every edge of these faces; overrides 'edge_filter', excludes 'edges'.")
 
 # option key -> the API's OWN ChamferCornerTypes member spelling, lowercase 't' in BlendCornertype
 # included: no BlendCornerType member exists, so a "corrected" name would getattr-raise and be
@@ -154,6 +159,22 @@ def _unclassified_phrase(census):
     return ", ".join(f"{census[k]} {k}" for k in _UNCLASSIFIED if census[k])
 
 
+def _edges_of_faces(faces):
+    """Every edge of `faces`, each ONCE - two faces in one list share their common edge, and the
+    same edge twice in a feature's edge set is a duplicate. An edge whose token will not read is
+    kept, since nothing there tells it from another."""
+    out, seen = [], set()
+    for f in faces:
+        for e in _common.iter_collection(safe(lambda f=f: f.edges)):
+            key = safe(lambda e=e: e.entityToken)
+            if key:
+                if key in seen:
+                    continue
+                seen.add(key)
+            out.append(e)
+    return out
+
+
 def _collect_edges(body, edge_filter):
     """(ObjectCollection of the body's edges matching 'edge_filter', the body's edge count, the
     per-edge census - None under 'all', which takes every edge and classifies none)."""
@@ -197,7 +218,23 @@ def _build_edge_set(fillet_input, variant, edges, val, k):
     return ""
 
 
-def _chamfer_readback(feature, sz, k, angle, corner_key):
+def _is_are(names):
+    """' is' or ' are' for a list of field names, so a one-field note reads as a sentence."""
+    return " is" if len(names) == 1 else " are"
+
+
+def _distance_mismatch(got_cm, want_cm, k):
+    """The refusal when the chamfer's own distance is not the one asked for, else '' - the ONE
+    comparison both the angle definition and an expression-driven distance are judged by. A
+    want_cm of None is an expression the units engine answered no number for: there is nothing to
+    compare against, and the caller publishes the distance unconfirmed instead."""
+    if want_cm is None or not isinstance(got_cm, float) or abs(got_cm - want_cm) <= 1e-6:
+        return ""
+    return (f"The chamfer was created but its distance reads back {round(got_cm / k, 6)}, "
+            f"not the requested {round(want_cm / k, 6)}.")
+
+
+def _chamfer_readback(feature, size_cm, k, angle, corner_key, as_expression=False):
     """(verified payload fields, unverified field names, error) read off the CREATED chamfer. A
     declined corner type leaves no trace anywhere else, and a distance-and-angle definition carries
     .distance in CM and .angle in RADIANS, which the comparisons below convert to."""
@@ -216,6 +253,18 @@ def _chamfer_readback(feature, sz, k, angle, corner_key):
         else:
             fields["corner_type"] = corner_key
     if angle is None:
+        if as_expression:
+            # An expression is compared against the cm the units engine evaluated it to, so a
+            # feature that took some other number is never reported as the expression asked for.
+            td = safe(lambda: feature.chamferTypeDefinition)
+            got = safe(lambda: td.distance.value) if td is not None else None
+            derr = _distance_mismatch(got, size_cm, k)
+            if derr:
+                return fields, unverified, derr
+            if isinstance(got, float) and size_cm is not None:
+                fields["distance"] = round(got / k, 6)
+            else:
+                unverified.append("distance")
         return fields, unverified, ""
 
     # chamferType names WHICH definition got built: a distance-and-angle chamfer that silently fell
@@ -242,11 +291,10 @@ def _chamfer_readback(feature, sz, k, angle, corner_key):
         fields["angle_deg"] = round(deg, 6)
     else:
         unverified.append("angle_deg")
-    if isinstance(got_dist, float):
-        if abs(got_dist - sz * k) > 1e-6:
-            return fields, unverified, (
-                f"The chamfer was created but its distance reads back {round(got_dist / k, 6)}, "
-                f"not the requested {round(sz, 6)}.")
+    if isinstance(got_dist, float) and size_cm is not None:
+        derr = _distance_mismatch(got_dist, size_cm, k)
+        if derr:
+            return fields, unverified, derr
         fields["distance"] = round(got_dist / k, 6)
     else:
         unverified.append("distance")
@@ -254,17 +302,18 @@ def _chamfer_readback(feature, sz, k, angle, corner_key):
 
 
 def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distance_two=0.0,
-           variant=None, angle=None, corner_key=None):
+           variant=None, angle=None, corner_key=None, face_handles=None):
     vtype = variant["type"] if variant else "constant"
     size_key = ("distance" if kind == "chamfer"
                 else "chord_length" if vtype == "chord_length" else "radius")
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
-    # A fillet RADIUS may arrive as a parameter EXPRESSION string ('WallT/2'); a chamfer distance
-    # and a chord_length stay literal, since their read-backs compare against that number. Only a
+    # A fillet RADIUS and a chamfer DISTANCE may arrive as a parameter EXPRESSION string
+    # ('WallT/2'); a chord_length stays literal, its read-back comparing against that number. Only a
     # LITERAL is judged this early, before the design that resolves an expression is in hand.
-    as_expression = size_key == "radius" and _inputs.looks_like_expression(size)
+    takes_expression = size_key in ("radius", "distance")
+    as_expression = takes_expression and _inputs.looks_like_expression(size)
     sz = None
     if not as_expression:
         try:
@@ -272,7 +321,7 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
         except Exception:
             return error(f"'{size_key}' must be a number"
                          + (" or a parameter-expression string like 'WallT/2'."
-                            if size_key == "radius" else "."))
+                            if takes_expression else "."))
         if sz <= 0:
             return error(f"Provide a positive {size_key}.")
 
@@ -289,14 +338,37 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
     if as_expression and size_cm is not None and size_cm <= 0:
         return error(f"Provide a positive {size_key}: the expression '{str(size).strip()}' "
                      f"evaluates to {round(size_cm / k, 6)} {units}.")
+    # How the refusals below name the size: an expression as itself (it carries its own units), a
+    # literal as the number plus the caller's units.
+    size_text = f"'{str(size).strip()}'" if as_expression else f"{sz} {units}"
 
     edge_src = "filter"
     body_label = None
     census = None
+    faces_selected = None
+    want_faces = face_handles not in (None, "", [])
+    if want_faces and edge_handles not in (None, "", []):
+        return error("Pass 'faces' or 'edges', not both: 'faces' works on every edge of the named "
+                     "faces, 'edges' on exactly the edges handed in.")
     # 'edges' (a GeometryHandleList of edge handles) takes precedence - closes the
     # 'fillet THESE specific edges' gap. The kind resolves+validates each handle to a BRep edge.
     blanket_note = None
-    if edge_handles not in (None, "", []):
+    if want_faces:
+        fents, ferr = _FACES.resolve(face_handles)
+        if ferr:
+            return error(ferr)
+        ents = _edges_of_faces(fents)
+        if not ents:
+            return error(f"None of the {len(fents)} face(s) answered any edges, so there is nothing "
+                         f"to {kind}. Pass 'edges' handles from find_geometry instead.")
+        edges = adsk.core.ObjectCollection.create()
+        for e in ents:
+            edges.add(e)
+        faces_selected = len(fents)
+        edge_src = f"{edges.count} edge(s) of {faces_selected} face(s)"
+        body_label = _qualified_body_name(safe(lambda: ents[0].body))
+        verify_bodies = _geom.owning_bodies(ents)
+    elif edge_handles not in (None, "", []):
         ents, herr = _EDGES.resolve(edge_handles)
         if herr:
             # Refuse BEFORE creating any feature: a handle that fails to resolve (stale entityToken,
@@ -319,9 +391,11 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
         # explicit scope makes body-wide edge treatment a stated choice).
         flt = (edge_filter or "").strip().lower()
         if not flt:
+            by_face = (" or 'faces' (every edge of the named faces)" if kind == "chamfer" else "")
             return error(f"State the edge scope: pass 'edges' (find_geometry edge handles - the "
-                         f"precise set to {kind}) or an explicit edge_filter ('all' | 'convex' | "
-                         f"'concave') to sweep the body. An omitted scope never means the whole body.")
+                         f"precise set to {kind}){by_face} or an explicit edge_filter ('all' | "
+                         f"'convex' | 'concave') to sweep the body. An omitted scope never means "
+                         f"the whole body.")
         if flt not in ("all", "convex", "concave"):
             return error("edge_filter must be: all | convex | concave.")
         body, berr = _common.resolve_body_or_recent(
@@ -365,18 +439,18 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
                 # angle turns the bevel off it.
                 ang = adsk.core.ValueInput.createByReal(math.radians(angle))
                 if not ci.setToDistanceAndAngle(val, ang):
-                    return error(f"Fusion refused a distance-and-angle chamfer of {sz} "
-                                 f"{units} at {angle} deg, so nothing was chamfered.")
+                    return error(f"Fusion refused a distance-and-angle chamfer of {size_text} "
+                                 f"at {angle} deg, so nothing was chamfered.")
             elif d2 > 0:
                 # two-distance (asymmetric) chamfer
                 val2 = adsk.core.ValueInput.createByReal(d2 * k)
                 if not ci.setToTwoDistances(val, val2):
-                    return error(f"Fusion refused a two-distance chamfer ({sz}/"
+                    return error(f"Fusion refused a two-distance chamfer ({size_text} / "
                                  f"{d2} {units}), so nothing was chamfered.")
             else:
                 if not ci.setToEqualDistance(val):
-                    return error(f"Fusion refused an equal-distance chamfer of {sz} "
-                                 f"{units}, so nothing was chamfered.")
+                    return error(f"Fusion refused an equal-distance chamfer of {size_text}"
+                                 ", so nothing was chamfered.")
             if corner_key:
                 # An omitted corner_type never assigns, so the input keeps the API's own default.
                 cts = safe(lambda: adsk.fusion.ChamferCornerTypes)
@@ -447,7 +521,8 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
     # platform declined leaves no other trace, so a mismatch rolls the feature back.
     verified, unverified = {}, []
     if kind == "chamfer":
-        verified, unverified, rerr = _chamfer_readback(feature, sz, k, angle, corner_key)
+        verified, unverified, rerr = _chamfer_readback(feature, size_cm, k, angle, corner_key,
+                                                       as_expression)
         if rerr:
             removed = safe(lambda: feature.deleteMe())
             return error(rerr + (" The feature has been rolled back."
@@ -483,8 +558,8 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
         "edges_requested": edges.count,
         "note": (f"Edges {'rounded' if kind == 'fillet' else 'beveled'}. Pair with view_screenshot."
                  + measured_note
-                 + (" " + "/".join(sorted(verified)) + " are read back off the created feature, "
-                    "not echoed." if verified else "")
+                 + (" " + "/".join(sorted(verified)) + _is_are(verified)
+                    + " read back off the created feature, not echoed." if verified else "")
                  + (" " + "/".join(sorted(unverified)) + " could NOT be read back off the feature, "
                     "so the requested value is unconfirmed." if unverified else "")
                  + (blanket_note or "")),
@@ -492,6 +567,8 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
     # Omit rather than report null: a None from safe() means the attribute did not answer.
     if faces_created is not None:
         payload["faces_created"] = faces_created
+    if faces_selected is not None:
+        payload["faces_selected"] = faces_selected
     if census is not None:
         payload["edges_convex"] = census["convex"]
         payload["edges_concave"] = census["concave"]
@@ -512,4 +589,8 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
     payload.update(verified)
     for field in unverified:
         payload[f"{field}_unverified"] = True
+    if as_expression and size_key in verified:
+        # size_key now carries the value the FEATURE reports; without this the caller cannot tell
+        # that number came from a parameter rather than from one they fixed.
+        payload[f"{size_key}_expression"] = str(size).strip()
     return ok(payload)

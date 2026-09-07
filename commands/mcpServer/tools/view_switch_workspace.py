@@ -6,8 +6,9 @@
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import ok, error
 from . import _common
+from . import _view_common
 from ._view_common import user_interface as _ui
 
 # Friendly aliases -> the workspace id, so callers don't have to know Fusion's
@@ -64,27 +65,18 @@ def handler(workspace: str = "") -> dict:
         if _common.read_flag(lambda: match.isActive) is True:
             return ok({"switched": False, "active_workspace": match.name,
         "note": "Workspace was already active."})
-        did = match.activate()
-        if not did:
+        # The refusal is worded from WHICHEVER read produced the verdict.
+        now, active_name, basis = _view_common.activate_workspace(ui, match)
+        if basis == "refused":
             return error(f"Activation of '{match.name}' failed (it may not be valid "
     "to switch to right now, e.g. no document open).")
-        # activate() returning true is not proof the workspace changed - re-read isActive, falling
-        # back to the UI's active workspace id. The refusal is worded from WHICHEVER read produced
-        # the verdict.
-        flag = _common.read_flag(lambda: match.isActive)
-        now = flag
-        if now is None:
-            active_id = safe(lambda: ui.activeWorkspace.id)
-            if active_id is not None:
-                now = active_id == safe(lambda: match.id)
         if now is False:
-            if flag is False:
+            if basis == "flag":
                 return error(f"activate() returned true for '{match.name}' but it still reads "
                              "isActive=false - the workspace did not become active.")
-            active_name = safe(lambda: ui.activeWorkspace.name) or safe(
-                lambda: ui.activeWorkspace.id) or "another workspace"
             return error(f"activate() returned true for '{match.name}', its isActive flag would "
-                         f"not read, and the UI reports '{active_name}' as the active workspace - "
+                         f"not read, and the UI reports "
+                         f"'{active_name or 'another workspace'}' as the active workspace - "
                          "the switch did not take.")
         out = {"switched": True, "active_workspace": match.name,
                "activation_verified": now is True}

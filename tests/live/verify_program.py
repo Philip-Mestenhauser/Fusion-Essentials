@@ -15,8 +15,8 @@ from verify_acts_cam import (
     _CAM_FB_DELIVER, _CAM_GREEN, _CAM_MULTI_POST, _CAM_SCOPE, _CAM_SECOND_SETUP, _CAM_STORY,
     _MX_SETUP, _SW_SETUP, _SW_SETUP2, _SWARF_RIG)
 from verify_acts_census import (
-    _CENSUS_EXT, _CENSUS_EXT_READ, _CENSUS_MILL, _CENSUS_MILL_READ, _CENSUS_TURN,
-    _CENSUS_TURN_READ)
+    _CENSUS_EXT, _CENSUS_EXT_READ, _CENSUS_LONG, _CENSUS_LONG_READ, _CENSUS_MILL,
+    _CENSUS_MILL_READ, _CENSUS_TURN, _CENSUS_TURN_READ)
 from verify_acts_doc import _FINALE, _OVERTURE, _SHOWCASE
 from verify_acts_dump import _HUB_CONTOUR, _HUB_DUMP, _MX_DUMP
 from verify_acts_hub import (
@@ -132,6 +132,13 @@ _ACT_PROGRAM = [
      ("cam_get", {"include": ["operations"], "setup": HUB_MILL_SETUP}), _CENSUS_MILL, []),
     ("ACT 10c8 - CAM: THE MILLING CENSUS READ",
      ("cam_get", {"include": ["operations"], "setup": HUB_MILL_SETUP}), _CENSUS_MILL_READ, []),
+    # The two whole-model families whose GENERATION wall clock (105 s and 71 s, measured) is the
+    # reason they ride an act of their own: their boundary poll gets a budget sized to the pair,
+    # where the census act's own is sized to sixteen short ones.
+    ("ACT 10c8b - CAM: THE LONG FAMILIES",
+     ("cam_get", {"include": ["operations"], "setup": HUB_MILL_SETUP}), _CENSUS_LONG, []),
+    ("ACT 10c8c - CAM: THE LONG FAMILIES READ",
+     ("cam_get", {"include": ["operations"], "setup": HUB_MILL_SETUP}), _CENSUS_LONG_READ, []),
     ("ACT 10c9 - CAM: THE TURNING CENSUS",
      ("cam_get", {"include": ["operations"], "setup": HUB_TURN_SETUP}), _CENSUS_TURN, []),
     ("ACT 10c10 - CAM: THE TURNING CENSUS READ",
@@ -258,6 +265,11 @@ POLL_AFTER = {
     # The milling act creates sixteen operations at once, so its poll takes more than the default 40.
     "ACT 10c7 - CAM: THE MILLING CENSUS": {"narrative": HUB_MILL_SETUP, "fallback": [],
                                            "max_polls": 70},
+    # the long family: its generation ran PAST 70 polls (350 s) on a session that had already driven
+    # a full sweep, against the 105 s it was first measured at - so the budget is sized to the slow
+    # reading, not the fast one.
+    "ACT 10c8b - CAM: THE LONG FAMILIES": {"narrative": HUB_MILL_SETUP, "fallback": [],
+                                           "max_polls": 160},
     "ACT 10c9 - CAM: THE TURNING CENSUS": {"narrative": HUB_TURN_SETUP, "fallback": []},
     # the extension families launch onto the milling setup whose stock is the lathe's rest, and that
     # generation ran past the default 40 polls with every operation reading valid behind it.
@@ -321,9 +333,13 @@ STORY = {
     "param_set_favorite": "mark PartLen the favorite driving dimension",
     "param_get": ("read the parameter table; then the pocket radius and the edge break the fillet "
                   "and chamfer features are built at, and a fresh driver read sizes the CAM stock"),
-    "model_create_component": "cast the part, the billet, the three vise parts and the lead screw",
-    "design_activate_component": "step into each part to build its sketch",
-    "sketch_create": "draw each part's sketch on its plane",
+    "model_create_component": ("cast the part, the billet, the three vise parts and the lead screw; "
+                               "then the HUB, the turned flange the CAM competence beats machine"),
+    "design_activate_component": ("step into each part to build its sketch, and back out to the "
+                                  "root once the hub's last feature has landed"),
+    "sketch_create": ("draw each part's sketch on its plane; then the hub's five - its turned "
+                      "outline and its keyway on the axis plane, the bolt circle and the flange "
+                      "pocket on XY, and the inclined flat on a datum swung 30 deg off XZ"),
     "sketch_add_geometry": ("draw the part's footprint, its step, its pocket and its boss; then the SLOT family, "
                             "one scratch sketch per shape - a three-point arc slot with its five "
                             "arcs and its profile, the centre-point arc slot in both its short and "
@@ -371,10 +387,16 @@ STORY = {
                          "line's horizontal span, a diameter, the gap between two circles on one "
                          "centre, a line to a circle's near tangent, and an ellipse's two radii - "
                          "each read back as a measured number, not a call that returned ok"),
-    "sketch_get": "read the skeleton and the part's own profiles back",
+    "sketch_get": ("read the skeleton and the part's own profiles back; then the hub's three "
+                   "PROOFS, each taken before a feature consumes the sketch - is_fully_constrained "
+                   "true with the constraint and dimension counts that closed it, which is the "
+                   "sketch recipes' own bar; and the keyway slot's own census, where WHICH of its "
+                   "three lines is the construction spine is read off the sketch rather than "
+                   "counted on (a solid side line is vertical too and spans the same length, so a "
+                   "dimension addressed at one lands the slot half a width off)"),
     "sketch_delete_entity": ("delete a helper constraint; count drops - then a sketch text by its "
                              "index, the deleted string reported back, and the empty index refused"),
-    "model_construction": ("offset the step floor the pocket is cut from and the top the boss stands on; an AXIS on a cameo bore whose published handle the circular pattern turns about; a plane at 30 deg about a bench bore's own axis (origin pinned to the axis) and a plane through a cap vertex; then the ON-PATH surface on one measured 30 mm cap edge - a proportional plane and point reading their ratio back with no extent published, an absolute placement inside the path, one before the start and one far past the end (both accepted, both disclosed against the measured length), the boundary exactly at the length, an expression placement whose model parameter is named for param_set, a to-object plane carrying distance AND offset off the path and a second one landing inside a two-edge chained path, and the summed length of that chain; the out-of-range proportional value and to_object on the point kind refused. Then the datum bench - one bored block carrying every reference the remaining modes read: a plane swung 30 deg about a top edge, one spanning three corners, one splitting the block at mid-height, one spanning two coplanar edges and one resting tangent on the bore wall; an axis on an edge, one spanning two corners and one along the top face's own normal; and points at the bore centre, at a corner where two edges meet, at the three world planes' shared origin and where an edge pierces XY. The world axis and the coordinate point are refused up front - both are setByLine/setByPoint, direct-edit-only, and this design is parametric"),
+    "model_construction": ("offset the step floor the pocket is cut from and the top the boss stands on; an AXIS on a cameo bore whose published handle the circular pattern turns about; a plane at 30 deg about a bench bore's own axis (origin pinned to the axis) and a plane through a cap vertex; then the ON-PATH surface on one measured 30 mm cap edge - a proportional plane and point reading their ratio back with no extent published, an absolute placement inside the path, one before the start and one far past the end (both accepted, both disclosed against the measured length), the boundary exactly at the length, an expression placement whose model parameter is named for param_set, a to-object plane carrying distance AND offset off the path and a second one landing inside a two-edge chained path, and the summed length of that chain; the out-of-range proportional value and to_object on the point kind refused. Then the datum bench - one bored block carrying every reference the remaining modes read: a plane swung 30 deg about a top edge, one spanning three corners, one splitting the block at mid-height, one spanning two coplanar edges and one resting tangent on the bore wall; an axis on an edge, one spanning two corners and one along the top face's own normal; and points at the bore centre, at a corner where two edges meet, at the three world planes' shared origin and where an edge pierces XY. The world axis and the coordinate point are refused up front - both are setByLine/setByPoint, direct-edit-only, and this design is parametric. And the hub's own datum: the axis plane swung 30 deg about the SHAFT WALL, whose frame maps its +X onto world Z alone - which is what lets the inclined flat be drawn in depths and radii measured from the hub's axis rather than from the datum's parametric origin"),
     "sketch_set_text": ("engrave the FUSION ESSENTIALS nameplate; then the path layouts - text "
                         "along a line and wrapped around a closed circle, and fitted to a line - "
                         "each checked against the created text's own definition objectType; a model "
@@ -384,15 +406,23 @@ STORY = {
                         "beside the string; an unknown name and its case variant refused on create "
                         "with the text count proving nothing landed, the same name refused on an "
                         "edit with the following read showing the string untouched, and a call "
-                        "with no font_name publishing no font key at all"),
+                        "with no font_name publishing no font key at all. Then the hub's own "
+                        "label - 'HUB' drawn 3.5 mm high on the flange-top outline sketch, its "
+                        "width measured off the created text's own bounding box; nothing cuts it"),
     "model_extrude": ("extrude the block, JOIN the stepped half and the boss onto it and CUT the "
                       "pocket down from the step floor, each depth an expression off the driver; "
                       "then a three-bay frame with 'all' whose payload NAMES the regions enclosed "
-                      "by another selected one - the bays that filled with material"),
+                      "by another selected one - the bays that filled with material. Then the "
+                      "hub's three cuts: the keyway symmetric about the axis plane, the inclined "
+                      "flat cut from the tilted sketch, and the flange pocket where 'all' takes "
+                      "TWO regions and neither encloses the other - the sector and the round "
+                      "pocket beside it, both cutting something a viewer can see"),
     "model_revolve": ("revolve a torus ring about the world z axis, then a ring about an off-origin "
                       "cylinder FACE - the resolved label reads BRepFace and the ring's measured "
                       "bounding box stands around x=30, not around the origin; a planar face as "
-                      "the axis refused"),
+                      "the axis refused. Then the HUB itself: its thirteen-segment outline turned "
+                      "360 deg about the construction line the outline closes on, off a profile "
+                      "handle rather than a guessed index"),
     "model_loft": "loft a base-to-post cameo between two profiles on stacked planes",
     "model_sweep": "sweep a round section along its own path",
     "model_draft": "draft a cameo face",
@@ -427,7 +457,9 @@ STORY = {
     "assembly_edit_contacts": ("build a contact set from two story parts, meet the single-member refusal, re-member it, rename it reading the landed name back, suppress round-trip, switch contact analysis on and back off, then delete it"),
     "model_hole": ("drill a cameo mounting hole, then the three additive placements - centred on "
                    "its rim, on an edge at middle and at start, and by plane offsets; a circular "
-                   "offset edge refused"),
+                   "offset edge refused. Then the hub's bolt circle: four counterbored through "
+                   "holes at WORLD points on the 32 mm circle its own reference sketch dimensions, "
+                   "which is the pattern the census aims its hole families at"),
     "model_combine": "join two overlapping cameo pads",
     "appearance_set": ("give the part, the billet and each vise component its own colour, with the "
                        "billet half translucent so the part inside it stays visible; then the occurrence FAN-OUT in the "
@@ -449,7 +481,10 @@ STORY = {
     "model_inspect": ("read the part's own extent back, and the billet's against the allowance it "
                       "was sized with; and a MESH addressed as "
                       "'<occurrence>:<mesh>' inside a singly-placed component, answering with its "
-                      "own triangle count and volume rather than the solid it was cast from"),
+                      "own triangle count and volume rather than the solid it was cast from; and "
+                      "the hub's turned envelope read back after EVERY cut, which is what says the "
+                      "keyway, the flat, the pocket and the thread all took material from inside "
+                      "it rather than off its outside"),
     "pmi_create": ("author a flatness note on the pocket floor and a hole note on a mounting bore, "
                    "each read back by name and markup"),
     "pmi_get": ("read the PMI back with segments and detail, and again with an over-cap "
@@ -466,7 +501,10 @@ STORY = {
                              "machine is concerned - and a scratch pair for the relations lifecycle"),
     "joint_create_origin": ("place the stock-center WCS at the part's origin, a station per bench "
                             "motion, the setup's own WCS at the billet's measured centre, and the "
-                            "flip setup's at the part's"),
+                            "flip setup's at the part's; then the hub's rotary WCS, computed at "
+                            "its bounding-box centre - the layout deals the hub a cell a metre out "
+                            "in the field, so the axis the rotary passes wrap about runs through "
+                            "that origin and not through the world's"),
     "joint_create": ("slide the moving jaw on the vise base and turn the lead screw on it; then a "
                      "station joint per bench motion, and the link's own fresh revolute"),
     "joint_at_geometry": ("joint a pin in its bore via cylinder faces; then the motion vocabulary on "
@@ -524,7 +562,8 @@ STORY = {
                      "alone, and the volume grows because filling a corner adds material; then the "
                      "SMOOTH branch on the body that round curved - 21 edges reading 19 convex, no "
                      "concave one left and the two tangent joins smooth, published in the refusal a "
-                     "filter matching nothing carries"),
+                     "filter matching nothing carries. And the hub's flange RIM, rounded 1.5 mm on "
+                     "the one circular edge told from its twin below it by its own centre"),
     "model_chamfer": ("break the step's outboard edge and a through-bore rim, then a mounting-bore "
                       "rim by distance-and-angle with a miter corner, each read back off the "
                       "created feature"),
@@ -537,7 +576,9 @@ STORY = {
                      "normal and checked against the face by the API at add() - and a partial "
                      "thread measured from the LOW end, reading that end back off the feature; an "
                      "unknown call-out, an offset with no length, and a modeled call-out too big "
-                     "for the cylinder all refused"),
+                     "for the cylinder all refused. And the hub's stub, M30x2 over 15 mm from its "
+                     "low end, on the ONE cylinder face of its radius the whole part carries - "
+                     "which is what says nothing has been cut across it"),
     "sketch_edit_curve": ("trim, extend, split, fillet, chamfer and offset on one scratch sketch "
                           "per action, with length read-backs; split's two halves must carry "
                           "distinct ids; a chamfer across an offset pair refused"),
@@ -675,12 +716,18 @@ STORY = {
                        "expression read back off the tool, which is where a cutting-tool dimension "
                        "is edited (the operation refuses that write). And the PROBE the probing "
                        "cycle needs, cloned by from_type from the shipped 'Probes' library at the "
-                       "index the document library's own count named"),
+                       "index the document library's own count named. Then the HUB's own shop set "
+                       "- ten cutters in ONE add, milling and turning, read back off the library "
+                       "in the order they were handed in, since that ORDER is the contract every "
+                       "hub create row picks its cutter by"),
     "cam_create_setup": ("create the milling setup on the bracket in the vise, and the FLIP setup "
                          "that turns it over on its own WCS - the pair one NC program ends the "
-                         "sweep on; then the setups on the drafted cameo: two milling, one for the "
-                         "simultaneous strategies, one for the rotary wrap, and a TURNING one whose "
-                         "operation_type is read back off the Setup itself"),
+                         "sweep on; then the two on the drafted cameo, one for the rails and one "
+                         "for the simultaneous strategies; and the HUB's three - the TURNING one "
+                         "whose operation_type is read back off the Setup itself, the milling one "
+                         "that cuts what the lathe leaves, and the one the 4-axis wrap turns in - "
+                         "each created holding ZERO operations, which is what says the row made "
+                         "the setup it names"),
     "cam_create_operation": ("build the job a shop would run on the bracket: face the top, rough it "
                              "with the 3D adaptive, open the pocket with 2D offset roughing, "
                              "contour the boss, break the stepped top's edges with a 2D chamfer, "
@@ -695,14 +742,16 @@ STORY = {
                              "strategy the setup offers that this installation reads "
                              "isGenerationAllowed false on, which creates nothing rather than "
                              "minting an operation that never generates. Then the families the "
-                             "bracket's job has no geometry for: an engraving on the part itself, "
-                             "the three simultaneous passes (multi-axis finishing and roughing, "
-                             "flow) in a setup of their own, a rotary wrap in another - both "
-                             "extension strategies - and the four turning cycles - face, profile "
-                             "roughing, profile finishing and the part-off - each created with no "
-                             "selection at all. And the PROBING cycle on the part itself: a Probe "
-                             "WCS pass created with the cloned probe, which is the tool kind a "
-                             "probing strategy is refused without"),
+                             "bracket's job has no geometry for: an engraving on the part itself "
+                             "and the three simultaneous passes (multi-axis finishing and "
+                             "roughing, flow) in a setup of their own. And the PROBING cycle on "
+                             "the part itself: a Probe WCS pass created with the cloned probe, "
+                             "which is the tool kind a probing strategy is refused without. On the "
+                             "HUB: the four lathe cycles in the order a shop turns them - face, "
+                             "profile roughing, profile finishing, then the part-off on the "
+                             "grooving insert - and the three rotary families wrapped about its "
+                             "own axis, every one created with no selection at all, because the "
+                             "geometry each of them cuts IS the setup's model"),
     "cam_select_geometry": ("aim every operation at the feature it cuts: the stock-top face, the "
                             "boss top and the stepped top through the FACE kind (which takes the "
                             "loops that bound the face), the pocket FLOOR through the POCKET kind "
@@ -744,23 +793,35 @@ STORY = {
                            "refused listing the tool's own; the cutting side written and read back "
                            "off its parameter; and the isEditable pre-guard refusing a cutting-TOOL "
                            "dimension by name before anything is applied. Then the deburr's "
-                           "multi-pass, in two writes because the stepover row is settable only "
-                           "once the flag above it is true, each read back off the operation; and "
+                           "multi-pass in ONE call, the stepover row named FIRST though it is "
+                           "settable only once the flag above it is true - written last, its own "
+                           "flag re-read, and marked unlocked_here in the row it reads back; and "
                            "the TOOL arm on EVERY operation the shipped template landed with none - "
                            "a spot drill, a drill and a mill that fits the counterbore, each with "
                            "Operation.tool read back beside a null was_tool. The rail operation "
                            "parked for the 3-axis program is restored at the end, so the tree the "
-                           "run leaves holds nothing suppressed"),
+                           "run leaves holds nothing suppressed. And on the hub's lathe job, the "
+                           "one parameter the turned part needs: doLeadOut off on the finishing "
+                           "cycle, which is what the no-warning read of that setup stands on"),
     "cam_create_machine": ("build a run-stamped 3-axis machine into the Local library, find it in "
-                           "the catalog, assign it to the setup, and refuse the duplicate name"),
+                           "the catalog, assign it to the setup, and refuse the duplicate name; "
+                           "then a run-stamped generic_4_axis for the hub's rotary setup, which is "
+                           "what a rotary wrap needs before it will generate"),
     "cam_delete_machine": ("take the run's own machine back out of the Local library: the "
                            "confirm_name mismatch refused while it still exists, then the delete "
                            "proved by the library walk, the name re-resolve, and the catalog read "
-                           "that listed it when it arrived"),
+                           "that listed it when it arrived; and the hub's 4-axis one taken out the "
+                           "same way as soon as the setup holds its own copy - Setup.machine takes "
+                           "a COPY, so the run leaves the Local library as it found it"),
     "cam_edit_setup": ("real stock + vise fixture bodies; WCS bound to the stock-center JO (bound "
                        "read back); Haas VF-2 assigned - then the same three on the FLIP setup, "
                        "whose WCS binds a Joint Origin of its own rather than sharing the first "
-                       "setup's, which would be the same fixture twice"),
+                       "setup's, which would be the same fixture twice. Then the hub's three "
+                       "setups: the lathe's mill-turn machine assigned through the simulation "
+                       "strip, its frame flipped onto world -Z so the flange sits in the chuck, "
+                       "its zero taken from the MODEL's front face; the milling setup's stock "
+                       "switched to the lathe's rest with the mode read back beside the one it "
+                       "held; and the rotary setup's WCS bound to that computed Joint Origin"),
     "cam_edit_folders": ("organize the job the way a shop sheet reads - the six milling passes "
                          "into Milling and the three hole-making cycles into Drilling, each move "
                          "counted by the destination folder's own re-read"),
@@ -783,7 +844,10 @@ STORY = {
                      "certified one setup at a time by the boundary poll, with the resolved node's "
                      "KIND read back beside the name asked for. The last CAM act relaunches every "
                      "setup the job's later edits left stale, taking either answer the tool gives "
-                     "that scope - a launch, or the skipped one naming what needed none"),
+                     "that scope - a launch, or the skipped one naming what needed none. On the "
+                     "hub, one launch per setup behind that act's own writes: the lathe job, the "
+                     "milling census, the two LONG families in an act whose poll budget is sized "
+                     "to their measured 105 s and 71 s, and the rotary wrap"),
     "cam_inspect_toolpaths": ("verdict false with named ops before generation, scoped check, "
                               "bogus-scope refusal, an over-cap max_results clamped to the tool's "
                               "own row ceiling, verdict true after generation, include_suppressed "
@@ -796,7 +860,10 @@ STORY = {
                        "on the finished extension job, whose per-state tally and health counts "
                        "describe the scope named beside them; and the LAST CAM step - the tree the "
                        "run leaves a watcher, read off the document and off the setup whose "
-                       "operations arrived tool-less: nothing out of date, errored or suppressed"),
+                       "operations arrived tool-less: nothing out of date, errored or suppressed. "
+                       "And the hub's lathe job read TURNED CLEAN - every cycle finished with no "
+                       "warning and none of them cutting air, which is the bar a solid of "
+                       "revolution turned from a cylinder of stock has to meet"),
     "cam_post": ("post the setup's NC program to disk; then the LAST thing the sweep does - ONE "
                  "program over the part's TWO setups, the job and its flip, with the setups asked "
                  "for beside the program's own stored operations re-read after the post and every "
@@ -849,7 +916,9 @@ STORY = {
                         "rename a MESH body - the kind reads 'mesh' and a fresh read of the "
                         "component's meshes carries the new name; the empty target and the root "
                         "component refused"),
-    "design_get": ("final design read: the whole cast, stamped with the DOCUMENT it was read from "
+    "design_get": ("the timeline read once the hub's last feature has landed - nothing in the "
+                   "design computed into an error or a warning; then the final design read: the "
+                   "whole cast, stamped with the DOCUMENT it was read from "
                    "(sys_find_tool, which never touches the design, carries no such stamp), the "
                    "timeline slice the 'name@index' feature form is addressed from, plus the "
                    "material/appearance catalog at both zoom levels - the library census and one "

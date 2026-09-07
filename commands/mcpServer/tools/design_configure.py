@@ -140,6 +140,30 @@ def _row_names(table):
     return out
 
 
+# The unit a TEXT parameter reads (measured: a text parameter reads 'Text', a length one 'mm').
+_TEXT_UNIT = "Text"
+
+
+def _column_ids(table):
+    """Every column id the table lists, or None when the collection would not enumerate - an
+    unreadable list is not an empty one, and a rollback may not be claimed on it."""
+    cols = safe(lambda: table.columns)
+    n = safe(lambda: cols.count) if cols is not None else None
+    if not isinstance(n, int) or isinstance(n, bool):
+        return None
+    return [safe(lambda i=i: cols.item(i).id) for i in range(n)]
+
+
+def _column_rolled_back(table, col):
+    """Remove a column whose cells could not be filled and PROVE it is gone - the table must stop
+    listing its id. deleteMe answering true is the request, not the proof."""
+    col_id = safe(lambda: col.id)
+    if not safe(lambda: col.deleteMe()):
+        return False
+    after = _column_ids(table)
+    return after is not None and col_id is not None and col_id not in after
+
+
 # ── action handlers ──────────────────────────────────────────────────────────
 
 def _do_create(design):
@@ -264,6 +288,13 @@ def _do_add_parameter(design, table, parameter, values):
     if unknown:
         return error(f"Values reference configurations that don't exist: {', '.join(unknown)}. "
                      f"Existing: {', '.join(str(n) for n in _row_names(table))}.")
+    # A TEXT parameter's column is created but no cell takes a value on this build, so it is refused
+    # BEFORE the column lands rather than rolled back after. A text parameter reads unit 'Text'.
+    if safe(lambda: p.unit) == _TEXT_UNIT:
+        return error(f"'{parameter}' is a {_TEXT_UNIT} parameter: its column would be created and "
+                     "every cell would keep the parameter's own value, so no row could vary. Vary a "
+                     "length/number parameter in the table, and relabel per configuration with "
+                     "param_set after activating the row.")
     col = table.columns.addParameterColumn(p)    # MUTATION
     if not col:
         return error(f"addParameterColumn for '{parameter}' returned null.")
@@ -277,9 +308,19 @@ def _do_add_parameter(design, table, parameter, values):
         # states; a silently dropped write reads back None here.
         got = safe(lambda cell=cell: cell.expression)
         if got is None or got != str(expr):
+            # The COLUMN is a mutation that already landed, so a bare refusal would leave an
+            # orphan behind and every retry would add another. Roll it back and say which happened.
+            removed = _column_rolled_back(table, col)
             return error(f"Cell '{rname}' of the '{parameter}' column reads "
                          f"{'nothing' if got is None else repr(got)} after the set - the "
-                         f"expression '{expr}' did not verifiably take.")
+                         f"expression '{expr}' did not verifiably take"
+                         + (f" ({n} earlier cell(s) did)" if n else "") + ". "
+                         + ("The column has been rolled back." if removed else
+                            "The column could NOT be auto-removed and is still on the table - "
+                            "delete it before retrying.")
+                         + f" If '{parameter}' is a Text parameter, no cell takes a value on this "
+                           "build - relabel per configuration with param_set after activating the "
+                           "row.")
         n += 1
     return ok({"parameter": parameter, "column_id": safe(lambda: col.id), "set": n,
                "note": "Parameter column added and per-configuration expressions set. Switch with "

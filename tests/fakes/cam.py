@@ -282,12 +282,18 @@ class FakeCAMParameter:
     The cam-parameter-bad-reference row is what `error` stands on: an expression naming a parameter
     that does not exist is stored verbatim and reports success, and only .error names the failure.
     An expression holding 'NoSuch' answers that text here, read from BEHAVIOR (the literal below is
-    the fallback until that row's regen lands the key). Pass `error` to pin the channel instead."""
+    the fallback until that row's regen lands the key). Pass `error` to pin the channel instead,
+    and `choices` to make .value answer getChoices() the way a ChoiceParameterValue does."""
     def __init__(self, name, expression="", value=None, title=None, editable=True, enabled=True,
-                 visible=True, error=None, warning=""):
+                 visible=True, error=None, warning="", choices=None):
         self.name = name
         self._expression = expression
         self.value = types.SimpleNamespace(value=value)
+        if choices is not None:
+            # A ChoiceParameterValue answers getChoices() -> (ok, titles, values); every other
+            # value class carries no such member at all.
+            legal = list(choices)
+            self.value.getChoices = lambda: (True, [str(v).title() for v in legal], list(legal))
         self.title = name if title is None else title
         self.isEditable = editable
         self.isEnabled = enabled

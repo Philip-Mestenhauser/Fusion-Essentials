@@ -1225,8 +1225,20 @@ class TestProgramOperationCount:
                                    output_folder=str(tmp_path), program_name="9"))
         assert "program_operation_count is what the program HOLDS" in data["note"]
         assert "posted_operations those reading hasToolpath True" in data["note"]
-        # and the next step for the difference the two counts just published
-        assert "cam_get(include=['operations']) shows the ops left out" in data["note"]
+        # and the usual cause of the difference the two counts just published
+        assert "A suppressed operation is neither held nor posted" in data["note"]
+
+    def test_the_note_says_a_suppressed_operation_is_neither_held_nor_posted(self, monkeypatch,
+                                                                              tmp_path):
+        # MEASURED: a program over a list holding a suppressed op OMITS it - filteredOperations
+        # excludes it, postProcess answers True, and the file carries none of its moves. Without
+        # this sentence a caller reads the two counts as a refusal it never got.
+        s1 = _Setup("Setup1", [_Op("Face1")])
+        _install(monkeypatch, _CAM([s1]))
+        data = _payload(cp.handler(setups=["Setup1"], post=str(_write_cps(tmp_path)),
+                                   output_folder=str(tmp_path), program_name="9"))
+        assert ("A suppressed operation is neither held nor posted: its toolpath reads discarded "
+                "and its moves are absent from the NC file.") in data["note"]
 
     def test_a_filtered_read_that_raises_publishes_no_operations_figure(self, monkeypatch,
                                                                         tmp_path):

@@ -84,8 +84,11 @@ class FakeAsBuiltJoints(_NamedCollection):
     platform-lies case: '' models a joint whose motion cannot be read at all)."""
 
     def __init__(self, motion_class=None, geometry_readback="ANCHOR", add_returns=True,
-                 name_sticks=True):
+                 name_sticks=True, add_raises=None):
         super().__init__()
+        # add_raises is Fusion's own refusal text out of add(); the tool words its diagnosis from
+        # that text, so a test can hand it the exact sentence the platform uses.
+        self._add_raises = add_raises
         self.last = None
         self.last_input = None
         self.added = 0
@@ -103,6 +106,8 @@ class FakeAsBuiltJoints(_NamedCollection):
 
     def add(self, inp):
         self.added += 1
+        if self._add_raises:
+            raise RuntimeError(self._add_raises)
         if not self._add_returns:
             return None
         cls = self._motion_class
@@ -464,3 +469,24 @@ class TestAsBuiltPendingMoveRefusal:
         monkeypatch.setattr(jn, "pending_position", lambda design: True)
         res = ja.handler(occurrence_one="A:1", occurrence_two="B:1")
         assert res["isError"] is True and "would silently revert" in res["message"]
+
+
+class TestPairAlreadyJointed:
+    """Fusion refuses a second as-built joint on an already-jointed PAIR, so the refusal has to
+    point at the two occurrences rather than at the anchor geometry the caller passed."""
+
+    _OVER_CONSTRAINED = ("3 : A joint in system exists for the provided input. "
+                         "System will be over constrained")
+
+    def test_the_platform_refusal_names_the_pair(self, as_built):
+        as_built(add_raises=self._OVER_CONSTRAINED)
+        res = ja.handler(occurrence_one="A:1", occurrence_two="B:1")
+        assert res["isError"] is True
+        assert "'A:1' and 'B:1' are already jointed to each other" in res["message"]
+
+    def test_another_add_failure_gets_no_pair_diagnosis(self, as_built):
+        # The clause is gated on Fusion's OWN words: a different failure must not be handed a
+        # cause nothing read.
+        as_built(add_raises="3 : Geometry should not be null if joint motion is not rigid")
+        res = ja.handler(occurrence_one="A:1", occurrence_two="B:1")
+        assert res["isError"] is True and "already jointed" not in res["message"]

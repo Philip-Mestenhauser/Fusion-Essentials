@@ -229,6 +229,13 @@ class _MeshBodies(_NamedCollection):
 # -- the mesh calculator: the tessellation a BRep body is saved as a mesh through ------------
 
 
+# setQuality writes surfaceTolerance alone and leaves the other three knobs at zero (measured on
+# the mesh-calculator row).
+_SET_QUALITY_WRITES_SURFACE_TOLERANCE_ONLY = (
+    _api_facts.BEHAVIOR["mesh_set_quality_writes_surface_tolerance_only"]
+    if "mesh_set_quality_writes_surface_tolerance_only" in _api_facts.BEHAVIOR else True)
+
+
 @fusion_fake(live_type="TriangleMeshCalculator", facts=("shape-dump-mesh-calculator-quality",))
 class FakeTriangleMeshCalculator:
     """meshManager.createMeshCalculator(): the level-of-detail knob and the tessellation itself.
@@ -257,6 +264,8 @@ class FakeTriangleMeshCalculator:
             return False
         self._quality = quality
         self.surfaceTolerance = self._tolerance
+        if not _SET_QUALITY_WRITES_SURFACE_TOLERANCE_ONLY:
+            self.maxNormalDeviation = self.maxAspectRatio = self.maxSideLength = self._tolerance
         return True
 
     def calculate(self):

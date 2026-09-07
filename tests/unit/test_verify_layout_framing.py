@@ -1,7 +1,8 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""The framing pass reading the camera rows an act module wrote by hand.
+"""The framing pass reading the camera rows an act module wrote by hand, and the frame a placement
+reads a step's coordinates in.
 
 An act module builds its rows as it imports, before any chunk is placed and before any sketch plane
 is known. The framing pass is the first place that knows both, so it is where a hand row's view is
@@ -51,6 +52,27 @@ class TestStandingFrame:
             + _made("Beta"))
         # An isolate aims nothing, so Beta is still on screen and costs no second frame.
         assert _frames(rows) == [["Alpha:1"], "Far:1"]
+
+
+class TestPlacementFrame:
+    """A coordinate LIST is read in the sketch's own frame, as the pair keys already are."""
+
+    _POINTS = {"sketch_name": "XZOnly", "kind": "polyline",
+               "points": [[400.0, 5.0], [460.0, 40.0]]}
+
+    def test_an_xz_points_list_pins_only_the_axis_its_plane_spans(self):
+        # read as world (x, y) the depths land as world Y, so the chunk measures 5..40 mm deep in an
+        # axis the XZ plane does not span - and the shift then carries it along that axis.
+        assert verify_layout._place_points(self._POINTS, "xz", "sketch_add_geometry") == [
+            (400.0, None), (460.0, None)]
+        moved = verify_layout._place_shift(self._POINTS, 100.0, 200.0, "xz", "sketch_add_geometry")
+        assert moved["points"] == [[500.0, 5.0], [560.0, 40.0]]
+
+    def test_a_points_only_xz_chunk_stays_where_it_was_authored(self):
+        program = [("act", None, [
+            ("sketch_create", {"name": "XZOnly", "plane": "xz"}, "ok", None),
+            ("sketch_add_geometry", self._POINTS, "ok", None)], None)]
+        assert verify_layout._place_slots(program) == {}
 
 
 class TestSketchView:

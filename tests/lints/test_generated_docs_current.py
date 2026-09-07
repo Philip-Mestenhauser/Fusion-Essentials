@@ -56,10 +56,20 @@ def _bindings_identity():
     return "|".join(parts)
 
 
+def _generated_artifacts():
+    """Every file a generator WRITES: the two spliced CLAUDE.md files, tests/api_surface.py, the
+    generated tree and the guidance skill package."""
+    paths = set(_OUTPUT_FILES)
+    for tree in (_OUTPUT_TREE, _SKILL_TREE):
+        for root, _dirs, names in os.walk(tree):
+            paths.update(os.path.join(root, n) for n in names)
+    return tuple(sorted(p for p in paths if os.path.isfile(p)))
+
+
 def _fingerprinted_paths():
     """Every file whose bytes decide whether the committed artifacts are current, sorted and
     de-duplicated (an output that also sits under the input tree is hashed once)."""
-    paths = set(_OUTPUT_FILES)
+    paths = set(_generated_artifacts())
     paths.update(glob.glob(os.path.join(TESTS_DIR, "*.py")))
     for root, _dirs, names in os.walk(_INPUT_TREE):
         if "__pycache__" in root:
@@ -67,9 +77,6 @@ def _fingerprinted_paths():
         # .json admits the guidance data gen_guidance reads - an input, so a JSON-only edit misses
         # the cache and pays the full check instead of riding a stale fingerprint.
         paths.update(os.path.join(root, n) for n in names if n.endswith((".py", ".json")))
-    for tree in (_OUTPUT_TREE, _SKILL_TREE):
-        for root, _dirs, names in os.walk(tree):
-            paths.update(os.path.join(root, n) for n in names)
     return tuple(sorted(p for p in paths if os.path.isfile(p)))
 
 
@@ -108,6 +115,22 @@ class TestGeneratedDocsAreCurrent:
         )
         if cache is not None:
             cache.set(_CACHE_KEY, fingerprint)
+
+
+class TestGeneratedFilesUseLfNewlines:
+    def test_no_generated_artifact_holds_a_carriage_return(self):
+        # git normalizes CRLF on add and then reports the whole file as changed on every diff.
+        offenders = []
+        for path in _generated_artifacts():
+            with open(path, "rb") as fh:
+                carriage = fh.read().count(b"\r")
+            if carriage:
+                offenders.append(f"{os.path.relpath(path, REPO_ROOT)}: {carriage} CR bytes")
+        assert not offenders, (
+            "generated files hold CR bytes - regenerate with `py -3 tests/gen_all.py`. If they "
+            "come back, the generator writing them either opens its output with the platform "
+            "newline, or decides the file is already current by comparing universal-newline text "
+            "instead of its raw bytes:\n  " + "\n  ".join(offenders))
 
 
 class TestTheFingerprintCoversEveryArtifact:

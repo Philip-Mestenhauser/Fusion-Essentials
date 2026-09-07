@@ -2300,6 +2300,106 @@ class TestWarningOverlayTally:
         assert t["valid"] == 0 and t["suppressed"] == 0 and t["errored"] == 0
 
 
+class TestPreviousSetupStockIsNotReadable:
+    """MEASURED on a setup switched to 'previous_setup': stockSolids reads 0, no previousSetup
+    parameter exists, and stockXLow..stockZHigh keep the RELATIVE-BOX numbers a plain setup reads.
+    A row that published those extents silently would have an agent size a clearing strategy off a
+    box the preceding setup already cut away - which is what a 400 s adaptive was."""
+
+    def _setups(self, install, mode):
+        setup = FakeSetup("S1")
+        setup.stockMode = cc.stock_mode_member(mode)
+        install(make_cam(setup))
+        return _payload(cr.get_cam_setups_handler())
+
+    def test_a_previous_setup_row_says_its_extents_are_not_the_rest_stock(self, install):
+        out = self._setups(install, "previous_setup")
+        row = out["setups"][0]
+        assert row["stock_mode"] == "previous_setup"
+        assert row["stock_extents_describe"] == "the relative box, NOT the rest stock this mode cuts from"
+        assert "nothing readable describes that" in out["note"]
+
+    def test_a_plain_box_setup_carries_no_such_key_or_sentence(self, install):
+        # the quiet default: the caveat belongs to the one mode it is true of.
+        out = self._setups(install, "relative_box")
+        assert "stock_extents_describe" not in out["setups"][0]
+        assert "note" not in out
+
+
+class TestSettledOverTheGeneratingFlag:
+    """MEASURED: an operation can read isGenerating true while its own state reads valid and it
+    carries a machining time. A poll settling on the flag waits on work already finished, so the
+    tally counts those apart and the completion verdict reads the STATES."""
+
+    def test_a_generating_flag_over_a_valid_state_counts_as_settled(self,
+                                                                    operation_cast_passthrough):
+        t = cc.op_state_tally([_tally_op("Rough1", state=0, generating=True)])
+        assert t["generating"] == 1 and t["generating_settled"] == 1
+        assert cc.unsettled_count(t) == 0
+
+    def test_a_generating_flag_over_an_unfinished_state_is_still_unsettled(
+            self, operation_cast_passthrough):
+        # state 3 (NoToolpath) has generating left to do, so the flag is what it says it is.
+        t = cc.op_state_tally([_tally_op("Rough1", state=3, generating=True)])
+        assert t["generating"] == 1 and t["generating_settled"] == 0
+        assert cc.unsettled_count(t) == 1
+
+    def test_an_errored_op_is_settled_however_the_flag_reads(self):
+        assert cc.op_settled({"has_error": True, "operation_state": 1}) is True
+
+    def test_a_suppressed_op_is_settled(self):
+        assert cc.op_settled({"is_suppressed": True, "operation_state": None}) is True
+
+    def test_an_out_of_date_op_is_not_settled(self):
+        assert cc.op_settled({"has_error": False, "operation_state": 1}) is False
+
+    def test_a_state_zero_op_with_no_toolpath_yet_is_not_settled(self):
+        # state 0 alone is not proof of a finished generation: an operation with nothing to show for
+        # it has produced no toolpath, so completing on it would call a job done that is not.
+        assert cc.op_settled({"has_error": False, "is_suppressed": False, "is_generating": True,
+                              "strategy": "adaptive", "operation_state": 0,
+                              "has_toolpath": None, "is_toolpath_valid": None}) is False
+
+    def test_a_state_zero_op_carrying_a_toolpath_is_settled(self):
+        assert cc.op_settled({"has_error": False, "operation_state": 0,
+                              "has_toolpath": True}) is True
+
+    def test_the_empty_class_is_settled_too(self):
+        # generated and cuts nothing: hasToolpath False with the state and validity that say it ran.
+        assert cc.op_settled({"has_error": False, "is_suppressed": False, "operation_state": 0,
+                              "has_toolpath": False, "is_toolpath_valid": True,
+                              "strategy": "contour2d", "is_generating": False}) is True
+
+    def test_a_settled_op_under_a_raised_flag_buckets_valid_not_generating(self):
+        # THE BITE the sweep caught: cam_inspect_toolpaths read 7 of 12 operations as 'generating'
+        # once the poll stopped waiting on the flag. Every reader shares this classifier, so the
+        # state has to outrank the flag HERE or the tools disagree about one operation.
+        facts = {"is_suppressed": False, "has_error": False, "is_generating": True,
+                 "operation_state": 0, "has_toolpath": True, "is_toolpath_valid": True,
+                 "strategy": "face"}
+        assert cc.op_primary_state(facts) == "valid"
+
+    def test_an_unfinished_op_under_the_flag_still_buckets_generating(self):
+        # the boundary: state 1 under the flag is work in flight, and calling it out_of_date would
+        # have a poller stop waiting on a generation that is genuinely running.
+        facts = {"is_suppressed": False, "has_error": False, "is_generating": True,
+                 "operation_state": 1, "has_toolpath": True, "is_toolpath_valid": False,
+                 "strategy": "face"}
+        assert cc.op_primary_state(facts) == "generating"
+
+    def test_the_clause_is_said_only_where_the_two_counts_differ(self):
+        assert cc.settled_clause({"generating": 2, "generating_settled": 0}) == ""
+        assert "2 operation(s) read isGenerating true" in cc.settled_clause(
+            {"generating": 2, "generating_settled": 2})
+
+    def test_live_readiness_publishes_the_settled_count(self, install,
+                                                        operation_cast_passthrough):
+        install(make_cam(_machined_setup([_tally_op("Rough1", state=0, generating=True)])))
+        sig, err = cc.live_readiness()
+        assert err is None
+        assert sig["generating"] == 1 and sig["generating_settled"] == 1
+
+
 _HAAS = FakeMachine(description="Haas VF-2")
 
 
@@ -3778,8 +3878,8 @@ class TestMachiningTimeScope:
         out = _payload(cr.get_machining_time_handler())
         assert "error" in out["setups"][0] and cam.calls == []
 
-    def test_a_raising_estimate_becomes_that_setups_error(self, install, object_collection,
-                                                          operation_cast_passthrough, monkeypatch):
+    def test_a_raising_estimate_names_the_setup_total_unavailable(
+            self, install, object_collection, operation_cast_passthrough, monkeypatch):
         cam = _MTCam([_MTSetup("S1")])
         install(cam)
 
@@ -3787,8 +3887,59 @@ class TestMachiningTimeScope:
             raise RuntimeError("post engine unavailable")
         monkeypatch.setattr(cam, "getMachiningTime", _boom)
         out = _payload(cr.get_machining_time_handler())
-        assert out["setups"][0]["error"] == "post engine unavailable"
+        assert out["setups"][0]["setup_total_unavailable"] == "post engine unavailable"
         assert out["total_machining_time_seconds"] == 0.0
+
+    def test_a_raising_setup_total_still_publishes_the_per_operation_times(
+            self, install, object_collection, operation_cast_passthrough, monkeypatch):
+        # CAM.getMachiningTime over a SETUP raises while any operation in it is errored, which would
+        # hide every good per-operation reading behind one message. The per-op calls still answer.
+        good, bad = _MTOp("Good"), _MTOp("Bad")
+        bad.hasError = True
+        cam = _MTCam([_MTSetup("S1", ops=[good, bad])], per_op_by_name={"Good": 42.0, "Bad": 7.0})
+        install(cam)
+        whole = cam.getMachiningTime
+
+        def _only_per_op(obj, *knobs):
+            if not isinstance(obj, FakeOperation):
+                raise RuntimeError("3 : Machining time could not be calculated.")
+            return whole(obj, *knobs)
+        monkeypatch.setattr(cam, "getMachiningTime", _only_per_op)
+        row = _payload(cr.get_machining_time_handler())["setups"][0]
+        assert row["setup_total_unavailable"] == "3 : Machining time could not be calculated."
+        assert [(r["operation"], r["machining_time_seconds"]) for r in row["operations"]] == [
+            ("Good", 42.0), ("Bad", 7.0)]
+        assert row["operations_time_sum_seconds"] == 49.0
+        assert row["operations_with_errors"] == ["Bad"]
+
+    def test_a_setup_left_out_of_the_document_total_is_named(self, install, object_collection,
+                                                             operation_cast_passthrough,
+                                                             monkeypatch):
+        # THE BITE: its per-op rows are published, so the payload looks complete while the document
+        # figure silently omits it. The total says which setups it does not cover.
+        cam = _MTCam([_MTSetup("S1"), _MTSetup("S2")], seconds=120.0)
+        install(cam)
+        whole = cam.getMachiningTime
+
+        def _s1_total_raises(obj, *knobs):
+            # the whole-collection call carries the setup's own operations, which is what names it
+            if not isinstance(obj, FakeOperation) and any(
+                    getattr(o, "name", "") == "S1 op" for o in obj):
+                raise RuntimeError("3 : Machining time could not be calculated.")
+            return whole(obj, *knobs)
+        monkeypatch.setattr(cam, "getMachiningTime", _s1_total_raises)
+        out = _payload(cr.get_machining_time_handler())
+        assert out["total_excludes_setups"] == ["S1"]
+        assert "total_excludes_setups names every setup left out of it" in out["note"]
+
+    def test_a_job_whose_setups_all_totalled_names_no_exclusions(self, install, object_collection,
+                                                                 operation_cast_passthrough):
+        # the quiet default: the key and its sentence appear only where a setup was actually left
+        # out, or every clean read carries a caveat about a state it is not in.
+        install(_MTCam([_MTSetup("S1")]))
+        out = _payload(cr.get_machining_time_handler())
+        assert "total_excludes_setups" not in out
+        assert "total_excludes_setups" not in out["note"]
 
     def test_unknown_units_are_refused_by_name(self, install):
         install(_MTCam([_MTSetup("S1")]))

@@ -391,16 +391,27 @@ class TestDisagreement:
         assert "the validity check passed; 1 of 2 counted op(s) outside valid" in out["note"]
         assert out["tolerance_used"]["validity_basis"]
 
-    def test_a_generating_operation_is_one_bucket_in_both_the_tally_and_the_rows(self, wire):
-        # isGenerating is a real Operation flag; an op can read operationState=0 WHILE generating,
-        # and the one classifier puts it in exactly one bucket
-        op = FakeOperation("Face1", operation_state=0)
+    def test_a_finished_operation_under_a_raised_flag_counts_valid(self, wire):
+        # MEASURED across one regeneration: isGenerating stayed true for 1.1 s AFTER the Future
+        # completed, over an operation reading state 0 with its toolpath. Bucketing that as
+        # 'generating' reported 7 of 12 finished operations as unfinished work on a live sweep.
+        op = FakeOperation("Face1", operation_state=0)      # the shared fake carries a toolpath
         op.isGenerating = True
         wire(_cam(FakeSetup("S1", ops=[op]), verdict=False))
         out = _payload(mod.handler())
-        assert out["measured"]["states"] == {"valid": 0, "out_of_date": 0, "no_toolpath": 0,
-                                             "error": 0, "suppressed": 0, "generating": 1,
+        assert out["measured"]["states"] == {"valid": 1, "out_of_date": 0, "no_toolpath": 0,
+                                             "error": 0, "suppressed": 0, "generating": 0,
                                              "unread": 0, "total": 1}
+        assert out["measured"]["not_valid"] == []
+
+    def test_an_operation_with_work_left_under_the_flag_still_counts_generating(self, wire):
+        # the boundary: state 1 is work in flight, and the flag is what it says it is there - one
+        # bucket either way, so the tally and the rows cannot disagree about one operation.
+        op = FakeOperation("Face1", operation_state=1)
+        op.isGenerating = True
+        wire(_cam(FakeSetup("S1", ops=[op]), verdict=False))
+        out = _payload(mod.handler())
+        assert out["measured"]["states"]["generating"] == 1
         assert out["measured"]["not_valid"] == [{"operation": "Face1", "state": "generating"}]
 
     def test_scoped_verdict_is_the_one_reported(self, wire):

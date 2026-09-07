@@ -41,8 +41,12 @@ _SELECTIONS = (_CHAIN, _POCKET, _FACE, _SILHOUETTE, _SKETCH, _POCKET_RECOGNITION
 _MACHINING_BOUNDARY_PARAM = "machiningBoundarySel"   # the 3D adaptive/parallel/surfacing boundary
 _DEBURR_EDGE_PARAM = "edgeSel"                       # deburr's drive edges
 _DRIVE_CURVES_PARAM = "curves"                       # drive curves, where no contours/pockets exist
+# turning_trace's own drive input, MEASURED as a CadContours2dParameterValue - the same class as
+# 'contours', so the curve builder applies to it unchanged.
+_MODEL_CONTOUR_PARAM = "modelContour"
 _CURVE_PARAM_CANDIDATES = ("contours", "pockets", SWARF_CONTOURS_PARAM, _DEBURR_EDGE_PARAM,
-                           _DRIVE_CURVES_PARAM, _MACHINING_BOUNDARY_PARAM, "stockContours")
+                           _DRIVE_CURVES_PARAM, _MACHINING_BOUNDARY_PARAM, _MODEL_CONTOUR_PARAM,
+                           "stockContours")
 
 # A selection on the 3D machining boundary is INERT while boundaryMode holds its default
 # 'silhouette' - the op machines the silhouette surface set instead. boundaryMode is a CAM STRING
@@ -413,7 +417,7 @@ def _engage_mode(op, mode_param, want, subject):
             f"Could not set {mode_param}='{want}' to engage the {subject}: {e}. The "
             f"selection is NOT confirmed engaged - set {mode_param}='{want}' with "
             "cam_edit_operation, then regenerate."
-            + enumeration_remedy(str(e), written, _PARAM_READ))
+            + enumeration_remedy(str(e), written, _PARAM_READ, p))
     after = safe(lambda: p.expression)
     if after is None:
         return None, False, (
@@ -716,7 +720,7 @@ def _set_height_param(op, param_name, value):
         p.expression = written            # ChoiceParameterValue takes the choice string
     except Exception as e:
         return None, False, (f"Could not set {param_name}='{value}': {e}"
-                             + enumeration_remedy(str(e), written, _PARAM_READ))
+                             + enumeration_remedy(str(e), written, _PARAM_READ, p))
     after = safe(lambda: p.expression)
     if after is None:
         return None, False, (f"{param_name} cannot be read back after being set to '{value}', so "

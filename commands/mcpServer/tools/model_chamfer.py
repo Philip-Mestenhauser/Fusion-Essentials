@@ -13,7 +13,7 @@ from ..mcp_primitives.registry import register
 from ._common import error
 from . import _inputs
 from . import _assert
-from ._edge_common import _BODY, _CORNER_TYPES, _EDGES, _EDGE_FILTER_DESC, _apply
+from ._edge_common import _BODY, _CORNER_TYPES, _EDGES, _EDGE_FILTER_DESC, _FACES, _apply
 
 app = adsk.core.Application.get()
 
@@ -48,10 +48,10 @@ def _angle_spec(angle_deg, distance_two):
 
 
 def handler(body_name: str = "", distance: float = 1.0, units: str = "mm",
-            edge_filter: str = "", edges=None, distance_two: float = 0.0,
+            edge_filter: str = "", edges=None, faces=None, distance_two: float = 0.0,
             angle_deg=None, corner_type: str = "") -> dict:
     """Bevel edges with a Chamfer - equal-distance, two-distance (asymmetric) via 'distance_two',
-    or distance-and-angle via 'angle_deg'. Specific edge handles, or an explicit filter."""
+    or distance-and-angle via 'angle_deg'. Edge handles, every edge of named faces, or a filter."""
     angle, aerr = _angle_spec(angle_deg, distance_two)
     if aerr:
         return error(aerr)
@@ -59,19 +59,22 @@ def handler(body_name: str = "", distance: float = 1.0, units: str = "mm",
     if cerr:
         return error(cerr)
     return _apply("chamfer", body_name, distance, units, edge_filter, edges, distance_two,
-                  angle=angle, corner_key=corner_key)
+                  angle=angle, corner_key=corner_key, face_handles=faces)
 
 
 TOOL_DESCRIPTION = (
 "Bevel (chamfer) edges - the machinist's default deburr/edge-break. Target with 'edges' handles "
-"from find_geometry, or 'body_name' + 'edge_filter'."
+"from find_geometry, 'faces' handles (every edge of those faces), or 'body_name' + 'edge_filter'."
 )
 
 tool = (
     Tool.create_simple(name="model_chamfer", description=TOOL_DESCRIPTION)
     .add_input_property("edges", _EDGES.schema())
+    .add_input_property(*_FACES.as_property())
     .add_input_property("body_name", _BODY.schema())
-    .add_input_property("distance", {"type": "number", "description": "Chamfer distance in 'units' (the first/only distance)."})
+    .add_input_property("distance", {"type": ["number", "string"],
+        "description": "Chamfer distance in 'units' (the first/only distance), OR a parameter "
+                       "EXPRESSION string ('WallT/2', '3 mm'; carries its own units)."})
     .add_input_property("distance_two", {"type": "number", "description": "Second distance for an ASYMMETRIC two-distance chamfer (in 'units'); omit/0 = equal-distance."})
     .add_input_property("angle_deg", {"type": "number",
         "description": "Distance-and-angle chamfer in DEGREES: one leg measures 'distance', the "

@@ -5,7 +5,7 @@ from these values, so the mocks carry measured data, not hand-typed claims. Each
 owned by the measurement row of the same name in tests/live/VERIFIED_API_FACTS.md."""
 
 FUSION_VERSION = "2705.1.11"
-VERIFIED_ON = "2026-09-06"
+VERIFIED_ON = "2026-09-07"
 
 # '<adsk namespace>.<Class>' -> {member: int} - seeded onto the mock adsk modules.
 ENUMS = {
@@ -547,9 +547,11 @@ BEHAVIOR = {
     "machining_time_args_inert": True,
     "mesh_repair_density_default": 128.0,
     "mesh_repair_feature_has_parameters": False,
+    "mesh_set_quality_writes_surface_tolerance_only": True,
     "meshbodies_has_itembyname": False,
     "meshbody_volume_open_raises": False,
     "model_parameter_created_by_answers_maker": True,
+    "native_body_visible_opacity_raises": True,
     "number_of_completed_is_completion_signal": False,
     "occurrence_appearance_none_by_default": True,
     "occurrence_has_no_opacity": True,

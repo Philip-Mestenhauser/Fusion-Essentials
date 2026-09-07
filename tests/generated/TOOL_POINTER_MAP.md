@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 187  |  **description breadcrumbs:** 395  |  **note/error breadcrumbs:** 469
+**Tools:** 187  |  **description breadcrumbs:** 397  |  **note/error breadcrumbs:** 470
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -35,12 +35,12 @@ close orphans, factor duplicated guards into shared helpers.
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
 - `doc_new`  <- 83  (desc 1, note 82)
-- `find_geometry`  <- 52  (desc 26, note 26)
+- `find_geometry`  <- 53  (desc 26, note 27)
 - `view_screenshot`  <- 42  (desc 13, note 29)
 - `design_get`  <- 39  (desc 14, note 25)
 - `design_delete_feature`  <- 38  (desc 17, note 21)
-- `cam_get`  <- 31  (desc 18, note 13)
 - `sketch_get`  <- 31  (desc 13, note 18)
+- `cam_get`  <- 30  (desc 17, note 13)
 - `data_get`  <- 26  (desc 12, note 14)
 - `doc_open`  <- 24  (desc 7, note 17)
 - `assembly_get`  <- 23  (desc 10, note 13)
@@ -305,8 +305,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Failed to apply template:
 
 ### `cam_compare_operations`
-- differences was capped at
-- ; raise max_results to see the rest.
 - Provide both 'operation_a' and 'operation_b' (operation names).
 
 ### `cam_create_machine`
@@ -461,9 +459,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide 'parameters' - at least one name=value to set (e.g. {'tool_feedCutting': '3000'}) - or 'preset', a preset on this operation's tool, 'tool_index' (with 'tool_scope=document' or 'tool_library...
 - ' has no parameter(s):
 - . cam_get(include=['parameters'], operation=...) lists this operation's own parameter names; only a name it lists can be set.
-- ' does not accept a write to:
-- (isEditable reads False on each). Nothing was applied. cam_get(include=['parameters'], operation=...) marks each refusing row editable false; set a row it does not mark. For a cutting-TOOL dimensio...
-- parameter(s); no change was applied.
+- parameter(s), each restored expression re-read.
 
 ### `cam_edit_setup`
 - Setup edited. Existing toolpaths are now OUT OF DATE - regenerate with cam_generate. A WCS bound via 'wcs' is a LIVE reference to the selected geometry or Joint Origin (bound_entities), so the WCS ...
@@ -591,7 +587,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ', which is not registered - a generation is dropped from the registry once it completes. Active handles:
 - . Omit 'handle' to read the ACTIVE document's live state, or pass 'target' (a setup/operation name) to read an inline generation by name.
 - cam_get(include=['operations']) for per-op detail.
-- No operations are still generating in scope.
+- No operation in scope has generating left to do.
 - Still generating in the background - check again later.
 - Generation complete (
 - The per-op tallies could not be read (
@@ -604,8 +600,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `cam_post`
 - Post did not report clean success - review before running.
 - ' posted AS-IS from its stored configuration -
-- file(s), nothing reconfigured. Read 'readiness' for the job's health.
-- file(s). Read 'readiness' for the job's health.
+- file(s), nothing reconfigured. 'readiness' carries its health.
+- file(s). 'readiness' carries its health.
 - Provide 'program_name' - the NC Program name or number (some posts require a number).
 - Provide 'output_folder' - the directory where the NC file(s) will be written.
 - Pass 'scope' or 'setups', not both - 'scope' names ONE setup/folder/operation and 'setups' names the several setups one program holds.
@@ -632,12 +628,14 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' was not allowed (e.g. moving an operation out of its setup, or across incompatible parents (setup or folder)).
 - Fusion allowed the move, but the order could NOT be read back here: '
 - '), which a parent holds in separate collections, so the two share no ordered list. Read the sequence with cam_get(include=['operations']).
+- Fusion allowed the move, but the order could NOT be read back here:
 - ' collection to re-read. Read the sequence with cam_get(include=['operations']).
-- ' was allowed but did not land: re-reading the collection under '
+- ' was allowed but did not land: re-reading the collection under
 - , where the requested move leaves
-- CAM item reordered - 'order' is the sibling collection re-read off the parent after the move, matching the requested placement, with the moved item at 'entity_index'.
-- Fusion allowed the move and the collection under '
-- ' re-reads as the order the requested placement leaves, but WHICH item landed was not measured: that collection carries
+- CAM item reordered - 'order' is the sibling collection under
+- , re-read after the move and matching the requested placement, with the moved item at 'entity_index'.
+- Fusion allowed the move and the collection under
+- re-reads as the order the requested placement leaves, but WHICH item landed was not measured: that collection carries
 - ', which the row of names cannot tell apart. Read the sequence with cam_get(include=['operations']).
 
 ### `cam_save_template`
@@ -906,11 +904,15 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide 'parameter' - the name of a model parameter to vary across configurations.
 - '. (Add/expose it first; a parameter column only matters if the parameter drives geometry.)
 - Values reference configurations that don't exist:
+- parameter: its column would be created and every cell would keep the parameter's own value, so no row could vary. Vary a length/number parameter in the table, and relabel per configuration with par...
 - addParameterColumn for '
 - Parameter column added and per-configuration expressions set. Switch with design_configure(action='activate', name=...) - the geometry rebuilds only if this parameter drives a dimension.
 - No cell for configuration '
+- ' is a Text parameter, no cell takes a value on this build - relabel per configuration with param_set after activating the row.
+- The column has been rolled back.
+- The column could NOT be auto-removed and is still on the table - delete it before retrying.
 - after the set - the expression '
-- ' did not verifiably take.
+- ' did not verifiably take
 - Provide 'feature' - the timeline feature name to suppress per configuration.
 - suppressed_in names unknown configurations:
 - addSuppressColumn for '
@@ -2614,10 +2616,13 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 
 ### `sketch_add_geometry`
 - Draw more with sketch_add_geometry, or view_screenshot to view the sketch.
+- Rectangle drawn. NO horizontal/vertical constraint took, so its sides are held only by their coordinates - a later edit can skew it. Add them with sketch_constrain (horizontal / vertical) before di...
+- horizontal/vertical constraint(s) applied to its sides, as the UI does - the constructor itself lands none. Its corners already share points; what remains free is position and size, so dimension th...
 - Control-point spline drawn - constrain or dimension it as 'cv_spline:<index>' (sketch_get lists the index).
 - Arc slot drawn out of SketchArcs - 'curves_added' counts them and each is addressable as 'arc:<index>' for sketch_dimension / sketch_constrain (sketch_get(include_entities=true) lists the indexes).
 - Slot drawn from 2 solid SketchLines, 1 CONSTRUCTION SketchLine (the centre-to-centre line) and 2 SketchArc end caps - 5 curves, of which 'curves_added' counts the 3 lines. Address any of them as 'l...
 - Slot drawn - 'curves_added' counts its SketchLines: three, four when a length or angle is passed. Its two end caps are SketchArcs. Address either as 'line:<index>' / 'arc:<index>' for sketch_dimens...
+- Closed path drawn and a profile forms. The seam is WELDED - the closing segment ends on the first segment's start point, so the loop shares that point instead of carrying two at the same coordinate...
 - '. Valid: mm, cm, in.
 - No active design. Create or open a document first (see doc_new).
 - No sketch to draw on. Create one first with sketch_create.
@@ -2705,8 +2710,9 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - ', which is a construction PLANE name, not a face handle. Pass it as plane='
 
 ### `sketch_delete_entity`
-- | constraint | text (e.g. 'circle:0', 'constraint:2', 'text:0'). sketch_get lists the curve/constraint indexes; a text index is the one sketch_set_text edits by.
+- | constraint | dimension | text (e.g. 'circle:0', 'dimension:2'). sketch_get(include_entities=true) lists the curve/constraint/dimension indexes; a text index is the one sketch_set_text edits by.
 - Provide 'target' as '<type>:<index>' - type =
+- | constraint | dimension | text.
 - Unknown target type '
 - . Indexes are 0-based in creation order; list them with sketch_get.
 - ). The entity may be consumed by a dimension/constraint - remove those first.
@@ -2715,6 +2721,9 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - did not take (constraint count
 - ). It may be a fixed/driving constraint the solver won't remove.
 - Constraint removed. Re-constrain if needed (see sketch_constrain).
+- did not take (dimension count
+- ). The dimension is still in the sketch.
+- Dimension removed. Re-read sketch_get(include_entities=true) for the sketch's remaining dimensions and its constrained state.
 - did not take (sketch text count
 - ). The text is still in the sketch.
 - Sketch text removed. Create a replacement with sketch_set_text(create=true).
@@ -2828,6 +2837,8 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - No active design (open a document with sketch text).
 - '. Use mm, cm, or in.
 - No sketch text matched index
+- 'parameter' binds an EXISTING sketch text, so it cannot ride a create. Create the text with its starting string first, then call again with parameter='
+- ' are two different string sources for one text. Pass 'parameter' alone to bind it, or 'text' alone to store a literal.
 - 'height' must be > 0.
 - No sketch text found in a sketch named '
 - . (Use sketch_get to list sketches; the text must live in a sketch with that exact name.)
@@ -2838,6 +2849,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Its string WAS set to '
 - ' before the resize was checked, so that one text carries the new string at its old size.
 - set the font of sketch text in '
+- ' before the resize was checked.
 - Sketch text created (verified: sketchTexts
 - ). (x,y) are SKETCH-plane coordinates - on an on-face sketch use the 'frame' from sketch_create to keep the text on the face. Extrude/emboss the sketch to engrave it, or edit it later with sketch_s...
 - Sketch text created on '
@@ -3083,28 +3095,29 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 
 ### `view_screenshot`
 - No active viewport (is a document open?).
-- fit_to: no occurrence matched '
-- '. Use design_get(include=['tree']) to list.
+- fit_to: nothing matched '
+- '. Use design_get(include=['tree']) for occurrences, find_geometry for a body.
 
 ### `view_screenshot_multi`
 - No active viewport (is a document open?).
 - No views were captured.
 
 ### `view_section`
+- Use view_screenshot to study the interior; flip=true cuts the other half; view_section(clear) removes the cut.
+- and the camera is aimed at the cut face.
+- ; the camera was left where it was (auto_view=false).
 - No active design. Open a document with design geometry first.
 - All section analyses removed - the model is no longer cut.
 - section analysis(es), but the remaining count could not be read back - view_section(list) confirms whether the model is still cut.
 - '. Use mm, cm, or in.
 - Section creation returned nothing (
-- Use view_screenshot to study the interior; flip=true cuts the other half; view_section(clear) removes the cut.
-- and the camera is aimed at the cut face.
-- ; the camera was left where it was (auto_view=false).
 - Could not read how many section analyses exist - nothing was removed. Retry, or delete them from the browser's Analysis folder.
 - section analysis(es) (
 - ) - the model is STILL cut by those.
 - were removed. Delete the rest from the browser's Analysis folder.
 - section analysis(es) but sectionAnalyses still reads
 - - the model may still be cut.
+- ' has no readable bounding box, so there is no centre to cut through and nothing was cut. Pass 'plane' with an explicit 'offset' to place the cut yourself.
 - Provide 'plane' (an origin alias xy/xz/yz, a construction-plane name, or a planar-face handle from find_geometry) or 'through' (an occurrence).
 - Failed to create section (
 

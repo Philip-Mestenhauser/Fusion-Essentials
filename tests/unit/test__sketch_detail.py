@@ -135,14 +135,22 @@ class FakeFixedSpline:
         self.entityToken = tok or f"tok-fx-{id(self)}"
 
 
-def _sketch_text(expression="'LABEL'", height_cm=0.5, font="Arial", bbox=None, readable=True):
+def _sketch_text(expression="'LABEL'", height_cm=0.5, font="Arial", bbox=None, readable=True,
+                 text_value=None):
     """A SketchText carrying only members api_surface lists for fusion.SketchText: textParameter
     (the live handle on the string - .text is retired), heightParameter (.height is retired),
     fontName and boundingBox. readable=False models a text no field answers for - every attribute
-    is simply absent, so each read raises the way an invalid proxy's does."""
+    is simply absent, so each read raises the way an invalid proxy's does.
+
+    MEASURED: textParameter.expression holds a literal QUOTED ("'PLAIN'") and a bound text's
+    BINDING bare ('d7'), while textParameter.textValue renders both ('PLAIN' / 'SOURCEWORD') -
+    so text_value defaults to the unquoted expression and is passed explicitly for a bound text."""
     if not readable:
         return type("T", (), {})()
-    members = {"textParameter": type("Par", (), {"expression": expression})(),
+    if text_value is None:
+        text_value = expression[1:-1] if expression[:1] in ("'", '"') else expression
+    members = {"textParameter": type("Par", (), {"expression": expression,
+                                                 "textValue": text_value})(),
                "heightParameter": type("Par", (), {"value": height_cm})(),
                "fontName": font}
     if bbox is not None:
@@ -776,15 +784,24 @@ class TestUnitsScaling:
         assert mm["profiles"][0]["handle"] == inch["profiles"][0]["handle"]
 
     def test_dimension_value_scaled_to_display_units(self):
-        # 1.4 cm raw (matching a '14 mm' expression) reads back as value 14.0 under mm default.
+        # 1.4 cm raw (matching a '14 mm' expression) reads back as value 14.0 under mm default,
+        # and value_units names the frame that 14.0 is in.
         s = FakeSketch("D", dimensions=[FakeDim("d1", 1.4, "14 mm")])
         _install(s)
         out = _payload(sd.handler(sketch_name="D", include_entities=True))
         assert out["dimensions"][0]["value"] == 14.0
+        assert out["dimensions"][0]["value_units"] == "mm"
 
-    def test_angular_dimension_value_not_length_scaled(self):
-        # an angular dimension's value is RADIANS, not a length - the mm factor must not touch it,
-        # or a 90-degree angle would misreport as if it were a 15.7 mm length.
+    def test_length_dimension_value_units_follow_the_calls_units(self):
+        s = FakeSketch("D", dimensions=[FakeDim("d1", 2.54, "1 in")])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="D", include_entities=True, units="in"))
+        assert out["dimensions"][0]["value"] == 1.0
+        assert out["dimensions"][0]["value_units"] == "in"
+
+    def test_angular_dimension_value_is_degrees_not_radians(self):
+        # the parameter reads DATABASE units (radians), so a row publishing 1.5708 beside a "90 deg"
+        # expression is the internal figure - it must arrive as degrees, labelled 'deg'.
         class SketchAngularDimension:
             def __init__(self, value):
                 self.parameter = type("Par", (), {"name": "ang", "value": value,
@@ -793,7 +810,21 @@ class TestUnitsScaling:
         s = FakeSketch("D", dimensions=[SketchAngularDimension(1.5708)])
         _install(s)
         out = _payload(sd.handler(sketch_name="D", include_entities=True))
-        assert out["dimensions"][0]["value"] == 1.5708
+        assert out["dimensions"][0]["value"] == 90.0002
+        assert out["dimensions"][0]["value_units"] == "deg"
+
+    def test_an_angle_is_never_scaled_by_the_calls_length_units(self):
+        # the mm/in factor must not touch an angle: under units='in' a 90 deg angle still reads 90.
+        class SketchAngularDimension:
+            def __init__(self, value):
+                self.parameter = type("Par", (), {"name": "ang", "value": value,
+                                                   "expression": "90 deg"})()
+                self.isDriving = True
+        s = FakeSketch("D", dimensions=[SketchAngularDimension(1.5708)])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="D", include_entities=True, units="in"))
+        assert out["dimensions"][0]["value"] == 90.0002
+        assert out["dimensions"][0]["value_units"] == "deg"
 
 
 # ── the three spline collections: entities, token map, counts ───────────────────────────────────
@@ -1389,6 +1420,25 @@ class TestSketchTextRecords:
         texts = [e for e in out["entities"] if e["type"] == "text"]
         assert [t["id"] for t in texts] == ["text:0", "text:1"]
         assert [t["text"] for t in texts] == ["FIRST", "SECOND"]
+
+    def test_a_parameter_bound_text_publishes_the_RENDERED_string(self):
+        # MEASURED: a bound text's expression is the binding ('d7') and textValue the render
+        # ('SOURCEWORD'). Publishing the expression as 'text' ships the parameter NAME as if it
+        # were the label - the glyphs on screen say SOURCEWORD.
+        _install(FakeSketch("S", texts=[_sketch_text("d7", text_value="SOURCEWORD")]))
+        out = _payload(sd.handler(sketch_name="S", include_entities=True))
+        rec = next(e for e in out["entities"] if e["type"] == "text")
+        assert rec["text"] == "SOURCEWORD"
+        assert rec["text_expression"] == "d7"
+
+    def test_a_literal_text_carries_no_expression_key(self):
+        # the boundary: expression and render AGREE for a literal, so there is no second thing to
+        # say and the key stays off the record.
+        _install(FakeSketch("S", texts=[_sketch_text("'PLAIN'")]))
+        out = _payload(sd.handler(sketch_name="S", include_entities=True))
+        rec = next(e for e in out["entities"] if e["type"] == "text")
+        assert rec["text"] == "PLAIN"
+        assert "text_expression" not in rec
 
     def test_string_is_unquoted_from_the_text_parameter(self):
         # the live handle is textParameter.expression, which holds the string QUOTED; SketchText.text

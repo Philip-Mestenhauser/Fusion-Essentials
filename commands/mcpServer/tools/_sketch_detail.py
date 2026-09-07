@@ -257,10 +257,17 @@ def _texts(sketch, f):
     texts = safe(lambda: sketch.sketchTexts)
     for i in range(safe(lambda: texts.count, 0) if texts else 0):
         st = safe(lambda i=i: texts.item(i))
+        # textParameter.expression is the string QUOTED for a literal and the BINDING for a bound
+        # text ('d7'); textValue is what Fusion renders either way (measured). A bound text is the
+        # pair disagreeing, so the expression is published only where it says something else.
+        expr = safe(lambda st=st: st.textParameter.expression)
+        rendered = safe(lambda st=st: st.textParameter.textValue)
         rec = {"id": f"text:{i}", "type": "text", "construction": False,
-               "text": _unquote(safe(lambda st=st: st.textParameter.expression)),
+               "text": rendered if rendered is not None else _unquote(expr),
                "height": _round(safe(lambda st=st: st.heightParameter.value), f),
                "font": _font_read_back(st)}
+        if expr is not None and rendered is not None and _unquote(expr) != rendered:
+            rec["text_expression"] = expr
         bb = safe(lambda st=st: st.boundingBox)
         if bb is not None:
             rec["bounding_box"] = {"min": _xy(safe(lambda: bb.minPoint), f),
@@ -455,10 +462,18 @@ def _profiles(sketch, f):
 _XRAY_CAP = 200   # a dense sketch can carry hundreds of entities/constraints/dimensions; bound each
 
 
-def _entity_xray(sketch, f, max_results=_XRAY_CAP):
+def _dimension_value(raw, is_angle, f):
+    """A dimension's value in the unit its row publishes: DEGREES for an angular dimension, whose
+    parameter reads DATABASE units (radians), else the caller's display unit."""
+    if raw is None:
+        return None
+    return _round(math.degrees(raw), 1.0) if is_angle else _round(raw, f)
+
+
+def _entity_xray(sketch, f, unit, max_results=_XRAY_CAP):
     """(entities, constraints, dimensions, construction_count, driving_dim_count, truncated), each
     array independently capped at max_results and the two counts taken over the UNCAPPED walk.
-    f is the cm -> display-unit factor applied to every length value."""
+    f is the cm -> display-unit factor applied to every length value, `unit` its name."""
     tok2id = _build_token_map(sketch)
     entities, construction_count = _entities(sketch, f)
 
@@ -473,11 +488,13 @@ def _entity_xray(sketch, f, max_results=_XRAY_CAP):
         d = sd.item(i)
         par = safe(lambda d=d: d.parameter)
         raw_value = safe(lambda: par.value) if par else None
-        # An ANGULAR dimension's value is radians, not a length, so it passes through unscaled.
+        # An ANGULAR dimension's value is radians, not a length, so it takes its own conversion.
         is_angle = type(d).__name__ == "SketchAngularDimension"
         dimensions.append({
             "name": safe(lambda: par.name) if par else None,
-            "value": _round(raw_value, 1.0 if is_angle else f),
+            "value": _dimension_value(raw_value, is_angle, f),
+            # The frame 'value' is in - never the caller's length unit for an ANGLE.
+            "value_units": "deg" if is_angle else unit,
             "expression": safe(lambda: par.expression) if par else None,
             # driving = constrains geometry; a driven/reference dim just MEASURES (doesn't lock).
             "driving": bool(safe(lambda d=d: d.isDriving, True)),
@@ -901,7 +918,8 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
                        "include_entities=true.")
         return ok(out)
 
-    entities, constraints, dimensions, construction_count, driving_dims, truncated = _entity_xray(sketch, f)
+    entities, constraints, dimensions, construction_count, driving_dims, truncated = _entity_xray(
+        sketch, f, unit)
     note = (lead + "Full X-ray, lengths in 'units'. Entity coordinates are sketch-LOCAL; "
                  + frame_space_note(out.get("frame"))
                  + " On the XZ plane local +Y is world -Z. "

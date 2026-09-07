@@ -318,18 +318,22 @@ def render_catalog(data) -> str:
 def _splice(path, begin, end, block, *, check=False):
     """Replace the region between begin/end markers in `path` with `block`. Returns True if already
     current. With check=True, does not write - just reports whether it would change."""
-    with open(path, encoding="utf-8") as fh:
-        text = fh.read()
+    # The already-current test compares against the file's RAW bytes: read through universal
+    # newlines a CRLF file whose block is current compares equal, returns here, and keeps its CRs
+    # through every regeneration. The splice itself runs on the LF-normalized text.
+    with open(path, encoding="utf-8", newline="") as fh:
+        raw = fh.read()
+    text = raw.replace("\r\n", "\n").replace("\r", "\n")
     if begin not in text or end not in text:
         raise SystemExit(f"{os.path.basename(path)} is missing the markers {begin!r}/{end!r} — add "
                          "them where the generated block should live.")
     pre, rest = text.split(begin, 1)
     _, post = rest.split(end, 1)
     new = pre + block + post
-    if new == text:
+    if new == raw:
         return True
     if not check:
-        with open(path, "w", encoding="utf-8") as fh:
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(new)
     return False
 
@@ -364,7 +368,7 @@ def main():
         print("TOOL_MANIFEST.md, the families census, and the catalog are up to date.")
         return
 
-    with open(MANIFEST_PATH, "w", encoding="utf-8") as fh:
+    with open(MANIFEST_PATH, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(rendered + "\n")
     _splice(CLAUDE_PATH, _FAM_BEGIN, _FAM_END, fam_block)
     _splice(TOOLS_CLAUDE_PATH, _CAT_BEGIN, _CAT_END, cat_block)

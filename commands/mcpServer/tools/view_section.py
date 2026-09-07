@@ -149,6 +149,7 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
     cut_entity = None
     desc = None
     pkey = None   # origin-alias key for auto-view normal; stays None for face/construction handles
+    centered_on = None
     factor = _common.scale(units)
     if factor is None:
         return error(f"Unknown units '{units}'. Use mm, cm, or in.")
@@ -164,14 +165,22 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
         if pkey not in _PLANES:
             return error(f"Unknown plane '{plane}'. Valid: {', '.join(sorted(set(_PLANES)))}.")
         cut_entity = getattr(root, _PLANES[pkey])
-        bb = safe(lambda: occ.boundingBox)
-        if bb:
-            cx = (bb.minPoint.x + bb.maxPoint.x) / 2
-            cy = (bb.minPoint.y + bb.maxPoint.y) / 2
-            cz = (bb.minPoint.z + bb.maxPoint.z) / 2
-            # distance along the plane's normal to reach the occurrence center
-            normal_coord = {"xy": cz, "top": cz, "xz": cy, "front": cy, "yz": cx, "right": cx}[pkey]
-            base_offset_cm += normal_coord
+        # The cut exists to expose the SOLID's interior, so it is centred on the bodies-only
+        # extents; the plain boundingBox counts visible sketches and datums, and one large
+        # construction rectangle beside a small body carries the cut clear of that body.
+        bb, centered_on = _view_common.focus_box(occ)
+        if bb is None:
+            # No box, no centre - cutting anyway puts the plane at the bare origin and reports a
+            # cut 'through' something it never measured. The sibling view_set refuses the same way.
+            return error(f"'{safe(lambda: occ.name) or through}' has no readable bounding box, so "
+                         "there is no centre to cut through and nothing was cut. Pass 'plane' with "
+                         "an explicit 'offset' to place the cut yourself.")
+        cx = (bb.minPoint.x + bb.maxPoint.x) / 2
+        cy = (bb.minPoint.y + bb.maxPoint.y) / 2
+        cz = (bb.minPoint.z + bb.maxPoint.z) / 2
+        # distance along the plane's normal to reach the occurrence center
+        normal_coord = {"xy": cz, "top": cz, "xz": cy, "front": cy, "yz": cx, "right": cx}[pkey]
+        base_offset_cm += normal_coord
         desc = f"through '{safe(lambda: occ.name)}' on {pkey} plane"
     else:
         if not (plane or "").strip():
@@ -212,7 +221,7 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
             safe(lambda: _aim_at_cut(normal, bool(flip)))
             aimed = True
 
-    return ok({
+    out = {
         "action": "cut",
         "section": safe(lambda: sec.name),
         "where": desc,
@@ -224,7 +233,10 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
                 "; the camera was left where it was (auto_view=false).") +
             " Use view_screenshot to study the interior; flip=true cuts the other half; "
             "view_section(clear) removes the cut."),
-    })
+    }
+    if centered_on:
+        out["centered_on"] = centered_on
+    return ok(out)
 
 
 TOOL_DESCRIPTION = (

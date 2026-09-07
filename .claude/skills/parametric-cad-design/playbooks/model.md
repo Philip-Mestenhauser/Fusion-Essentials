@@ -57,11 +57,12 @@ Use when one part in several sizes.
 1. `param_add` - the driving sizes as named parameters (length_handle, diameter_thread), the derived ones as ratios (chamfer_size = weight_width / 8). Read back: each expression evaluates.
 2. `sketch_dimension` - write every profile dimension as a parameter expression, halves as diameter / 2. Read back: expressions, not literals.
 3. `model_revolve` - revolve the profile, or extrude with a profile offset for a coating. Read back: is_solid true.
-4. `model_emboss` - emboss a sketch text whose string is a text parameter. Read back: the text lands raised or engraved by the signed depth.
-5. `doc_save_as` - save the document - a configuration table refuses an unsaved one. Read back: a document id.
-6. `design_configure` - create the table, a column per varying size, a row per variant; a text column takes no per-row value, so relabel by param_set. Read back: configured true, then each column id.
-7. `design_configure` - activate a different row. Read back: the activate reports the row.
-8. `design_get` - read the configurations slice and the timeline. Read back: the row reads active and the timeline is healthy.
+4. `sketch_set_text` - create the label, then bind it with parameter=<the text parameter>. Read back: bound_to naming the parameter.
+5. `model_emboss` - emboss that bound text. Read back: the text lands raised or engraved by the signed depth.
+6. `doc_save_as` - save the document - a configuration table refuses an unsaved one. Read back: a document id.
+7. `design_configure` - create the table, a column per varying size, a row per variant; a text column takes no per-row value, so relabel by param_set. Read back: configured true, then each column id.
+8. `design_configure` - activate a different row. Read back: the activate reports the row.
+9. `design_get` - read the configurations slice and the timeline. Read back: the row reads active and the timeline is healthy.
 
 Bar - measure: param_get shows only named parameters and ratios; design_get reports healthy on each configuration row. Eyes: switching rows changes size and label together with no broken feature.
 Exemplar: Configured Dumbbell (urn:adsk.wipprod:dm.lineage:0Unl7fg2Q2upJxRN-cdSfQ) - 12 parameters, urethane_coating = weight_width / 10, weight_text driving the emboss, 14 configuration rows. Access: Autodesk Design Samples, read only

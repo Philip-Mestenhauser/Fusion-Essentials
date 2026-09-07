@@ -272,7 +272,7 @@ def main():
         print("PERMISSION_POSTURE.md is up to date.")
         return
 
-    with open(POSTURE_PATH, "w", encoding="utf-8") as fh:
+    with open(POSTURE_PATH, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(rendered)
     print(f"Wrote {POSTURE_PATH} ({len(data['tools'])} tools).")
 

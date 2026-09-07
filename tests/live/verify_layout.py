@@ -562,8 +562,8 @@ _PLACE_PAIRS = (("x", "y"), ("x1", "y1"), ("x2", "y2"), ("x3", "y3"), ("cx", "cy
 # instance a whole field away from the original it is meant to sit beside.
 _PLACE_DELTA_TOOLS = ("design_add_instance",)
 
-_PLACE_XYZ = ("nearest_to", "point")        # one [x, y, z], always world
-_PLACE_POINTS = ("points",)                 # a list of [x, y] or [x, y, z], always world
+_PLACE_XYZ = ("nearest_to", "point")        # one [x, y, z]
+_PLACE_POINTS = ("points",)                 # a list of [x, y] or [x, y, z]
 
 # Keys naming the entity a step addresses, most specific first. A step that names one belongs to
 # that entity's chunk wherever it sits in the narrative; only a step naming none inherits the chunk
@@ -659,6 +659,13 @@ def _place_points(args, frame="xy", tool=""):
     which anchors nothing."""
     num, out = _place_num, []
     axes = _PLACE_FRAMES.get(frame or "", (None, None))
+
+    def world(u, v):
+        """(x, y) with None on the axis this frame does not span; None when it spans neither."""
+        pinned = dict(zip(axes, (u, v)))
+        pinned.pop(None, None)
+        return (pinned.get("x"), pinned.get("y")) if pinned else None
+
     pairs = tuple(p for p in _PLACE_PAIRS
                   if not (p == ("x", "y") and tool in _PLACE_DELTA_TOOLS))
     for kx, ky in pairs:
@@ -669,10 +676,9 @@ def _place_points(args, frame="xy", tool=""):
         r = args.get("radius") if (kx, ky) == ("cx", "cy") else None
         r = r if num(r) else 0
         for dx, dy in (((0, 0),) if not r else ((-r, -r), (r, r))):
-            world = dict(zip(axes, (args[kx] + dx, args[ky] + dy)))
-            world.pop(None, None)
-            if world:
-                out.append((world.get("x"), world.get("y")))
+            at = world(args[kx] + dx, args[ky] + dy)
+            if at is not None:
+                out.append(at)
     if args.get("kind") == "plane" and num(args.get("offset")):
         # an origin plane's offset is a world position along its NORMAL: an XZ plane sits at that Y,
         # so a body it splits moves out from under it unless the offset moves too.
@@ -681,16 +687,23 @@ def _place_points(args, frame="xy", tool=""):
             out.append((args["offset"], None))
         elif normal == "y":
             out.append((None, args["offset"]))
+    # A coordinate list is read in the SAME frame as the pair keys: a polyline drawn on an XZ sketch
+    # pins world X and a depth the layout does not span, so reading it as (x, y) records the depth
+    # as a world Y and carries the chunk along an axis it does not live on.
     for key in _PLACE_XYZ:
         v = args.get(key)
         if isinstance(v, (list, tuple)) and len(v) >= 2 and num(v[0]) and num(v[1]):
-            out.append((v[0], v[1]))
+            at = world(v[0], v[1])
+            if at is not None:
+                out.append(at)
     for key in _PLACE_POINTS:
         v = args.get(key)
         if isinstance(v, (list, tuple)):
             for p in v:
                 if isinstance(p, (list, tuple)) and len(p) >= 2 and num(p[0]) and num(p[1]):
-                    out.append((p[0], p[1]))
+                    at = world(p[0], p[1])
+                    if at is not None:
+                        out.append(at)
     return out
 
 
@@ -750,9 +763,9 @@ def _place_walk(steps, home_out=None):
 
 
 def _place_shift(args, dx, dy, frame="xy", tool=""):
-    """args translated by (dx, dy): every pinned position moves, everything else is untouched. The
-    pair keys move by the world delta resolved into 'frame's axes, so an XZ sketch shifts only the
-    coordinate that is a world X and leaves the one that is a world Z alone."""
+    """args translated by (dx, dy): every pinned position moves, everything else is untouched. Pair
+    keys AND coordinate lists move by the world delta resolved into 'frame's axes, so an XZ sketch
+    shifts only the coordinate that is a world X and leaves the one that is a world Z alone."""
     num = _place_num
     delta = {"x": dx, "y": dy, None: 0.0}
     du, dv = (delta[a] for a in _PLACE_FRAMES.get(frame or "", (None, None)))
@@ -760,7 +773,7 @@ def _place_shift(args, dx, dy, frame="xy", tool=""):
     def shift_seq(v):
         if not isinstance(v, (list, tuple)) or len(v) < 2 or not (num(v[0]) and num(v[1])):
             return v
-        return [v[0] + dx, v[1] + dy] + list(v[2:])
+        return [v[0] + du, v[1] + dv] + list(v[2:])
 
     if callable(args):
         return lambda ctx, _f=args: _place_shift(_f(ctx), dx, dy, frame, tool)
@@ -797,15 +810,13 @@ def _place_slots(program):
             args = step[1]
             if chunk is None or not isinstance(args, dict):
                 continue
-            # A sketch on a GLOBAL origin plane is nailed to that plane: an XZ sketch is at y=0 and
-            # cannot be carried in y, so a chunk holding one can only move within the plane it is
-            # drawn on. Rather than translate it into a plane it does not live on - which is how a
-            # pipe cut ends up passing through empty space - such a chunk stays where it was authored.
-            if frame in ("xz", "yz") and any(
-                    _place_num(args.get(kx)) and _place_num(args.get(ky))
-                    for kx, ky in _PLACE_PAIRS):
+            pinned = _place_points(args, frame, step[0])
+            # A sketch on a GLOBAL origin plane is nailed to that plane: an XZ sketch is at y=0, so
+            # a chunk holding one stays where it was authored rather than being carried in y.
+            # Any pinned position locks it, a coordinate list as much as a pair key.
+            if frame in ("xz", "yz") and pinned:
                 locked.add(chunk)
-            for x, y in _place_points(args, frame, step[0]):
+            for x, y in pinned:
                 if chunk not in box:
                     box[chunk] = [None, None, None, None]
                     order.append(chunk)

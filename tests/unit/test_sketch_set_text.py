@@ -191,6 +191,16 @@ def _install(comps, design_type=1):
     return install(st, FakeDesign(comps, design_type))
 
 
+def _install_with_parameters(comps, names, unit="Text"):
+    """A design whose allParameters answers `names` - the user parameters a text can bind to.
+    MEASURED: a text parameter's `unit` reads 'Text' where a length parameter's reads 'mm'."""
+    design = FakeDesign(comps)
+    design.allParameters = _NamedCollection(
+        [types.SimpleNamespace(name=n, unit=unit) for n in names])
+    install(st, design)
+    return design
+
+
 def _payload(res):
     assert res["isError"] is False, res
     return json.loads(res["content"][0]["text"])
@@ -1772,3 +1782,81 @@ class TestNamedSketchMiss:
     def test_the_miss_still_lists_what_is_there(self, wired_create):
         res = st.handler(text="LBL", create=True, sketch_name="Ghost")
         assert "Available: Plate" in res["message"]
+
+
+class TestParameterBinding:
+    """'parameter' makes the string FOLLOW a user parameter: the text parameter's expression holds
+    the BARE parameter name, where a literal is the same string QUOTED. param_set on that parameter
+    then restrings every text bound to it."""
+
+    def _one_text(self, expr="'10'"):
+        text = FakeText(expr)
+        _install_with_parameters([FakeComp("Root", [FakeSketch("Plate", [text])])],
+                                 ["weight_text"])
+        return text
+
+    def test_the_expression_becomes_the_bare_parameter_name(self):
+        text = self._one_text()
+        out = _payload(st.handler(sketch_name="Plate", parameter="weight_text"))
+        assert text.textParameter.expression == "weight_text"       # bare, not "'weight_text'"
+        assert out["bound_to"] == "weight_text"
+        assert out["changed"][0]["expression"] == "weight_text"
+        assert out["changed"][0]["before"] == "10"
+        assert "text" not in out
+
+    def test_a_binding_that_did_not_take_is_an_error(self):
+        class _StuckParam:
+            """A text parameter that accepts the assignment and keeps its own expression - the
+            accept-and-ignore only a read-back catches."""
+            def __init__(self, expr):
+                self._expr = expr
+
+            @property
+            def expression(self):
+                return self._expr
+
+            @expression.setter
+            def expression(self, value):
+                pass
+
+        text = self._one_text()
+        text.textParameter = _StuckParam("'10'")
+        res = st.handler(sketch_name="Plate", parameter="weight_text")
+        assert res["isError"] is True and "did not take" in res["message"]
+
+    def test_the_lookup_runs_through_the_shared_parameter_resolver(self, monkeypatch):
+        # The bite for the ONE-home claim: stub the shared symbol alone. A re-rolled local
+        # allParameters.itemByName would ignore this and still find the parameter.
+        text = self._one_text()
+        monkeypatch.setattr(st._param_common, "_find_parameter", lambda design, name: None)
+        res = st.handler(sketch_name="Plate", parameter="weight_text")
+        assert res["isError"] is True and "No parameter named 'weight_text'" in res["message"]
+        assert text.textParameter.expression == "'10'"
+
+    def test_an_unknown_parameter_is_refused_before_any_text_is_touched(self):
+        text = self._one_text()
+        res = st.handler(sketch_name="Plate", parameter="nope")
+        assert res["isError"] is True and "No parameter named 'nope'" in res["message"]
+        assert text.textParameter.expression == "'10'"
+
+    def test_a_length_parameter_is_refused_before_the_text_is_touched(self):
+        # MEASURED LIVE: Fusion ACCEPTS a length parameter in a text parameter's expression and
+        # renders its value as the label, so only the unit read refuses it - without this the tool
+        # reports set:true on a label that now follows a dimension.
+        text = FakeText("'10'")
+        _install_with_parameters([FakeComp("Root", [FakeSketch("Plate", [text])])],
+                                 ["WallT"], unit="mm")
+        res = st.handler(sketch_name="Plate", parameter="WallT")
+        assert res["isError"] is True
+        assert "'WallT' is a mm parameter" in res["message"]
+        assert text.textParameter.expression == "'10'"
+
+    def test_text_and_parameter_together_are_refused(self):
+        self._one_text()
+        res = st.handler(text="25", sketch_name="Plate", parameter="weight_text")
+        assert res["isError"] is True and "two different string sources" in res["message"]
+
+    def test_parameter_on_a_create_names_the_two_call_route(self):
+        self._one_text()
+        res = st.handler(text="LBL", create=True, sketch_name="Plate", parameter="weight_text")
+        assert res["isError"] is True and "cannot ride a create" in res["message"]

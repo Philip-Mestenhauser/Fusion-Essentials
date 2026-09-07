@@ -901,6 +901,68 @@ class TestReadStrategies:
 # So the guard replaces a silent failure, and both wire strings say only that.
 
 
+class TestNamesThatAreNotOperations:
+    """MEASURED: hole_recognition and folder read isGenerationAllowed TRUE and operations.add over
+    either answers with a name while the setup's operation count does not move. That COUNT is what
+    refuses - the table only names what does the job instead, so a build where one of them starts
+    landing creates it rather than meeting a refusal that outlived its measurement."""
+
+    def _empty_add(self, monkeypatch, strategy):
+        cam = _install(monkeypatch, strategies=("face", strategy))
+        _with_operations(cam, _DeafOperations)
+        return cco.handler(setup="Setup1", strategy=strategy,
+                           tool_library_url="u", tool_index=0, generate=False)
+
+    def test_hole_recognition_points_at_the_drilling_cycle_and_its_selection(self, monkeypatch):
+        res = self._empty_add(monkeypatch, "hole_recognition")
+        assert res["isError"] is True and "did not land" in res["message"]
+        assert "'hole_recognition' is not an operation" in res["message"]
+        assert "cam_select_geometry(selection='holes')" in res["message"]
+
+    def test_folder_points_at_the_tool_that_makes_one(self, monkeypatch):
+        res = self._empty_add(monkeypatch, "folder")
+        assert res["isError"] is True and "cam_edit_folders" in res["message"]
+
+    def test_a_real_strategy_that_does_not_land_gets_no_category_clause(self, monkeypatch):
+        # the boundary: a 'face' that failed to land is a FAULT, not a category error, and telling
+        # its caller to reach for another tool would send it away from a real bug.
+        res = self._empty_add(monkeypatch, "face")
+        assert res["isError"] is True and "did not land" in res["message"]
+        assert "is not an operation" not in res["message"]
+
+
+class TestDrillingAxisNote:
+    """MEASURED on a milling setup whose Z is the world Z, drilling a hole bored along world X: the
+    generate errored 'Cylindrical face not in tool orientation!' and binding the setup's Z to that
+    hole's own face cleared it. The create is where an agent can still turn the setup."""
+
+    def _drill_setup(self, monkeypatch):
+        return _install(monkeypatch, strategies=(
+            _Strategy("drill", allowed=True, isDrillingStrategy=True, isMillingStrategy=True),
+            _Strategy("face", allowed=True, is2DStrategy=True, isMillingStrategy=True)))
+
+    def test_a_drilling_create_names_the_setup_z_rule_and_the_remedy(self, monkeypatch):
+        self._drill_setup(monkeypatch)
+        out = _payload(cco.handler(setup="Setup1", strategy="drill",
+                                   tool_library_url="u", tool_index=0))
+        assert "cuts along the SETUP's Z" in out["note"]
+        assert "Cylindrical face not in tool orientation!" in out["note"]   # the observed text
+        assert "cam_edit_setup(wcs={'z_axis'" in out["note"]
+
+    def test_a_non_drilling_create_carries_none_of_it(self, monkeypatch):
+        self._drill_setup(monkeypatch)
+        out = _payload(cco.handler(setup="Setup1", strategy="face",
+                                   tool_library_url="u", tool_index=0))
+        assert "SETUP's Z" not in out["note"]
+
+    def test_the_rule_survives_the_generate_arm_that_rewrites_the_note(self, monkeypatch):
+        # generate=true REPLACES the note; the axis rule is what the cycle is aimed by either way.
+        self._drill_setup(monkeypatch)
+        out = _payload(cco.handler(setup="Setup1", strategy="drill", generate=True,
+                                   tool_library_url="u", tool_index=0))
+        assert "generation started" in out["note"] and "cuts along the SETUP's Z" in out["note"]
+
+
 class TestStrategyEntitlement:
     def test_a_generation_blocked_strategy_is_refused_and_nothing_is_created(self, monkeypatch):
         cam = _blocked_setup(monkeypatch)

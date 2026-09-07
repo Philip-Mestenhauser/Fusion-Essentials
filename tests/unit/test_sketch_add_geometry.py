@@ -819,10 +819,10 @@ class TestParsePoints:
 
 class TestClosedPathDelegation:
 
-    """closed_path DELEGATES to the repeated-first-point polyline shape: it appends the first point
-    and draws an open chain, adding NO explicit closing coincident constraint. That constraint is the
-    one the sketch solver rejects on many outlines (VCS_SKETCH_SOLVING_FAILED), leaving a partial
-    chain behind - the loop closes geometrically, so the solver-rejecting path is never taken."""
+    """closed_path DELEGATES to the repeated-first-point polyline shape and WELDS the seam: the
+    closing segment ends ON the first segment's start point, so the loop shares that point and
+    needs no closing constraint. MEASURED live: a welded 4-point loop carries 4 distinct endpoints
+    where a repeated coordinate carries 5, and a profile forms either way."""
 
     def test_closed_path_adds_no_closing_coincident(self, monkeypatch):
         s = FakeSketch(); _install_draw(monkeypatch, s)
@@ -839,6 +839,28 @@ class TestClosedPathDelegation:
         out = _payload(sk.handler(kind="closed_path", points=[[0, 0], [1, 0], [1, 1]]))
         assert "(closed)" in out["drawn"]
 
+    def test_the_closing_segment_ends_ON_the_first_segments_start_point(self, monkeypatch):
+        # THE WELD: the last addByTwoPoints must be handed the first line's OWN start point, not a
+        # fresh coordinate at the same place - that duplicate point is the seam defect.
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        _payload(sk.handler(kind="closed_path", points=[[0, 0], [1, 0], [1, 1]]))
+        drawn = s.sketchLines._items
+        assert len(drawn) == 3
+        assert drawn[-1].endSketchPoint is drawn[0].startSketchPoint
+
+    def test_a_plain_polyline_leaves_its_ends_apart(self, monkeypatch):
+        # the boundary the weld must not cross: polyline is an OPEN chain, so its last segment
+        # ends on its own point, never on the first segment's.
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        _payload(sk.handler(kind="polyline", points=[[0, 0], [1, 0], [1, 1], [0, 0]]))
+        drawn = s.sketchLines._items
+        assert drawn[-1].endSketchPoint is not drawn[0].startSketchPoint
+
+    def test_the_note_says_the_seam_is_welded(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        out = _payload(sk.handler(kind="closed_path", points=[[0, 0], [1, 0], [1, 1]]))
+        assert "WELDED" in out["note"] and "no closing coincident" in out["note"]
+
     def test_closed_path_repeats_first_point_for_the_closing_segment(self, monkeypatch):
         # N points -> N segments (the appended first point closes the loop), matching the proven
         # polyline-with-repeated-point shape.
@@ -846,6 +868,51 @@ class TestClosedPathDelegation:
         _payload(sk.handler(kind="closed_path",
                                                 points=[[0, 0], [2, 0], [2, 2], [0, 2]]))
         assert s.sketchLines.count == 4      # 4 points + repeated first = 5 pts -> 4 segments
+
+
+class TestRectangleConstraints:
+
+    """MEASURED live: addTwoPointRectangle and addCenterPointRectangle each land four lines and
+    ZERO constraints, with or without deferred compute, while the UI's rectangle carries
+    horizontal/vertical on its sides. The tool applies them and publishes the count that took."""
+
+    def test_a_two_point_rectangle_gets_four_axis_constraints(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        out = _payload(sk.handler(kind="rectangle", x1=0, y1=0, x2=40, y2=30))
+        assert out["constraints_added"] == 4
+        kinds = sorted(k for k, _ln in s.geometricConstraints.axis)
+        assert kinds == ["horizontal", "horizontal", "vertical", "vertical"]
+
+    def test_a_center_rectangle_gets_them_too(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        out = _payload(sk.handler(kind="center_rectangle", cx=0, cy=0, x2=20, y2=15))
+        assert out["constraints_added"] == 4
+        assert len(s.geometricConstraints.axis) == 4
+
+    def test_the_note_names_the_count_that_took(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        out = _payload(sk.handler(kind="rectangle", x1=0, y1=0, x2=40, y2=30))
+        assert "4 horizontal/vertical constraint(s)" in out["note"]
+
+    def test_a_sketch_refusing_them_says_so_instead_of_claiming_them(self, monkeypatch):
+        # the constraints are a best-effort addition on top of a SUCCESSFUL draw: when none takes,
+        # the rectangle still lands and the note must not claim a constraint that is not there.
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+
+        def _refuse(_line):
+            raise RuntimeError("3 : constraint refused")
+        s.geometricConstraints.addHorizontal = _refuse
+        s.geometricConstraints.addVertical = _refuse
+        out = _payload(sk.handler(kind="rectangle", x1=0, y1=0, x2=40, y2=30))
+        assert out["constraints_added"] == 0
+        assert "NO horizontal/vertical constraint took" in out["note"]
+        assert out["curves_added"] == 4          # the draw itself still succeeded
+
+    def test_a_non_rectangle_kind_gets_no_axis_constraints(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        out = _payload(sk.handler(kind="line", x1=0, y1=0, x2=10, y2=0))
+        assert "constraints_added" not in out
+        assert s.geometricConstraints.axis == []
 
 
 class TestMarkConstructionHonesty:

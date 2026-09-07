@@ -26,9 +26,60 @@ app = adsk.core.Application.get()
 _LOFT_PROFILES = _inputs.ProfileRefList("profiles", required=True, scope_input="component",
     description=">=2 profiles.")
 _LOFT_RAILS = _inputs.GeometryHandleList("rails", require="any", required=False,
-    description="Guide curves; not with 'centerline'.")
+    description="Guide curves - body-edge handles, or '<sketch>/<type>:<index>' sketch curves. "
+                "Not with 'centerline'.")
 _LOFT_CENTERLINE = _inputs.GeometryHandle("centerline", require="any", required=False,
-    description="Not with 'rails'.")
+    description="A body-edge handle or '<sketch>/<type>:<index>' sketch curve. Not with 'rails'.")
+
+# LoftCenterLineOrRails.addRail takes a SketchCurve (measured: addRail(SketchArc) returns a
+# LoftCenterLineOrRail), but find_geometry mints handles for BRep faces/edges/vertices only - so a
+# spine drawn before any body exists needs this second spelling, '<sketch>/<type>:<index>'.
+_SKETCH_CURVE_SEP = "/"
+
+
+def _sketch_curve_ref(raw):
+    """The '<sketch>/<type>:<index>' parts of a sketch-curve ref, or None when it is not one."""
+    if not isinstance(raw, str) or _SKETCH_CURVE_SEP not in raw or _inputs.is_handle(raw):
+        return None
+    name, _, ref = raw.strip().rpartition(_SKETCH_CURVE_SEP)
+    kind = ref.rpartition(":")[0].strip().lower()
+    return (name.strip(), ref.strip()) if name.strip() and kind in _common.ENTITY_REF_KINDS else None
+
+
+def _resolve_sketch_curve(design, raw, label):
+    """(SketchCurve, None) for a '<sketch>/<type>:<index>' ref, or (None, error)."""
+    name, ref = _sketch_curve_ref(raw)
+    sketch, ambiguous = _common.find_sketch(
+        design, name, remedy="Name the component that owns it in 'component'.")
+    if ambiguous:
+        return None, f"{label} '{raw}': {ambiguous}"
+    if sketch is None:
+        return None, (f"{label} '{raw}' names no sketch '{name}'. Available: "
+                      + (", ".join(n for n in _common.all_sketch_names(design) if n) or "(none)"))
+    curve = _common.resolve_entity_ref(sketch, ref)
+    if curve is None:
+        return None, (f"{label} '{raw}': sketch '{name}' has no '{ref}'. "
+                      "sketch_get(include_entities=true) lists its entity ids.")
+    return curve, None
+
+
+def _resolve_guides(design, raw, kind, label):
+    """(entities, error) for rails/centerline: each item is a find_geometry handle OR a sketch-curve
+    ref, resolved item by item so the two spellings can be mixed in one call."""
+    items = raw if isinstance(raw, (list, tuple)) else [raw]
+    if any(_sketch_curve_ref(i) for i in items):
+        out = []
+        for i in items:
+            if _sketch_curve_ref(i):
+                ent, err = _resolve_sketch_curve(design, i, label)
+            else:
+                ent, err = kind.resolve(i) if not isinstance(kind, _inputs.GeometryHandleList) \
+                    else _inputs.GeometryHandle.resolve(kind, i)
+            if err:
+                return None, err
+            out.append(ent)
+        return out, None
+    return kind.resolve(raw)
 
 
 def _cut_check_bodies(comp):
@@ -63,14 +114,16 @@ def handler(profiles=None, rails=None, centerline="", operation="new",
 
     rail_ents = []
     if has_rails:
-        rail_ents, rerr = _LOFT_RAILS.resolve(rails)
+        rail_ents, rerr = _resolve_guides(design, rails, _LOFT_RAILS, "rails")
         if rerr:
             return error(rerr)
     center_ent = None
     if has_centerline:
-        center_ent, cerr = _LOFT_CENTERLINE.resolve(centerline)
+        center_ent, cerr = _resolve_guides(design, centerline, _LOFT_CENTERLINE, "centerline")
         if cerr:
             return error(cerr)
+        if isinstance(center_ent, list):
+            center_ent = center_ent[0] if center_ent else None
 
     # Host the loft on the profiles' OWNING component: handing another component's native profile to
     # features.createInput raises 'InternalValidationError : bSet', so the feature - and its body

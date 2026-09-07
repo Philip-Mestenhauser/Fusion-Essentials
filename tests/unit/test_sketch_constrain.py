@@ -1205,8 +1205,23 @@ class TestSmooth:
         res = sc.handler(constraint="smooth", sketch_name="S",
                          entity_one="line:0", entity_two="line:1")
         assert res["isError"] is True
-        assert "'smooth' takes two curves, at least one of them a spline." in res["message"]
+        assert "'smooth' takes two curves, at least one of them a spline" in res["message"]
         assert s.geometricConstraints.calls == []
+
+    def test_the_refusal_names_the_coincidence_the_constraint_needs(self, install):
+        # the operand-kind rule alone asserts a precondition that HELD in the measured failure:
+        # both were curves and one was a spline, and what was missing was the shared coincident
+        # endpoint an earlier smooth had moved apart. The remedy has to name it.
+        s = _full_sketch(); install(s)
+
+        def _raise(_a, _b):
+            raise RuntimeError("3 : Invalid argument for constraint")
+        s.geometricConstraints.addSmooth = _raise
+        res = sc.handler(constraint="smooth", sketch_name="S",
+                         entity_one="spline:0", entity_two="line:0")
+        assert res["isError"] is True
+        assert "COINCIDENT" in res["message"]
+        assert "still coincident" in res["message"]
 
     def test_a_spline_and_a_line_apply(self, install):
         s = _full_sketch(); install(s)

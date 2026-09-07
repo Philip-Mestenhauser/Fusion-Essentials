@@ -454,6 +454,13 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
     # world with its ctx, nothing is stamped and the state is not advanced.
     develop = bool(run_id and resume and acts_spec is not None)
     state = load_run_state(run_id) if (run_id and resume) else None
+    # A run id that already holds state is CONTINUED, never restarted over: starting it again
+    # would run the acts with an empty ctx (every saved value gone) and rewrite its progress.
+    if run_id and not resume and load_run_state(run_id) is not None:
+        print("run refused: {0!r} already holds state at {1} - pass --resume to continue it "
+              "(--resume --acts for a development walk), or start a new run id".format(
+                  run_id, run_state_path(run_id)))
+        return 1
     health = health_gate()
     print(f"server ok: {health.get('server')} v{health.get('version', '?')}")
     if run_id and resume:

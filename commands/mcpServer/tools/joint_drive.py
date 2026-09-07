@@ -571,7 +571,8 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
                     result["note"] += (
                         f" NOTE: the commanded angle equals the current pose modulo 360 deg - "
                         f"{acc_txt}, so the physical pose already matches the command and nothing "
-                        "needed to move; revolute values keep their full-turn count.")
+                        "moved. A whole number of turns is an equivalent pose: command an angle "
+                        "that is not a multiple of 360 deg to move the mechanism.")
             else:
                 angle_landed = False
                 mismatched.append(

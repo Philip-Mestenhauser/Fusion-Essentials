@@ -45,6 +45,7 @@ _ACCURACY = {
 _ACCURACY_NAME = {v: k for k, v in _ACCURACY.items()}   # for reporting the accuracy the API used
 
 _MAX_PER_OCCURRENCE_ROWS = 200   # per_body rows: one per occurrence, each crossing the wire
+_MAX_PER_BODY_ROWS = 200         # and one per solid body, which a component can hold several of
 
 
 # ── small geometry helpers ───────────────────────────────────────────────────
@@ -119,6 +120,36 @@ def _subtree_occurrences(entity, limit):
         out.append(o)
         frontier.extend(_common.iter_collection(safe(lambda o=o: o.childOccurrences)))
     return out
+
+
+def _body_rows(entity, occs, acc, inv, limit):
+    """(rows, truncated) - one row per BREP BODY the target holds: its own, then each subtree
+    occurrence's, named by the occurrence it was reached through. A component holding three bodies
+    is three rows here and ONE row in the per-occurrence breakdown, which sums them. The walk is
+    bRepBodies, so an open SURFACE body gets a row carrying is_solid false and a mesh body none."""
+    holders = [(None, entity)] + [(safe(lambda o=o: o.fullPathName) or safe(lambda o=o: o.name), o)
+                                  for o in occs]
+    rows = []
+    for path, holder in holders:
+        for b in _common.iter_collection(safe(lambda h=holder: h.bRepBodies)):
+            if len(rows) >= limit:
+                return rows, True
+            # A body whose properties will not compute still gets its row: the name and lump count
+            # are the census, and a missing mass is published null rather than dropping the body.
+            bpp = safe(lambda b=b: b.getPhysicalProperties(acc))
+            rows.append({
+                "body": safe(lambda b=b: b.name),
+                "occurrence": path,
+                # A surface body has area but no volume or mass, so the flag is what tells an empty
+                # mass row from a solid whose properties would not compute; null = the flag itself
+                # did not read.
+                "is_solid": _common.read_flag(lambda b=b: b.isSolid),
+                "mass_kg": _common.measured(lambda: bpp.mass) if bpp is not None else None,
+                "volume": (_common.measured(lambda: bpp.volume, inv ** 3)
+                           if bpp is not None else None),
+                "lump_count": _geom.lump_count(b),
+            })
+    return rows, False
 
 
 def _joint_origin_axes(frame_name):
@@ -376,6 +407,13 @@ def _physical_properties(design, entity, desc, units, accuracy, per_body):
         result["per_occurrence"] = breakdown
         result["per_occurrence_count"] = len(breakdown)
         result["per_occurrence_truncated"] = truncated
+        # The per-BODY census beside it: an occurrence row covers its whole component, so a part
+        # built as several bodies is invisible in the occurrence rows - and a leaf occurrence, which
+        # has no subtree at all, produces none of them.
+        body_rows, body_cut = _body_rows(entity, occs, acc, 1.0 / k, _MAX_PER_BODY_ROWS)
+        result["per_body"] = body_rows
+        result["per_body_count"] = len(body_rows)
+        result["per_body_truncated"] = body_cut
 
     note = ("Mass is driven by each body's PHYSICAL MATERIAL (density), not its appearance - "
             "if a mass looks wrong, check 'density'. Inertia_world is about the WORLD origin; "
@@ -385,9 +423,17 @@ def _physical_properties(design, entity, desc, units, accuracy, per_body):
                  "included, keyed by full path; a row marked aggregates_children:true already covers "
                  "the rows beneath it, so summing every row double-counts (null there = the child "
                  "count could not be read).")
+        note += (" per_body carries one row per BREP body - its name, the occurrence it was reached "
+                 "through (null for the target's own), is_solid, mass, volume and lump_count. An "
+                 "open SURFACE body is a row with is_solid false and no mass; a MESH body is not "
+                 "listed (model_inspect on it reports mesh stats). A part built as several bodies "
+                 "is several rows here and one row in per_occurrence.")
         if truncated:
             note += (f" Cut at {_MAX_PER_OCCURRENCE_ROWS} rows - there are more occurrences than "
                      "that (per_occurrence_truncated).")
+        if body_cut:
+            note += (f" The body rows were cut at {_MAX_PER_BODY_ROWS} too "
+                     "(per_body_truncated).")
     result["note"] = note
     return ok(result)
 
@@ -473,8 +519,8 @@ def handler(target: str = "", include=None, units: str = "mm", accuracy: str = "
         out["note"] = ("Bounding box over the SOLID/SURFACE/MESH bodies only - sketch and construction "
                        "geometry (planes, axes) are excluded, so an orphaned datum does not inflate it. "
                        "Add include=['mass'] for full physical properties (mass/volume/CoM/inertia; "
-                       "'per_body' adds a row per occurrence in the subtree). 'frame'=<Joint Origin> "
-                       "measures in part space.")
+                       "'per_body' adds a row per body and per occurrence in the subtree). "
+                       "'frame'=<Joint Origin> measures in part space.")
     return ok(out)
 
 
@@ -495,8 +541,9 @@ tool = (
     .add_input_property("accuracy", {"type": "string", "enum": ["low", "medium", "high", "very_high"],
             "description": "Physical-properties accuracy when include=['mass'] (default medium)."})
     .add_input_property("per_body", {"type": "boolean",
-            "description": "With include=['mass']: also a mass + CoM row per occurrence in the "
-                           "subtree (nested included; a row with children aggregates them)."})
+            "description": "With include=['mass']: a row per BREP body (name, is_solid, mass, "
+                           "volume, lump_count; mesh bodies are not listed) AND a mass + CoM row "
+                           "per occurrence in the subtree (a row with children aggregates them)."})
     .add_input_property(*_FRAME.as_property())
     .strict_schema()
 )

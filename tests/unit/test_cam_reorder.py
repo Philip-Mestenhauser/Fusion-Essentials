@@ -165,6 +165,60 @@ class TestReorder:
                                            or "declin" in res["message"].lower())
 
 
+# ── a SETUP is rootless: its ordered row is the document's own setups collection ─────────────────
+
+class MovableSetup(Setup):
+    """A Setup that really moves inside cam.setups - the one ordered list the document's setups
+    live in, and the list the tool re-reads through _cam_common.setup_names."""
+
+    def _relocate(self, other, before):
+        if not self._allow:
+            return False
+        self.moved = ("before" if before else "after", other)
+        row = self._home
+        row.remove(self)
+        at = row.index(other)
+        row.insert(at if before else at + 1, self)
+        return True
+
+
+class _StuckSetup(MovableSetup):
+    """The setup move Fusion allows and does not make - the swallowed write a bool cannot catch."""
+    def moveAfter(self, other):
+        return True
+
+
+def _install_setups(monkeypatch, *setups):
+    """Install a document whose SETUPS are the movable row, each wired to that one list."""
+    cam = make_cam(*setups)
+    for s in setups:
+        s._home = cam.setups._items
+    monkeypatch.setattr(cr, "get_cam", lambda: (cam, None))
+    return cam
+
+
+class TestSetupOrder:
+    """Setup order is the order a job runs in - turning before milling on a mill-turn - and creation
+    order was the only way to reach it. The move is judged by re-reading cam.setups, like every other
+    kind: an allowed move that did not land is an error."""
+
+    def test_a_setup_moves_inside_the_documents_setups_and_the_order_is_read_back(self, monkeypatch):
+        _install_setups(monkeypatch, MovableSetup("Mill"), MovableSetup("Turn"),
+                        MovableSetup("Flip"))
+        out = _payload(cr.handler(entity="Turn", position="before", reference="Mill"))
+        assert out["order"] == ["Turn", "Mill", "Flip"]
+        assert out["moved"] == "Turn" and out["entity_index"] == 0 and out["reference_index"] == 1
+        assert "the document's setups" in out["note"]
+
+    def test_a_setup_move_the_platform_allows_but_does_not_make_is_an_error(self, monkeypatch):
+        # the same gate every other kind runs: moveBefore answering true is not the setups
+        # collection having changed.
+        _install_setups(monkeypatch, _StuckSetup("Mill"), MovableSetup("Turn"))
+        res = cr.handler(entity="Mill", position="after", reference="Turn")
+        assert res["isError"] is True and "did not land" in res["message"]
+        assert "the document's setups" in res["message"]
+
+
 # ── the order is RE-READ, never echoed ───────────────────────────────────────
 
 class _StuckMover(Operation):

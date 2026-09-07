@@ -1579,6 +1579,25 @@ def _param_value(name, value):
     return check
 
 
+def _unlocked_in_one_call(switch, gated, value):
+    """cam_edit_operation carrying BOTH a switch and the row it unlocks: the gated row reads back
+    the value asked for and carries 'unlocked_here', which is the call saying it read isEditable
+    false at the start and true once the switch had landed. The switch itself carries no such key."""
+    def check(p):
+        rows = {r.get("name"): r for r in (p.get("changed") or [])}
+        gated_row = rows.get(gated) or {}
+        try:
+            got = float(str(gated_row.get("after")).strip())
+        except (TypeError, ValueError):
+            got = None
+        return _measured(f"'{switch}' and '{gated}'={value} in ONE call, the gated row unlocked",
+                         {"edited": p.get("edited"), "changed": p.get("changed")},
+                         p.get("edited") is True and got == float(value)
+                         and gated_row.get("unlocked_here") is True
+                         and "unlocked_here" not in (rows.get(switch) or {}))
+    return check
+
+
 def _preset_applied(name):
     """cam_edit_operation(preset=...): 'preset' is Operation.toolPreset read BACK after the
     assignment (the tool errors when the name it reads does not match the preset it assigned), and
@@ -1940,15 +1959,13 @@ _CAM_EXTENSION = [
                                        "handles": [_ctx_get(c, "sw_top_edge", "the top edge")],
                                        "generate": False},
      _edges_applied(1), None),
-    # the deburr's MULTI-PASS, in two writes because the stepover row reads isEditable False until
-    # the flag above it is true, and the tool validates every named row before applying any - so the
-    # pair in one call is refused whole, naming the row that was not settable yet.
+    # the deburr's MULTI-PASS in ONE call: the stepover row reads isEditable False until the flag
+    # above it is true, so it is written LAST and its flag re-read once the switch has landed. The
+    # gated row is named FIRST here, which is the order a request-order apply would refuse on.
     ("cam_edit_operation", lambda c: {"operation": _ctx_get(c, "deburr_op", "the deburr op"),
-                                      "parameters": {"doMultiplePasses": "true"}},
-     _param_landed("doMultiplePasses", "true"), None),
-    ("cam_edit_operation", lambda c: {"operation": _ctx_get(c, "deburr_op", "the deburr op"),
-                                      "parameters": {"numberOfStepovers": "3"}},
-     _param_value("numberOfStepovers", 3), None),
+                                      "parameters": {"numberOfStepovers": "3",
+                                                     "doMultiplePasses": "true"}},
+     _unlocked_in_one_call("doMultiplePasses", "numberOfStepovers", 3), None),
     # the faces the geodesic is driven by, sorted from a point above the frustum: the top face and
     # the four drafted walls, with the base face the farthest of the six and so the one left out.
     ("find_geometry", {"target": _SW_COMP, "kind": "planar_face",

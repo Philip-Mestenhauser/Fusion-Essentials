@@ -1042,7 +1042,78 @@ class TestPerOccurrenceReachesEveryDepth:
         out = _payload(mi._physical_properties(None, self._design_with_grandchild(),
                                                "whole design", "mm", "medium", False))
         assert "per_occurrence" not in out and "per_occurrence_truncated" not in out
+        assert "per_body" not in out and "per_body_truncated" not in out
         assert "aggregates_children" not in out["note"]
+
+
+class TestPerBodyRows:
+    """One row per solid BODY beside the occurrence rows. An occurrence row covers a whole
+    component, so a part built as several bodies is one row there - and a LEAF occurrence, having no
+    subtree, earns no occurrence row at all and would otherwise report an empty breakdown."""
+
+    def _body(self, name, mass=1.0, volume=2.0, computes=True, is_solid=True):
+        b = BRepBody(name=name, volume=volume, is_solid=is_solid)
+        props = SimpleNamespace(mass=mass, volume=volume, centerOfMass=FakePoint(0.0, 0.0, 0.0))
+        b.getPhysicalProperties = lambda acc, p=(props if computes else None): p
+        return b
+
+    def _rows(self, entity, target="whole design"):
+        out = _payload(mi._physical_properties(None, entity, target, "mm", "medium", True))
+        return out, out["per_body"]
+
+    def test_a_leaf_occurrence_holding_three_bodies_gets_three_rows(self):
+        occ = SimpleNamespace(getPhysicalProperties=lambda acc: _make_pp(),
+                              bRepBodies=_NamedCollection([self._body("Pin1", mass=0.1),
+                                                           self._body("Pin2", mass=0.2),
+                                                           self._body("Web", mass=0.7)]))
+        out, rows = self._rows(occ, "occurrence 'Carrier:1'")
+        assert out["per_occurrence"] == []            # no subtree, so nothing to break down there
+        assert [r["body"] for r in rows] == ["Pin1", "Pin2", "Web"]
+        assert out["per_body_count"] == 3
+        assert rows[0]["mass_kg"] == 0.1
+        assert rows[0]["volume"] == 2000.0            # cm3 -> mm3
+        assert all(r["occurrence"] is None for r in rows)
+
+    def test_a_subtree_occurrences_bodies_are_named_by_its_path(self):
+        child = _occ_row("Frame:1+Motor:1", mass=0.5)
+        child.bRepBodies = _NamedCollection([self._body("Rotor")])
+        e = SimpleNamespace(getPhysicalProperties=lambda acc: _make_pp(),
+                            bRepBodies=_NamedCollection([self._body("Plate")]),
+                            allOccurrences=_NamedCollection([child]))
+        _out, rows = self._rows(e)
+        assert [(r["body"], r["occurrence"]) for r in rows] == [
+            ("Plate", None), ("Rotor", "Frame:1+Motor:1")]
+
+    def test_an_open_surface_body_is_a_row_flagged_not_solid(self):
+        # the walk is bRepBodies, which carries open surfaces too - the flag is what tells a surface
+        # body's empty mass from a solid whose properties would not compute.
+        e = SimpleNamespace(getPhysicalProperties=lambda acc: _make_pp(),
+                            bRepBodies=_NamedCollection([self._body("Plate"),
+                                                         self._body("Skin", is_solid=False)]))
+        _out, rows = self._rows(e)
+        assert [(r["body"], r["is_solid"]) for r in rows] == [("Plate", True), ("Skin", False)]
+
+    def test_a_body_whose_properties_do_not_compute_still_gets_its_row(self):
+        e = SimpleNamespace(getPhysicalProperties=lambda acc: _make_pp(),
+                            bRepBodies=_NamedCollection([self._body("Ghost", computes=False)]))
+        _out, rows = self._rows(e)
+        assert rows[0]["body"] == "Ghost"
+        assert rows[0]["mass_kg"] is None and rows[0]["volume"] is None
+
+    def test_the_body_rows_are_capped_and_say_so(self, monkeypatch):
+        monkeypatch.setattr(mi, "_MAX_PER_BODY_ROWS", 2)
+        e = SimpleNamespace(getPhysicalProperties=lambda acc: _make_pp(),
+                            bRepBodies=_NamedCollection([self._body(f"B{i}") for i in range(4)]))
+        out, rows = self._rows(e)
+        assert len(rows) == 2 and out["per_body_count"] == 2
+        assert out["per_body_truncated"] is True and "per_body_truncated" in out["note"]
+
+    def test_exactly_the_cap_is_not_flagged_truncated(self, monkeypatch):
+        monkeypatch.setattr(mi, "_MAX_PER_BODY_ROWS", 2)
+        e = SimpleNamespace(getPhysicalProperties=lambda acc: _make_pp(),
+                            bRepBodies=_NamedCollection([self._body(f"B{i}") for i in range(2)]))
+        out, rows = self._rows(e)
+        assert len(rows) == 2 and out["per_body_truncated"] is False
 
 
 def _walkable_occ(path):

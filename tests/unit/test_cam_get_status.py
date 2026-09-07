@@ -500,6 +500,32 @@ class TestStatusHandler:
         out = _payload(st.handler(handle="gen1"))
         assert out["completed"] is True
 
+    def test_a_handle_completes_over_ops_flagged_generating_whose_state_answered(self, monkeypatch):
+        # MEASURED: isGenerating can read true over an operation already reading valid with a
+        # machining time. Settling on the flag leaves a finished job polling to its budget, so the
+        # verdict reads the operations' own states and the flag rides beside them.
+        st._GENERATIONS["gen1"] = self._scoped_entry("Roughing")
+        st._HANDLE_SEQ[0] = 1
+        self._install_cam(monkeypatch,
+                          _setup("Roughing", [_live_op("R1", state=0, generating=True),
+                                              _live_op("R2", state=0, generating=True)]))
+        self._stub_health(monkeypatch)
+        out = _payload(st.handler(handle="gen1"))
+        assert out["completed"] is True
+        assert out["live_states"]["generating"] == 2            # the flag is reported, not hidden
+        assert out["live_states"]["generating_settled"] == 2
+        assert "read isGenerating true while their own state reads valid" in out["note"]
+
+    def test_a_handle_still_waits_where_the_flagged_ops_state_has_not_answered(self, monkeypatch):
+        # The other side: state 1 (IsInvalid) under the flag is work that really is left to do.
+        st._GENERATIONS["gen1"] = self._scoped_entry("Roughing")
+        st._HANDLE_SEQ[0] = 1
+        self._install_cam(monkeypatch,
+                          _setup("Roughing", [_live_op("R1", state=1, generating=True)]))
+        out = _payload(st.handler(handle="gen1"))
+        assert out["completed"] is False
+        assert out["live_states"]["generating_settled"] == 0
+
     def test_status_handler_accepts_exactly_its_wire_schema(self):
         # The schema is strict, and the kernel rejects an unknown argument BEFORE dispatch unless the
         # tool is listed in _SCHEMA_OMITTED_ARGS - so a handler kwarg with no schema property of its
@@ -1378,13 +1404,35 @@ class TestScopedHealthLists:
         # qualifies them) appear only once the read reports completed.
         import adsk.cam
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
-        setup = SharedSetup("Roughing", ops=[_op("Rough clean", has_toolpath=False)])
+        # state 3 (NoToolpath) beside the flag: an operation whose OWN state still has generating
+        # left to do, which is what the completion verdict settles on.
+        setup = SharedSetup("Roughing", ops=[_op("Rough clean", has_toolpath=False, state=3)])
         setup.operations._items[0].isGenerating = True
         setup.machine = _MACHINE
         monkeypatch.setattr(st._cam_common, "get_cam", lambda: (_FakeCAM([setup]), None))
         out = _payload(st.handler(target="Roughing"))
         assert out["completed"] is False
         assert "empty_toolpaths" not in out and "health_scope" not in out
+
+    def test_a_live_read_completes_over_a_flag_whose_state_already_answered(self, monkeypatch):
+        # The no-handle path settles on the same states: two operations reading valid under a stuck
+        # isGenerating flag are finished work, and the flag rides beside the verdict.
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        setup = SharedSetup("Roughing", ops=[_op("Rough clean"), _op("Rough adaptive")])
+        for row in setup.operations._items:
+            row.isGenerating = True
+        setup.machine = _MACHINE
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (_FakeCAM([setup]), None))
+        out = _payload(st.handler(target="Roughing"))
+        assert out["completed"] is True
+        assert out["live_states"]["generating"] == 2
+        assert out["live_states"]["generating_settled"] == 2
+        assert "read isGenerating true while their own state reads valid" in out["note"]
+        # the LEAD has to agree with the clause that follows it: "nothing is still generating" is
+        # false about exactly these operations.
+        assert out["note"].startswith("No operation in scope has generating left to do.")
+        assert "No operations are still generating" not in out["note"]
 
     def test_include_operations_false_publishes_no_health_lists(self, monkeypatch):
         self._cam(monkeypatch)

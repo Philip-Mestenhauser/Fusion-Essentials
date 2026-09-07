@@ -24,7 +24,8 @@ _OP_TYPES = {"milling": "MillingOperation", "turning": "TurningOperation"}
 _OP_TYPE = _inputs.Choice("operation_type", options=list(_OP_TYPES), default="milling",
                           description="The machining operation type for the setup.")
 # models: bodies (handle/name) OR component occurrences (name); omitted -> all root bodies.
-# Setup.models accepts an Occurrence, a BRepBody or a MeshBody.
+# Setup.models accepts an Occurrence, a BRepBody or a MeshBody. Measured: an OCCURRENCE keeps that
+# selection when the component's contents are replaced, and the setup stays valid.
 _MODELS = _inputs.TargetRefList("models", required=False,
                                 description="Bodies OR component occurrences to machine (omit = every root-component body).")
 

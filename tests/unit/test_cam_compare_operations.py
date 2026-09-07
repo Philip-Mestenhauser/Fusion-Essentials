@@ -248,6 +248,24 @@ class TestCaps:
         assert len(out["differences"]) == cc._DIFFERENCES_CEILING
         assert out["truncated"] is True and out["difference_count"] == n
 
+    def test_each_side_publishes_the_strategy_id_and_the_create_name_apart(self, install):
+        # MEASURED: the 'strategy' PARAMETER reads the internal id ('parallel_new') while
+        # Operation.strategy reads the create vocabulary ('parallel'). The diff row below carries
+        # only the id, so a caller comparing two strategies would carry a spelling
+        # cam_create_operation raises on ('Unknown strategy').
+        a = FakeOperation("A", parameters=make_cam_parameters(("strategy", "'parallel_new'")),
+                          strategy="parallel", tool=FakeTool(description="T"))
+        b = FakeOperation("B", parameters=make_cam_parameters(("strategy", "'scallop_new'")),
+                          strategy="scallop", tool=FakeTool(description="T"))
+        install([a, b])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        assert out["strategy_a"] == "parallel_new" and out["strategy_name_a"] == "parallel"
+        assert out["strategy_b"] == "scallop_new" and out["strategy_name_b"] == "scallop"
+        # the id is still the diff row's value, which is the vocabulary the note tells them apart by
+        row = next(d for d in out["differences"] if d["parameter"] == "strategy")
+        assert row["operation_a"] == "'parallel_new'"
+        assert "take strategy_name" in out["note"]
+
     def test_a_non_numeric_max_results_falls_back_to_the_default(self, install):
         # the wire types it integer, but the clamp must not raise on a junk value either
         params_a = {f"p{i}": "a" for i in range(3)}

@@ -261,7 +261,7 @@ ROWS = [
     {
         "id": "point3d-vectorto",
         "claim": "Point3D.vectorTo(other) == other - self",
-        "encoded_in": "tests/conftest.py FakePoint.vectorTo",
+        "encoded_in": "tests/fakes/geometry.py FakePoint.vectorTo",
         "body": """
     a = adsk.core.Point3D.create(1.0, 2.0, 3.0)
     b = adsk.core.Point3D.create(4.0, 6.0, 8.0)
@@ -273,7 +273,7 @@ ROWS = [
     {
         "id": "vector3d-normalize-zero",
         "claim": "Vector3D.normalize() returns True even for a (near-)zero vector and leaves the components untouched - the return value is not a zero guard",
-        "encoded_in": "tests/conftest.py FakeVector3D.normalize; commands/mcpServer/tools/_geom.py unit_vector (its own magnitude guard, never normalize()'s return)",
+        "encoded_in": "tests/fakes/geometry.py FakeVector3D.normalize; commands/mcpServer/tools/_geom.py unit_vector (its own magnitude guard, never normalize()'s return)",
         "body": """
     z = adsk.core.Vector3D.create(0.0, 0.0, 0.0)
     rz = z.normalize()
@@ -642,7 +642,9 @@ ROWS = [
         "id": "joint-revolute-value-tenth-degree-grid",
         "claim": ("A revolute jointMotion.rotationValue lands on a 0.1 deg GRID: an angle that is "
                   "not a multiple of 0.1 deg reads back at the nearest tenth, so such a command "
-                  "cannot be stored exactly (12.34, 20.103, 0.03 and 45.55 all read back on-grid)"),
+                  "cannot be stored exactly (12.34, 20.103, 0.03 and 45.55 all read back on-grid). "
+                  "An EXACT half-step rounds AWAY FROM ZERO on both signs - -20.15 reads -20.2 and "
+                  "+20.15 reads +20.2 - and the boundary is exact: -20.1499999 reads -20.1"),
         "encoded_in": ("commands/mcpServer/tools/joint_drive.py _ANGLE_GRID_DEG / _ANGLE_BAND_DEG "
                        "(the half-step landing band) and the off-grid note; "
                        "tests/unit/test_joint_drive.py TestTheAngleBandIsHalfTheStoreGrid"),
@@ -667,9 +669,16 @@ ROWS = [
         j.jointMotion.rotationValue = math.radians(want)
         reads.append(round(math.degrees(j.jointMotion.rotationValue), 9))
     on_grid = all(abs(r - round(r * 10.0) / 10.0) < 1e-9 for r in reads)
-    emit(on_grid,
+    half = []
+    for want in (-20.15, 20.15, -20.1499999):
+        j.jointMotion.rotationValue = math.radians(want)
+        half.append(round(math.degrees(j.jointMotion.rotationValue), 6))
+    away_from_zero = (abs(half[0] + 20.2) < 1e-6 and abs(half[1] - 20.2) < 1e-6
+                      and abs(half[2] + 20.1) < 1e-6)
+    emit(on_grid and away_from_zero,
          "joint-revolute-value-tenth-degree-grid: commanded 12.34/20.103/0.03/45.55 read back "
-         + str(reads) + " (expect every read-back a multiple of 0.1 deg)")
+         + str(reads) + " (expect every read-back a multiple of 0.1 deg); half-step "
+         "-20.15/20.15/-20.1499999 read back " + str(half) + " (expect -20.2, 20.2, -20.1)")
 """,
     },
     {
@@ -695,7 +704,7 @@ ROWS = [
     {
         "id": "find-entity-token-shape",
         "claim": "findEntityByToken returns a SWIG BaseVector - list-like (len/index/iterate) but NOT a Python list",
-        "encoded_in": "tests/conftest.py MakeDesign.findEntityByToken",
+        "encoded_in": "tests/fakes/design.py MakeDesign.findEntityByToken",
         "need_box": True,
         "body": """
     hit = des.findEntityByToken(body.entityToken)
@@ -713,7 +722,7 @@ ROWS = [
     {
         "id": "find-entity-token-miss",
         "claim": "A stale token, a garbage string, a plain name, and a truncated token each return an EMPTY falsy vector (len 0) - never a raise",
-        "encoded_in": "tests/conftest.py MakeDesign.findEntityByToken; commands/mcpServer/tools/_inputs.py _resolve_token_entity fallthrough",
+        "encoded_in": "tests/fakes/design.py MakeDesign.findEntityByToken; commands/mcpServer/tools/_inputs.py _resolve_token_entity fallthrough",
         "need_box": True,
         "facts_on_pass": {"behavior.find_entity_token_empty_on_miss": True},
         "body": """
@@ -770,7 +779,7 @@ ROWS = [
     {
         "id": "allcomponents-design-only",
         "claim": "allComponents lives on Design (Component has none) and is counted AND iterable",
-        "encoded_in": "tests/conftest.py MakeDesign.allComponents (the Component shape dump carries no allComponents, which is what keeps MakeComp from offering one)",
+        "encoded_in": "tests/fakes/design.py MakeDesign.allComponents (the Component shape dump carries no allComponents, which is what keeps MakeComp from offering one)",
         "body": """
     comp_has = hasattr(des.rootComponent, "allComponents")
     ac = des.allComponents
@@ -786,7 +795,7 @@ ROWS = [
     {
         "id": "brepbodies-protocol",
         "claim": "BRepBodies supports count / item(i) / itemByName (None on a miss) / iteration",
-        "encoded_in": "tests/conftest.py _NamedCollection",
+        "encoded_in": "tests/fakes/scaffold.py _NamedCollection",
         "need_box": True,
         "facts_on_pass": {"behavior.item_by_name_none_on_miss": True},
         "body": """
@@ -803,7 +812,7 @@ ROWS = [
     {
         "id": "item-oor-brepbodies",
         "claim": "BRepBodies.item(out-of-range) never returns None - it raises RuntimeError. This row's body catches the raise and gates on its type; the expect also accepts a script-level abort, so a PASS does not say which of the two the run saw. The abort half is not this row's measurement either way: it is the live observation the module docstring records, that an out-of-range item() raise escaped try/except and killed a whole script invocation",
-        "encoded_in": "tests/conftest.py _NamedCollection.item",
+        "encoded_in": "tests/fakes/scaffold.py _NamedCollection.item",
         "need_box": True,
         "expect": "raise_or_abort",
         "facts_on_pass": {"behavior.collection_item_out_of_range_raises": True},
@@ -819,7 +828,7 @@ ROWS = [
     {
         "id": "item-oor-sketches",
         "claim": "Sketches.item(out-of-range) never returns None - it raises. This row's body catches the raise and gates on its type; the expect also accepts a script-level abort, so a PASS does not say which of the two the run saw. The abort half is not this row's measurement either way: it is the live observation the module docstring records, that an out-of-range item() raise escaped try/except and killed a whole script invocation",
-        "encoded_in": "tests/conftest.py _NamedCollection.item",
+        "encoded_in": "tests/fakes/scaffold.py _NamedCollection.item",
         "expect": "raise_or_abort",
         "facts_on_pass": {"behavior.collection_item_out_of_range_raises": True},
         "body": """
@@ -834,7 +843,7 @@ ROWS = [
     {
         "id": "objectcollection-protocol",
         "claim": "ObjectCollection.create() yields add / count / item(i) / iteration",
-        "encoded_in": "tests/conftest.py _FakeObjectCollection",
+        "encoded_in": "tests/fakes/scaffold.py _FakeObjectCollection",
         "need_box": True,
         "body": """
     oc = adsk.core.ObjectCollection.create()
@@ -849,7 +858,7 @@ ROWS = [
     {
         "id": "meshbodies-no-itembyname",
         "claim": "A component's meshBodies collection has count/item but NO itemByName (unlike bRepBodies, which has all three) - a mesh must be resolved by iterate-and-match, never itemByName",
-        "encoded_in": "tests/conftest.py _MeshBodies (drops itemByName off the flag; MakeComp builds meshBodies from it)",
+        "encoded_in": "tests/fakes/mesh.py _MeshBodies (drops itemByName off the flag; design.py's MakeComp builds meshBodies from it)",
         "facts_on_pass": {"behavior.meshbodies_has_itembyname": False},
         "body": """
     root = adsk.fusion.Design.cast(app.activeProduct).rootComponent
@@ -982,7 +991,7 @@ ROWS = [
     {
         "id": "meshbody-volume-open-returns-zero",
         "claim": "MeshBody.volume on a mesh that is NOT closed RETURNS 0.0 - it does not raise; a null volume in a payload therefore means the field could not be read at all, never 'the mesh is open'",
-        "encoded_in": "_mesh_common.py _mesh_summary + mesh_get's note/description; mesh_shell.py _closed (the reason the closure flag is sampled at both ends); tests/conftest.py's shared MeshBody fake, which reads this BEHAVIOR flag rather than hard-coding it; test_mesh_get.py's own MeshBody",
+        "encoded_in": "_mesh_common.py _mesh_summary + mesh_get's note/description; mesh_shell.py _closed (the reason the closure flag is sampled at both ends); tests/fakes/mesh.py's MeshBody fake, which reads this BEHAVIOR flag rather than hard-coding it; test_mesh_get.py's own MeshBody",
         "facts_on_pass": {"behavior.meshbody_volume_open_raises": False},
         "body": """
     tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
@@ -1002,7 +1011,7 @@ ROWS = [
     {
         "id": "meshbody-delete-answers-true-and-removes",
         "claim": "MeshBody.deleteMe() answers True and drops the body from meshBodies in every construction measured here - a PARAMETRIC body added in a base-feature scope, one deleted while ANOTHER component's base-feature scope is open, one a downstream mesh-repair feature consumed, and an assembly-context PROXY. A wrapper whose body is already gone RAISES ('An API Object refers to a deleted Object') rather than answering False, so no measured path returns a False here",
-        "encoded_in": "tests/conftest.py MeshBody.deleteMe - its `deletes` False is a DECLARED state (the fake's docstring says so), because no construction measured here declines; mesh_delete.py, which reports a False rather than swallowing it",
+        "encoded_in": "tests/fakes/mesh.py MeshBody.deleteMe - its `deletes` False is a DECLARED state (the fake's docstring says so), because no construction measured here declines; mesh_delete.py, which reports a False rather than swallowing it",
         "body": """
     FLAT = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
     TET = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
@@ -1075,7 +1084,7 @@ ROWS = [
     {
         "id": "meshbody-facegroups-counted-before-generation",
         "claim": "MeshBody.faceGroups answers a FaceGroups collection - never None, the read never raises - whose count is a plain int reading 1, NOT 0, on a mesh straight from addByTriangleMeshData, before any MeshGenerateFaceGroupsFeature has run; that holds for an open one-triangle mesh and for a closed tetrahedron alike, and the single group items() answers is a FaceGroup. An STL IMPORTED through meshBodies.add reads that same 1 before generation, and an accurate generation on its four facets moves the count to 4",
-        "encoded_in": "tests/conftest.py MeshBody's `face_groups` knob, defaulting to the measured 1 a mesh already publishes; mesh_generate_face_groups.py's before/after faceGroups.count read-back and tests/live/verify_acts_mesh.py's observed-read-back predicate",
+        "encoded_in": "tests/fakes/mesh.py MeshBody's `face_groups` knob, defaulting to the measured 1 a mesh already publishes; mesh_generate_face_groups.py's before/after faceGroups.count read-back and tests/live/verify_acts_mesh.py's observed-read-back predicate",
         "body": """
     import os, tempfile
     NL = chr(10)
@@ -1195,7 +1204,7 @@ ROWS = [
     {
         "id": "brepbody-area-cm2-solid-and-open-surface",
         "claim": "BRepBody.area reads a float in cm2 on BOTH a solid and an open (non-closed) surface body: a 2 cm cube reads 24.0 and a 2 x 3 cm single-face extruded open profile reads 6.0. The surface body reads isSolid False and volume 0.0 while its area still answers, so a null area in a payload means the field could not be read, never 'the body is open'",
-        "encoded_in": "tests/conftest.py BRepBody's `area` knob (cm2); surface_trim.py's before/after area read-back on a surface body; _sys_common.py _selection_record's area_cm2",
+        "encoded_in": "tests/fakes/design.py BRepBody's `area` knob (cm2); surface_trim.py's before/after area read-back on a surface body; _sys_common.py _selection_record's area_cm2",
         "body": """
     tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
     try:
@@ -1234,7 +1243,7 @@ ROWS = [
     {
         "id": "meshbody-area-and-boundingbox-open-mesh",
         "claim": "MeshBody.area and MeshBody.boundingBox both READ on an open (non-watertight) mesh, the volume-open row's one-triangle mesh: area is a float in cm2 reading 0.5 for the unit right triangle, and boundingBox is a BoundingBox3D whose min/max are the mesh's own extents (0,0,0)-(1,1,0). Neither read raises and neither answers None, so a null area or box in a payload means the field could not be read, never 'the mesh is open'",
-        "encoded_in": "tests/conftest.py MeshBody's `area` and `bbox` knobs; _mesh_common.py _area_volume and mesh_measure_of_body",
+        "encoded_in": "tests/fakes/mesh.py MeshBody's `area` and `bbox` knobs; _mesh_common.py _area_volume and mesh_measure_of_body",
         "body": """
     tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
     try:
@@ -1259,7 +1268,7 @@ ROWS = [
     {
         "id": "shape-dump-mesh-world",
         "claim": "MeshBody and its PolygonMesh dump non-empty member lists, the latter carrying both nodeCoordinatesAsDouble and normalVectorsAsDouble - the arrays a smooth's coordinate diff and a reverse's normal negation are judged on. displayMesh is a TriangleMesh, dumped alongside so the count fake is swept too. Totals are not pinned: they vary by a member or two across rigs and builds, and the SHAPE lines are the product",
-        "encoded_in": "tests/conftest.py shared MeshBody / _FakePolygonMesh / _FakeTriangleMesh fakes; tests/lints/test_fake_shapes_exist.py sweeps them against these dumps",
+        "encoded_in": "tests/fakes/mesh.py's MeshBody / _FakePolygonMesh / _FakeTriangleMesh fakes; tests/lints/test_fake_shapes_exist.py sweeps them against these dumps",
         "body": """
     tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
     try:
@@ -1809,7 +1818,7 @@ ROWS = [
     {
         "id": "camera-returns-copy",
         "claim": "Viewport.camera returns a COPY - mutating it moves nothing until viewport.camera is reassigned",
-        "encoded_in": "tests/conftest.py's shared Viewport/Camera fakes (they model a shared mutable object, the opposite, so only this row checks the real semantics)",
+        "encoded_in": "tests/fakes/geometry.py's Viewport/Camera fakes (they model a shared mutable object, the opposite, so only this row checks the real semantics)",
         "facts_on_pass": {"behavior.viewport_camera_returns_copy": True},
         "body": """
     vp = app.activeViewport
@@ -1879,7 +1888,8 @@ ROWS = [
     {
         "id": "shape-dump-design-world",
         "claim": "Each of the 21 design-side adsk types this row DUMPS exposes a non-empty live public attribute set (dir() membership) - the set the fake-shape lint sweeps the shared fakes against. A shared fake whose live type is NOT dumped here is outside that sweep: the lint's own unmapped list carries those, and this row measures nothing about them",
-        "encoded_in": "tests/conftest.py shared fakes (BRepBody/BRepFace/BRepEdge/MakeComp/MakeDesign/FakeVector3D/FakePoint/...)",
+        "encoded_in": ("tests/fakes/design.py (BRepBody/BRepFace/BRepEdge/MakeComp/MakeDesign) and "
+                       "tests/fakes/geometry.py (FakeVector3D/FakePoint/...)"),
         "need_box": True,
         "body": """
     root = des.rootComponent
@@ -1933,7 +1943,8 @@ ROWS = [
     {
         "id": "shape-dump-document-world",
         "claim": "The session objects around a scratch document dump non-empty live attribute sets: Application.get() is an Application, its documents a Documents, the added document a FusionDocument (NOT a Document - that is the base class, and Document.cast returns the same FusionDocument), its products a Products, app.data a Data, app.userInterface a UserInterface, that UI's activeSelections a Selections holding a Selection once a construction plane is added to it, ValueInput.createByReal a ValueInput, and the design's exportManager an ExportManager. Document and DocumentReference are dumped from the CLASS object because no construction in this row returns either: dir() of a class is dir() of its instance minus SWIG's 'this', re-measured here on Documents, which the row holds both of",
-        "encoded_in": "tests/conftest.py - the shared fakes DEGRANDFATHER-B step 3 writes for these types",
+        "encoded_in": ("tests/fakes/data_docs.py - the shared fakes for these session types; "
+                       "tests/fakes/geometry.py FakeValueInput"),
         "body": """
     tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
     try:
@@ -1967,7 +1978,8 @@ ROWS = [
     {
         "id": "shape-dump-timeline-world",
         "claim": "In a scratch document a sketch carrying a rectangle and a point yields Sketches, SketchCurves, SketchPoints and SketchPoint, and its Profiles; an extrude fills Features and the design's Timeline with TimelineObject entries; userParameters.add yields UserParameters and UserParameter; baseFeatures.add followed by startEdit/finishEdit yields BaseFeatures and BaseFeature. Feature and Parameter are dumped from the CLASS: the extrude answers ExtrudeFeature and the parameter answers UserParameter, so no construction here returns the base type, and the class dump is checked against the class-dir-equals-instance-dir-minus-'this' reading taken on Sketches. The row also reads that neither adsk.fusion nor adsk.core carries a type NAMED Parameters - a design's parameter collections are UserParameters and ParameterList",
-        "encoded_in": "tests/conftest.py - the shared fakes DEGRANDFATHER-B step 3 writes for these types",
+        "encoded_in": ("tests/fakes/design.py - the timeline, feature and parameter fakes; "
+                       "tests/fakes/sketch.py - the sketch types"),
         "body": """
     tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
     try:
@@ -2013,7 +2025,8 @@ ROWS = [
     {
         "id": "shape-dump-assembly-world",
         "claim": "Six new components in a scratch document yield an Occurrences; three joints from the first to the next three - one revolute, one slider, one cylindrical, each on the Z axis through the components' origin construction points - yield Joints, Joint and the three motion types RevoluteJointMotion, SliderJointMotion and CylindricalJointMotion off joint.jointMotion; a motion link over the revolute and the slider yields MotionLinks and MotionLink; and a rigid group over the two un-jointed occurrences yields RigidGroups and RigidGroup. Every one of the ten dumps is non-empty and answers the type its label names",
-        "encoded_in": "tests/conftest.py - the shared fakes DEGRANDFATHER-B step 3 writes for these types",
+        "encoded_in": ("tests/fakes/joints.py - the joint, motion, link and rigid-group fakes; "
+                       "tests/fakes/design.py FakeOccurrence"),
         "body": """
     tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
     try:
@@ -2168,7 +2181,7 @@ ROWS = [
     {
         "id": "shape-dump-data-world",
         "claim": "The cloud data model dumps three types from a READ-ONLY, bounded look: the project named 'MCP Test Project' found in app.data.dataProjects is a DataProject (app.data.activeProject RAISES '2 : InternalValidationError : group' on 2705.1.11 in every context tried - a fresh session, an unsaved scratch document, and a cloud document open and active - so no row and no tool can lean on it), its rootFolder a DataFolder, and the DataFile dumped is the root folder's first file - or, when the root holds no file, the first file of the root's FIRST subfolder. At most those two folders are opened and only item(0) of each is touched: no recursive walk, which has been measured killing the add-in. When neither folder holds a file, DataFile is dumped from the class object under the same class-dir-equals-instance-dir-minus-'this' reading, taken here on DataFolder; the detail names which of the three sources supplied it",
-        "encoded_in": "tests/conftest.py - the shared fakes DEGRANDFATHER-B step 3 writes for these types",
+        "encoded_in": "tests/fakes/data_docs.py - the shared fakes for these cloud types",
         "body": """
     # Data.activeProject raises on 2705.1.11 in every context, so the project is found by name.
     projects = app.data.dataProjects
@@ -2209,7 +2222,7 @@ ROWS = [
     {
         "id": "shape-dump-data-cloud-collections",
         "claim": "The cloud COLLECTION types dump from the same READ-ONLY, bounded look as shape-dump-data-world: DataFiles and DataFolders off the root folder of the project named 'MCP Test Project' in app.data.dataProjects (activeProject raises on 2705.1.11), DataProjects and DataHubs off app.data - at most the root folder plus its FIRST subfolder are opened and only item(0) of each is touched, no recursive walk. All four carry asArray, and so does the parentReferences of the one DataFile reached (parentReferences answers a DataFiles). DataFileFuture is dumped from the class object under the class-dir-equals-instance-dir-minus-'this' reading, re-measured in this row on the live DataProjects, and carries both uploadState and dataFile. Data.activeHub carries a SETTER function, so 'no public setter' is not what stops a programmatic hub switch. MEASURED BY HAND and deliberately NOT re-measured by any row: assigning it LANDS - data_switch_hub reported switched:true both ways between 'Mechio' and 'Philip Mestenhauser' on 2705.1.4 - and the switch CLOSES every open document, which would destroy the sweep's own scratch",
-        "encoded_in": ("tests/conftest.py FakeData, FakeDataFolder, FakeDataFile and the _CloudArray "
+        "encoded_in": ("tests/fakes/data_docs.py FakeData, FakeDataFolder, FakeDataFile and the _CloudArray "
                        "collection fakes (_CloudProjects among them); data_delete_file.py's "
                        "parentReferences.asArray() read"),
         "body": """
@@ -2267,7 +2280,7 @@ ROWS = [
     {
         "id": "shape-dump-drawing-world",
         "claim": "The row makes and removes its OWN source, so nothing it measures depends on what a project happens to hold: it adds a scratch design carrying one placed box, saves it into the cloud project 'MCP Test Project' as MeasureDrawingSource, takes that document's DataFile as the createDrawingInput source, and in a finally closes the document and deletes the file. Right after saveAs the DataFile's id is the LOCAL cache path - the cloud urn: id lands asynchronously, about two seconds - so the row pumps doEvents under a 20 second clock bound until the urn: form answers and FAILS naming the timeout if it never does. Before saving, ONE listing of that folder's own dataFiles (never recursive) deletes any MeasureDrawingSource a previous run left behind; that listing LAGS its own deletes, so an entry it names can already be gone and the row reports the entries seen and the deletes that took rather than inferring a leftover from the difference. The same lag makes deleteMe RAISE InternalValidationError while a just-closed file is still settling, so the removal pumps doEvents and retries under a clock bound - measured taking two or three attempts. DrawingManager.get() answers a DrawingManager and createDrawingInput answers a CreateDrawingInput whose customSize hands out a CustomSheetSize already carrying a positive width and height and at least two zones each way, so 'a DEFAULT CustomSheetSize' is read rather than assumed. The deleting of the source is reported but does NOT gate the row: a False leaves the file for the next run's sweep and the detail names it. The eleven document-side types (DrawingDocument, Drawing, Sheets, Sheet, Views, View, DrawingSketches, DrawingSketch, Images, DrawingExportManager, DocumentSettings) come off their CLASS objects: adsk.core.DocumentTypes carries no drawing member at all, so documents.add cannot make one, and DrawingManager.createDrawing would mint a SECOND cloud file, which this row does not call. The class dump rests on the class-dir-equals-instance-dir-minus-'this' reading, re-measured here on CreateDrawingInput, which the row holds both of. The collection types are named Views/Images, NOT DrawingViews/DrawingImages, and the settings type is DocumentSettings - the labels are what the fake-shape lint maps a fake onto, so each live one is read back rather than assumed",
-        "encoded_in": ("tests/conftest.py's drawing world - FakeDrawingDocument, FakeDrawing, "
+        "encoded_in": ("tests/fakes/drawing.py's drawing world - FakeDrawingDocument, FakeDrawing, "
                        "FakeSheets/FakeSheet, FakeViews/FakeView, FakeDrawingSketches/"
                        "FakeDrawingSketch, FakeImages, FakeDrawingExportManager, "
                        "FakeDocumentSettings, FakeDrawingManager, FakeCreateDrawingInput, "
@@ -2417,13 +2430,15 @@ ROWS = [
     {
         "id": "shape-dump-appearance-world",
         "claim": "The appearance world dumps seven library types - MaterialLibraries off app.materialLibraries, the first MaterialLibrary carrying appearances, its Appearances, that library's first Appearance, the Appearance's appearanceProperties, the ColorProperty among them and the Color that property's value answers - and the row reads that Appearance.appearanceProperties answers a PROPERTIES collection: there is no type named AppearanceProperties in adsk.core or adsk.fusion. Beside them it reads the PLAIN answers a fresh scratch entity gives with no override applied, which is what a body/occurrence/face double has to start from: BRepBody.appearance is already a live Appearance (never None) and opacity reads 1.0, but visibleOpacity on the NATIVE body RAISES InternalValidationError while the same read through an assembly-context proxy answers 1.0; Occurrence.appearance reads None, its visibleOpacity 1.0, and Occurrence carries no opacity member at all; Component.opacity reads 1.0 and BRepFace.appearance is a live Appearance. The native visibleOpacity raise is CAUGHT and the row keeps reading, so a build that stops raising fails this row rather than passing it quietly",
-        "encoded_in": ("tests/conftest.py FakeOccurrence - its appearance default and its absent "
-                       "opacity member; the body/face doubles are still per-file in "
-                       "test_appearance_set.py and test_model_set_material.py; "
-                       "appearance_set._reads_as and appearance_set._apply_opacity read these "
-                       "members live"),
+        "encoded_in": ("tests/fakes/appearance.py's library world (FakeMaterialLibraries, "
+                       "FakeMaterialLibrary, FakeAppearances, FakeAppearance, _Properties, "
+                       "ColorProperty, FakeColor); tests/fakes/design.py FakeOccurrence - its "
+                       "appearance default and its absent opacity member - and its BRepBody / "
+                       "BRepFace; appearance_set._reads_as and appearance_set._apply_opacity read "
+                       "these members live"),
         "facts_on_pass": {"behavior.occurrence_appearance_none_by_default": True,
-                          "behavior.occurrence_has_no_opacity": True},
+                          "behavior.occurrence_has_no_opacity": True,
+                          "behavior.native_body_visible_opacity_raises": True},
         "body": """
     libs = app.materialLibraries
     lib = None
@@ -2490,9 +2505,88 @@ ROWS = [
 """,
     },
     {
+        "id": "appearance-duplicate-name-raises-and-occurrence-write-fans-out",
+        "claim": ("design.appearances.addByCopy(base, name) with a name the document already holds "
+                  "RAISES '3 : appearance name already exists in document' and the collection "
+                  "count does not move - the refusal is a raise, not a null answer. An "
+                  "OCCURRENCE-level appearance write then lands on every body of that occurrence "
+                  "carrying no body-level override and leaves one that does: a two-body component "
+                  "whose second body was given its own appearance reads first='the occurrence's', "
+                  "second='its own' after the write, through the native bodies and through their "
+                  "assembly-context proxies alike. BRepBody.visibleOpacity on the NATIVE body "
+                  "raises InternalValidationError both before AND after body.opacity is written "
+                  "(the write itself reads back), so the assembly-context proxy is the only route "
+                  "that answers a rendered opacity"),
+        "encoded_in": ("tests/fakes/appearance.py FakeAppearances.addByCopy; tests/fakes/design.py "
+                       "FanoutOcc's parent FakeOccurrence and its BRepBody appearance member; "
+                       "appearance_set's occurrence arm and its opacity read-back"),
+        "body": """
+    libs = app.materialLibraries
+    lib = None
+    for i in range(libs.count):
+        if libs.item(i).appearances.count > 1:
+            lib = libs.item(i)
+            break
+    src_a = lib.appearances.item(0)
+    src_b = lib.appearances.item(1)
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = d.rootComponent
+        occ = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
+        comp = occ.component
+        comp.name = "AppProbe"
+        for x in (0.0, 3.0):
+            sk = comp.sketches.add(comp.xYConstructionPlane)
+            sk.sketchCurves.sketchLines.addTwoPointRectangle(
+                adsk.core.Point3D.create(x, 0.0, 0.0),
+                adsk.core.Point3D.create(x + 1.0, 1.0, 0.0))
+            comp.features.extrudeFeatures.addSimple(
+                sk.profiles.item(0), adsk.core.ValueInput.createByReal(1.0),
+                adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        plain, overridden = comp.bRepBodies.item(0), comp.bRepBodies.item(1)
+        first = d.appearances.addByCopy(src_a, "ProbeCopy")
+        n1 = d.appearances.count
+        dup, why = None, ""
+        try:
+            dup = d.appearances.addByCopy(src_b, "ProbeCopy")
+        except Exception as ex:
+            why = (str(ex).strip().splitlines() or [""])[-1][:70]
+        added = d.appearances.count - n1
+        override = d.appearances.addByCopy(src_b, "ProbeOverride")
+        overridden.appearance = override
+        occ.appearance = first
+        fan = (plain.appearance.name, overridden.appearance.name,
+               plain.createForAssemblyContext(occ).appearance.name,
+               overridden.createForAssemblyContext(occ).appearance.name)
+        def vis(body):
+            try:
+                return repr(body.visibleOpacity)
+            except Exception as ex:
+                return "raised " + type(ex).__name__
+        before = vis(plain)
+        plain.opacity = 0.5
+        after, wrote = vis(plain), plain.opacity
+        proxy_after = vis(plain.createForAssemblyContext(occ))
+    finally:
+        tmp.close(False)
+    emit(dup is None and why.startswith("3 : appearance name already exists") and added == 0
+         and fan == ("ProbeCopy", "ProbeOverride", "ProbeCopy", "ProbeOverride")
+         and before.startswith("raised ") and after.startswith("raised ")
+         and wrote == 0.5 and proxy_after == "0.5",
+         "appearance-duplicate-name-raises-and-occurrence-write-fans-out: duplicate addByCopy="
+         + ("raised " + repr(why) if why else "ANSWERED " + repr(dup and dup.name))
+         + " added=" + str(added) + " (expect 0) | after the occurrence write (plain body,"
+         " overridden body, and each through its proxy)=" + str(fan)
+         + " expect ('ProbeCopy','ProbeOverride','ProbeCopy','ProbeOverride')"
+         + " | native visibleOpacity before=" + before + " after opacity:=" + repr(wrote)
+         + " it reads " + after + " while the proxy reads " + proxy_after)
+""",
+    },
+    {
         "id": "shape-dump-pmi-world",
         "claim": "PMI authoring runs on this installation, and the row proves it by CREATING what it dumps: in a scratch design holding a box with one hole, component.pmiAnnotations answers a PMIAnnotations, its leaderLineNotes a PMILeaderLineNotes whose createInput(planar face) answers a PMILeaderLineNoteInput and add() a PMILeaderLineNote, its holeThreadNotes a PMIHoleThreadNotes whose createInput([cylindrical face]) answers a PMIHoleThreadNoteInput and add() a PMIHoleThreadNote. A created note's segments answer a PMISegmentVector, and the six document-free factories - PMITextSegment.create(text), PMISymbolSegment.create(member), PMILineBreakSegment.create(), PMIGeometricValue.create(), PMIGeometricValueTolerance.create() and PMIDisplaySettings.create(), the last four taking NO argument - each answer their own type. Both adds are gated, so a session where the Design/Manufacturing Extension is not entitled FAILS this row naming the refusal instead of passing on the reads alone",
-        "encoded_in": ("tests/conftest.py's PMI world - FakePMIAnnotations, the two note "
+        "encoded_in": ("tests/fakes/pmi.py's PMI world - FakePMIAnnotations, the two note "
                        "collections and inputs, FakePMILeaderLineNote/FakePMIHoleThreadNote, the "
                        "segment, value, tolerance and display-settings fakes; "
                        "_pmi.walk_annotations, _pmi.build_segments and _pmi.annotation_record "
@@ -2563,10 +2657,11 @@ ROWS = [
     {
         "id": "shape-dump-mesh-calculator-quality",
         "claim": "A BRepBody's meshManager answers a MeshManager whose createMeshCalculator() answers a TriangleMeshCalculator; a FRESH calculator reads all four of its knobs - maxNormalDeviation, surfaceTolerance, maxAspectRatio, maxSideLength - as 0.0, so it carries no tolerances of its own. setQuality returns True and writes surfaceTolerance ALONE: the other three stay 0.0 after it, and HighQualityTriangleMesh lands a strictly SMALLER surfaceTolerance than NormalQualityTriangleMesh on the same body, which is the comparison a quality that silently did nothing would fail. calculate() answers a TriangleMesh carrying nodes, and meshManager.displayMeshes answers a TriangleMeshList",
-        "encoded_in": ("tests/conftest.py FakeMeshManager and FakeTriangleMeshCalculator (its "
+        "encoded_in": ("tests/fakes/mesh.py FakeMeshManager and FakeTriangleMeshCalculator (its "
                        "four zero defaults and the surfaceTolerance setQuality writes); "
                        "save_as_mesh._tessellate reads meshManager, createMeshCalculator, the "
                        "BOOL setQuality returns and calculate live"),
+        "facts_on_pass": {"behavior.mesh_set_quality_writes_surface_tolerance_only": True},
         "need_box": True,
         "body": """
     def knobs(c):
@@ -2603,7 +2698,7 @@ ROWS = [
     {
         "id": "shape-dump-units-manager",
         "claim": "A design's unitsManager and its fusionUnitsManager BOTH answer a FusionUnitsManager - neither read hands back the base UnitsManager, so that base type is dumped from its CLASS object under the class-dir-equals-instance-dir-minus-'this' reading, re-measured in this row on the live FusionUnitsManager. The base's public names are a STRICT subset of the subclass's, and the four the subclass adds are exactly design, distanceDisplayUnits, massDisplayUnits and unitSystem: a build that moved a member between the two fails this row rather than letting a UnitsManager-shaped fake keep a surface the live object no longer has",
-        "encoded_in": ("tests/conftest.py FakeUnitsManager - this dump is the SHAPES key that "
+        "encoded_in": ("tests/fakes/design.py FakeUnitsManager - this dump is the SHAPES key that "
                        "sweeps its defaultLengthUnits and evaluateExpression, both among "
                        "UnitsManager's 15 public names; _param_common._param_summary converts "
                        "through the same object"),
@@ -2633,7 +2728,7 @@ ROWS = [
     {
         "id": "units-manager-internal-units-and-convert",
         "claim": "UnitsManager.internalUnits is not a unit name: it reads the SENTINEL string 'InternalUnits', and that sentinel is POLYMORPHIC - handed to convert() as the from-unit it means centimetres for a length target and radians for an angular one, so ONE call shape converts both. convert(1.0, sentinel, 'mm') answers 10.0, convert(1.0, sentinel, 'ft') 0.032808..., and convert(1.0, sentinel, 'deg') 57.295777... off the same 1.0. The refusals are the other half of the claim, because they are what a fake that scaled by a table would never produce: an EMPTY to-unit raises '3 : Bad units parameter' (so the sentinel cannot be converted into 'no units'), a literal 'cm' to 'deg' raises '6 : The input and output units are not compatible' (only the sentinel crosses the length/angle boundary), and a to-unit outside the vocabulary raises '6 : The units parameter is not a valid unit string'",
-        "encoded_in": ("tests/conftest.py FakeUnitsManager - its internalUnits reads the sentinel "
+        "encoded_in": ("tests/fakes/design.py FakeUnitsManager - its internalUnits reads the sentinel "
                        "flag and its convert refuses the incompatible pair on the other; "
                        "_param_common._param_summary passes units_manager.internalUnits straight "
                        "through as convert's from-unit, so the sentinel is what makes that "
@@ -2677,7 +2772,7 @@ ROWS = [
     {
         "id": "parameter-favorite-maker-text-value-and-fresh-appearances",
         "claim": "Four plain reads the parameter and appearance doubles stand on, measured on one scratch design carrying a dimensioned sketch, an extrude and one TEXT user parameter. (1) ModelParameter.isFavorite reads the bool False on every allParameters entry outside userParameters. (2) ModelParameter.createdBy never declines and never reads None: each one answers the entity that made it - the Sketch for a sketch dimension's parameter, the ExtrudeFeature for an extrude's - so a model parameter with no readable maker was not reachable here; the DECLINE belongs to UserParameter, which carries NO createdBy member at all and raises AttributeError on the read. (3) Parameter.value on a TEXT parameter RAISES 'Parameter is not numeric type' while textValue answers the unquoted string, so the textValue fallback is live code; a text parameter is made with units 'Text' and a QUOTED string-literal expression, an unquoted one is refused at add with 'Invalid expression', and the same unquoted string under empty units makes a NUMERIC parameter whose textValue raises 'Parameter is not text type' instead. (4) Design.appearances is an Appearances collection that starts EMPTY and fills from GEOMETRY, not from any apply: it counts 0 on a design with no bodies, still 0 after a sketch is drawn, and becomes 1 the moment the extrude brings a body in - that one entry is the body's default material appearance, named 'Steel - Satin'. The row reads the count at all three moments, so binding the collection early and asserting its count late (which reads the CURRENT count, never the captured one) cannot pass this claim",
-        "encoded_in": ("tests/conftest.py FakeModelParameter (its owner-None branch and its "
+        "encoded_in": ("tests/fakes/design.py FakeModelParameter (its owner-None branch and its "
                        "isFavorite default), FakeUserParameter (its absent createdBy and its "
                        "text-parameter value read) and MakeDesign's appearances default; "
                        "_param_common._owner_facts and _param_common._param_summary branch on the "
@@ -2779,7 +2874,7 @@ ROWS = [
                   "it. Measured over EVERY linear edge of a shelled box, and the row fails unless "
                   "at least one of them reads isParamReversed True, so a rig with nothing to "
                   "discriminate cannot pass. A plain box read the flag False on all twelve edges"),
-        "encoded_in": ("tests/conftest.py's shared BRepEdge fake (its param_reversed argument) and "
+        "encoded_in": ("tests/fakes/design.py's BRepEdge fake (its param_reversed argument) and "
                        "_edge_common._edge_tangent, which negates the evaluator tangent "
                        "when isParamReversed reads True before _edge_convexity signs one edge's "
                        "dihedral off that heading"),
@@ -2850,7 +2945,7 @@ ROWS = [
                   "a singularity detector; rigid occurrence transforms cannot be singular, which "
                   "is why the callers' math stays sound"),
         "encoded_in": ("model_inspect._measuring_axes and model_hole._world_lift invert() gates; "
-                       "tests/conftest.py FakeMatrix3D invertible=False contract"),
+                       "tests/fakes/geometry.py FakeMatrix3D invertible=False contract"),
         "body": """
     import math
     m = adsk.core.Matrix3D.create()
@@ -2879,7 +2974,7 @@ ROWS = [
                   "with asArray rows (0,0,1)/(1,0,0)/(0,1,0), where the swapped product would send "
                   "+X to +Z"),
         "encoded_in": ("commands/mcpServer/tools/assembly_move.py translation compose; "
-                       "tests/conftest.py FakeMatrix3D.transformBy"),
+                       "tests/fakes/geometry.py FakeMatrix3D.transformBy"),
         "body": """
     import math
     a = adsk.core.Matrix3D.create()
@@ -2925,7 +3020,7 @@ ROWS = [
                   "elements 3, 7 and 11 - a column-major read would find the offset at 12/13/14 "
                   "and mis-report every position built from it"),
         "encoded_in": ("commands/mcpServer/tools/assembly_move.py before/after asArray compare; "
-                       "tests/conftest.py FakeMatrix3D.asArray"),
+                       "tests/fakes/geometry.py FakeMatrix3D.asArray"),
         "body": """
     m = adsk.core.Matrix3D.create()
     m.translation = adsk.core.Vector3D.create(1.0, 2.0, 3.0)
@@ -2943,7 +3038,7 @@ ROWS = [
                   "read is never the one assigned, so mutating a read result moves nothing - and "
                   "assigning None RAISES '3 : invalid argument value' rather than clearing the "
                   "column, so the member takes a Vector3D and nothing else"),
-        "encoded_in": "tests/conftest.py FakeMatrix3D.translation property and its setter",
+        "encoded_in": "tests/fakes/geometry.py FakeMatrix3D.translation property and its setter",
         # The None assignment RAISES, and a caught adsk error still takes the whole Python.Run down
         # outside a read-only context; the matrix here is a value object, so nothing is given up.
         "read_only": True,
@@ -2976,11 +3071,69 @@ ROWS = [
 """,
     },
     {
+        "id": "matrix3d-setrotation-bakes-the-pivot-into-the-translation-column",
+        "claim": ("Matrix3D.setToRotation(angle, axis, pivot) carries the pivot as a CORRECTION in "
+                  "the translation column, not as a separate centre: a 90 deg Z rotation about "
+                  "(10,0,0) reads translation (10,-10,0) and maps that pivot point to itself. "
+                  "ASSIGNING mat.translation overwrites that correction, so the same matrix then "
+                  "rotates about the WORLD origin - the pivot maps to (0,10,0) with (0,0,0) "
+                  "assigned and to (5,10,0) with (5,0,0) assigned - while COMPOSING the offset "
+                  "with transformBy keeps the pivot and adds the shift, mapping it to (15,0,0). "
+                  "transformBy also ACCUMULATES: two 90 deg Z rotations send +X to -X"),
+        "encoded_in": ("commands/mcpServer/tools/assembly_move.py, whose rotate arm composes the "
+                       "translation as its own matrix rather than assigning the column; "
+                       "tests/fakes/geometry.py FakeMatrix3D.setToRotation and its transformBy"),
+        # Transient value objects only - nothing in the design is touched, so the row is read-only.
+        "read_only": True,
+        "body": """
+    import math
+
+    def spun(m, x, y, z):
+        p = adsk.core.Point3D.create(x, y, z)
+        p.transformBy(m)
+        return (round(p.x, 6) + 0.0, round(p.y, 6) + 0.0, round(p.z, 6) + 0.0)
+
+    def rot(pivot):
+        m = adsk.core.Matrix3D.create()
+        m.setToRotation(math.radians(90.0), adsk.core.Vector3D.create(0.0, 0.0, 1.0),
+                        adsk.core.Point3D.create(*pivot))
+        return m
+
+    base = rot((10.0, 0.0, 0.0))
+    col = base.translation
+    column = (round(col.x, 6) + 0.0, round(col.y, 6) + 0.0, round(col.z, 6) + 0.0)
+    kept = spun(base, 10.0, 0.0, 0.0)
+    zeroed = rot((10.0, 0.0, 0.0))
+    zeroed.translation = adsk.core.Vector3D.create(0.0, 0.0, 0.0)
+    world = spun(zeroed, 10.0, 0.0, 0.0)
+    shifted = rot((10.0, 0.0, 0.0))
+    shifted.translation = adsk.core.Vector3D.create(5.0, 0.0, 0.0)
+    world_shift = spun(shifted, 10.0, 0.0, 0.0)
+    composed = rot((10.0, 0.0, 0.0))
+    tm = adsk.core.Matrix3D.create()
+    tm.translation = adsk.core.Vector3D.create(5.0, 0.0, 0.0)
+    composed.transformBy(tm)
+    kept_shift = spun(composed, 10.0, 0.0, 0.0)
+    twice = rot((0.0, 0.0, 0.0))
+    twice.transformBy(rot((0.0, 0.0, 0.0)))
+    accum = spun(twice, 1.0, 0.0, 0.0)
+    emit(column == (10.0, -10.0, 0.0) and kept == (10.0, 0.0, 0.0)
+         and world == (0.0, 10.0, 0.0) and world_shift == (5.0, 10.0, 0.0)
+         and kept_shift == (15.0, 0.0, 0.0) and accum == (-1.0, 0.0, 0.0),
+         "matrix3d-setrotation-bakes-the-pivot-into-the-translation-column: column=" + str(column)
+         + " expect (10,-10,0) | pivot maps to " + str(kept) + " expect (10,0,0)"
+         + " | translation:=(0,0,0) -> " + str(world) + " expect (0,10,0)"
+         + " | translation:=(5,0,0) -> " + str(world_shift) + " expect (5,10,0)"
+         + " | transformBy(translate 5) -> " + str(kept_shift) + " expect (15,0,0)"
+         + " | two 90 deg rotations send +X to " + str(accum) + " expect (-1,0,0)")
+""",
+    },
+    {
         "id": "occurrence-plain-reads-referenced-false-empty-collections",
         "claim": ("A plain LOCAL occurrence answers isReferencedComponent False and EMPTY joints "
                   "and bRepBodies collections - absence is not a live state for any of the three, "
                   "so a fake that drops the member teaches an API shape Fusion never presents"),
-        "encoded_in": "tests/conftest.py FakeOccurrence joints/bRepBodies/isReferencedComponent",
+        "encoded_in": "tests/fakes/design.py FakeOccurrence joints/bRepBodies/isReferencedComponent",
         "body": """
     tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
     try:
@@ -3000,7 +3153,7 @@ ROWS = [
     {
         "id": "occurrence-plain-reads-valid-and-lit",
         "claim": "A plain LOCAL occurrence made by addNewComponent, before anything is modelled in it, answers isValid True, isLightBulbOn True, isIsolated False, isVisible True and isReferencedComponent False - a fresh instance is live, lit, un-isolated and visible, so none of those flags has an unset or declining state a fake may model, and isIsolated in particular answers the bool False rather than nothing. Its boundingBox2 asked for solid bodies answers NOTHING (None, not an empty box) while the component holds no body, and answers a BoundingBox3D once one extrude lands - the 1 cm cube's box, min (0,0,0) to max (1,1,1). boundingBox2 takes a BITWISE BoundingBoxEntityTypes value, not a list, and the row reads both moments on the SAME occurrence so the None is the bodyless state rather than a different object",
-        "encoded_in": ("tests/conftest.py FakeOccurrence - its valid, light_bulb_on and isolated "
+        "encoded_in": ("tests/fakes/design.py FakeOccurrence - its valid, light_bulb_on and isolated "
                        "knobs (installed as plain isValid/isLightBulbOn/isIsolated reads) and its "
                        "bodies_bounding_box knob, whose None stands for the read that answers "
                        "nothing on an instance placing no body"),
@@ -3861,7 +4014,7 @@ ROWS = [
                   "transform still reads (1,2,3), and transforming a copy leaves the receiver "
                   "where the first transform put it"),
         "encoded_in": ("_assembly_detail._world_axes, which copies each axis vector before "
-                       "transformBy and then publishes the RECEIVER; tests/conftest.py FakeVector3D"),
+                       "transformBy and then publishes the RECEIVER; tests/fakes/geometry.py FakeVector3D"),
         "body": """
     import math
     v = adsk.core.Vector3D.create(1.0, 2.0, 3.0)
@@ -3928,7 +4081,7 @@ ROWS = [
                   "byte-equal to the native's - so an identity keys on (nativeObject or self)."
                   "entityToken, and a handle minted in one placement cannot resolve to the other. "
                   "A proxy token equal to the native's, or two placements sharing one, refutes"),
-        "encoded_in": ("conftest._MeshProxy - the shared MeshBody fake's lift, whose per-placement "
+        "encoded_in": ("tests/fakes/mesh.py _MeshProxy - the MeshBody fake's lift, whose per-placement "
                        "token is what keeps _common.native_identity from merging two placements"),
         "body": """
     doc, mesh, occ_a, occ_b = make_mesh_rig(app, "TokComp")
@@ -4061,7 +4214,7 @@ ROWS = [
                   "wrappers (no two are the same object) that all carry ONE byte-identical "
                   "entityToken: identity never answers 'same entity', the token does. Two reads "
                   "answering the SAME object, or two tokens differing, refutes"),
-        "encoded_in": ("tests/conftest.py entity_proxy / _EntityProxy, which hands a distinct "
+        "encoded_in": ("tests/fakes/scaffold.py entity_proxy / _EntityProxy, which hands a distinct "
                        "Python object per reference while every read delegates to one entity"),
         "body": """
     body, occ = make_placed_box(des, "ProxyTok")
@@ -4089,7 +4242,7 @@ ROWS = [
                   "native's own nativeObject reads None, and each wrapper re-reads its own token "
                   "unchanged. Equal tokens on the two, or a native answering a nativeObject, "
                   "refutes"),
-        "encoded_in": ("tests/conftest.py body_proxy / _OccurrenceProxy, whose token is folded per "
+        "encoded_in": ("tests/fakes/design.py body_proxy / _OccurrenceProxy, whose token is folded per "
                        "placement; _inputs._body_key, which keys on (nativeObject or self)"),
         "body": """
     native, occ = make_placed_box(des, "ProxySplit")
@@ -4117,7 +4270,7 @@ ROWS = [
                   "True both times and leaves count 2 - the collection de-dupes nothing, so a "
                   "False from add() is a genuine refusal of that object and never 'it was already "
                   "in there'. A second add answering False, or a count still 1, refutes"),
-        "encoded_in": ("tests/conftest.py _FakeObjectCollection.add, whose False is reserved for "
+        "encoded_in": ("tests/fakes/scaffold.py _FakeObjectCollection.add, whose False is reserved for "
                        "its `refuse` list"),
         "body": """
     p = adsk.core.Point3D.create(1.0, 2.0, 3.0)
@@ -4130,6 +4283,93 @@ ROWS = [
          "objectcollection-duplicate-add-takes: add=" + repr(first) + " count=" + str(after_first)
          + ", duplicate add=" + repr(second) + " count=" + str(after_second)
          + " (expect True/1 then True/2)")
+""",
+    },
+    {
+        "id": "cam-setup-occurrence-model-survives-a-body-swap",
+        "claim": ("A setup whose model is an OCCURRENCE keeps that selection when the component's "
+                  "contents are replaced: with the component's only body deleted and a differently "
+                  "sized one extruded in its place, Setup.models still answers the same one "
+                  "Occurrence and the setup reads isValid. The two model members take DIFFERENT "
+                  "types - SetupInput.models takes a Python LIST and Setup.models takes an "
+                  "ObjectCollection, each refusing the other with a TypeError. The relative stock "
+                  "box is the one thing that did NOT follow: stockXLow/High still read the "
+                  "ORIGINAL body's extents after the swap, so this row reports them rather than "
+                  "claiming the setup re-derived"),
+        "encoded_in": ("cam_create_setup.py's models comment and "
+                       ".claude/skills/insert-into-template/reference.md, whose part swap depends "
+                       "on the selection surviving; tests/fakes/cam.py FakeSetup / FakeSetupInput"),
+        "needs": "cam",
+        "body": """
+    cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
+    d = adsk.fusion.Design.cast(app.activeDocument.products.itemByProductType("DesignProductType"))
+    root = d.rootComponent
+    occ = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
+    comp = occ.component
+    comp.name = "SwapProbe"
+    sk = comp.sketches.add(comp.xYConstructionPlane)
+    sk.sketchCurves.sketchLines.addTwoPointRectangle(
+        adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(4.0, 4.0, 0.0))
+    comp.features.extrudeFeatures.addSimple(
+        sk.profiles.item(0), adsk.core.ValueInput.createByReal(1.0),
+        adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+    comp.bRepBodies.item(0).name = "FirstBody"
+    si = cam.setups.createInput(adsk.cam.OperationTypes.MillingOperation)
+    list_taken = True
+    try:
+        si.models = [occ]
+    except TypeError:
+        list_taken = False
+    setup = cam.setups.add(si)
+    setup.name = "SwapProbeSetup"
+
+    def box():
+        return tuple(setup.parameters.itemByName(n).expression
+                     for n in ("stockXLow", "stockXHigh"))
+
+    before_models = [m.name for m in setup.models]
+    before_box = box()
+    comp.bRepBodies.item(0).deleteMe()
+    sk2 = comp.sketches.add(comp.xYConstructionPlane)
+    sk2.sketchCurves.sketchLines.addTwoPointRectangle(
+        adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(6.0, 6.0, 0.0))
+    comp.features.extrudeFeatures.addSimple(
+        sk2.profiles.item(0), adsk.core.ValueInput.createByReal(2.0),
+        adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+    comp.bRepBodies.item(0).name = "SecondBody"
+    d.computeAll()
+    for _ in range(40):
+        adsk.doEvents()
+    after_models = [m.name for m in setup.models]
+    after_box = box()
+    still_valid = setup.isValid
+    # The two members are typed differently: the collection the SETUP takes is refused by the INPUT.
+    coll = adsk.core.ObjectCollection.create()
+    coll.add(occ)
+    input_takes_collection = True
+    try:
+        cam.setups.createInput(adsk.cam.OperationTypes.MillingOperation).models = coll
+    except TypeError:
+        input_takes_collection = False
+    setup_takes_list = True
+    try:
+        setup.models = [occ]
+    except TypeError:
+        setup_takes_list = False
+    cleaned = []
+    for label, entity in (("setup", setup), ("occurrence", occ)):
+        try:
+            cleaned.append(label + "=" + repr(entity.deleteMe()))
+        except Exception as ex:
+            cleaned.append(label + "=raised " + type(ex).__name__)
+    emit(list_taken and before_models == ["SwapProbe:1"] and after_models == ["SwapProbe:1"]
+         and still_valid is True and input_takes_collection is False and setup_takes_list is False,
+         "cam-setup-occurrence-model-survives-a-body-swap: models before=" + str(before_models)
+         + " after the swap=" + str(after_models) + " isValid=" + repr(still_valid)
+         + "; SetupInput.models took a list=" + str(list_taken) + " and an ObjectCollection="
+         + str(input_takes_collection) + ", Setup.models took a list=" + str(setup_takes_list)
+         + "; the relative stock box read " + str(before_box) + " before and " + str(after_box)
+         + " after (the swapped-in body is half again as wide); cleanup " + ", ".join(cleaned))
 """,
     },
     {
@@ -4197,7 +4437,7 @@ ROWS = [
     {
         "id": "cam-alloperations-shape",
         "claim": "Setup.allOperations FLATTENS folder-nested ops into the collection and DROPS the folder objects; counted and iterable. setup.operations holds only top-level ops; folders hang off setup.folders",
-        "encoded_in": "tests/conftest.py FakeCAMFolder / FakeSetup (the shared flatten every CAM test drives); tests/unit/test_cam_delete.py; _cam_common.walk_operations",
+        "encoded_in": "tests/fakes/cam.py FakeCAMFolder / FakeSetup (the shared flatten every CAM test drives); tests/unit/test_cam_delete.py; _cam_common.walk_operations",
         "needs": "cam",
         "facts_on_pass": {"behavior.alloperations_flattens_folder_children": True,
                           "behavior.alloperations_drops_folder_objects": True},
@@ -4265,7 +4505,7 @@ ROWS = [
                   "back. Other locked parameters keep theirs (isXpress), so the flag predicts only "
                   "that the UI never offers the edit - which is why cam_edit_operation refuses "
                   "before writing instead of reporting the edit it would have made"),
-        "encoded_in": ("cam_edit_operation.py's locked-parameter refusal; tests/conftest.py "
+        "encoded_in": ("cam_edit_operation.py's locked-parameter refusal; tests/fakes/cam.py "
                        "FakeCAMParameter's expression setter, which lands the write off this flag"),
         "needs": "cam",
         "facts_on_pass": {"behavior.cam_locked_parameter_write_lands": True},
@@ -4307,7 +4547,7 @@ ROWS = [
                   "raise, expression echoes the text verbatim, value.value still reads a finite "
                   "number, and .error is the only channel that names the failure - reading "
                   "'Failed to evaluate expression.'"),
-        "encoded_in": ("tests/conftest.py FakeCAMParameter.error, which answers that text for a "
+        "encoded_in": ("tests/fakes/cam.py FakeCAMParameter.error, which answers that text for a "
                        "stored expression naming a missing parameter; the rollback arms of "
                        "cam_edit_operation.py and cam_edit_setup.py gate on it"),
         "needs": "cam",
@@ -4345,6 +4585,60 @@ ROWS = [
          + " -> " + repr(after) + " value=" + repr(value) + " finite=" + str(finite)
          + " error=" + repr(err) + " | restored " + repr(p.expression) + " | "
          + ("raised " + raised if raised else "no raise"))
+""",
+    },
+    {
+        "id": "cam-tool-parameter-spells-a-backslash-doubled",
+        "claim": ("A CAM tool STRING parameter's expression spells a backslash DOUBLED: writing "
+                  "tool_description = 'C:\\\\Temp\\\\bin' (each backslash doubled inside the single "
+                  "quotes) reads the value back as C:\\Temp\\bin, while the same text written with "
+                  "single backslashes is accepted as an expression and its VALUE reads the literal "
+                  "'<UNSPECIFIED>' - a silent loss, not a raise. An apostrophe stays "
+                  "backslash-escaped, which is the shared codec's own spelling. The library tool "
+                  "read through toolLibraryAtURL is a transient copy: the shipped library reads "
+                  "its own description back afterwards, so nothing shop-owned is written"),
+        "encoded_in": ("cam_edit_tools._quote, whose backslash branch doubles before the shared "
+                       "codec's quoting; _cam_common.quote_expression, which escapes the "
+                       "apostrophe only"),
+        "body": """
+    libs = adsk.cam.CAMManager.get().libraryManager.toolLibraries
+    lib = None
+    for a in libs.childAssetURLs(
+            libs.urlByLocation(adsk.cam.LibraryLocations.Fusion360LibraryLocation)):
+        if "Milling Tools (Metric)" in a.leafName:
+            lib = libs.toolLibraryAtURL(a)
+            break
+    if lib is None or not lib.count:
+        emit(False, "cam-tool-parameter-spells-a-backslash-doubled: the bundled 'Milling Tools "
+             "(Metric)' library did not load - inconclusive")
+        return
+    t = lib.item(0)
+    p = t.parameters.itemByName("tool_description")
+    original = p.value.value
+    reads = {}
+    for label, expr in (("doubled", "'C:\\\\\\\\Temp\\\\\\\\bin'"),
+                        ("single", "'C:\\\\Temp\\\\bin'"),
+                        ("apostrophe", "'Bob\\\\'s tool'")):
+        try:
+            p.expression = expr
+            reads[label] = p.value.value
+        except Exception as ex:
+            reads[label] = "raised " + type(ex).__name__
+    # The library asset is untouched by the writes above: a FRESH load reads its own text back.
+    fresh = None
+    for a in libs.childAssetURLs(
+            libs.urlByLocation(adsk.cam.LibraryLocations.Fusion360LibraryLocation)):
+        if "Milling Tools (Metric)" in a.leafName:
+            fresh = libs.toolLibraryAtURL(a).item(0).parameters.itemByName(
+                "tool_description").value.value
+            break
+    emit(reads.get("doubled") == "C:\\\\Temp\\\\bin" and reads.get("single") == "<UNSPECIFIED>"
+         and reads.get("apostrophe") == "Bob's tool" and fresh == original,
+         "cam-tool-parameter-spells-a-backslash-doubled: doubled -> "
+         + repr(reads.get("doubled")) + " (expect the path with single backslashes) | single -> "
+         + repr(reads.get("single")) + " (expect '<UNSPECIFIED>') | apostrophe -> "
+         + repr(reads.get("apostrophe")) + " | the shipped library still reads " + repr(fresh)
+         + " (was " + repr(original) + ")")
 """,
     },
     {
@@ -4411,7 +4705,7 @@ ROWS = [
     {
         "id": "shape-dump-cam-job-world",
         "claim": "Five more CAM types dump non-empty attribute sets off the harness world: cam.setups is a Setups, setups.createInput(MillingOperation) a SetupInput, the bundled 'Milling Tools (Metric)' library's first entry a Tool, the first operation's parameters a CAMParameters whose item(0) is a CAMParameter, and the Fusion360 machine library's first entry a Machine. The dumped Machine is the LIBRARY's; what MeasureSetup's own machine property answered is reported in the detail and gates nothing, because the harness setup is built without a machine",
-        "encoded_in": "tests/conftest.py - the shared fakes DEGRANDFATHER-B step 3 writes for these types",
+        "encoded_in": "tests/fakes/cam.py - the shared fakes for these CAM types",
         "needs": "cam",
         "body": """
     cam, setup = cam_measure_setup()
@@ -4483,7 +4777,7 @@ ROWS = [
     {
         "id": "cam-children-tree",
         "claim": "Setup.children interleaves top-level Operations and folder objects whose type name is 'CAMFolder'; folder.allOperations and folder.children expose the folder's contents",
-        "encoded_in": "no fake: the tools walk _cam_common.CHILD_COLLECTIONS (operations/folders/patterns) and never read children, and tests/conftest.py's FakeCAMFolder / FakeSetup carry no children member",
+        "encoded_in": "no fake: the tools walk _cam_common.CHILD_COLLECTIONS (operations/folders/patterns) and never read children, and tests/fakes/cam.py's FakeCAMFolder / FakeSetup carry no children member",
         "needs": "cam",
         "body": """
     cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
@@ -4769,6 +5063,58 @@ ROWS = [
          + ("refused: " + why if refused else
             "not exercised (the machine this run picked carries no simulation model)"
             if refused is None else "SUCCEEDED - the clearing is not needed"))
+""",
+    },
+    {
+        "id": "cam-machine-simulation-refusal-spans-both-locations",
+        "claim": ("The simulation-model refusal is not a property of the LOCAL library: a machine "
+                  "read out of the bundled Fusion360 location whose hasSimulationModel is True is "
+                  "refused by Setup.machine the same way the local one is, and the platform words "
+                  "it '3 : Setting a simulation ready machine from an external library is "
+                  "currently not supported' - the flag and the library, not the vendor: three "
+                  "different Fusion360 machines are refused alike. The row stands up its OWN "
+                  "document and setup, because a setup that has already refused one such "
+                  "assignment aborts the script on the next one"),
+        "encoded_in": ("_cam_common._MACHINE_LOCATIONS and cam_edit_setup's "
+                       "machine_strip_simulation refusal hint, which names the simulation model "
+                       "and not the location it was read from"),
+        "body": """
+    lib = adsk.cam.CAMManager.get().libraryManager.machineLibrary
+    machines = lib.createQuery(adsk.cam.LibraryLocations.Fusion360LibraryLocation,
+                               "", "").execute() or []
+    sim_true = [m for m in machines if m.hasSimulationModel]
+    if not sim_true:
+        emit(False, "cam-machine-simulation-refusal-spans-both-locations: no Fusion360 machine of "
+             + str(len(machines)) + " read hasSimulationModel True - inconclusive")
+        return
+    ui = app.userInterface
+    was = ui.activeWorkspace.id
+    doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    reads = []
+    try:
+        d = adsk.fusion.Design.cast(doc.products.itemByProductType("DesignProductType"))
+        make_box(d, "SimRefusalBox")
+        ui.workspaces.itemById("CAMEnvironment").activate()
+        adsk.doEvents()
+        cam = adsk.cam.CAM.cast(doc.products.itemByProductType("CAMProductType"))
+        setup = cam.setups.add(cam.setups.createInput(adsk.cam.OperationTypes.MillingOperation))
+        for m in sim_true[:3]:
+            label = str(m.vendor) + " " + str(m.model)
+            try:
+                setup.machine = m
+                reads.append(label + "=LANDED")
+            except Exception as exc:
+                reads.append(label + "=refused: "
+                             + (str(exc).strip().splitlines() or [""])[-1][:80])
+    finally:
+        doc.close(False)
+        ui.workspaces.itemById(was).activate()
+        adsk.doEvents()
+    external = [r for r in reads if "simulation ready machine from an external library" in r]
+    emit(len(reads) == 3 and len(external) == 3,
+         "cam-machine-simulation-refusal-spans-both-locations: " + str(len(sim_true)) + " of "
+         + str(len(machines)) + " Fusion360 machines read hasSimulationModel True; "
+         + " | ".join(reads))
 """,
     },
     {
@@ -5529,7 +5875,7 @@ ROWS = [
                   "products.itemByProductType('CAMProductType') RAISES '3 : failed to find "
                   "product' on a fresh design document. A None inspectionResults, or a "
                   "no-CAM-product document answering None instead of raising, refutes"),
-        "encoded_in": ("tests/conftest.py make_inspection_cam, whose measures=None models the "
+        "encoded_in": ("tests/fakes/cam.py make_inspection_cam, whose measures=None models the "
                        "property answering None; cam_inspect_toolpaths' inspection reads"),
         "needs": "cam",
         "body": """
@@ -5948,7 +6294,7 @@ ROWS = [
         "claim": ("With isComputeDeferred True, Sketch.profiles still answers and holds the "
                   "regions closed BEFORE the deferral: two regions read 2, a third region drawn "
                   "while deferred still reads 2, and 3 once compute resumes"),
-        "encoded_in": ("tests/conftest.py make_sketch(profiles=, is_compute_deferred=) - the "
+        "encoded_in": ("tests/fakes/sketch.py make_sketch(profiles=, is_compute_deferred=) - the "
                        "profile list a deferred sketch hands a tool is the stale one; the arrange "
                        "and extrude deferral refusals guard that state"),
         "body": """
@@ -5980,7 +6326,7 @@ ROWS = [
                   "still count; with it at 0, moveToPreviousStep() returns True and markerPosition "
                   "is still 0. The bool is therefore no signal that the marker moved - a caller "
                   "that needs to know reads markerPosition back"),
-        "encoded_in": ("tests/conftest.py - the shared FakeTimeline's move helper answers True and "
+        "encoded_in": ("tests/fakes/design.py - FakeTimeline's move helper answers True and "
                        "leaves the marker on an out-of-range target, and "
                        "tests/unit/test__conftest_worlds.py pins that pair of boundaries"),
         "body": """
@@ -6020,7 +6366,7 @@ ROWS = [
         "id": "design-computeall-returns-true",
         "claim": ("Design.computeAll() RETURNS True on a healthy design - the SDK documents 'Returns "
                   "true if successful' and the call answers a bool, not None"),
-        "encoded_in": ("tests/conftest.py - the shared MakeDesign's computeAll answers True; "
+        "encoded_in": ("tests/fakes/design.py - MakeDesign's computeAll answers True; "
                        "design_recompute.py ignores the bool and judges the recompute by the "
                        "timeline health it reads afterwards"),
         "body": """
@@ -6106,7 +6452,7 @@ ROWS = [
                   "parentDocument all read. After every attempt isOutOfDate is still True and the "
                   "derived component still holds the FIRST version's single body, so no refresh "
                   "landed and none silently half-landed"),
-        "encoded_in": ("tests/conftest.py FakeDocumentReference (version setter, setter_raises, "
+        "encoded_in": ("tests/fakes/data_docs.py FakeDocumentReference (version setter, setter_raises, "
                        "latest_raises); doc_update_xref.py _refresh_one"),
         "body": """
     DR = adsk.core.DocumentReference

@@ -515,12 +515,13 @@ class TestAssemblyPlacement:
 
 
 class TestAppearanceWorld:
-    def test_a_copy_under_a_name_the_collection_already_holds_is_refused(self):
-        # DECLARED, not measured: the refusal is this fake's guard against a caller that mints
-        # BLIND. Without it, a handler that skipped its look-up-first reuse path would get a second
-        # same-named asset back and read that as success, leaving the document carrying two.
+    def test_a_copy_under_a_name_the_collection_already_holds_raises(self):
+        # MEASURED: live addByCopy raises '3 : appearance name already exists in document' and adds
+        # nothing; appearance_set reaches it through safe(), so the raise arrives as the None its
+        # look-up-first reuse path re-checks on.
         apps = FakeAppearances([FakeAppearance("AgentColor_1E8E3E")])
-        assert apps.addByCopy(FakeAppearance("Base"), "AgentColor_1E8E3E") is None
+        with pytest.raises(RuntimeError, match="already exists"):
+            apps.addByCopy(FakeAppearance("Base"), "AgentColor_1E8E3E")
         assert apps.count == 1 and apps._copied == []
 
     def test_a_copy_keeps_its_sources_asset_id_and_its_colour_channels(self):

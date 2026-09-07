@@ -744,6 +744,28 @@ _SKETCHWORK = [
                 and isinstance(t[2].get("font"), str) and t[2]["font"]
                 and "min" in (t[0].get("bounding_box") or {}))
      ([e for e in p.get("entities", []) if e.get("type") == "text"]), None),
+    # A WRONG DIMENSION COMES OUT: 'dimension:<i>' indexes sketchDimensions in the order the X-ray
+    # lists them, and the parameter name captured before the mutation says WHICH one went. The two
+    # lines are DIFFERENT lengths so the survivor's expression convicts a wrong-index delete.
+    ("sketch_create", {"plane": "xy", "name": "DimDel"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 1300, "y1": 100, "x2": 1360, "y2": 100,
+                             "sketch_name": "DimDel"}, "ok", None),
+    ("sketch_add_geometry", {"kind": "line", "x1": 1300, "y1": 120, "x2": 1340, "y2": 120,
+                             "sketch_name": "DimDel"}, "ok", None),
+    ("sketch_dimension", {"dim_type": "distance", "sketch_name": "DimDel",
+                          "entity_one": "line:0", "value": "60 mm"}, "ok", None),
+    ("sketch_dimension", {"dim_type": "distance", "sketch_name": "DimDel",
+                          "entity_one": "line:1", "value": "40 mm"}, "ok", None),
+    ("sketch_get", {"sketch_name": "DimDel", "include_entities": True},
+     lambda p: p.get("dimension_count") == 2, None),
+    ("sketch_delete_entity", {"sketch_name": "DimDel", "target": "dimension:1"},
+     lambda p: p.get("dimensions_before") == 2 and p.get("dimensions_after") == 1
+     and isinstance(p.get("parameter"), str) and bool(p["parameter"]), None),
+    ("sketch_get", {"sketch_name": "DimDel", "include_entities": True},
+     lambda p: p.get("dimension_count") == 1
+     and "60" in (p["dimensions"][0].get("expression") or ""), None),
+    # the emptied index refuses naming the count - never a false ok on a dimension that is gone.
+    ("sketch_delete_entity", {"sketch_name": "DimDel", "target": "dimension:1"}, "refused", None),
     # THE SLOT FAMILY, one scratch sketch per shape in a clear band so every count is absolute.
     # 'radius' is the HALF width throughout (the label carries the full width), each tailed
     # constructor takes its tail POSITIONALLY, and the ladders differ per kind - which is what the
@@ -804,8 +826,11 @@ _SKETCHWORK = [
      lambda p: p.get("dimension_count") == 3
      and any("diameter" in (d.get("type") or "") for d in p["dimensions"])
      and any("linear" in (d.get("type") or "") and abs((d.get("value") or 0) - 40.0) < 1e-3
-             for d in p["dimensions"])
+             and d.get("value_units") == "mm" for d in p["dimensions"])
+     # the ANGLE's value is published in DEGREES beside its own 'deg' unit key - the parameter's
+     # own read is radians, which would land 0.5236 here against a "30 deg" expression.
      and any("angular" in (d.get("type") or "") and "30" in (d.get("expression") or "")
+             and abs((d.get("value") or 0) - 30.0) < 1e-2 and d.get("value_units") == "deg"
              for d in p["dimensions"]), None),
     # the flag ALONE, with no tail: three lines and exactly the one dimension it asked for.
     ("sketch_create", {"plane": "xy", "name": "SlotF"}, "ok", None),

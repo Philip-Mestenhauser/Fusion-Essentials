@@ -586,26 +586,18 @@ class TestFaceExtentAndPlanar:
 # The create handler had no handler-level test; pin the validation gates and the computed output
 # fields (axis null for non-axis types, offset/angle ValueInput scaling, joint_type echo).
 
-class _CreateJointInput:
-    """A JointInput recording which motion setter ran; `ok` False is the setter that REFUSES."""
+class _CreateJointInput(FakeJointInput):
+    """The shared JointInput plus the three fields a create WRITES onto it, and `called` - the
+    motion the shared fake records; `ok` False is the setter that REFUSES."""
     def __init__(self, ok=True):
-        self.called = None
+        super().__init__(sets_ok=ok)
         self.offset = None
         self.angle = None
         self.isFlipped = False
-        self._ok = ok
-    def setAsRigidJointMotion(self):
-        self.called = ("rigid",); return self._ok
-    def setAsRevoluteJointMotion(self, ax, *rest):
-        self.called = ("revolute", ax) + rest; return self._ok
-    def setAsSliderJointMotion(self, ax, *rest):
-        self.called = ("slider", ax) + rest; return self._ok
-    def setAsCylindricalJointMotion(self, ax, *rest):
-        self.called = ("cylindrical", ax) + rest; return self._ok
-    def setAsPlanarJointMotion(self, ax, *rest):
-        self.called = ("planar", ax) + rest; return self._ok
-    def setAsBallJointMotion(self, a, b):
-        self.called = ("ball", a, b); return self._ok
+
+    @property
+    def called(self):
+        return self._motion
 
 
 def _install_create(monkeypatch, jo_names=("JO_A", "JO_B"), snapshots=None, joint_input=None):

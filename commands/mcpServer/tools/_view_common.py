@@ -13,11 +13,13 @@ from . import _common
 from . import _geom
 
 MAP_BLURB = (
-    "view_direction/look_direction/up_vector/is_ortho_face - camera vectors for a named view; "
-    "apply_named_view/capture_png_b64 - orient and grab the viewport; "
-    "standoff_distance/STANDOFF_FALLBACK_CM - the eye-target standoff an orient rebuilds from; "
-    "DISPLAY_FOLDERS/all_display_components - toggling non-body clutter; "
-    "keep_visible/isolate_for_fit/restore_message/focus_box - framing on one occurrence")
+    "view_direction/look_direction/up_vector/is_ortho_face - a named view's vectors; "
+    "apply_named_view/capture_png_b64 - orient and grab; "
+    "standoff_distance/STANDOFF_FALLBACK_CM - the orient standoff; "
+    "activate_workspace - activate and read back; "
+    "DISPLAY_FOLDERS/all_display_components - non-body clutter; "
+    "keep_visible/all_bodies/same_body/isolate_for_fit/restore_message/focus_box - framing one "
+    "subject")
 
 app = adsk.core.Application.get()
 
@@ -28,6 +30,25 @@ def user_interface():
     if not ui:
         raise RuntimeError("No user interface available.")
     return ui
+
+
+def activate_workspace(ui, ws):
+    """(verdict, active_label, basis) for activating workspace 'ws': verdict True when it reads back
+    active, False when activate() declined or a read names another workspace, None when neither read
+    answered; basis is the read the verdict came from - 'refused', 'flag' or 'ui'."""
+    # activate() returning true is not proof the workspace changed, so Workspace.isActive is read
+    # back and the UI's own active workspace answers where that flag will not. The call itself is a
+    # MUTATION and raises: a caller restoring a workspace it switched away from catches it.
+    if not ws.activate():
+        return False, None, "refused"
+    flag = _common.read_flag(lambda: ws.isActive)
+    if flag is not None:
+        return flag, None, "flag"
+    active_id = _common.safe(lambda: ui.activeWorkspace.id)
+    if active_id is None:
+        return None, None, "ui"
+    label = _common.safe(lambda: ui.activeWorkspace.name) or active_id
+    return active_id == _common.safe(lambda: ws.id), label, "ui"
 
 
 # Display category -> the Component FOLDER bulb controlling it. The folder bulb is separate from
@@ -83,32 +104,65 @@ def keep_visible(o_path, target_path):
             or o_path.startswith(target_path + "+"))     # o is a descendant of the target
 
 
+def all_bodies(design):
+    """Every solid/surface/mesh body in the design - the root component's, plus each occurrence's."""
+    root = _common.safe(lambda: design.rootComponent)
+    # The shared census, not root.allOccurrences: that property RAISES on a design holding an
+    # unresolved external reference.
+    holders = ([root] if root is not None else []) + list(_common.all_occurrences(design))
+    out = []
+    for h in holders:
+        for attr in ("bRepBodies", "meshBodies"):
+            out.extend(_common.iter_collection(
+                _common.safe(lambda h=h, attr=attr: getattr(h, attr))))
+    return out
+
+
+def same_body(a, b):
+    """Whether two body reads are the SAME body - the API mints a fresh proxy per access, so `is`
+    alone misses one reached through a second walk."""
+    # native_identity, never a bare entityToken: that token is document-local, so two bodies out of
+    # two x-refs read the same one. An unread identity answers False rather than matching another
+    # unread one, which keeps a body VISIBLE rather than hiding the subject by mistake.
+    if a is b:
+        return True
+    ia = _common.native_identity(a)
+    return ia is not None and ia == _common.native_identity(b)
+
+
 def isolate_for_fit(name, ref):
-    """Hide every occurrence outside the named one's subtree so a fit frames it; 'ref' is the
-    caller's OccurrenceRef. Returns (restore, target, error) - restore() answers the names whose
-    bulb it could not put back."""
+    """Hide everything outside the named subject so a fit frames it; 'ref' is the caller's
+    TargetRef, resolving an occurrence (its own subtree stays lit) or a single BODY. Returns
+    (restore, target, error) - restore() answers the names whose bulb it could not put back."""
     design = _common.design()
     root = _common.safe(lambda: design.rootComponent) if design else None
     if not root:
         return None, None, f"{ref.name}: no active design to resolve '{name}' against."
-    target, err = ref.resolve(name)
-    if target is None:
+    resolved, err = ref.resolve(name)
+    if resolved is None:
         return None, None, err
-    target_path = _common.safe(lambda: target.fullPathName)
-    # root.allOccurrences RAISES on a design holding an unresolved external reference; the shared
-    # census survives it.
-    occs = _common.all_occurrences(design)
+    target, kind = resolved
     prev = []
-    for o in occs:
-        if keep_visible(_common.safe(lambda o=o: o.fullPathName), target_path):
-            continue
-        was = _common.safe(lambda o=o: o.isLightBulbOn)
-        if was:
-            prev.append(o)
-            _common.safe(lambda o=o: setattr(o, "isLightBulbOn", False))
+    if kind in ("body", "mesh"):
+        # A single-body root design places no occurrence at all, so the subject is the BODY and the
+        # other BODIES' bulbs are what a fit has to clear.
+        for b in all_bodies(design):
+            if same_body(b, target) or not _common.safe(lambda b=b: b.isLightBulbOn):
+                continue
+            prev.append(b)
+            _common.safe(lambda b=b: setattr(b, "isLightBulbOn", False))
+    else:
+        target_path = _common.safe(lambda: target.fullPathName)
+        for o in _common.all_occurrences(design):
+            if keep_visible(_common.safe(lambda o=o: o.fullPathName), target_path):
+                continue
+            was = _common.safe(lambda o=o: o.isLightBulbOn)
+            if was:
+                prev.append(o)
+                _common.safe(lambda o=o: setattr(o, "isLightBulbOn", False))
 
     # Viewport.fit() frames every VISIBLE entity, so construction geometry outside the isolated
-    # subtree still blows the frame open; the folder bulbs switch that clutter off design-wide.
+    # subject still blows the frame open; the folder bulbs switch that clutter off design-wide.
     folder_prev = []                       # (component, attr) - only bulbs we moved
     for comp in all_display_components(design):
         for attr in DISPLAY_FOLDERS.values():
@@ -128,6 +182,9 @@ def isolate_for_fit(name, ref):
             if _common.read_flag(lambda comp=comp, attr=attr: getattr(comp, attr)) is not True:
                 stuck.append(f"{_common.safe(lambda comp=comp: comp.name) or '?'}:{attr}")
         return stuck
+    # What the isolate actually darkened, so the restore's message names bodies on a body subject
+    # and occurrences on an occurrence one rather than one word for both.
+    restore.hidden = "bodies" if kind in ("body", "mesh") else "occurrences"
     return restore, target, None
 
 
@@ -142,10 +199,11 @@ def restore_message(restore, label, purpose):
         stuck = [f"the restore raised: {e}"]
     if not stuck:
         return None
-    return (f"{label} hid the other occurrences {purpose} and could NOT turn "
+    hidden = getattr(restore, "hidden", "occurrences")
+    return (f"{label} hid the other {hidden} {purpose} and could NOT turn "
             f"{len(stuck)} of them back on: {', '.join(str(s) for s in stuck[:5])}. "
-            "The document is left with those hidden - view_set(action='show', target=...) "
-            "restores them.")
+            f"The document is left with those {hidden} hidden - view_set(action='show', "
+            "target=...) restores them.")
 
 # eye - target direction per named view, not pre-normalized; view_direction() normalizes on read.
 # Fusion is Z-up: a positive z aims the camera down at the TOP face, so an iso-bottom-* entry

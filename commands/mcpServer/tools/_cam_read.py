@@ -192,11 +192,29 @@ def get_cam_setups_handler() -> dict:
             if unreadable:
                 setups[-1]["model_lists_unreadable"] = unreadable
             setups[-1]["blocked_by"] = setup_blockers(s)
+            if setups[-1]["stock_mode"] == _PREVIOUS_SETUP_MODE:
+                setups[-1]["stock_extents_describe"] = _REST_STOCK_UNREADABLE
     except Exception as e:
         return error(f"Could not read setups: {e}")
 
-    return ok({"setup_count": len(setups), "setups": setups, "truncated": setups_truncated})
+    out = {"setup_count": len(setups), "setups": setups, "truncated": setups_truncated}
+    if any(r.get("stock_mode") == _PREVIOUS_SETUP_MODE for r in setups):
+        out["note"] = _REST_STOCK_NOTE
+    return ok(out)
 
+
+# MEASURED on a setup switched to this mode: stockSolids reads 0, no previousSetup parameter exists,
+# and stockXLow..stockZHigh keep the RELATIVE-BOX numbers a plain setup reads - so nothing published
+# here describes what the preceding setup actually left.
+_PREVIOUS_SETUP_MODE = "previous_setup"
+
+_REST_STOCK_UNREADABLE = "the relative box, NOT the rest stock this mode cuts from"
+
+_REST_STOCK_NOTE = (
+    "A setup at stock_mode 'previous_setup' cuts what the SETUP BEFORE it left, and nothing readable "
+    "describes that: its stockSolids read empty and its stock extents keep the relative-box numbers "
+    "(stock_extents_describe says so on the row). Size a clearing strategy from the preceding "
+    "setup's own operations, not from those extents.")
 
 _GENERATE_REQUIRES = {"tool": "cam_generate", "workspace": "Manufacture"}
 # A state that never answered is not stale work: the remedy is another READ, in the workspace op
@@ -719,6 +737,45 @@ def _op_time_rows(cam, ops, args, factor) -> tuple:
     return rows, False
 
 
+# Said only where a setup row actually carries the key - a job whose every setup totalled would
+# otherwise be handed a sentence about a state nothing in the payload is in.
+_TOTAL_UNAVAILABLE_NOTE = (
+    " A setup carrying setup_total_unavailable is one whose whole-collection getMachiningTime "
+    "RAISED - that key is the platform's message, its per-operation rows were read one at a time, "
+    "and operations_with_errors names its operations reading hasError true. It adds nothing to "
+    "total_machining_time_seconds, which is a PARTIAL: total_excludes_setups names every setup "
+    "left out of it.")
+
+
+def _op_time_block(cam, ops, args, factor) -> dict:
+    """The per-operation half of a setup row: the rows, their sum and how many were summed. This
+    sum is NOT the setup total - that is one call over the whole collection."""
+    rows, truncated = _op_time_rows(cam, ops, args, factor)
+    timed = [r["machining_time_seconds"] for r in rows
+             if isinstance(r.get("machining_time_seconds"), (int, float))]
+    block = {"operations": rows, "operations_time_sum_seconds": round(sum(timed), 1),
+             "operations_time_summed": len(timed)}
+    if truncated:
+        block["operations_truncated"] = True
+    return block
+
+
+def _errored_op_names(ops) -> list:
+    """The operations of a setup reading hasError true - present-and-empty when none do."""
+    return [safe(lambda o=o: o.name) for o in ops if safe(lambda o=o: o.hasError, False)]
+
+
+def _per_operation_only(cam, label, ops, suppressed, args, factor, exc) -> dict:
+    """The setup row for a whole-collection getMachiningTime that RAISED: every per-operation
+    reading it could still take, the platform's message as setup_total_unavailable, and the
+    operations reading hasError true beside them."""
+    rec = {"setup": label, "excluded_suppressed": suppressed,
+           "setup_total_unavailable": str(exc),
+           "operations_with_errors": _errored_op_names(ops)}
+    rec.update(_op_time_block(cam, ops, args, factor))
+    return rec
+
+
 def get_machining_time_handler(setup: str = "", units: str = "mm") -> dict:
     """Estimated machining time for the whole doc, or one setup (`setup`), per setup and per op."""
     cam, err = get_cam()
@@ -781,31 +838,32 @@ def get_machining_time_handler(setup: str = "", units: str = "mm") -> dict:
             "timed_operations": added,
             "excluded_suppressed": suppressed,
             }
-            rows, truncated = _op_time_rows(cam, ops, args, factor)
-            rec["operations"] = rows
             # The per-op sum disagrees with the aggregate above, so both are published and neither
             # is derived from the other.
-            timed = [r["machining_time_seconds"] for r in rows
-                     if isinstance(r.get("machining_time_seconds"), (int, float))]
-            rec["operations_time_sum_seconds"] = round(sum(timed), 1)
-            rec["operations_time_summed"] = len(timed)
-            if truncated:
-                rec["operations_truncated"] = True
+            rec.update(_op_time_block(cam, ops, args, factor))
             results.append(rec)
         except Exception as e:
-            results.append({"setup": label, "excluded_suppressed": suppressed, "error": str(e)})
+            # The whole-collection call raises where any operation in the setup is ERRORED, which
+            # would hide every good per-operation reading behind one message.
+            results.append(_per_operation_only(cam, label, ops, suppressed, args, factor, e))
 
-    return ok({
+    # A setup whose own total raised contributes nothing to the grand total while its per-operation
+    # rows ARE published, so the document figure is named as the partial it is.
+    excluded = [r["setup"] for r in results if "setup_total_unavailable" in r]
+    payload = {
             "setup_count": len(results),
         "total_machining_time_seconds": round(grand, 1),
         "total_machining_time_hms": _hms(grand),
         "setups": results,
         "units": unit,
-    "note": _TIME_NOTE,
+    "note": _TIME_NOTE + (_TOTAL_UNAVAILABLE_NOTE if excluded else ""),
     "assumptions": {"feed_scale_percent": feed_scale,
             "rapid_feed_cm_per_s": rapid_feed,
             "tool_change_seconds": tool_change},
-    })
+    }
+    if excluded:
+        payload["total_excludes_setups"] = excluded
+    return ok(payload)
 
 
 def _hms(seconds) -> str:

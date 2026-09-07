@@ -77,7 +77,9 @@ class BRepBody:
     @property
     def visibleOpacity(self):
         if self._visible_opacity is BRepBody._UNSET:
-            raise RuntimeError("3 : InternalValidationError : res")
+            if _NATIVE_OPACITY_RAISES:
+                raise RuntimeError("3 : InternalValidationError : res")
+            return getattr(self, "opacity", 1.0)
         return self._visible_opacity
 
     @property
@@ -259,7 +261,7 @@ class BRepFace:
     def __init__(self, surface, area=0.0, centroid=None, edge_count=0, body_name=None,
                  entity_token=None, body=None, point_on_face=None, normal=None,
                  bounding_box=None, assembly_context=None, param_reversed=None,
-                 assembly_proxy=_UNSET, appearance=_UNSET):
+                 assembly_proxy=_UNSET, appearance=_UNSET, edges=None):
         self.appearance = FakeAppearance() if appearance is BRepFace._UNSET else appearance
         self.geometry = surface
         self.assemblyContext = assembly_context
@@ -271,7 +273,10 @@ class BRepFace:
             self.boundingBox = bounding_box
         self.area = area
         self.centroid = centroid
-        self.edges = _NamedCollection([None] * edge_count)
+        # `edges` are the BRepEdges bounding the face, for a caller that walks them; `edge_count`
+        # alone gives that many placeholder slots, which is enough for a count read.
+        self.edges = _NamedCollection(list(edges) if edges is not None
+                                      else [None] * edge_count)
         self.body = body if body is not None else (_SimpleNamed(body_name) if body_name else None)
         self.entityToken = entity_token
         self.pointOnFace = point_on_face
@@ -421,6 +426,9 @@ class MakeComp:
 # working while the generated facts file is one republish behind the row that emits the key.
 _FRESH_DESIGN_APPEARANCES = (_api_facts.BEHAVIOR["fresh_design_appearances_count"]
                              if "fresh_design_appearances_count" in _api_facts.BEHAVIOR else 0)
+# A native body's visibleOpacity raises with no override set (measured on the appearance world).
+_NATIVE_OPACITY_RAISES = (_api_facts.BEHAVIOR["native_body_visible_opacity_raises"]
+                          if "native_body_visible_opacity_raises" in _api_facts.BEHAVIOR else True)
 
 
 @fusion_fake(live_type="Design",

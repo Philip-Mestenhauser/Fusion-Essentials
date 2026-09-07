@@ -1483,6 +1483,72 @@ class TestParameterEditableFlag:
         assert "editable false refuses a write" in out["note"] and "DIFFERENT units" in out["note"]
 
 
+class TestParameterChoices:
+    """A CHOICE parameter's own values, published on the row: without them neither this read nor the
+    refusal a wrong token earns names a single legal spelling, and the caller guesses."""
+
+    def _op(self, monkeypatch, params):
+        op = type("O", (), {"name": "MA1", "strategy": "multi_axis_contour",
+                            "parameters": _SetupParams(params)})()
+        monkeypatch.setattr(cg, "resolve_operation",
+                            lambda cam, name, label="operation": (SimpleNamespace(obj=op), None, []))
+
+    def test_a_choice_row_publishes_the_values_it_takes(self, monkeypatch):
+        self._op(monkeypatch, [FakeCAMParameter("multiAxisMachiningType", "three_axis",
+                                                title="Type", value="three_axis",
+                                                choices=["three_axis", "five_axis"])])
+        out, err = cg._slice_parameters(object(), "MA1", "")
+        assert err is None
+        assert out["sections"]["General"][0]["choices"] == ["three_axis", "five_axis"]
+        assert "getChoices()" in out["note"]
+
+    def test_a_row_with_no_choice_set_carries_no_key_and_no_note(self, monkeypatch):
+        # the quiet default: nearly every parameter is a number or a string, and a 'choices' key on
+        # each of them - or a sentence about a key nothing carries - is noise.
+        self._op(monkeypatch, [FakeCAMParameter("tolerance", "0.01", title="Tolerance")])
+        out, _err = cg._slice_parameters(object(), "MA1", "")
+        assert "choices" not in out["sections"]["General"][0]
+        assert "getChoices()" not in out["note"]
+
+    def test_the_setup_slice_publishes_them_too(self, monkeypatch):
+        setup = type("S", (), {"name": "Turn1", "parameters": _SetupParams(
+            [FakeCAMParameter("wcs_origin_turning", "'model front'", title="Origin",
+                              choices=["model front", "model back"])])})()
+        monkeypatch.setattr(cg, "find_setup", lambda cam, name: (setup, ["Turn1"], None))
+        out, _err = cg._slice_parameters(object(), "", "Turn1")
+        assert out["sections"]["General"][0]["choices"] == ["model front", "model back"]
+        assert "getChoices()" in out["note"]
+
+
+class TestStrategyIdAndName:
+    """MEASURED: the 'strategy' PARAMETER reads the platform's internal id ('parallel_new') while
+    Operation.strategy reads the create vocabulary ('parallel') - and createInput takes only the
+    latter. One key each, so an agent cannot carry the id back into a create that raises on it."""
+
+    def test_the_slice_publishes_the_id_and_the_create_name_apart(self, monkeypatch):
+        op = type("O", (), {"name": "Parallel1", "strategy": "parallel", "parameters": _SetupParams(
+            [FakeCAMParameter("strategy", "'parallel_new'", title="Strategy"),
+             FakeCAMParameter("tolerance", "0.01", title="Tolerance")])})()
+        monkeypatch.setattr(cg, "resolve_operation",
+                            lambda cam, name, label="operation": (SimpleNamespace(obj=op), None, []))
+        out, err = cg._slice_parameters(object(), "Parallel1", "")
+        assert err is None
+        assert out["strategy"] == "parallel_new"        # the parameter's own id, unquoted
+        assert out["strategy_name"] == "parallel"       # what cam_create_operation takes
+        assert "cam_create_operation and cam_get(include=['strategies']) take strategy_name" \
+            in out["note"]
+
+    def test_an_operation_with_no_strategy_parameter_reads_null_not_the_name(self, monkeypatch):
+        # the two are separate reads: falling back to Operation.strategy here would publish the
+        # create name under the id key and hide that the parameter never answered.
+        op = type("O", (), {"name": "Face1", "strategy": "face",
+                            "parameters": _SetupParams([FakeCAMParameter("tolerance", "0.01")])})()
+        monkeypatch.setattr(cg, "resolve_operation",
+                            lambda cam, name, label="operation": (SimpleNamespace(obj=op), None, []))
+        out, _err = cg._slice_parameters(object(), "Face1", "")
+        assert out["strategy"] is None and out["strategy_name"] == "face"
+
+
 class TestInspectionSlice:
     """include=['inspection'] = the recorded probing results, delegated to _cam_read's
     get_inspection_results_handler; 'measure'/'max_results'/'units' scope and bound it."""

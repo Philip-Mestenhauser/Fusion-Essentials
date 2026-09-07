@@ -8,7 +8,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import iter_collection, ok, error, safe
-from ._cam_common import clamp_rows, get_cam, resolve_cam_node
+from ._cam_common import STRATEGY_PAIR_NOTE, clamp_rows, get_cam, resolve_cam_node, strategy_pair
 
 
 _DIFFERENCES_CAP = 200   # two operations can differ across hundreds of CAM parameters; bound the rows
@@ -54,18 +54,25 @@ def handler(operation_a: str = "", operation_b: str = "",
     differences_out = differences[:cap]
     truncated = total > len(differences_out)
 
+    pair_a, pair_b = strategy_pair(op_a), strategy_pair(op_b)
     out = {
         "operation_a": safe(lambda: op_a.name),
         "operation_b": safe(lambda: op_b.name),
     "tool_a": _op_tool_desc(op_a),
     "tool_b": _op_tool_desc(op_b),
+    # Both vocabularies per side: the 'strategy' difference row below carries the internal id, which
+    # is not a name cam_create_operation takes.
+    "strategy_a": pair_a["strategy"], "strategy_name_a": pair_a["strategy_name"],
+    "strategy_b": pair_b["strategy"], "strategy_name_b": pair_b["strategy_name"],
     "same_parameter_count": same_count,
     "difference_count": total,
     "differences": differences_out,
     "truncated": truncated,
+    "note": STRATEGY_PAIR_NOTE,
     }
     if truncated:
-        out["note"] = f"differences was capped at {cap} of {total}; raise max_results to see the rest."
+        out["note"] += (f" differences was capped at {cap} of {total}; raise max_results to see "
+                        "the rest.")
     return ok(out)
 
 

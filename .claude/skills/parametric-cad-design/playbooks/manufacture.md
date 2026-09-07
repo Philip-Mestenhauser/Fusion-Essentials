@@ -8,6 +8,8 @@
 
 **geometry-selection-is-half-the-operation** - Compare their geometry selections - chains, extension modes, stock contours, boundaries - because a parameter diff cannot see them when two operations read as identical; not for operations that differ in parameters already. Prove: `cam_get`: each operation's references: the chains and faces it was given.
 
+**turning-lead-out-gouges-the-remaining-stock** - Read the warning text before treating the cycle as clean: 'Lead-Out has been modified due to a gouge with the remaining stock' says the exit move ran into stock the cycle leaves behind, and Fusion moved it rather than refusing. Setting doLeadOut false on that operation with cam_edit_operation cleared it - measured on a turned flange, where the four cycles then read no warning at all and every one cut when a turning profile finishing cycle generates carrying a warning; not for a cycle whose exit move has to clear a face, where the lead-out is the point. Prove: `cam_get_status`: operations_with_warnings is empty for that setup and none of its operations is in empty_toolpaths.
+
 ### Recipes
 
 #### Choosing a strategy for a feature

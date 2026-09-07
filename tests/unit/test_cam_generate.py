@@ -203,6 +203,69 @@ class TestLaunchCountIsTheScopeWalk:
         assert out["operations_to_generate"] == 3
         _GENERATIONS.clear()
 
+    def test_the_launch_names_each_operation_it_covers_and_why(self, monkeypatch):
+        # MEASURED: skip_valid=true launched 11 operations where 5 were new - a count alone cannot
+        # say whether the extra six were stale or the launch over-reached, so each covered operation
+        # is named beside the state it read before the launch.
+        _GENERATIONS.clear()
+        self._install(monkeypatch, [SharedSetup("S", ops=[
+            SharedOp("Stale", operation_state=1),
+            SharedOp("New", operation_state=3),
+            SharedOp("Done", operation_state=0),
+            SharedOp("Parked", operation_state=2, suppressed=True)])], 13)
+        out = _payload(gen.handler(target="", skip_valid=True))
+        assert out["launch_reasons"] == {"out_of_date": 1, "no_toolpath": 1}
+        assert out["launched_operations"] == [{"operation": "Stale", "reason": "out_of_date"},
+                                              {"operation": "New", "reason": "no_toolpath"}]
+        assert "launch_reasons tallies the state each operation read BEFORE" in out["note"]
+        _GENERATIONS.clear()
+
+    def test_a_forced_launch_says_the_valid_ones_were_forced(self, monkeypatch):
+        # skip_valid=false is the one way a valid operation joins a launch; a reason of
+        # 'out_of_date' over it would misdescribe the whole call.
+        _GENERATIONS.clear()
+        self._install(monkeypatch, [SharedSetup("S", ops=[
+            SharedOp("Done", operation_state=0), SharedOp("Stale", operation_state=1)])], 13)
+        out = _payload(gen.handler(target="", skip_valid=False))
+        assert out["launch_reasons"] == {"valid_forced": 1, "out_of_date": 1}
+        _GENERATIONS.clear()
+
+    def test_a_scoped_launch_says_skip_valid_was_not_applied(self, monkeypatch):
+        # MEASURED: cam.generateToolpath over a SETUP regenerated all four of its operations, two
+        # already valid, under skip_valid=true - the flag narrows the DOCUMENT sweep only. Without
+        # this the valid_forced rows read as a stale-state fault the caller would go hunting.
+        _GENERATIONS.clear()
+        self._install(monkeypatch, [SharedSetup("S", ops=[
+            SharedOp("Done", operation_state=0), SharedOp("Stale", operation_state=1)])], 13)
+        out = _payload(gen.handler(target="S", skip_valid=True))
+        assert out["skip_valid_applied"] is False
+        assert out["launch_reasons"] == {"valid_forced": 1, "out_of_date": 1}
+        assert "skip_valid was requested but NOT applied" in out["note"]
+        assert "regenerates its whole target whatever the flag says" in out["note"]
+        _GENERATIONS.clear()
+
+    def test_the_document_sweep_publishes_no_such_disclosure(self, monkeypatch):
+        # the boundary: the flag DOES narrow a document sweep, so the key would be noise there.
+        _GENERATIONS.clear()
+        self._install(monkeypatch, [SharedSetup("S", ops=self._ops())], 13)
+        out = _payload(gen.handler(target="", skip_valid=True))
+        assert "skip_valid_applied" not in out
+        assert "skip_valid was requested but NOT applied" not in out["note"]
+        _GENERATIONS.clear()
+
+    def test_the_named_rows_are_capped_and_the_overflow_is_flagged(self, monkeypatch):
+        # A whole-document sweep can cover hundreds; a silently cut list would read as the complete
+        # set of what is being rebuilt.
+        _GENERATIONS.clear()
+        monkeypatch.setattr(gen, "_LAUNCH_ROWS_CAP", 2)
+        self._install(monkeypatch, [SharedSetup("S", ops=[
+            SharedOp(f"Op{i}", operation_state=1) for i in range(4)])], 13)
+        out = _payload(gen.handler(target="", skip_valid=True))
+        assert len(out["launched_operations"]) == 2
+        assert out["launched_operations_truncated"] is True
+        assert out["launch_reasons"] == {"out_of_date": 4}     # the tally covers every one
+        _GENERATIONS.clear()
+
     def test_the_walk_runs_before_the_launch_that_moves_the_state_it_reads(self, monkeypatch):
         # generateAllToolpaths marks every operation valid here. Counting after it would read the
         # states the launch just wrote and report 0 over a launch covering three.
@@ -316,6 +379,10 @@ class TestEntitlementPreflight:
         assert [kind for kind, _ in cam.generate_calls] == ["target", "target"]
         assert self._launched(cam) == ["Face1", "Face2"]
         assert out["entitlement_blocked"] == [{"name": "Cham", "strategy": "chamfer"}]
+        # the split arm names what it launched too, and the excluded one is not in that list
+        assert out["launched_operations"] == [{"operation": "Face1", "reason": "out_of_date"},
+                                              {"operation": "Face2", "reason": "out_of_date"}]
+        assert out["launch_reasons"] == {"out_of_date": 2}
         assert out["operations_to_generate"] == 2
         assert "isGenerationAllowed false" in out["note"] and "Cham" in out["note"]
         assert "Machining Extension" in out["note"]          # the remedy cam_create_operation uses

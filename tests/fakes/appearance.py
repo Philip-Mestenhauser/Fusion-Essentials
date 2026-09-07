@@ -78,11 +78,11 @@ class FakeAppearances(_NamedCollection):
     """A design's or a library's appearances; each copy is recorded on the private _copied walk as
     (source, name, made).
 
-    The duplicate-name refusal is DECLARED, not measured: no row here reads what live addByCopy does
-    with a name already in the collection. It is the fake's guard against a caller that mints
-    BLIND - one that skips the look-up-first reuse path gets nothing back here rather than a second
-    same-named asset, so its missing look-up shows up as a failure instead of as a silently
-    duplicated document appearance. The copy keeping its source's id is the measured half."""
+    A name the collection already holds RAISES '3 : appearance name already exists in document' and
+    adds nothing (measure row appearance-duplicate-name-raises-and-occurrence-write-fans-out); every
+    caller here reaches addByCopy through safe(), which turns that raise into the None its
+    look-up-first reuse path re-checks on. The copy keeping its source's id is measured by
+    shape-dump-appearance-world."""
 
     def __init__(self, items=()):
         super().__init__(items)
@@ -90,7 +90,7 @@ class FakeAppearances(_NamedCollection):
 
     def addByCopy(self, base, name):
         if self.itemByName(name) is not None:
-            return None
+            raise RuntimeError("3 : appearance name already exists in document")
         # A copy carries its SOURCE's channels, so an appearance minted off a base exposes the same
         # colour ids the base does - which is what an albedo write then looks for.
         colour, other = [], []

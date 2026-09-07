@@ -35,8 +35,10 @@ _HEIGHT_DEFAULT = 600
 # appends, so no file lands with PNG bytes under another format's name.
 _PNG_EXT = ".png"
 
-_FIT_TO = _inputs.OccurrenceRef("fit_to",
-        description="Occurrence to frame the camera on: hides the others for the shot, then "
+# A TargetRef, not an OccurrenceRef: a single-body root design places no occurrence at all, so a
+# body handle/name is the only way to frame its part.
+_FIT_TO = _inputs.TargetRef("fit_to", allow=("occurrence", "body", "mesh"),
+        description="Occurrence or BODY to frame the camera on: hides the rest for the shot, then "
                     "restores them.")
 
 
@@ -46,8 +48,9 @@ _keep_visible = _view_common.keep_visible
 
 
 def _isolate_for_fit(name):
-    """Hide everything but 'fit_to' (its ancestors and descendants stay lit) so vp.fit() frames just
-    it - the shared walk, bound to this tool's own input kind so its errors say 'fit_to'."""
+    """Hide everything but 'fit_to' (an occurrence's ancestors and descendants stay lit) so vp.fit()
+    frames just it - the shared walk, bound to this tool's own input kind so its errors say
+    'fit_to'."""
     return _view_common.isolate_for_fit(name, _FIT_TO)
 
 
@@ -137,8 +140,8 @@ def handler(view: str = "current", width: int = _WIDTH_DEFAULT, height: int = _H
     if want_fit:
         restore_fit_to, _fit_target, fit_err = _isolate_for_fit(want_fit)
         if restore_fit_to is None:
-            return error(fit_err or f"fit_to: no occurrence matched '{want_fit}'. "
-                         "Use design_get(include=['tree']) to list.")
+            return error(fit_err or f"fit_to: nothing matched '{want_fit}'. Use "
+                         "design_get(include=['tree']) for occurrences, find_geometry for a body.")
 
     # Reorient the camera if a specific view was requested, saving the user's current
     # camera so we can restore it afterward (a read tool shouldn't permanently change
@@ -237,7 +240,7 @@ def handler(view: str = "current", width: int = _WIDTH_DEFAULT, height: int = _H
 
 TOOL_DESCRIPTION = (
     "Capture the current Fusion viewport as an image. 'view' reorients the camera first, 'zoom' "
-    "scales after fitting, 'fit_to' frames ONE occurrence. 'file_path' also writes the PNG to "
+    "scales after fitting, 'fit_to' frames ONE occurrence or body. 'file_path' also writes the PNG to "
     "local disk (the image still returns inline) - the raster file drawing_insert_image takes. "
     "view_screenshot_multi captures several views in one call."
 )

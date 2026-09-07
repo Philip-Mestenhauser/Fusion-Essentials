@@ -1,9 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Reorder a CAM operation/folder/pattern relative to another, via OperationBase.moveBefore/
-moveAfter. Operation order in a setup is the machining sequence (rough before finish, drill before
-bore)."""
+"""Reorder a CAM setup/operation/folder/pattern relative to another of its kind, via
+Setup.moveBefore/moveAfter for a setup and OperationBase.moveBefore/moveAfter for the rest. Order is
+the machining sequence: setups run in order (turning before milling on a mill-turn), and inside one
+setup rough comes before finish, drill before bore."""
 
 import adsk.core
 
@@ -11,13 +12,17 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, iter_collection
-from ._cam_common import CHILD_COLLECTIONS, get_cam, resolve_cam_node, walk_cam_tree
+from ._cam_common import CHILD_COLLECTIONS, get_cam, resolve_cam_node, setup_names, walk_cam_tree
 
 app = adsk.core.Application.get()
 
 _POSITIONS = ("before", "after")
-_KINDS = ("operation", "folder", "pattern")
-_LABEL = "CAM operation/folder/pattern"
+_KINDS = ("setup", "operation", "folder", "pattern")
+_LABEL = "CAM setup/operation/folder/pattern"
+
+# A SETUP is rootless in the tree walk, so its ordered row is the document's own setups collection
+# rather than a parent's <kind> children.
+_SETUP_COLLECTION = "setups"
 
 
 def _row_names(parent_obj, kind):
@@ -34,6 +39,18 @@ def _row_nodes(nodes, parent_node, kind):
     """That same collection as CamNodes out of ONE walk of the tree: `parent_node`'s `kind`
     children, in the walk's order."""
     return [n for n in nodes if n.parent is parent_node and n.kind == kind]
+
+
+def _sibling_row(cam, nodes, ref_node):
+    """(the CamNodes of the ordered collection the move lands in, a zero-arg RE-READ of that
+    collection's names, what to call it, the collection's own name) - the document's setups for a
+    setup, the reference parent's own <kind> children for everything else."""
+    if ref_node.kind == "setup":
+        return ([n for n in nodes if n.kind == "setup"], lambda: setup_names(cam),
+                "the document's setups", _SETUP_COLLECTION)
+    return (_row_nodes(nodes, ref_node.parent, ref_node.kind),
+            lambda: _row_names(ref_node.parent.obj, ref_node.kind),
+            f"'{ref_node.parent.path}'", CHILD_COLLECTIONS[ref_node.kind])
 
 
 def _requested_order(row, mover_node, ref_node, position):
@@ -76,12 +93,12 @@ def handler(entity: str = "", position: str = "after", reference: str = "") -> d
                      f"'{mover_node.path}') - nothing to reorder.")
     mover, ref = mover_node.obj, ref_node.obj
 
-    # The row the move lands in is the REFERENCE's own, which does not move. Every node of these
-    # kinds carries its container (only a setup is rootless, and _KINDS excludes it).
-    expected = at = ref_place = None
+    # The row the move lands in is the REFERENCE's own, which does not move.
+    expected = at = ref_place = reread = None
+    where, coll_name = "", ""
     if mover_node.kind == ref_node.kind:
-        expected, at, ref_place = _requested_order(
-            _row_nodes(nodes, ref_node.parent, ref_node.kind), mover_node, ref_node, position)
+        row, reread, where, coll_name = _sibling_row(cam, nodes, ref_node)
+        expected, at, ref_place = _requested_order(row, mover_node, ref_node, position)
 
     fn = (lambda: mover.moveBefore(ref)) if position == "before" else (lambda: mover.moveAfter(ref))
     did = safe(fn, False)
@@ -91,7 +108,7 @@ def handler(entity: str = "", position: str = "after", reference: str = "") -> d
 
     # moveBefore/moveAfter returning true says Fusion ALLOWED the move, not that the tree changed,
     # so the destination collection is re-read and compared against the requested order.
-    order = None if expected is None else _row_names(ref_node.parent.obj, ref_node.kind)
+    order = None if expected is None else reread()
     if order is None:
         payload = {"moved": mover_node.name, "position": position, "reference": ref_node.name,
                    "order": None, "order_unverified": True}
@@ -105,15 +122,14 @@ def handler(entity: str = "", position: str = "after", reference: str = "") -> d
         else:
             payload["note"] = (
                 "Fusion allowed the move, but the order could NOT be read back here: "
-                f"'{ref_node.parent.path}' answers no "
-                f"'{CHILD_COLLECTIONS[ref_node.kind]}' collection to re-read. Read the sequence "
+                f"{where} answers no '{coll_name}' collection to re-read. Read the sequence "
                 "with cam_get(include=['operations']).")
         return ok(payload)
 
     if order != expected:
         return error(
             f"Move of '{mover_node.name}' {position} '{ref_node.name}' was allowed but did not "
-            f"land: re-reading the collection under '{ref_node.parent.path}' gives {order}, where "
+            f"land: re-reading the collection under {where} gives {order}, where "
             f"the requested move leaves {expected}.")
 
     # The re-read is a row of NAMES, so a row carrying several items under the mover's name reads
@@ -123,7 +139,7 @@ def handler(entity: str = "", position: str = "after", reference: str = "") -> d
         return ok({
             "moved": mover_node.name, "position": position, "reference": ref_node.name,
             "order": order, "order_unverified": True,
-            "note": (f"Fusion allowed the move and the collection under '{ref_node.parent.path}' "
+            "note": (f"Fusion allowed the move and the collection under {where} "
                      "re-reads as the order the requested placement leaves, but WHICH item landed "
                      f"was not measured: that collection carries {namesakes} items named "
                      f"'{mover_node.name}', which the row of names cannot tell apart. Read the "
@@ -131,21 +147,22 @@ def handler(entity: str = "", position: str = "after", reference: str = "") -> d
 
     return ok({"moved": order[at], "position": position, "reference": order[ref_place],
                "order": order, "entity_index": at, "reference_index": ref_place,
-               "note": "CAM item reordered - 'order' is the sibling collection re-read off the "
-                       "parent after the move, matching the requested placement, with the moved "
-                       "item at 'entity_index'."})
+               "note": f"CAM item reordered - 'order' is the sibling collection under {where}, "
+                       "re-read after the move and matching the requested placement, with the "
+                       "moved item at 'entity_index'."})
 
 
 TOOL_DESCRIPTION = (
-    "REORDER a CAM operation/folder/pattern in the machining sequence: move 'entity' to 'before' or "
-    "'after' 'reference' (both are item names from cam_get(include=['operations']) / cam_edit_folders). Works on operations, "
-    "folders, and patterns, anywhere in the tree. An illegal move (e.g. out of its setup) is reported as "
+    "REORDER a CAM item in the machining sequence: move 'entity' to 'before' or "
+    "'after' 'reference' (both are item names from cam_get(include=['operations']) / cam_edit_folders). Works on SETUPS, "
+    "operations, folders and patterns, anywhere in the tree; two items of different kinds share no "
+    "ordered list. An illegal move (e.g. out of its setup) is reported as "
     "an error, not a false success."
 )
 
 tool = (
     Tool.create_simple(name="cam_reorder", description=TOOL_DESCRIPTION)
-    .add_input_property("entity", {"type": "string", "description": "The CAM item to move (operation/folder/pattern name)."})
+    .add_input_property("entity", {"type": "string", "description": "The CAM item to move (setup/operation/folder/pattern name)."})
     .add_input_property("position", {"type": "string", "enum": list(_POSITIONS),
             "description": "'before' or 'after' the reference."})
     .add_input_property("reference", {"type": "string", "description": "The item to move relative to."})
@@ -153,9 +170,9 @@ tool = (
 )
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
-    # Past the move-allowed bool the destination collection is re-read off the reference's own
-    # parent and compared against the order the request asks for; anything else is an error, and
-    # the published order is that re-read - never the strings the call was handed.
+    # Past the move-allowed bool the destination collection is re-read - the document's own setups
+    # for a setup, the reference's parent collection otherwise - and compared against the order the
+    # request asks for; anything else is an error, and the order published is that re-read.
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_cam_reorder.py::TestLyingMove::"

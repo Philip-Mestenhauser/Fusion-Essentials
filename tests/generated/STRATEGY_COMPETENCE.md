@@ -12,7 +12,7 @@ declines it before mutating anything, and 'skipped' carries the message the plat
 answered with; nothing in either column is a guess about cause. Create with
 cam_create_operation, aim with cam_select_geometry.
 
-Counts: 49 proven, 3 measured, 1 created, 7 refused, 11 skipped, 71 strategies.
+Counts: 50 proven, 2 measured, 1 created, 7 refused, 11 skipped, 71 strategies.
 
 | Strategy | Verdict | Geometry kind (cam_select_geometry) | Tool | Proven on / the measured reason |
 |---|---|---|---|---|
@@ -53,13 +53,13 @@ Counts: 49 proven, 3 measured, 1 created, 7 refused, 11 skipped, 71 strategies.
 | parallel | proven | none - the setup's model | ball end mill | ACT 10c7 Parallel |
 | pencil | proven | none - the setup's model | ball end mill | ACT 10c7 Pencil |
 | pocket2d | proven | pocket | flat end mill | ACT 10a |
-| pocket_clearing | measured | none - the setup's model | flat end mill | driven non-empty on the hub; its generation alone runs 71.4 s, which is most of the act boundary poll's whole budget, so it is not a beat and no receipt row stands behind it |
+| pocket_clearing | measured | none - the setup's model | flat end mill | created and generated on the hub's milling setup with the 10 mm flat mill and read EMPTY - cam_get's time slice returned no figure for it while its sibling in the same act cut; which cutter or model it does clear is unmeasured, so it carries no beat |
 | probe | proven | probe | probe | ACT 10a (machining extension) |
 | probe_geometry | proven | probe | probe | ACT 10c11 ProbeGeom with a cloned probe on one face, machining time read in ACT 10c12; a tool that is not a probe is refused naming the type it was handed (machining extension) |
 | profile2d | proven | silhouette | waterjet (a cutting tool) | ACT 10c7 WaterjetProfile |
 | project | proven | chain | ball end mill | ACT 10c7 ProjectRim |
 | radial | proven | none - the setup's model | ball end mill | ACT 10c7 Radial |
-| ramp | measured | none - the setup's model | ball end mill | driven non-empty on the hub; its generation alone runs 105.2 s, which is most of the act boundary poll's whole budget, so it is not a beat and no receipt row stands behind it |
+| ramp | proven | none - the setup's model | ball end mill | ACT 10c8b Ramp, machining time read in ACT 10c8c - launched BY NAME, on an act poll budget of its own; it cut 2163.8 s of toolpath |
 | rotary_contour | proven | none - the setup's model | ball end mill | ACT 10c13 RotContour on the hub's rotary setup, machining time read in ACT 10c14; the operation reads axisView_orientation_mode 'axisZ' - the axis its passes wrap about - and axisView_origin_mode 'jobOrigin', so it turns about the setup's own WCS (machining extension) |
 | rotary_finishing | proven | none - the setup's model | ball end mill | ACT 10c13 RotFinish on the hub's rotary setup, machining time read in ACT 10c14; the operation reads axisView_orientation_mode 'axisZ' - the axis its passes wrap about - and axisView_origin_mode 'jobOrigin', so it turns about the setup's own WCS (machining extension) |
 | rotary_pocket | proven | none - the setup's model | flat end mill | ACT 10c13 RotPocket on the hub's rotary setup, machining time read in ACT 10c14; the operation reads axisView_orientation_mode 'axisZ' - the axis its passes wrap about - and axisView_origin_mode 'jobOrigin', so it turns about the setup's own WCS (machining extension) |
@@ -86,7 +86,7 @@ Counts: 49 proven, 3 measured, 1 created, 7 refused, 11 skipped, 71 strategies.
 | turning_single_groove | proven | groove -> grooves (an edge) | turning grooving insert | ACT 10c9 TurnSingleGroove |
 | turning_stock_transfer | skipped | - | turning general insert | generated with 'Toolpath is not supported for the given tool and settings.' |
 | turning_thread | proven | thread -> threadFaces | turning threading insert | ACT 10c9 TurnThread |
-| turning_trace | skipped | model contour - no route | turning general insert | 'Model Contour: No model contour selected to machine.' and the operation carries no curve-selection parameter this call routes |
+| turning_trace | skipped | chain -> modelContour | turning general insert | its drive input reads a CadContours2dParameterValue - the curve family - so a chain applies to it (1 path, 4 segments on a measured box) and clears 'Model Contour: No model contour selected to machine.'; no beat has yet generated one on a turning insert |
 
 ## Neighbours - what separates a family from the one beside it
 

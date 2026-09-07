@@ -82,9 +82,12 @@ class TestGenManifestFamilies:
 class TestSplice:
     # _splice is generic (path + begin/end markers); the same seam splices the root families census
     # and the tools/CLAUDE.md catalog. Exercised here on a temp file with the catalog markers.
-    def _doc(self, tmp_path, body):
+    def _doc(self, tmp_path, body, newline="\n"):
+        # LF by default, as a generated file is: Path.write_text translates to the PLATFORM newline,
+        # which would hand every test below a CRLF fixture no generator ever produces.
         p = tmp_path / "DOC.md"
-        p.write_text(body, encoding="utf-8")
+        with open(p, "w", encoding="utf-8", newline=newline) as fh:
+            fh.write(body)
         return str(p)
 
     def test_splice_replaces_only_between_markers(self, tmp_path):
@@ -108,6 +111,15 @@ class TestSplice:
         block = b + "\ncurrent\n" + e
         path = self._doc(tmp_path, block)
         assert gen_manifest._splice(path, b, e, block, check=True) is True
+
+    def test_a_current_block_in_a_crlf_file_is_still_rewritten(self, tmp_path):
+        # the already-current test is what makes this invisible: read through universal newlines a
+        # CRLF file matches its own block, returns early, and keeps its CRs through every run.
+        b, e = gen_manifest._CAT_BEGIN, gen_manifest._CAT_END
+        block = b + "\ncurrent\n" + e
+        path = self._doc(tmp_path, "head\n" + block + "\ntail\n", newline="\r\n")
+        assert gen_manifest._splice(path, b, e, block) is False
+        assert b"\r" not in open(path, "rb").read()
 
     def test_missing_markers_raise_systemexit(self, tmp_path):
         path = self._doc(tmp_path, "no markers here\n")

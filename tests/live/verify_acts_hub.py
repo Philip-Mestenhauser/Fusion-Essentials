@@ -471,13 +471,10 @@ _HUB = (
         ("sketch_add_geometry", {"kind": "line", "x1": _HUB_X, "y1": 0.0, "x2": _HUB_X,
                                  "y2": _AXIS_LEN, "sketch_name": HUB_PROFILE,
                                  "is_construction": True}, _drew(1), None),
+        # a closed_path ends its last segment on the first point's own SketchPoint (the seam is
+        # welded), so the outline arrives with no free vertex at the seam.
         ("sketch_add_geometry", {"kind": "closed_path", "points": _HUB_POINTS,
                                  "sketch_name": HUB_PROFILE}, _drew(13), None),
-        # a closed_path REPEATS its first point rather than constraining the two, so the last
-        # vertex is a free point until this coincident lands it on the first.
-        ("sketch_constrain", {"constraint": "coincident", "sketch_name": HUB_PROFILE,
-                              "entity_one": "line:13:end", "entity_two": "line:1:start"},
-         "ok", None),
     ]
     + _one_line(HUB_PROFILE, "horizontal", _HUB_ACROSS)
     + _one_line(HUB_PROFILE, "vertical", _HUB_DOWN)
@@ -508,7 +505,7 @@ _HUB = (
                               "value": f"{_AXIS_LEN:g} mm"}, "ok", None),
         # THE PROOF, before anything consumes the profile: every freedom closed, and the region the
         # revolve turns handed on as a handle rather than as a guessed index.
-        ("sketch_get", {"sketch_name": HUB_PROFILE}, _fully_constrained(HUB_PROFILE, 17, 13),
+        ("sketch_get", {"sketch_name": HUB_PROFILE}, _fully_constrained(HUB_PROFILE, 16, 13),
          _prof("hub_profile")),
         ("model_revolve", lambda c: {"sketch_name": HUB_PROFILE,
                                      "profile_index": _ctx_get(c, "hub_profile",

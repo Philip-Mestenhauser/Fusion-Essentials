@@ -287,6 +287,59 @@ _UNCHANGED_NOTE = ("changed[].unchanged marks a parameter the request already ma
                    "and its expression reads the same, which is the one case an unmoved read-back "
                    "confirms rather than contradicts.")
 
+_UNLOCKED_NOTE = ("changed[].unlocked_here marks a parameter that read isEditable false at the "
+                  "start of this call and true once the rest of the call had been applied - it was "
+                  "written after them, not refused.")
+
+_LOCKED_REFUSAL = (
+    "Operation '{operation}' does not accept a write to: {names} (isEditable reads False on each"
+    "{after}). {applied} cam_get(include=['parameters'], operation=...) marks each refusing row "
+    "editable false; set a row it does not mark.")
+
+# What this call did to the operation before the refusal, claiming only what the restore RE-READ.
+# Nothing here says the operation is as it was found: an expression put back is not a toolpath state
+# put back, and no read taken here settles that.
+_WROTE_THEN_RESTORED = (
+    "This call WROTE {n} parameter(s) on the operation and then restored each one - every restored "
+    "expression reads back what it held. No other state was read, so re-read the operation with "
+    "cam_get(include=['operations']) before relying on it.")
+
+_RESTORE_FAILED = (
+    "This call WROTE {n} parameter(s) on the operation and restored each one, but {bad} did NOT "
+    "come back: {rows}. The operation is left holding those values - set each one back by hand.")
+
+
+def _restore(changed, resolved):
+    """Put every parameter this call wrote back to the expression it held and RE-READ each one;
+    returns the rows whose expression did not come back, as '<name> reads <x>, held <y>'. The
+    restore is a MUTATION and is left to raise - only the read-back is guarded."""
+    failed = []
+    for rec in changed:
+        p = resolved[rec["name"]]
+        p.expression = rec["before"]
+        back = safe(lambda p=p: p.expression)
+        if back != rec["before"]:
+            failed.append(f"'{rec['name']}' reads {back!r}, held {rec['before']!r}")
+    return failed
+
+
+def _restored_clause(changed, resolved) -> str:
+    """The 'what this call did to the operation' sentence a refusal after a write carries: the
+    restore and its re-read, worded on whether every expression actually came back."""
+    if not changed:
+        return "Nothing was applied."
+    failed = _restore(changed, resolved)
+    if failed:
+        return _RESTORE_FAILED.format(n=len(changed), bad=len(failed), rows="; ".join(failed))
+    return _WROTE_THEN_RESTORED.format(n=len(changed))
+
+
+_LOCKED_REMEDY = (
+    " A row another parameter in the SAME call unlocks is written after it - deburr's "
+    "numberOfStepovers reads editable once doMultiplePasses is true. For a cutting-TOOL dimension, "
+    "a cam_edit_tools edit reaches only operations created AFTER it - re-assign this one with "
+    "cam_edit_operation(tool_scope, tool_index).")
+
 
 def _suppression_note(rec, name):
     """What the suppression call OBSERVED - the flag it read back and the toolpath reads on either
@@ -371,25 +424,32 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
                      "parameter names; only a name it lists can be set.")
 
     # isEditable False says the UI never offers the edit, not that the platform drops it (measured:
-    # a locked parameter takes the write, no raise) - so refuse BEFORE writing, never after.
-    # read_flag, not safe(..., True): a flag that reads None did not answer, and cannot refuse.
+    # a locked parameter takes the write, no raise). ALL rows locked is refused here before any
+    # write; another row present is written first - it may be the switch that unlocks the rest.
     locked = [name for name, p in resolved.items()
+              # read_flag, not safe(..., True): a flag that read None cannot refuse.
               if read_flag(lambda p=p: p.isEditable) is False]
-    if locked:
-        return error(f"Operation '{operation}' does not accept a write to: {', '.join(locked)} "
-                     "(isEditable reads False on each). Nothing was applied. "
-                     "cam_get(include=['parameters'], operation=...) marks each refusing row "
-                     "editable false; set a row it does not mark. For a cutting-TOOL dimension, a "
-                     "cam_edit_tools edit reaches only operations created AFTER it - re-assign "
-                     "this one with cam_edit_operation(tool_scope, tool_index).")
+    if locked and len(locked) == len(wanted):
+        return error(_LOCKED_REFUSAL.format(operation=operation, names=", ".join(locked),
+                                            after="", applied="Nothing was applied.")
+                     + _LOCKED_REMEDY)
 
     changed = []
     eval_failures = []
     no_takes = []
     unreadable = []
+    still_locked = []
     written_of = {}
-    for name, expr in wanted.items():
+    # A locked row goes LAST: a switch in the same call is what unlocks it, and the flag is re-read
+    # once the rest of the request has landed.
+    order = [n for n in wanted if n not in locked] + locked
+    for name in order:
+        expr = wanted[name]
         p = resolved[name]
+        if name in locked:
+            if read_flag(lambda p=p: p.isEditable) is not True:
+                still_locked.append(name)
+                continue
         before = safe(lambda p=p: p.expression)
         # A parameter already holding a QUOTED expression stores a string, and Fusion refuses the
         # bare spelling ('3 : Invalid enumeration value.'), so the request is wrapped to match.
@@ -400,7 +460,7 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
         except Exception as e:
             return error(f"Could not set '{name}' = '{expr}' on '{operation}': {e}. "
                           f"(Already applied: {', '.join(c['name'] for c in changed) or 'none'}.)"
-                          + enumeration_remedy(str(e), written, _PARAM_READ))
+                          + enumeration_remedy(str(e), written, _PARAM_READ, p))
         # Read the parameter BACK for its evaluation state: the platform stores an unresolvable
         # expression silently (.expression echoes it, .value.value reads a finite 0.0) - only .error
         # exposes it (see _cam_common.expression_error).
@@ -408,6 +468,8 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
         after = safe(lambda p=p: p.expression)
         rec = {"name": name, "before": before, "after": after,
                "value": safe(lambda p=p: p.value.value)}
+        if name in locked:
+            rec["unlocked_here"] = True     # absent = it read editable before this call wrote
         if quoted:
             rec["quoted"] = True            # absent = the request was written as it was sent
         if eval_warn:
@@ -426,12 +488,20 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
         if eval_err:
             eval_failures.append((name, str(expr), eval_err))
 
+    # A row that still read isEditable false once the rest of the call had landed. Whatever this
+    # call wrote is restored and re-read, and the refusal states that write rather than claiming the
+    # operation was never touched.
+    if still_locked:
+        after_clause = (f" after the other {len(changed)} parameter(s) in this call were applied"
+                        if changed else "")
+        return error(_LOCKED_REFUSAL.format(
+            operation=operation, names=", ".join(still_locked), after=after_clause,
+            applied=_restored_clause(changed, resolved)) + _LOCKED_REMEDY)
+
     # Three ways a write is not a success: it did not evaluate, it did not move, it will not read
-    # back. Roll EVERY parameter set in this call back to its prior expression and name what each
-    # one did, so the operation is left exactly as found.
+    # back. Restore EVERY parameter set in this call, re-read each one, and name what each one did.
     if eval_failures or no_takes or unreadable:
-        for rec in changed:
-            safe(lambda rec=rec: setattr(resolved[rec["name"]], "expression", rec["before"]))
+        restore_failed = _restore(changed, resolved)
         parts = []
         if eval_failures:
             detail = "; ".join(f"'{n}' = '{e}' ({why})" for n, e, why in eval_failures)
@@ -447,7 +517,8 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
         if eval_failures:
             remedy = ("(An operation expression must reference existing parameters and resolve to "
                       "a value - check names and units.)")
-            remedy += next((c for c in (enumeration_remedy(why, written_of[n], _PARAM_READ)
+            remedy += next((c for c in (enumeration_remedy(why, written_of[n], _PARAM_READ,
+                                                           resolved[n])
                                         for n, _e, why in eval_failures) if c), "")
         elif no_takes:
             remedy = ("(For a cutting-TOOL dimension, a cam_edit_tools edit reaches only operations "
@@ -455,8 +526,12 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
                       "tool_index).)")
         else:
             remedy = "(Re-read the operation with cam_get(include=['operations']).)"
+        failed_clause = (f" {len(restore_failed)} did NOT come back and the operation is left "
+                         f"holding them: {'; '.join(restore_failed)}."
+                         if restore_failed else "")
         return error(f"Operation '{operation}': {'; '.join(parts)}. Rolled back all "
-                     f"{len(changed)} parameter(s); no change was applied. {remedy}")
+                     f"{len(changed)} parameter(s), each restored expression re-read.{failed_clause}"
+                     f" {remedy}")
 
     op_name = safe(lambda: op.name) or (operation or "").strip()
     out = {
@@ -469,6 +544,8 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
     notes = [_PARAM_NOTE] if changed else []
     if any(c.get("unchanged") for c in changed):
         notes.append(_UNCHANGED_NOTE)
+    if any(c.get("unlocked_here") for c in changed):
+        notes.append(_UNLOCKED_NOTE)
     # Every arm below runs AFTER the parameters: a set that could not be evaluated has already
     # returned, so nothing here is applied to an operation this call rolled back. Each failure names
     # the arms that DID land, in `landed`.
@@ -529,7 +606,7 @@ tool = (
         input_param_description="The CAM operation name to edit.",
     )
     .add_input_property("parameters", {"type": "object",
-            "description": "Parameters to set: {name: expression} (or a 'name=value, ...' string), by this operation's own parameter names. One it takes no write to is refused by name."})
+            "description": "Parameters to set: {name: expression} (or a 'name=value, ...' string), by this operation's own parameter names. A locked row another one here unlocks is written after it; one still locked is refused by name."})
     .add_input_property("preset", {"type": "string",
             "description": "Name of a preset on THIS operation's tool to run it with (cam_get(include=['tool'], operation=...) lists them)."})
     .add_input_property("suppressed", {"type": "boolean",

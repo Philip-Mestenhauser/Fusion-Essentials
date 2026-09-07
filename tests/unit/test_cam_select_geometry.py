@@ -1862,6 +1862,14 @@ class _RefusingEnumerationMode(_BoundaryModeParam):
         raise RuntimeError("3 : Invalid enumeration value.")
 
 
+class _RefusingChoiceMode(_RefusingEnumerationMode):
+    """The same refusal on a parameter whose value ANSWERS getChoices - the set the remedy names."""
+    def __init__(self, start="silhouette", choices=("silhouette", "selection")):
+        super().__init__(start)
+        legal = list(choices)
+        self.value = types.SimpleNamespace(getChoices=lambda: (True, list(legal), legal))
+
+
 class _RefusingEnumerationHeight:
     """A height parameter holding a QUOTED expression that refuses the write the same way."""
     def __init__(self, held):
@@ -2040,6 +2048,13 @@ class TestQuotingMatchesWhatTheParameterStores:
         assert "the expression written was 'from contour'" in res["message"]
         assert cg._PARAM_READ in res["message"]
 
+    def test_a_refused_mode_whose_value_answers_getChoices_lists_them(self, monkeypatch):
+        # The read pointer costs the caller a turn; where the parameter itself answers the set, the
+        # refusal hands it over instead.
+        _op, res = self._refused_by_enumeration(monkeypatch, _RefusingChoiceMode())
+        assert res["isError"] is True
+        assert "This parameter's own values: silhouette, selection" in res["message"]
+
     def test_a_non_enumeration_refusal_carries_no_remedy(self, monkeypatch):
         # The clause belongs to the refusal that names an enumeration; on any other platform message
         # it would assert a cause nothing read.
@@ -2123,7 +2138,38 @@ def _selection_on(op, param):
     return op.parameters.itemByName(param).value.getCurveSelections()
 
 
+def _turning_trace_op(name="TurnTrace1", **kw):
+    """A turning trace op: MEASURED, its drive input is 'modelContour' - a CadContours2dParameterValue,
+    the same class 'contours' carries - and it holds none of the other curve parameters."""
+    return _Op(name, {"modelContour": _Param(_CurveParamValue()),
+                      "frontHeight_ref": _Param(None)}, **kw)
+
+
 class TestDriveParamRouting:
+    def test_a_turning_trace_chain_lands_on_its_model_contour(self, monkeypatch):
+        # MEASURED: applying a chain here cleared 'Model Contour: No model contour selected to
+        # machine.' Without the route the op meets the has-no-curve-parameter refusal instead.
+        op = _turning_trace_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        out = _payload(cg.handler(operation="TurnTrace1", selection="chain", handles=["a"],
+                                  generate=False))
+        assert _selection_on(op, "modelContour").count == 1
+        assert out["selections"] == 1
+
+    def test_model_contour_is_probed_after_the_boundary_so_no_3d_feed_changes_route(self,
+                                                                                    monkeypatch):
+        # the ORDER is the routing: an op carrying BOTH keeps its boundary, which is what every 3D
+        # family's chain is aimed at.
+        op = _Op("Both1", {"machiningBoundarySel": _Param(_CurveParamValue()),
+                           "modelContour": _Param(_CurveParamValue()),
+                           "boundaryMode": _BoundaryModeParam("none")})
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        _payload(cg.handler(operation="Both1", selection="chain", handles=["a"], generate=False))
+        assert _selection_on(op, "machiningBoundarySel").count == 1
+        assert _selection_on(op, "modelContour").count == 0
+
     def test_a_swarf_chain_lands_on_swarf_contours_and_engages_the_mode(self, monkeypatch):
         op = _swarf_op()
         cam = _CAM([_Setup([op])])

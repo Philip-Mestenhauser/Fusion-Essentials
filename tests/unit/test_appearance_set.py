@@ -402,8 +402,9 @@ class TestApply:
 
 
 class TestReuseExistingAppearance:
-    """addByCopy refuses a duplicate name (returns nothing, live-verified) - a second same-color call
-    or a retry after a half-made copy must LOOK UP and reuse the existing appearance, not fail."""
+    """addByCopy refuses a duplicate name by RAISING (measured) and safe() hands the handler None -
+    a second same-color call or a retry after a half-made copy must LOOK UP and reuse the existing
+    appearance, not fail."""
 
     def test_second_same_color_call_reuses_one_shared_appearance(self):
         b1, b2 = FakeBody("B1"), FakeBody("B2")

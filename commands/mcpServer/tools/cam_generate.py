@@ -41,8 +41,23 @@ _ALL_BLOCKED = ("Nothing was launched: every operation in scope reads isGenerati
 _UNREAD_ENTITLEMENT = " {n} more: isGenerationAllowed did not read, so not excluded."
 
 # The split launch's own note: the excluded operations and their remedy take the room the whole-
-# document sentence would, so this one keeps the poller and drops the rest.
+# document sentence would, so this one keeps the poller and the reasons key and drops the rest.
 _SPLIT_LAUNCH_NOTE = "Launched - check cam_get_status(handle) until completed=true."
+
+# What launched_operations / launch_reasons describe: this call's OWN pre-launch walk over the
+# scope, the same walk operations_to_generate counts.
+_REASONS_NOTE = (
+    " launch_reasons tallies the state each operation read BEFORE this launch, and "
+    "launched_operations names them: out_of_date, no_toolpath (never generated), errored, "
+    "valid_forced (valid, and covered anyway) or state_unread.")
+
+# MEASURED: cam.generateToolpath over a SETUP regenerated all four of its operations - two of them
+# already valid - under skip_valid=true. The flag narrows the DOCUMENT sweep only, so a scoped
+# launch says so rather than leaving the caller to read valid_forced rows as a fault.
+_SKIP_VALID_UNUSED = (
+    " skip_valid was requested but NOT applied: this launch names a {scope}, and generateToolpath "
+    "regenerates its whole target whatever the flag says - the valid_forced rows are that, not a "
+    "stale read. Omit 'target' for the document sweep, which the flag does narrow.")
 
 
 def _scope_nodes(cam, node):
@@ -59,10 +74,26 @@ def _blocked_clause(rows) -> str:
             f"{named_with_remainder([r['name'] for r in rows])}. " + _ENTITLEMENT_REMEDY)
 
 
+# Why an operation is in a launch, off the state it read BEFORE the launch. 'no_toolpath' is the
+# never-generated one (OperationStates.NoToolpath); 'valid_forced' is an already-valid operation the
+# launch covers anyway; 'state_unread' is an operationState that answered nothing.
+_LAUNCH_REASON = {0: "valid_forced", 1: "out_of_date", 3: "no_toolpath"}
+
+# How many launched rows the payload NAMES; past this the tally is what describes the launch.
+_LAUNCH_ROWS_CAP = 50
+
+
+def _launch_reason(facts) -> str:
+    """The reason one operation is in this launch - its own pre-launch state, named."""
+    if facts.get("has_error"):
+        return "errored"
+    return _LAUNCH_REASON.get(facts.get("operation_state"), "state_unread")
+
+
 def _launch_set(rows, skip_valid):
-    """(the (label, node) rows a launch builds a toolpath for, suppressed count, already-valid
-    count) - a suppressed operation carries no toolpath to build, and skip_valid passes over the
-    ones already reading operationState IsValid (0)."""
+    """(the (label, node, reason) rows a launch builds a toolpath for, suppressed count,
+    already-valid count) - a suppressed operation carries no toolpath to build, and skip_valid
+    passes over the ones already reading operationState IsValid (0)."""
     covered, parked, already_valid = [], 0, 0
     for label, node in rows:
         facts = _cam_common.op_state_facts(node.obj)
@@ -71,8 +102,21 @@ def _launch_set(rows, skip_valid):
         elif skip_valid and facts["operation_state"] == 0:
             already_valid += 1
         else:
-            covered.append((label, node))
+            covered.append((label, node, _launch_reason(facts)))
     return covered, parked, already_valid
+
+
+def _launch_rows(payload, covered):
+    """Fold the launched operations into `payload`: the reason TALLY over all of them, and one named
+    row each up to the cap, with the overflow flagged rather than silently cut."""
+    tally = {}
+    for _label, _node, reason in covered:
+        tally[reason] = tally.get(reason, 0) + 1
+    payload["launch_reasons"] = tally
+    payload["launched_operations"] = [{"operation": label, "reason": reason}
+                                      for label, _node, reason in covered[:_LAUNCH_ROWS_CAP]]
+    if len(covered) > _LAUNCH_ROWS_CAP:
+        payload["launched_operations_truncated"] = True
 
 
 def _nothing_to_launch(target_desc, parked, already_valid) -> dict:
@@ -100,9 +144,9 @@ def _launch_around_blocked(cam, keep, blocked, skip_valid, scope, target_desc, r
     """The launch for a scope holding entitlement-blocked operations: the whole-scope sweep
     regenerates NOTHING over such a scope, so every operation that did not read false is launched on
     its own, all under one handle."""
-    futures, failures = [], []
+    futures, failures, launched = [], [], []
     covered, parked, already_valid = _launch_set(keep, skip_valid)
-    for label, node in covered:
+    for label, node, reason in covered:
         try:
             fut = cam.generateToolpath(node.obj)
         except Exception as e:
@@ -112,6 +156,7 @@ def _launch_around_blocked(cam, keep, blocked, skip_valid, scope, target_desc, r
             failures.append({"name": label, "error": "generateToolpath returned no future."})
             continue
         futures.append(fut)
+        launched.append((label, node, reason))
 
     if not futures:
         if failures:
@@ -135,8 +180,9 @@ def _launch_around_blocked(cam, keep, blocked, skip_valid, scope, target_desc, r
         "skip_valid": bool(skip_valid),
         "operations_to_generate": len(futures),
         "entitlement_blocked": blocked,
-        "note": _SPLIT_LAUNCH_NOTE + _blocked_clause(blocked),
+        "note": _SPLIT_LAUNCH_NOTE + _REASONS_NOTE + _blocked_clause(blocked),
     }
+    _launch_rows(payload, launched)
     if failures:
         payload["launch_failures"] = failures       # named in the payload, not restated in the note
     if unread:
@@ -210,8 +256,12 @@ def handler(target: str = "", skip_valid: bool = True) -> dict:
         "target": target_desc,
         "skip_valid": bool(skip_valid),
         "operations_to_generate": len(covered),
-        "note": _LAUNCH_NOTE,
+        "note": _LAUNCH_NOTE + _REASONS_NOTE,
     }
+    _launch_rows(payload, covered)
+    if skip_valid and node is not None:
+        payload["skip_valid_applied"] = False    # absent = the flag narrowed this launch
+        payload["note"] += _SKIP_VALID_UNUSED.format(scope=scope)
     if unread:
         payload["entitlement_unread"] = unread
         payload["note"] += _UNREAD_ENTITLEMENT.format(n=unread)

@@ -208,27 +208,35 @@ class _ChainBroken(Exception):
                 "them a second time.")
 
 
-def _draw_polyline(sketch, points, k, kind="polyline"):
+def _draw_polyline(sketch, points, k, kind="polyline", weld_seam=False):
     """Draw a connected chain of lines through 'points' ((x,y) in user units * k = cm), returning a
     label or None for < 2 points; a segment that does not draw raises _ChainBroken."""
     # Each segment starts at the previous one's endSketchPoint, so consecutive segments SHARE a
-    # point. Repeating the first point as the last closes the loop geometrically; an explicit
-    # closing coincident constraint is what the solver rejects (VCS_SKETCH_SOLVING_FAILED).
+    # point. weld_seam ends the LAST segment ON the first segment's start point: measured, that
+    # leaves 4 distinct endpoints round a 4-point loop where a repeated coordinate leaves 5.
     pts = [(float(x), float(y)) for x, y in (points or [])]
     if len(pts) < 2:
         return None
     lines = sketch.sketchCurves.sketchLines
     prev_end = None
+    first_start = None
     total = len(pts) - 1
     for i in range(1, len(pts)):
         start = prev_end if prev_end is not None else _pt(pts[i - 1][0], pts[i - 1][1], k)
-        end = _pt(pts[i][0], pts[i][1], k)
+        # addByTwoPoints takes a SketchPoint in EITHER slot (measured), so the closing segment
+        # ends on the first point itself rather than on a new one at the same coordinates.
+        if weld_seam and i == len(pts) - 1 and first_start is not None:
+            end = first_start
+        else:
+            end = _pt(pts[i][0], pts[i][1], k)
         try:
             ln = lines.addByTwoPoints(start, end)
         except Exception as e:
             raise _ChainBroken(kind, i, total, pts, cause=e) from e
         if ln is None:
             raise _ChainBroken(kind, i, total, pts)
+        if first_start is None:
+            first_start = safe(lambda ln=ln: ln.startSketchPoint)
         prev_end = safe(lambda ln=ln: ln.endSketchPoint)
     return f"polyline {len(pts)} pts, {total} segments"
 
@@ -256,6 +264,37 @@ def _mark_recent_construction(sketch, before_count):
     n = safe(lambda: curves.count, 0) if curves else 0
     for i in range(before_count, n):
         setattr(curves.item(i), "isConstruction", True)
+
+
+_RECT_KINDS = ("rectangle", "center_rectangle")
+_AXIS_EPS = 1e-9   # cm; a rectangle side this close to an axis is treated as lying on it
+
+
+def _rect_constrain(sketch, lines_before):
+    """Apply horizontal/vertical to each rectangle line the draw just landed, the way the UI does,
+    and return how many the sketch's own constraint count GAINED. MEASURED: both rectangle
+    constructors land ZERO constraints through the API, deferred compute or not."""
+    coll = _common.entity_collection(sketch, "line")
+    gc = safe(lambda: sketch.geometricConstraints)
+    n = safe(lambda: coll.count) if coll is not None else None
+    before = _common.counted(lambda: gc.count) if gc is not None else None
+    if n is None or before is None or lines_before is None:
+        return None
+    for i in range(lines_before, n):
+        ln = safe(lambda i=i: coll.item(i))
+        a = safe(lambda ln=ln: ln.startSketchPoint.geometry)
+        b = safe(lambda ln=ln: ln.endSketchPoint.geometry)
+        if a is None or b is None:
+            continue
+        dx, dy = abs(b.x - a.x), abs(b.y - a.y)
+        # Each line is classified by its OWN geometry: the constructors' line order is not a
+        # contract, and a rotated rectangle has no axis-aligned side to constrain.
+        add = (safe(lambda: gc.addHorizontal) if (dy <= _AXIS_EPS < dx)
+               else safe(lambda: gc.addVertical) if (dx <= _AXIS_EPS < dy) else None)
+        if add is not None:
+            safe(lambda add=add, ln=ln: add(ln))
+    after = _common.counted(lambda: gc.count)
+    return None if after is None else after - before
 
 
 def _minor_radius(p):
@@ -401,12 +440,12 @@ def _draw(sketch, kind, p, k):
     curves = sketch.sketchCurves
     if kind in ("polyline", "closed_path"):
         pts = list(p.get("points") or [])
-        # closed_path DELEGATES to the polyline-with-repeated-first-point shape: appending the first
-        # point closes the loop geometrically (a profile forms + extrudes) without the explicit
-        # closing coincident the solver rejects on many outlines. Scales like polyline (no ~48 ceiling).
+        # closed_path DELEGATES to the polyline shape with the first point appended, and WELDS the
+        # seam: the closing segment ends on the first point itself, so the loop carries no duplicate
+        # point and needs no closing constraint. Scales like polyline (no ~48 ceiling).
         if kind == "closed_path" and len(pts) >= 2:
             pts = pts + [pts[0]]
-        label = _draw_polyline(sketch, pts, k, kind)
+        label = _draw_polyline(sketch, pts, k, kind, weld_seam=(kind == "closed_path"))
         if label and kind == "closed_path":
             label += " (closed)"
         return label
@@ -662,6 +701,17 @@ def handler(kind: str = "", sketch_name: str = "", units: str = "mm",
     }
     if delta is not None:
         out["curves_added"] = delta
+    if kind in _RECT_KINDS:
+        gained = _rect_constrain(sketch, before_kind)
+        out["constraints_added"] = gained
+        out["note"] = (
+            f"Rectangle drawn with {gained} horizontal/vertical constraint(s) applied to its "
+            "sides, as the UI does - the constructor itself lands none. Its corners already share "
+            "points; what remains free is position and size, so dimension those with "
+            "sketch_dimension." if gained else
+            "Rectangle drawn. NO horizontal/vertical constraint took, so its sides are held only "
+            "by their coordinates - a later edit can skew it. Add them with sketch_constrain "
+            "(horizontal / vertical) before dimensioning.")
     if kind == "cv_spline":
         out["note"] = ("Control-point spline drawn - constrain or dimension it as "
                        "'cv_spline:<index>' (sketch_get lists the index).")
@@ -697,6 +747,12 @@ def handler(kind: str = "", sketch_name: str = "", units: str = "mm",
                        "length or angle is passed. Its two end caps are SketchArcs. Address either "
                        "as 'line:<index>' / 'arc:<index>' for sketch_dimension / sketch_constrain "
                        "(sketch_get(include_entities=true) lists the indexes).")
+    if kind == "closed_path":
+        out["note"] = ("Closed path drawn and a profile forms. The seam is WELDED - the closing "
+                       "segment ends on the first segment's start point, so the loop shares that "
+                       "point instead of carrying two at the same coordinates, and needs no "
+                       "closing coincident. Size it with sketch_dimension; the loop still carries "
+                       "its position and shape freedom.")
     if kind in _REF_LESS_NOTES:
         out["note"] = _REF_LESS_NOTES[kind]
     if restore_error:
@@ -707,7 +763,8 @@ def handler(kind: str = "", sketch_name: str = "", units: str = "mm",
 
 TOOL_DESCRIPTION = (
     "Draw one geometry entity on a sketch; coords/sizes in 'units', angles in degrees. "
-    "center_rectangle adds NO center/symmetry constraints - constrain/dimension it after. "
+    "Both rectangle kinds get horizontal/vertical constraints on their sides (the constructors "
+    "land none); no center/symmetry constraint is added - dimension position and size after. "
     "Every slot kind takes x1,y1 / x2,y2 + radius, but the point roles DIFFER: overall_slot's two "
     "are the overall TIPS, center_point_slot's are the centre and a CAP CENTRE, and the arc slots "
     "add cx,cy = the arc centre (center_point_arc_slot) or a point ON the arc "

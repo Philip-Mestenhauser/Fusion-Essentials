@@ -579,6 +579,16 @@ class TestTheWorkspaceTheImportSwitchedAway:
         assert out["workspace_changed"] == {"from": "Manufacture", "to": "Design"}
         assert "workspace_restored" not in out
 
+    def test_a_restore_that_reads_back_nothing_is_disclosed_not_claimed(self, wire, cad):
+        # the before and after reads answer, the one AFTER the re-activate does not: an unverified
+        # restore is the workspace the import changed, never a restored one.
+        ui = _FakeUI(reads=4)
+        self._solid_import_flipping_the_workspace(wire, ui)
+        out = payload(mod.handler(file_path=cad("part.step")))
+        assert ui.activated == ["CAMEnvironment"]
+        assert "workspace_restored" not in out
+        assert out["workspace_changed"] == {"from": "Manufacture", "to": "Design"}
+
     def test_a_workspace_the_import_left_alone_publishes_neither_key(self, wire, cad):
         ui = _FakeUI()
         design = make_design()

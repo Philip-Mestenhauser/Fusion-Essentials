@@ -57,12 +57,21 @@ class ConfigurationAppearanceCell:
 
 
 class _Col:
-    """A configuration column whose cells are addressed by row name."""
+    """A configuration column whose cells are addressed by row name. `owner` is the collection that
+    lists it, so deleteMe can stop listing it; `delete_lands` False models the accept-and-ignore -
+    deleteMe answers true and the column is still there, which only a read-back catches."""
     def __init__(self, cls, kind="param"):
         self.id = "col-" + kind
         self._cls = cls
         self._cells = {}
         self.cell_factory = cls
+        self.owner = None
+        self.delete_lands = True
+
+    def deleteMe(self):
+        if self.delete_lands and self.owner is not None and self in self.owner.added:
+            self.owner.added.remove(self)
+        return True
     def _cell(self, rowname):
         if rowname not in self._cells:
             self._cells[rowname] = self.cell_factory()
@@ -315,10 +324,24 @@ class _InsertCol(_Col):
 
 
 class _Columns:
+    """The table's column collection - countable and indexable, the reads a rollback is proven by."""
     def __init__(self):
         self.added = []
+
+    @property
+    def count(self):
+        return len(self.added)
+
+    def item(self, i):
+        return self.added[i]
+
+    def _own(self, c):
+        c.owner = self
+        self.added.append(c)
+        return c
+
     def addParameterColumn(self, p):
-        c = _Col(ConfigurationParameterCell, "param"); c.param = p; self.added.append(c); return c
+        c = _Col(ConfigurationParameterCell, "param"); c.param = p; return self._own(c)
     def addSuppressColumn(self, f):
         c = _Col(ConfigurationSuppressCell, "suppress"); c.feature = f; self.added.append(c); return c
     def addVisibilityColumn(self, e):
@@ -1380,6 +1403,48 @@ class TestAddParameterRefusals:
         assert res["isError"] is True
         assert "reads '9 mm'" in res["message"]
         assert "'50 mm' did not verifiably take" in res["message"]
+        assert "param_set after activating the row" in res["message"]
+
+    def test_a_text_parameter_is_refused_before_the_column_lands(self, col_design):
+        # MEASURED LIVE: a text parameter reads unit 'Text'. Its column is created but no cell takes
+        # a value, so the refusal goes BEFORE addParameterColumn - a rollback afterwards is second
+        # best, and a retry loop would leave an orphan column each time.
+        table = _top(col_design)
+        p = col_design.allParameters.itemByName("plate_len")
+        p.unit = "Text"
+        res = dc.handler(action="add_parameter", parameter="plate_len",
+                         values={"Default": "'50'"})
+        assert res["isError"] is True
+        assert "is a Text parameter" in res["message"]
+        assert "param_set after activating the row" in res["message"]
+        assert table.columns.added == []          # nothing was mutated at all
+
+    def test_the_column_is_rolled_back_when_a_cell_will_not_take(self, col_design):
+        # the COLUMN is a mutation that already landed; leaving it would give every retry another
+        # orphan column on the table
+        _cells_from(_top(col_design), "addParameterColumn", _StubbornParamCell)
+        res = dc.handler(action="add_parameter", parameter="plate_len", values={"Default": "50 mm"})
+        assert res["isError"] is True and "The column has been rolled back" in res["message"]
+        assert _top(col_design).columns.added == []
+
+    def test_a_rollback_that_did_not_take_is_disclosed_not_claimed(self, col_design):
+        # deleteMe answers true while the table still lists the column - only the read-back after it
+        # tells the caller an orphan is there to delete
+        table = _top(col_design)
+        _cells_from(table, "addParameterColumn", _StubbornParamCell)
+        real = table.columns.addParameterColumn
+
+        def build(p):
+            col = real(p)
+            col.delete_lands = False
+            return col
+
+        table.columns.addParameterColumn = build
+        res = dc.handler(action="add_parameter", parameter="plate_len", values={"Default": "50 mm"})
+        assert res["isError"] is True
+        assert "could NOT be auto-removed" in res["message"]
+        assert "delete it before retrying" in res["message"]
+        assert len(table.columns.added) == 1
 
 
 # ── add_suppress: the refusals around the suppress column ──────────────────

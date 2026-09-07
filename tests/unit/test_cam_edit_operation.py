@@ -598,9 +598,12 @@ class TestNotEditable:
         assert res["isError"] is True
         assert "tool_diameter, tool_stepover" in res["message"]
 
-    def test_one_locked_parameter_refuses_the_whole_call_before_any_lands(self, monkeypatch):
-        # All-before-any: the editable half must not be applied and then abandoned - a touched
-        # operation costs a regeneration whether or not the call succeeded.
+    def test_one_locked_parameter_is_written_then_restored_and_the_refusal_says_so(self,
+                                                                                   monkeypatch):
+        # The editable row may be the SWITCH that unlocks the locked one, so it is written and the
+        # flag re-read. When it was not, every written expression goes back and is re-read - and the
+        # refusal states the write rather than claiming the operation was never touched, since
+        # putting an expression back is not putting the operation's toolpath state back.
         op = _install(monkeypatch,
                       params={"tool_feedCutting": "5210.23",
                               "tool_diameter": FakeParam("tool_diameter", "10.", editable=False)})
@@ -608,6 +611,9 @@ class TestNotEditable:
                          parameters={"tool_feedCutting": "3000", "tool_diameter": "12"})
         assert res["isError"] is True
         assert "tool_diameter" in res["message"] and "tool_feedCutting" not in res["message"]
+        assert "WROTE 1 parameter(s) on the operation and then restored each one" in res["message"]
+        assert "every restored expression reads back what it held" in res["message"]
+        assert "No other state was read" in res["message"]        # no claim it is as it was found
         assert op.parameters.itemByName("tool_feedCutting").expression == "5210.23"
         assert op.parameters.itemByName("tool_diameter").expression == "10."
 
@@ -1564,3 +1570,117 @@ class TestQuotedStringParameter:
         _install(monkeypatch)
         res = ce.handler(operation="Adaptive1", parameters={"maximumStepdown": "BOOM"})
         assert res["isError"] is True and "ENUMERATION" not in res["message"]
+
+
+class EnumChoiceParam(FakeCAMParameter):
+    """A CHOICE parameter: it refuses a value outside its set the way Fusion does, and its value
+    answers getChoices() with that set."""
+    @FakeCAMParameter.expression.setter
+    def expression(self, v):
+        raise RuntimeError("3 : Invalid enumeration value.")
+
+
+class TestEnumerationRefusalNamesTheChoices:
+    """A refusal that only points at a read costs the caller another turn - and a guessed token
+    costs several. Where the parameter's own getChoices answers, the refusal lists what it takes."""
+
+    def test_the_refusal_lists_the_values_the_parameter_takes(self, monkeypatch):
+        _install(monkeypatch, params={"multiAxisMachiningType": EnumChoiceParam(
+            "multiAxisMachiningType", "three_axis", value="three_axis",
+            choices=["three_axis", "five_axis_simultaneous"])})
+        res = ce.handler(operation="Adaptive1",
+                         parameters={"multiAxisMachiningType": "five_axis"})
+        assert res["isError"] is True
+        assert "This parameter's own values: three_axis, five_axis_simultaneous" in res["message"]
+
+    def test_a_parameter_with_no_choice_set_still_gets_the_read_pointer(self, monkeypatch):
+        # No getChoices to read means no list to print, and the refusal falls back to the read that
+        # shows what the parameter holds rather than printing an empty set.
+        _install(monkeypatch,
+                 params={"boundaryMode": EnumRefusingParam("boundaryMode", "'silhouette'")})
+        res = ce.handler(operation="Adaptive1", parameters={"boundaryMode": "sillhouette"})
+        assert "own values:" not in res["message"]
+        assert "cam_get(include=['parameters'], operation=...)" in res["message"]
+
+
+class _StuckAfterFirstWrite(FakeParam):
+    """Takes one write and swallows every later one - the parameter whose RESTORE does not land, so
+    the operation is left holding the value this call wrote."""
+
+    @FakeParam.expression.setter
+    def expression(self, value):
+        if getattr(self, "_written_once", False):
+            return
+        self._written_once = True
+        FakeParam.expression.fset(self, value)
+
+
+class GatedParam(FakeParam):
+    """A parameter another one UNLOCKS: isEditable follows the gate parameter's own expression,
+    which is the shape numberOfStepovers reads behind doMultiplePasses."""
+
+    def __init__(self, name, expression="", gate=None, **kw):
+        super().__init__(name, expression, **kw)
+        self._gate = gate
+
+    @property
+    def isEditable(self):
+        return str(self._gate.expression).strip().lower() == "true"
+
+    @isEditable.setter
+    def isEditable(self, value):
+        pass
+
+
+class TestASwitchInTheSameCall:
+    """A row whose isEditable is gated by ANOTHER parameter of the same request: the locked rows go
+    LAST and their flag is re-read once the switch has landed, so one call carrying both works."""
+
+    def _deburr(self, monkeypatch):
+        gate = FakeParam("doMultiplePasses", "false")
+        return _install(monkeypatch, params={
+            "tool_feedCutting": "5210.23", "doMultiplePasses": gate,
+            "numberOfStepovers": GatedParam("numberOfStepovers", "1", gate=gate)})
+
+    def test_the_gated_row_is_written_after_the_switch_that_unlocks_it(self, monkeypatch):
+        # The gated row is asked for FIRST, so a handler applying the request in its own order would
+        # meet the locked flag and refuse.
+        op = self._deburr(monkeypatch)
+        out = _payload(ce.handler(operation="Adaptive1",
+                                  parameters={"numberOfStepovers": "3",
+                                              "doMultiplePasses": "true"}))
+        assert op.parameters.itemByName("doMultiplePasses").expression == "true"
+        assert op.parameters.itemByName("numberOfStepovers").expression == "3"
+        rows = {c["name"]: c for c in out["changed"]}
+        assert rows["numberOfStepovers"]["unlocked_here"] is True
+        assert "unlocked_here" not in rows["doMultiplePasses"]
+        assert "read isEditable false at the start of this call" in out["note"]
+
+    def test_a_row_nothing_in_the_call_unlocks_is_written_around_and_restored(self, monkeypatch):
+        op = self._deburr(monkeypatch)
+        res = ce.handler(operation="Adaptive1",
+                         parameters={"tool_feedCutting": "3000", "numberOfStepovers": "3"})
+        assert res["isError"] is True
+        assert "does not accept a write to: numberOfStepovers" in res["message"]
+        assert "after the other 1 parameter(s) in this call were applied" in res["message"]
+        assert "WROTE 1 parameter(s) on the operation and then restored each one" in res["message"]
+        assert op.parameters.itemByName("tool_feedCutting").expression == "5210.23"
+        assert op.parameters.itemByName("numberOfStepovers").expression == "1"
+
+    def test_a_restore_that_did_not_come_back_is_named_not_claimed_restored(self, monkeypatch):
+        # THE BITE: the refusal may only claim what the RE-READ saw. A parameter that swallows the
+        # restore leaves the operation holding this call's value, and saying otherwise hands the
+        # caller a state nothing read.
+        gate = FakeParam("doMultiplePasses", "false")
+        _install(monkeypatch, params={
+            "tool_feedCutting": _StuckAfterFirstWrite("tool_feedCutting", "5210.23"),
+            "doMultiplePasses": gate,
+            "numberOfStepovers": GatedParam("numberOfStepovers", "1", gate=gate)})
+        res = ce.handler(operation="Adaptive1",
+                         parameters={"tool_feedCutting": "3000", "numberOfStepovers": "3"})
+        assert res["isError"] is True
+        assert "restored each one, but 1 did NOT come back" in res["message"]
+        assert "'tool_feedCutting' reads '3000', held '5210.23'" in res["message"]
+        assert "set each one back by hand" in res["message"]
+        # and NOT the clean-restore sentence, which would contradict the line beside it
+        assert "every restored expression reads back what it held" not in res["message"]

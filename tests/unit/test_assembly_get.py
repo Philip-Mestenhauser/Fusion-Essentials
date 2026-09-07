@@ -15,7 +15,7 @@ import pytest
 
 import live_api_facts as _api_facts
 from conftest import (BRepBody, CylindricalJointMotion, FakeAsBuiltJoint as _SharedAsBuiltJoint,
-                      FakeJoint, FakeMatrix3D, FakeMotionLink,
+                      FakeContactSet, FakeJoint, FakeMatrix3D, FakeMotionLink,
                       FakeOccurrence, FakePoint, FakeRigidGroup, FakeTimeline, FakeTimelineObject,
                       FakeVector3D, MakeComp, MakeDesign, _MotionLimits, _NamedCollection,
                       go_stale, install, load_tool, make_bbox, make_design, make_occurrence)
@@ -1198,14 +1198,15 @@ class _RawMember:
     """What a BODY member reads back as: an object neither cast accepts, so it counts but has no name."""
 
 
-class _ContactSetRow:
-    def __init__(self, name, members=(), suppressed=False):
-        self.name = name
-        self.occurencesAndBodies = list(members)      # ONE 'r' - the real property name
-        self.isSuppressed = suppressed
+def _contact_set(name, members=(), suppressed=False):
+    """One set the slice reads: the shared ContactSet fake with its membership written in through
+    occurencesAndBodies - ONE 'r', the real property name."""
+    row = FakeContactSet(name=name, suppressed=suppressed)
+    row.occurencesAndBodies = list(members)
+    return row
 
 
-class _UnreadableMembers(_ContactSetRow):
+class _UnreadableMembers(FakeContactSet):
     """A set whose member list cannot be read at all - distinct from a set that holds nothing."""
 
     @property
@@ -1254,7 +1255,7 @@ def contacts_design(monkeypatch):
 
 class TestContactsSlice:
     def test_default_omits_the_slice_and_advertises_it(self, contacts_design):
-        contacts_design(sets=[_ContactSetRow("ContactSet1")])
+        contacts_design(sets=[_contact_set("ContactSet1")])
         out = _payload(ap.handler())
         assert "contacts" not in out and "contact_analysis" not in out
         assert "include=['contacts']" in out["note"]
@@ -1267,7 +1268,7 @@ class TestContactsSlice:
         assert out["contact_analysis"] == {"enabled": False, "scope": "all_bodies"}
 
     def test_a_row_carries_members_count_and_suppression(self, contacts_design):
-        contacts_design(sets=[_ContactSetRow("Frame_Panel",
+        contacts_design(sets=[_contact_set("Frame_Panel",
                                              members=[make_occurrence("Frame:1"), make_occurrence("Panel:1")],
                                              suppressed=True)])
         row = _payload(ap.handler(include=["contacts"]))["contacts"][0]
@@ -1278,14 +1279,14 @@ class TestContactsSlice:
     def test_a_row_carries_no_handle_and_no_health(self, contacts_design):
         # a ContactSet has neither entityToken nor healthState - inventing either key would promise
         # a round-trip and a health verdict that do not exist.
-        contacts_design(sets=[_ContactSetRow("ContactSet1", members=[make_occurrence("A:1")])])
+        contacts_design(sets=[_contact_set("ContactSet1", members=[make_occurrence("A:1")])])
         row = _payload(ap.handler(include=["contacts"]))["contacts"][0]
         assert "handle" not in row and "healthy" not in row
 
     def test_a_body_member_is_counted_but_not_named(self, contacts_design):
         # measured: a body member reads back as a raw object both casts reject. Counting it keeps
         # member_count honest; a names-only row would silently under-report the membership.
-        contacts_design(sets=[_ContactSetRow("Mixed", members=[_RawMember(), make_occurrence("A:1")])])
+        contacts_design(sets=[_contact_set("Mixed", members=[_RawMember(), make_occurrence("A:1")])])
         row = _payload(ap.handler(include=["contacts"]))["contacts"][0]
         assert row["member_count"] == 2
         assert row["members"] == ["A:1"] and row["members_unreadable"] == 1
@@ -1301,13 +1302,13 @@ class TestContactsSlice:
         # "unreadable, some amount". No members and two named members are both the 0 side of that
         # boundary; one unnamed member is the 1 side.
         for members in ([], [make_occurrence("Frame:1"), make_occurrence("Panel:1")]):
-            contacts_design(sets=[_ContactSetRow("Readable", members=members)])
+            contacts_design(sets=[_contact_set("Readable", members=members)])
             row = _payload(ap.handler(include=["contacts"]))["contacts"][0]
             assert "members_unreadable" not in row
             assert row["member_count"] == len(members)
 
     def test_members_are_previewed_but_the_count_is_honest(self, contacts_design):
-        contacts_design(sets=[_ContactSetRow("Big", members=[make_occurrence(f"P{i}:1") for i in range(30)])])
+        contacts_design(sets=[_contact_set("Big", members=[make_occurrence(f"P{i}:1") for i in range(30)])])
         out = _payload(ap.handler(include=["contacts"]))
         row = out["contacts"][0]
         assert len(row["members"]) == 12              # the member preview cap
@@ -1317,18 +1318,18 @@ class TestContactsSlice:
 
     def test_one_two_and_many_sets_are_all_listed(self, contacts_design):
         for n in (1, 2, 6):
-            contacts_design(sets=[_ContactSetRow(f"CS{i}") for i in range(n)])
+            contacts_design(sets=[_contact_set(f"CS{i}") for i in range(n)])
             out = _payload(ap.handler(include=["contacts"]))
             assert out["contact_count"] == n and len(out["contacts"]) == n
 
     def test_the_list_cap_truncates_and_flags_it(self, contacts_design):
-        contacts_design(sets=[_ContactSetRow(f"CS{i}") for i in range(5)])
+        contacts_design(sets=[_contact_set(f"CS{i}") for i in range(5)])
         out = _payload(ap.handler(include=["contacts"], max_contacts=2))
         assert len(out["contacts"]) == 2 and out["contact_count"] == 5
         assert out["contacts_truncated"] is True and "max_contacts" in out["note"]
 
     def test_analysis_on_with_the_sets_is_reported_without_an_inert_warning(self, contacts_design):
-        contacts_design(sets=[_ContactSetRow("CS1")], enabled=True, use_sets=True)
+        contacts_design(sets=[_contact_set("CS1")], enabled=True, use_sets=True)
         out = _payload(ap.handler(include=["contacts"]))
         assert out["contact_analysis"] == {"enabled": True, "scope": "contact_sets"}
         assert "INERT" not in out["note"]
@@ -1336,7 +1337,7 @@ class TestContactsSlice:
     def test_analysis_on_but_scoped_to_all_bodies_says_the_sets_are_ignored(self, contacts_design):
         # analysis being ON is not enough: scoped to all bodies, every set listed takes no part, and
         # a list with no disclosure reads as "these are in force".
-        contacts_design(sets=[_ContactSetRow("CS1")], enabled=True, use_sets=False)
+        contacts_design(sets=[_contact_set("CS1")], enabled=True, use_sets=False)
         out = _payload(ap.handler(include=["contacts"]))
         assert out["contact_analysis"]["scope"] == "all_bodies"
         assert "IGNORED" in out["note"] and "set_analysis_scope" in out["note"]
@@ -1345,7 +1346,7 @@ class TestContactsSlice:
     def test_an_unreadable_scope_is_null_not_all_bodies(self, contacts_design):
         # all_bodies would be a fabricated answer for a flag that never answered - and it would also
         # trigger the ignored-sets disclosure over a scope nobody read.
-        contacts_design(sets=[_ContactSetRow("CS1")], enabled=True,
+        contacts_design(sets=[_contact_set("CS1")], enabled=True,
                         design_cls=_UnreadableScopeDesign)
         out = _payload(ap.handler(include=["contacts"]))
         assert out["contact_analysis"] == {"enabled": True, "scope": None}
@@ -1361,7 +1362,7 @@ class TestContactsSlice:
 
     def test_sets_listed_while_analysis_is_off_are_flagged_inert(self, contacts_design):
         # the list alone would read as "these are in force"; with analysis off none of them acts.
-        contacts_design(sets=[_ContactSetRow("CS1")], enabled=False)
+        contacts_design(sets=[_contact_set("CS1")], enabled=False)
         out = _payload(ap.handler(include=["contacts"]))
         assert "INERT" in out["note"] and "enable_analysis" in out["note"]
 
@@ -1370,7 +1371,7 @@ class TestContactsSlice:
         assert "INERT" not in _payload(ap.handler(include=["contacts"]))["note"]
 
     def test_contacts_composes_with_the_other_slices(self, contacts_design):
-        contacts_design(sets=[_ContactSetRow("CS1")])
+        contacts_design(sets=[_contact_set("CS1")])
         out = _payload(ap.handler(include=["contacts", "relations"]))
         assert out["contact_count"] == 1
         assert out["relation_counts"] == {"rigid_groups": 0, "motion_links": 0, "constraints": 0}
@@ -2165,7 +2166,7 @@ class TestDefaultCapsReachThePayload:
         assert out["relations_truncated"] is True
 
     def test_contacts_default_caps_the_list_at_50(self, contacts_design):
-        contacts_design(sets=[_ContactSetRow(f"CS{i}") for i in range(51)])
+        contacts_design(sets=[_contact_set(f"CS{i}") for i in range(51)])
         out = _payload(ap.handler(include=["contacts"]))
         assert len(out["contacts"]) == 50
         assert out["contact_count"] == 51 and out["contacts_truncated"] is True
@@ -2195,6 +2196,6 @@ class TestDefaultCapsReachThePayload:
         out = _payload(ap.handler(include=["relations"]))
         assert len(out["relations"]["rigid_groups"]) == _promised_default("max_relations")
 
-        contacts_design(sets=[_ContactSetRow(f"CS{i}") for i in range(over)])
+        contacts_design(sets=[_contact_set(f"CS{i}") for i in range(over)])
         out = _payload(ap.handler(include=["contacts"]))
         assert len(out["contacts"]) == _promised_default("max_contacts")

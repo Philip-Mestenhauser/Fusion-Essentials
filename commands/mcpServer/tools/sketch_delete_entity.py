@@ -2,8 +2,8 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """sketch_delete_entity - remove one '<type>:<index>' target (a curve/point kind from
-_common.ENTITY_REF_KINDS, 'constraint', or 'text') from a named sketch, WITHOUT rebuilding the whole
-sketch. The delete is verified by reading the collection count back. WRITES."""
+_common.ENTITY_REF_KINDS, 'constraint', 'dimension', or 'text') from a named sketch, WITHOUT
+rebuilding the whole sketch. The delete is verified by reading the collection count back. WRITES."""
 
 import adsk.core
 import adsk.fusion
@@ -43,6 +43,24 @@ def _resolve_constraint(sketch, idx):
         return None, _unread_count_error("constraint", f"'constraint:{idx}'")
     if idx < 0 or idx >= n:
         return None, f"constraint index {idx} out of range - the sketch has {n} constraint(s)."
+    return safe(lambda: coll.item(idx)), None
+
+
+def _dimension_collection(sketch):
+    return safe(lambda: sketch.sketchDimensions)
+
+
+def _resolve_dimension(sketch, idx):
+    """A sketch dimension by creation-order index - the SAME index sketch_get's X-ray lists it at -
+    or (None, error_string)."""
+    coll = _dimension_collection(sketch)
+    if coll is None:
+        return None, "This sketch exposes no sketch dimensions collection."
+    n = _common.counted(lambda: coll.count)
+    if n is None:
+        return None, _unread_count_error("dimension", f"'dimension:{idx}'")
+    if idx < 0 or idx >= n:
+        return None, f"dimension index {idx} out of range - the sketch has {n} dimension(s)."
     return safe(lambda: coll.item(idx)), None
 
 
@@ -94,9 +112,9 @@ def handler(sketch_name: str = "", target: str = "", component: str = "") -> dic
     if ":" not in ref:
         return error("Provide 'target' as '<type>:<index>' - type = "
                      + " | ".join(_common.ENTITY_REF_KINDS)
-                     + " | constraint | text (e.g. 'circle:0', 'constraint:2', 'text:0'). "
-                     "sketch_get lists the curve/constraint indexes; a text index is the one "
-                     "sketch_set_text edits by.")
+                     + " | constraint | dimension | text (e.g. 'circle:0', 'dimension:2'). "
+                     "sketch_get(include_entities=true) lists the curve/constraint/dimension "
+                     "indexes; a text index is the one sketch_set_text edits by.")
     kind, _, idx_s = ref.rpartition(":")
     try:
         idx = int(idx_s)
@@ -133,6 +151,41 @@ def handler(sketch_name: str = "", target: str = "", component: str = "") -> dic
             "constraints_before": before,
             "constraints_after": after,
             "note": "Constraint removed. Re-constrain if needed (see sketch_constrain).",
+        })
+
+    # --- dimension path (sketchDimensions is its own collection, indexed the way the X-ray lists it) ---
+    if kind == "dimension":
+        coll = _dimension_collection(sketch)
+        before = _common.counted(lambda: coll.count) if coll is not None else None
+        ent, derr = _resolve_dimension(sketch, idx)
+        if derr:
+            return error(derr)
+        if before is None:
+            return error(_unread_count_error("dimension", f"deleting {ref}")
+                         + " Nothing was deleted.")
+        # Captured BEFORE the mutation: the parameter name is what tells the caller WHICH
+        # dimension went.
+        pname = safe(lambda: ent.parameter.name)
+        try:
+            # The MUTATION - not safe-wrapped, so a genuine failure raises and is reported.
+            did = ent.deleteMe()
+        except Exception as e:
+            return error(f"Could not delete {ref}: {e}")
+        after = _common.counted(lambda: coll.count)
+        if after is None:
+            return _unverified_delete(ref, "dimension", before)
+        if not did or after >= before:
+            return error(f"Delete of {ref} did not take (dimension count {before} -> {after}). "
+                         "The dimension is still in the sketch.")
+        return ok({
+            "deleted": True,
+            "target": ref,
+            "parameter": pname,
+            "sketch": safe(lambda: sketch.name),
+            "dimensions_before": before,
+            "dimensions_after": after,
+            "note": ("Dimension removed. Re-read sketch_get(include_entities=true) for the "
+                     "sketch's remaining dimensions and its constrained state."),
         })
 
     # --- sketch-text path (sketchTexts is neither a SketchCurves sub-collection nor a constraint,
@@ -173,7 +226,8 @@ def handler(sketch_name: str = "", target: str = "", component: str = "") -> dic
     # --- curve/point path (shared resolver + count read-back on the matching collection) ---
     if kind not in _common.ENTITY_REF_KINDS:
         return error(f"Unknown target type '{kind}'. Use "
-                     + " | ".join(_common.ENTITY_REF_KINDS) + " | constraint | text.")
+                     + " | ".join(_common.ENTITY_REF_KINDS)
+                     + " | constraint | dimension | text.")
 
     # Count the SAME collection resolve_entity_ref indexes, so the read-back proves this delete.
     coll = _common.entity_collection(sketch, kind)
@@ -209,9 +263,9 @@ def handler(sketch_name: str = "", target: str = "", component: str = "") -> dic
 
 
 TOOL_DESCRIPTION = (
-    "Delete ONE sketch entity, constraint or text from a named sketch. 'target' is "
-    "'<type>:<index>' - indexes come from sketch_get, and a text's index is the one "
-    "sketch_set_text edits by."
+    "Delete ONE sketch entity, constraint, dimension or text from a named sketch. 'target' is "
+    "'<type>:<index>' - indexes come from sketch_get(include_entities=true), and a text's index is "
+    "the one sketch_set_text edits by."
 )
 
 tool = (
@@ -223,9 +277,9 @@ tool = (
     )
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("target", {"type": "string",
-            "description": "The entity to delete as '<type>:<index>' - line | arc | circle | ellipse | "
-                           "point | spline | cv_spline | fixed_spline | constraint | text (e.g. "
-                           "'circle:0', 'text:0'). 0-based, in creation order."})
+            "description": "What to delete as '<type>:<index>' - line | arc | circle | ellipse | "
+                           "point | spline | cv_spline | fixed_spline | constraint | dimension | "
+                           "text (e.g. 'circle:0'). 0-based, in creation order."})
     .add_required_input("target")
     .strict_schema()
 )

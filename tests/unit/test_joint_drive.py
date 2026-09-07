@@ -1748,6 +1748,9 @@ class TestEquivalentPose:
         _install(j)
         out = payload(jd.handler(joint_name="Crank", angle_deg=360))
         assert out["equivalent_pose"] is True and "drive_took" not in out
+        # the note carries the way forward, and claims no turn count: value_now reads 0.0 deg here
+        assert "not a multiple of 360 deg" in out["note"]
+        assert "full-turn count" not in out["note"]
 
     def test_float_drift_just_under_a_full_turn_is_equivalent(self, monkeypatch):
         # 719.9995 deg commanded to 0: the raw difference is 359.9995, so only the 360-d half of

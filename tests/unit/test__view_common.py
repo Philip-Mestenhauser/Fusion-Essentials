@@ -519,7 +519,7 @@ class TestIsolateForFit:
         design = SimpleNamespace(rootComponent=comp, allComponents=[comp])
         monkeypatch.setattr(vc._common, "design", lambda: design)
         monkeypatch.setattr(vc._common, "all_occurrences", lambda d: [occ])
-        ref = SimpleNamespace(name="fit_to", resolve=lambda raw: (occ, None))
+        ref = SimpleNamespace(name="fit_to", resolve=lambda raw: ((occ, "occurrence"), None))
         restore, target, err = vc.isolate_for_fit("Part:1", ref)
         assert err is None and target is occ
         assert comp.isSketchFolderLightBulbOn is False    # the fit really did clear the clutter

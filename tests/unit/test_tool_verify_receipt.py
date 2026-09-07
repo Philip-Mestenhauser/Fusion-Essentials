@@ -457,6 +457,19 @@ class TestResumableRun:
         assert second.run(run_id="r1", resume=True, acts_spec="ACT B") == 1
         assert "b_get" not in second.tools_called() and "not the active one" in capsys.readouterr().out
 
+    def test_starting_a_run_id_that_holds_state_is_refused_before_any_act(self, monkeypatch,
+                                                                         tmp_path, capsys):
+        # the trap: --run <id> --acts without --resume on a used id ran the acts with an empty ctx
+        # and rewrote the saved progress; now it stops before the first wire call.
+        first = _Harness(monkeypatch, tmp_path)
+        first.run(run_id="r1", acts_spec="ACT A")
+        before = tool_verify.load_run_state("r1")
+        second = _Harness(monkeypatch, tmp_path)
+        assert second.run(run_id="r1", acts_spec="ACT B") == 1
+        assert second.seen == [] and not second.wrote
+        assert tool_verify.load_run_state("r1") == before
+        assert "already holds state" in capsys.readouterr().out
+
     def test_a_single_invocation_is_unchanged_by_the_run_id_machinery(self, monkeypatch, tmp_path):
         # the path everyone runs: no run id, no state file, one stamp at the end.
         h = _Harness(monkeypatch, tmp_path)

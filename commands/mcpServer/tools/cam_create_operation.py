@@ -261,6 +261,31 @@ _UNCHECKED_VOCABULARY = (
     " The setup's compatibleStrategies did not read, so neither the compatibility nor the "
     "entitlement pre-flight ran.")
 
+# Names a setup OFFERS, each reading isGenerationAllowed true, that operations.add does NOT land:
+# it answers with a name while the setup's operation count stays where it was. Value = what does
+# the job instead. The count read is what refuses; this table only names the remedy.
+_NOT_AN_OPERATION = {
+    "hole_recognition": ("hole recognition picks holes for a drilling cycle - create 'drill' (or "
+                         "'bore') and aim it with cam_select_geometry(selection='holes')"),
+    "folder": "a CAM folder is created and filled by cam_edit_folders",
+}
+
+
+def _not_an_operation_clause(strategy) -> str:
+    """What to reach for instead, for a name that is not an operation - '' for every other
+    strategy, whose empty landing is a fault rather than a category error."""
+    remedy = _NOT_AN_OPERATION.get(strategy)
+    return f" '{strategy}' is not an operation: {remedy}." if remedy else ""
+
+# MEASURED on a milling setup whose Z is the world Z, drilling a hole bored along world X: the
+# generate errored on the ORIENTATION, and binding the setup's Z to that hole's own face cleared
+# that error. The heights themselves read isEditable true, so they are not what refuses.
+_DRILLING_AXIS_NOTE = (
+    " A drilling cycle cuts along the SETUP's Z: a hole whose axis is not that Z errored "
+    "'Cylindrical face not in tool orientation!' at generate, and binding the setup's Z to the "
+    "hole's own face cleared it - cam_edit_setup(wcs={'z_axis': <that face handle>}) before "
+    "selecting the holes.")
+
 
 def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
             tool_index: int = -1, tool_scope: str = "", generate: bool = False,
@@ -375,7 +400,7 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
     if ops_after <= ops_before:
         return error(f"operations.add returned '{safe(lambda: op.name)}' but the setup's operation "
                      f"count did not increase ({ops_before} before, {ops_after} after) - the "
-                     "operation did not land.")
+                     "operation did not land." + _not_an_operation_clause(strategy))
 
     # The operation has landed, so a declined name is a DISCLOSURE, not a failed create - the
     # payload publishes the name Operation.name reads back either way.
@@ -453,6 +478,10 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
                               f"cam_get_status(handle='{handle}'), or confirm with "
                               "cam_get(include=['operations']) once generation completes.")
 
+    # After the generate arm, which REPLACES the note: the axis rule is what a drilling cycle is
+    # aimed by, whichever arm wrote the sentence before it.
+    if chosen is not None and chosen.get("is_drilling") is True:
+        result["note"] += _DRILLING_AXIS_NOTE
     if chosen is None:
         # absent = the read answered and the pre-flight ran, for both keys
         result["strategy_checked"] = False

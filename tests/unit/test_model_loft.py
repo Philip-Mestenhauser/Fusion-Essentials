@@ -220,6 +220,45 @@ class TestLoft:
         assert out["rails_count"] == 2
         assert out["has_centerline"] is False
 
+    def _sketch_rail_design(self, sketch_name="Spine"):
+        """A loft design whose component also holds a SKETCH carrying one arc - the spine case:
+        at first-loft time no body exists, so find_geometry can mint no handle for it."""
+        lf = _FakeLoftFeatures()
+        arc = object()
+        sk = make_sketch(name=sketch_name, arcs=[arc])
+        comp = MakeComp(name="Comp", bodies=(), mesh_bodies=(), sketches=[sk])
+        comp.features = _FakeFeatures(loft=lf)
+        install(so, make_design(comp=comp,
+                                tokens={"H0": Profile("0"), "H1": Profile("1")}))
+        return lf, arc
+
+    def test_a_rail_can_be_a_SKETCH_CURVE_ref(self):
+        # MEASURED: LoftCenterLineOrRails.addRail(SketchArc) is accepted. find_geometry acquires
+        # BRep faces/edges/vertices only, so this second spelling is the only way to hand a loft a
+        # spine drawn before any body exists.
+        lf, arc = self._sketch_rail_design()
+        out = _payload(so.handler(profiles=["H0", "H1"], rails=["Spine/arc:0"]))
+        assert lf.last_input.centerLineOrRails.rails == [arc]
+        assert out["rails_count"] == 1
+
+    def test_a_centerline_can_be_a_sketch_curve_ref(self):
+        lf, arc = self._sketch_rail_design()
+        out = _payload(so.handler(profiles=["H0", "H1"], centerline="Spine/arc:0"))
+        assert lf.last_input.centerLineOrRails.centerlines == [arc]
+        assert out["has_centerline"] is True
+
+    def test_an_unknown_sketch_in_a_rail_ref_is_named(self):
+        self._sketch_rail_design()
+        res = so.handler(profiles=["H0", "H1"], rails=["NoSuch/arc:0"])
+        assert res["isError"] is True
+        assert "NoSuch" in res["message"] and "Spine" in res["message"]
+
+    def test_a_curve_the_sketch_does_not_hold_is_named(self):
+        self._sketch_rail_design()
+        res = so.handler(profiles=["H0", "H1"], rails=["Spine/arc:7"])
+        assert res["isError"] is True
+        assert "arc:7" in res["message"] and "sketch_get" in res["message"]
+
     def test_unknown_operation_rejected(self):
         self._profiles_design()
         res = so.handler(profiles=["H0", "H1"], operation="weld")

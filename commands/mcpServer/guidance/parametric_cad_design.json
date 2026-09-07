@@ -379,7 +379,8 @@
             {"tool": "param_add", "do": "the driving sizes as named parameters (length_handle, diameter_thread), the derived ones as ratios (chamfer_size = weight_width / 8)", "read_back": "each expression evaluates"},
             {"tool": "sketch_dimension", "do": "write every profile dimension as a parameter expression, halves as diameter / 2", "read_back": "expressions, not literals"},
             {"tool": "model_revolve", "do": "revolve the profile, or extrude with a profile offset for a coating", "read_back": "is_solid true"},
-            {"tool": "model_emboss", "do": "emboss a sketch text whose string is a text parameter", "read_back": "the text lands raised or engraved by the signed depth"},
+            {"tool": "sketch_set_text", "do": "create the label, then bind it with parameter=<the text parameter>", "read_back": "bound_to naming the parameter"},
+            {"tool": "model_emboss", "do": "emboss that bound text", "read_back": "the text lands raised or engraved by the signed depth"},
             {"tool": "doc_save_as", "do": "save the document - a configuration table refuses an unsaved one", "read_back": "a document id"},
             {"tool": "design_configure", "do": "create the table, a column per varying size, a row per variant; a text column takes no per-row value, so relabel by param_set", "read_back": "configured true, then each column id"},
             {"tool": "design_configure", "do": "activate a different row", "read_back": "the activate reports the row"},
@@ -729,6 +730,15 @@
           "do": "compare their geometry selections - chains, extension modes, stock contours, boundaries - because a parameter diff cannot see them",
           "except": "operations that differ in parameters already",
           "prove": [{"tool": "cam_get", "observe": "each operation's references: the chains and faces it was given"}]
+        },
+        {
+          "id": "turning-lead-out-gouges-the-remaining-stock",
+          "section": "manufacture",
+          "scenarios": ["machining_job"],
+          "when": "a turning profile finishing cycle generates carrying a warning",
+          "do": "read the warning text before treating the cycle as clean: 'Lead-Out has been modified due to a gouge with the remaining stock' says the exit move ran into stock the cycle leaves behind, and Fusion moved it rather than refusing. Setting doLeadOut false on that operation with cam_edit_operation cleared it - measured on a turned flange, where the four cycles then read no warning at all and every one cut",
+          "except": "a cycle whose exit move has to clear a face, where the lead-out is the point",
+          "prove": [{"tool": "cam_get_status", "observe": "operations_with_warnings is empty for that setup and none of its operations is in empty_toolpaths"}]
         }
       ],
       "recipes": [
