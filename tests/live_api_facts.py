@@ -14,6 +14,15 @@ ENUMS = {
         "SkipGeneration": 1,
         "UserPreference": 2,
     },
+    "cam.ExtensionMethods": {
+        "TangentExtensionMethod": 0,
+        "ClosestBoundaryExtensionMethod": 1,
+        "ParallelExtensionMethod": 2,
+    },
+    "cam.ExtensionTypes": {
+        "BoundaryExtensionType": 0,
+        "DistanceExtensionType": 1,
+    },
     "cam.InspectionPointState": {
         "WithinTolerance": 0,
         "AboveTolerance": 1,
@@ -561,6 +570,9 @@ BEHAVIOR = {
     "save_image_options_defaults": True,
     "text_parameter_value_raises": True,
     "thread_same_designation_types_identical": True,
+    "timeline_collapsed_member_index_raises": True,
+    "timeline_group_created_collapsed": True,
+    "timeline_group_row_enumerated_only_when_collapsed": True,
     "units_manager_convert_refuses_incompatible": True,
     "units_manager_internal_units_sentinel": 'InternalUnits',
     "user_parameter_has_no_created_by": True,
@@ -934,6 +946,11 @@ SHAPES = {
     "Images": [
         "cast", "classType", "createInput", "insert", "isValid", "objectType",
         "thisown",
+    ],
+    "InfiniteLine3D": [
+        "cast", "classType", "copy", "create", "curveType", "direction",
+        "evaluator", "getData", "intersectWithCurve", "intersectWithSurface", "isColinearTo", "isValid",
+        "objectType", "origin", "set", "this", "thisown", "transformBy",
     ],
     "InterferenceInput": [
         "areCoincidentFacesIncluded", "cast", "classType", "entities", "isValid", "objectType",
@@ -1313,6 +1330,11 @@ SHAPES = {
     "Snapshots": [
         "add", "cast", "classType", "count", "hasPendingSnapshot", "isValid",
         "item", "objectType", "revertPendingSnapshot", "this", "thisown",
+    ],
+    "Sphere": [
+        "cast", "classType", "copy", "create", "evaluator", "getData",
+        "isValid", "objectType", "origin", "radius", "set", "surfaceType",
+        "this", "thisown", "transformBy",
     ],
     "Timeline": [
         "cast", "classType", "count", "deleteAllAfterMarker", "isValid", "item",

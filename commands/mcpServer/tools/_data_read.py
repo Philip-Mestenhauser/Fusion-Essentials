@@ -17,10 +17,10 @@ from ._data_common import (_data, _find_project, _folder_path_string, navigate_f
 app = adsk.core.Application.get()
 
 MAP_BLURB = ("the cloud READ cores data_get delegates to - list_projects_handler (the active "
-             "hub's projects), list_project_files_handler (one project's files, optionally "
-             "folder-scoped), list_folders_handler (a project's bounded folder TREE) and "
-             "file_facts_handler (ONE file's metadata + link state) - over _walk_folder, the "
-             "capped/deadlined recursion recording a folder whose enumeration RAISED")
+             "hub's projects), list_project_files_handler (one project's files, folder-scoped), "
+             "list_folders_handler (the bounded folder TREE, whole project or one folder) "
+             "and file_facts_handler (ONE file's metadata + link state) - over _walk_folder and "
+             "_folder_tree_bounded, the capped/deadlined walks RECORDING an unreadable folder")
 
 # Every DataFile property read and every dataFolders/dataFiles enumeration is a synchronous cloud
 # round-trip on Fusion's MAIN thread, so these caps bound a whole-project walk; a bigger project is
@@ -35,6 +35,22 @@ _MAX_FOLDER_VISITS = 40
 # normal latency on a network stall, which no count cap catches. Checked BETWEEN items (an in-flight
 # call cannot be interrupted) and published as 'time_truncated', apart from an ordinary size cap.
 _TIME_BUDGET_S = 20.0
+
+# The ceiling a CALLER's own budget is clamped into (floor 1). A walk this long still blocks Fusion's
+# main thread, so a caller sizing a read for absence buys more of it, not an unbounded one.
+_TIME_BUDGET_MAX_S = 120.0
+
+
+def _budget(value, default, ceiling):
+    """A caller's budget as a float clamped into [1, ceiling]; anything that is not a number (NaN
+    included) takes the default. The effective value rides in the payload."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if v != v:
+        return float(default)
+    return max(1.0, min(v, float(ceiling)))
 
 
 # ---------------------------------------------------------------------------
@@ -77,8 +93,30 @@ def list_projects_handler() -> dict:
 # data_get(project=...) scope: a project's files
 # ---------------------------------------------------------------------------
 
+def _folder_scope(root, folder):
+    """(start folder, its cleaned path, None) for a 'folder' scope, else (None, None, error result).
+    An unread sibling list and a genuine miss are DIFFERENT refusals; '' scopes to `root` itself."""
+    want = (folder or "").strip().strip("/")
+    if not want:
+        return root, "", None
+    start, path, miss = navigate_folder_path(root, want)
+    if miss is None:
+        return start, path, None
+    if miss["available"] is None:
+        # The sibling list did not enumerate: '(none)' here would report an unread folder
+        # as an empty one, and 'not found' would be a verdict this walk never reached.
+        return None, None, error(f"Folder '{folder}' could not be resolved: the subfolders of "
+                                 f"'{miss['at']}' could not be read, so whether '{miss['segment']}' "
+                                 "is there is unknown - nothing was listed. Retry, or scope with a "
+                                 "folder path that opens.")
+    return None, None, error(f"Folder '{folder}' not found: no subfolder '{miss['segment']}' in "
+                             f"'{miss['at']}'. Subfolders there: "
+                             f"{', '.join(miss['available']) or '(none)'}.")
+
+
 def list_project_files_handler(project: str = "", project_id: str = "",
-                               folder: str = "", recursive: bool = True) -> dict:
+                               folder: str = "", recursive: bool = True,
+                               time_budget_s=None) -> dict:
     """List a project's files (name, lineage id, versionId, fileExtension, versionNumber,
     fusionWebURL), optionally scoped to a folder path; 'recursive' controls descent into subfolders."""
     data = app.data
@@ -97,29 +135,18 @@ def list_project_files_handler(project: str = "", project_id: str = "",
 
     files = []
     truncated = {"value": False}
-    deadline = time.monotonic() + _TIME_BUDGET_S
+    seconds = _budget(time_budget_s, _TIME_BUDGET_S, _TIME_BUDGET_MAX_S)
+    deadline = time.monotonic() + seconds
     try:
         root = target.rootFolder
     except Exception as e:
         return error(f"Could not access root folder of project '{target.name}': {e}")
 
     # Scope to a sub-folder path if given (navigate there, then walk only it).
-    start_folder = root
-    start_path = ""
-    want_folder = (folder or "").strip().strip("/")
-    if want_folder:
-        start_folder, start_path, miss = navigate_folder_path(root, want_folder)
-        if miss:
-            if miss["available"] is None:
-                # The sibling list did not enumerate: '(none)' here would report an unread folder
-                # as an empty one, and 'not found' would be a verdict this walk never reached.
-                return error(f"Folder '{folder}' could not be resolved: the subfolders of "
-                             f"'{miss['at']}' could not be read, so whether '{miss['segment']}' is "
-                             "there is unknown - nothing was listed. Retry, or scope with a folder "
-                             "path that opens.")
-            return error(f"Folder '{folder}' not found: no subfolder '{miss['segment']}' in "
-                         f"'{miss['at']}'. Subfolders there: "
-                         f"{', '.join(miss['available']) or '(none)'}.")
+    want_folder = bool((folder or "").strip().strip("/"))
+    start_folder, start_path, scope_err = _folder_scope(root, folder)
+    if scope_err:
+        return scope_err
 
     try:
         if want_folder and not recursive:
@@ -148,6 +175,7 @@ def list_project_files_handler(project: str = "", project_id: str = "",
     "file_count": len(files),
     "truncated": truncated["value"],
     "time_truncated": truncated.get("time_truncated", False),
+    "time_budget_s": seconds,
     "files": files,
     }
     if truncated.get("time_truncated"):
@@ -373,9 +401,14 @@ _LF_MAX_DEPTH = 12
 # folder at a time (data_get(project, folder=<path>)).
 _LF_FOLDER_BUDGET = 20
 
+# The ceiling a caller's own fetch budget is clamped into (floor 1) - see _TIME_BUDGET_MAX_S.
+_LF_FOLDER_BUDGET_MAX = 200
 
-def list_folders_handler(project: str = "", project_id: str = "", max_depth: int = 4) -> dict:
-    """Return a project's folder tree (name, id, path) to a bounded depth and folder budget."""
+
+def list_folders_handler(project: str = "", project_id: str = "", max_depth: int = 4,
+                         folder: str = "", folder_budget=None, time_budget_s=None) -> dict:
+    """Return a folder tree (name, id, path) under a project, or under one folder path in it,
+    bounded by depth, fetch budget and time budget - each published as used."""
     if not (project or project_id):
         return error("Provide 'project' (name) or 'project_id'.")
     try:
@@ -393,33 +426,54 @@ def list_folders_handler(project: str = "", project_id: str = "", max_depth: int
     except Exception:
         depth = 4
 
+    budget = int(_budget(folder_budget, _LF_FOLDER_BUDGET, _LF_FOLDER_BUDGET_MAX))
+    seconds = _budget(time_budget_s, _TIME_BUDGET_S, _TIME_BUDGET_MAX_S)
+
     try:
         root = proj.rootFolder
-        tree, count, truncated, time_truncated = _folder_tree_bounded(root, depth)
+    except Exception as e:
+        return error(f"Could not read folder tree: {e}")
+    start, start_path, scope_err = _folder_scope(root, folder)
+    if scope_err:
+        return scope_err
+    try:
+        tree, count, truncated, time_truncated, unread = _folder_tree_bounded(
+            start, depth, budget=budget, seconds=seconds, path=start_path)
     except Exception as e:
         return error(f"Could not read folder tree: {e}")
 
-    return ok({"project": safe(lambda: proj.name), "max_depth": depth,
+    payload = {"project": safe(lambda: proj.name), "folder": start_path or "(project root)",
+        "max_depth": depth, "folder_budget": budget, "time_budget_s": seconds,
         "folder_count": count, "truncated": truncated, "time_truncated": time_truncated,
-        "folders": tree})
+        "folders": tree}
+    if unread.get("unread_count"):
+        # Folders whose enumeration RAISED: what is under them was never read, which no cap flag
+        # describes - so this tree is not evidence that a folder is absent.
+        payload["folders_unreadable"] = unread["unread_count"]
+        payload["folders_unreadable_at"] = unread.get("unread", [])
+    return ok(payload)
 
 
-def _folder_tree_bounded(root, max_depth):
-    """The nested folder tree under `root`, BREADTH-FIRST and bounded by _LF_FOLDER_BUDGET fetches
-    and _TIME_BUDGET_S: (tree, node_count, truncated, time_truncated). A node whose children were NOT
-    fetched carries folders_truncated=true for a budget cut, children_unknown=true at the depth cap;
-    `truncated` reports the budget cut only, the depth cap being visible as max_depth."""
+def _folder_tree_bounded(root, max_depth, budget=None, seconds=None, path=""):
+    """The nested folder tree under `root`, BREADTH-FIRST and bounded by a fetch budget and a time
+    budget: (tree, node_count, truncated, time_truncated, unread). A node whose children were NOT
+    fetched carries folders_truncated=true for a budget cut, children_unreadable=true when the fetch
+    RAISED, children_unknown=true at the depth cap; `truncated` reports the budget cut only."""
     tree = []
     count = 0
     fetches = 0
-    queue = [(root, tree, None, "", 0)]    # (folder, children-list in the output, its node, path, depth)
+    # `path` is where `root` sits in the PROJECT, so a scoped walk still prints the paths its own
+    # 'folder' input takes back.
+    queue = [(root, tree, None, path, 0)]  # (folder, children-list in the output, its node, path, depth)
     truncated = False
     time_truncated = False
-    deadline = time.monotonic() + _TIME_BUDGET_S
+    unread = {}
+    budget = _LF_FOLDER_BUDGET if budget is None else budget
+    deadline = time.monotonic() + (_TIME_BUDGET_S if seconds is None else seconds)
     while queue:
         folder, children_out, node, path, depth = queue.pop(0)
         stalled = time.monotonic() > deadline
-        if fetches >= _LF_FOLDER_BUDGET or stalled:
+        if fetches >= budget or stalled:
             # budget exhausted (fetch count OR time): this folder's children are NOT enumerated -
             # flag it, never guess.
             truncated = True
@@ -433,6 +487,12 @@ def _folder_tree_bounded(root, max_depth):
         try:
             children = folder.dataFolders.asArray()
         except Exception:
+            # The fetch RAISED: what is under this folder was never read, which is a different
+            # answer from the childless leaf a dropped node would read as.
+            _note_unread(unread, path)
+            if node is not None:
+                node.pop("folders", None)
+                node["children_unreadable"] = True
             continue
         for f in children:
             name = safe(lambda f=f: f.name)
@@ -449,7 +509,7 @@ def _folder_tree_bounded(root, max_depth):
                 # round-trip) - say so instead of implying 'none'.
                 child["children_unknown"] = True
     _prune_empty_folder_lists(tree)
-    return tree, count, truncated, time_truncated
+    return tree, count, truncated, time_truncated, unread
 
 
 def _prune_empty_folder_lists(nodes):

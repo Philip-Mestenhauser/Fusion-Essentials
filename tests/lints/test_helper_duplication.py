@@ -235,6 +235,10 @@ _DENYLIST = {
     # The ONE capped wire list: a truncated candidate list that does not COUNT what it dropped reads
     # as the complete set, and a caller picks its next call out of it.
     "named_with_remainder": ("_common", "def"),
+    # The ONE head a message quotes a caller's own value back as, and the ONE disclosed cut. A
+    # find_geometry handle runs past 200 chars, so a local re-roll is how one refusal floods the
+    # sentence naming the way forward while its sibling stays readable.
+    "short_ref": ("_common", "def"),
     # The ONE substitution a listing makes when a name REPEATS - the name where it identifies one
     # row, that row's discriminator where it does not. Every re-roll of this rule is a listing that
     # prints one name twice and has told the caller only the count it already stated.
@@ -430,6 +434,12 @@ _DENYLIST = {
     "pending_position": ("_joints", "def"),
     "pending_move_guard": ("_joints", "def"),
     "PENDING_MOVE_REFUSAL": ("_joints", "assign"),
+    # The ONE already-jointed-PAIR diagnosis both create tools append, and the platform words it is
+    # gated on. A second copy is how one create keeps naming the pair while the other relays the
+    # platform text bare.
+    "PAIR_USED": ("_joints", "assign"),
+    "PAIR_USED_ANCHOR_NOTE": ("_joints", "assign"),
+    "pair_used_clause": ("_joints", "def"),
     # The orient + refresh-then-grab capture mechanics both screenshot tools share.
     "apply_named_view": ("_view_common", "def"),
     "capture_png_b64": ("_view_common", "def"),

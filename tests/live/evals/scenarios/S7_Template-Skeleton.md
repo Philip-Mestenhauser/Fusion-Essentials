@@ -11,7 +11,8 @@ fixture: the S6 artifact P6-Vise (verified BY URN) OPENED by the orchestrator as
 budget:
   max_tool_calls: 135
   max_tokens: 340000
-substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
+substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag; {{PROJECT}} /
+  {{FOLDER}} -> the configured destination"
 perturbations: none (baseline - document opens/saves are async and CAN flap; grade recovery)
 expected_refusals: none
 ---
@@ -69,7 +70,7 @@ GOAL - the template skeleton a machining job drops into:
   allowance on every side, and its features (the hole included) must cut the placeholder ALONE -
   a feature that reaches into the stock or fixture bodies ships a corrupted template.
 
-Finally save the document as P7-Template into MCP Test Project / Pipeline-v1/{{RUN_FOLDER}} (create the folder path if missing; never a project).
+Finally save the document as P7-Template into {{PROJECT}} / {{FOLDER}}/{{RUN_FOLDER}} (create the folder path if missing; never a project).
 
 Additionally, TAG the template for its consumers: attach a small set of NAMED ATTRIBUTES to
 the template's key timeline features (at minimum the stock feature and the fixture insert) -
@@ -112,7 +113,7 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
   in the stock body's bbox with allowance on every side (report both boxes), AND the stock and
   fixture bodies are untouched by the placeholder's features - each body's fresh volume matches
   its own feature arithmetic (report the volumes; a hole that also pierced the stock fails this).
-- doc_get -> saved as "P7-Template", real URN, version >= 1, in MCP Test Project / Pipeline-v1/{{RUN_FOLDER}}.
+- doc_get -> saved as "P7-Template", real URN, version >= 1, in {{PROJECT}} / {{FOLDER}}/{{RUN_FOLDER}}.
 
 REPORT - return EXACTLY this structure, nothing else:
 

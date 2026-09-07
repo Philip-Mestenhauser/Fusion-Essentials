@@ -10,9 +10,9 @@ test stays offline; occurrence resolution goes through the real _inputs kind aga
 
 import json
 
-from conftest import (FakeApplication, FakeData, FakeDataFile, FakeMatrix3D, FakePoint,
-                      FakeVector3D, MakeComp, MakeDesign, _NamedCollection, load_tool,
-                      make_occurrence)
+from conftest import (FakeApplication, FakeData, FakeDataFile, FakeDocumentReference,
+                      FakeFusionDocument, FakeMatrix3D, FakePoint, FakeVector3D, MakeComp,
+                      MakeDesign, _NamedCollection, load_tool, make_occurrence)
 
 io = load_tool("doc_insert_occurrence")
 
@@ -48,15 +48,18 @@ def FakeOcc(name, component=None, full_path=None, delete_returns=True):
                            delete_ok=delete_returns)
 
 
-def _install(monkeypatch, occurrences=(), root_comp=None):
-    """Point BOTH design seams (the tool's and the shared _inputs resolver's) at one fake design."""
+def _install(monkeypatch, occurrences=(), root_comp=None, data_file=None, host_document=None):
+    """Point BOTH design seams (the tool's and the shared _inputs resolver's) at one fake design.
+    `host_document` is the design's parent Document, which carries the documentReferences an insert
+    is read back through; `data_file` is the source the patched resolve hands back."""
     root_comp = root_comp or FakeComp("Root")
     root_comp.allOccurrences = list(occurrences)
-    design = MakeDesign(comp=root_comp)
+    design = (MakeDesign(comp=root_comp) if host_document is None
+              else MakeDesign(comp=root_comp, parent_document=host_document))
+    source = FakeDataFile("Part") if data_file is None else data_file
     monkeypatch.setattr(io._common, "design", lambda: design)
     monkeypatch.setattr(io._inputs._common, "design", lambda: design)
-    monkeypatch.setattr(io, "_resolve_data_file",
-                        lambda raw: (FakeDataFile("Part"), raw, [raw]))
+    monkeypatch.setattr(io, "_resolve_data_file", lambda raw: (source, raw, [raw]))
     import adsk.core
     monkeypatch.setattr(adsk.core.Matrix3D, "create", staticmethod(FakeMatrix3D))
     monkeypatch.setattr(adsk.core.Vector3D, "create",
@@ -124,6 +127,87 @@ class TestSavedVersionWireSentence:
 
     def test_description_states_the_saved_version_rule(self):
         assert "last SAVED cloud version" in io.TOOL_DESCRIPTION
+
+
+class TestTheVersionTheReferenceBound:
+    """A fresh insert bound its source at v2 while that source's stream had reached v3, so the
+    reference read out of date on the very next walk. The version the reference HOLDS is read off
+    the reference itself and published beside the source's tip - a caller may not assume a fresh
+    insert is current."""
+
+    def _inserted(self, monkeypatch, bound, latest, lineage="urn:src"):
+        source = FakeDataFile("Part", file_id=lineage, version=latest, latest_version=latest)
+        host = FakeFusionDocument(
+            name="Host", references=[FakeDocumentReference(data_file=source, version=bound)])
+        _install(monkeypatch, data_file=source, host_document=host)
+        return _payload(io.handler(document_id=lineage))
+
+    def test_a_reference_behind_the_source_tip_is_published_as_not_the_tip(self, monkeypatch):
+        out = self._inserted(monkeypatch, bound=2, latest=3)
+        assert out["bound_version"] == 2
+        assert out["source_latest_version"] == 3
+        assert out["bound_is_tip"] is False
+        assert "bound_is_tip" in out["note"] and "doc_update_xref" in out["note"]
+
+    def test_a_reference_on_the_source_tip_reads_as_the_tip(self, monkeypatch):
+        # the other side of the same equality: equal numbers are current, not merely 'not stale'.
+        out = self._inserted(monkeypatch, bound=3, latest=3)
+        assert out["bound_is_tip"] is True
+
+    def test_a_version_that_does_not_read_is_null_never_false(self, monkeypatch):
+        # no reference row answers here, so the bound version is UNKNOWN - published as false it
+        # would read as a stale insert the walk never saw.
+        _install(monkeypatch)
+        out = _payload(io.handler(document_id="urn:x"))
+        assert out["bound_version"] is None
+        assert out["bound_is_tip"] is None
+
+    def test_a_reference_id_carrying_a_version_suffix_still_matches_its_source(self, monkeypatch):
+        # the id is matched on its LINEAGE key, as every other reference walk here matches. A
+        # '?version=' suffix was NOT seen on this path; raw equality would miss one if it appeared.
+        source = FakeDataFile("Part", file_id="urn:src", version=3, latest_version=3)
+        suffixed = FakeDataFile("Part", file_id="urn:src?version=2", version=2, latest_version=3)
+        host = FakeFusionDocument(
+            name="Host", references=[FakeDocumentReference(data_file=suffixed, version=2)])
+        _install(monkeypatch, data_file=source, host_document=host)
+        out = _payload(io.handler(document_id="urn:src"))
+        assert out["bound_version"] == 2
+        assert out["bound_is_tip"] is False
+
+    def test_a_source_id_that_did_not_read_matches_nothing(self, monkeypatch):
+        # an unread id keys to '' - and so does every unread REFERENCE id, so a bare key compare
+        # would bind this insert to whatever other reference also failed to read.
+        source = FakeDataFile("Part", file_id=None, version=3, latest_version=3)
+        other = FakeDataFile("Other", file_id=None, version=7, latest_version=7)
+        host = FakeFusionDocument(
+            name="Host", references=[FakeDocumentReference(data_file=other, version=7)])
+        _install(monkeypatch, data_file=source, host_document=host)
+        out = _payload(io.handler(document_id="urn:src"))
+        assert out["bound_version"] is None
+        assert out["bound_is_tip"] is None
+
+    def test_a_matched_row_whose_version_did_not_read_is_unknown_not_agreement(self, monkeypatch):
+        # two references to ONE source, one of them unreadable: {2, None} is not "bound at 2" - the
+        # unread row could hold any version, so the answer is UNKNOWN.
+        source = FakeDataFile("Part", file_id="urn:src", version=3, latest_version=3)
+        host = FakeFusionDocument(name="Host", references=[
+            FakeDocumentReference(data_file=source, version=2),
+            FakeDocumentReference(data_file=source, version=None)])
+        _install(monkeypatch, data_file=source, host_document=host)
+        out = _payload(io.handler(document_id="urn:src"))
+        assert out["bound_version"] is None
+        assert out["bound_is_tip"] is None
+
+    def test_two_references_at_two_versions_have_no_single_answer(self, monkeypatch):
+        # one source can be referenced twice; two rows disagreeing is not one bound version, and
+        # picking either would name a version the other reference does not hold.
+        source = FakeDataFile("Part", file_id="urn:src", version=3, latest_version=3)
+        host = FakeFusionDocument(name="Host", references=[
+            FakeDocumentReference(data_file=source, version=2),
+            FakeDocumentReference(data_file=source, version=3)])
+        _install(monkeypatch, data_file=source, host_document=host)
+        out = _payload(io.handler(document_id="urn:src"))
+        assert out["bound_version"] is None and out["bound_is_tip"] is None
 
 
 class TestAlwaysReference:
@@ -244,7 +328,7 @@ class TestRemoveExisting:
         _install(monkeypatch, occurrences=[old])
         out = _payload(io.handler(document_id="urn:x", remove_existing="OldPart:1"))
         note = out["note"]
-        assert "REMAINS in the timeline carrying reference failures" in note
+        assert "referenced its geometry carrying reference failures" in note
         assert "CAM" not in note and "stripped" not in note
 
     def test_no_removal_note_when_nothing_was_removed(self, monkeypatch):

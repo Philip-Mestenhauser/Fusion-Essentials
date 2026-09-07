@@ -552,7 +552,8 @@ class TestStuckParameter:
 
 class TestMissingParameter:
     """A name the operation does not carry is refused before any write. The refusal is the one place
-    a caller learns which names exist, so it names the read that lists them."""
+    a caller learns which names exist, so it names the read that lists them - and that read lists
+    the SHOWN rows only, a row behind a switch landing in the call that sets the switch."""
 
     def test_the_refusal_names_the_read_that_lists_the_parameter_names(self, monkeypatch):
         op = _install(monkeypatch,
@@ -562,6 +563,12 @@ class TestMissingParameter:
         assert "has no parameter(s): tool_dia" in res["message"]
         assert "cam_get(include=['parameters'], operation=...)" in res["message"]
         assert op.parameters.itemByName("tool_diameter").expression == "10."
+
+    def test_the_refusal_does_not_call_that_read_the_whole_settable_set(self, monkeypatch):
+        _install(monkeypatch, params={"tool_diameter": FakeParam("tool_diameter", "10.")})
+        message = ce.handler(operation="Adaptive1", parameters={"tool_dia": "12"})["message"]
+        assert "only a name it lists can be set" not in message
+        assert "hidden_count" in message and "SAME call" in message
 
 
 class TestNotEditable:
@@ -1430,6 +1437,21 @@ class TestRename:
                          parameters={"tool_stepover": "1.5"})
         assert res["isError"] is True
         assert "Parameters already applied: tool_stepover" in res["message"]
+
+    def test_the_note_says_a_rename_generates_the_operation(self, monkeypatch):
+        # MEASURED: a 'face' op renamed with no cam_generate call went no_toolpath -> valid. A note
+        # reporting only the new name leaves the caller unaware a generation was provoked.
+        _install_op(monkeypatch, FakeOp("Adaptive1", {"tool_stepover": "2."}))
+        out = _payload(ce.handler(operation="Adaptive1", rename="Rough Pocket"))
+        assert "generates the operation where its strategy can" in out["note"]
+        assert "cam_get_status" in out["note"]
+
+    def test_a_rename_that_wrote_nothing_claims_no_generation(self, monkeypatch):
+        # A rename onto the name already read writes nothing, so nothing generated - saying it did
+        # would be a claim about a write this call never made.
+        _install_op(monkeypatch, DedupingNameOp("Face1", {"tool_stepover": "2."}))
+        out = _payload(ce.handler(operation="Face1", rename="Face1"))
+        assert "generates the operation" not in out["note"]
 
     def test_rename_alone_needs_no_other_input(self, monkeypatch):
         _install_op(monkeypatch, FakeOp("Drill1", {"tool_stepover": "2."}))

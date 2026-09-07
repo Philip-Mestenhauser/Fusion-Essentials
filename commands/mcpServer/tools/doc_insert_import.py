@@ -169,8 +169,9 @@ def _reactivate(ws_id):
 
 def _workspace_disclosure(before):
     """(payload keys, note sentence) for what the import did to the ACTIVE workspace."""
-    # importManager activates Design: a STEP import with Manufacture active reads back Design, so
-    # the workspace read before the import is re-activated by the id that read.
+    # MEASURED: importManager activates Design BEFORE it can fail - a malformed SAT imported with
+    # Manufacture active raised, and activeWorkspace read 'Design' inside the except. So the
+    # workspace read before the import is re-activated by the id that read.
     before_id, before_name = before
     if before_id is None:
         return {}, ""
@@ -186,6 +187,14 @@ def _workspace_disclosure(before):
             "switch back with view_switch_workspace.")
 
 
+def _restored_workspace_note(before_ws):
+    """Put the workspace back after an import that FAILED, and return the sentence to append when
+    the restore itself did not read back (else ''). importToTarget2 activates Design and then
+    raises, so an error path that skips this leaves a Manufacture session in Design."""
+    _keys, note = _workspace_disclosure(before_ws)
+    return note
+
+
 def _import_solid(mgr, design, path, fmt, into_component, before_ws=(None, None)):
     comp, label, terr = _target_of(design, into_component)
     if terr:
@@ -197,14 +206,17 @@ def _import_solid(mgr, design, path, fmt, into_component, before_ws=(None, None)
     before = _component_counts(comp)
     objects, ierr = _run_import(mgr, options, comp)
     if ierr:
-        return error(ierr)
+        return error(ierr + _restored_workspace_note(before_ws))
     gained = _gained(before, _component_counts(comp))
 
+    # MEASURED: no solid format reached this state. STEP and IGES mint an occurrence named after the
+    # file even from a malformed one AND from a valid file carrying no geometry; SAT, SMT and F3D
+    # raise instead. The guard stands so an unmeasured empty return is never a false ok.
     if not objects and gained["bodies"] <= 0 and gained["occurrences"] <= 0:
         return error(f"The {fmt.upper()} import reported no failure but nothing landed in {label}: "
                      "importToTarget2 returned no objects and the component gained no body and no "
-                     "occurrence. The file may hold no geometry, or the geometry went somewhere "
-                     "else - check design_get(include=['tree']).")
+                     "occurrence. Read the design back with design_get(include=['tree']) - the "
+                     "geometry may have landed elsewhere." + _restored_workspace_note(before_ws))
 
     ws_keys, ws_note = _workspace_disclosure(before_ws)
     return ok({
@@ -238,7 +250,7 @@ def _import_dxf(mgr, design, path, into_component, plane, before_ws=(None, None)
     before = _component_counts(comp)
     objects, ierr = _run_import(mgr, options, comp)
     if ierr:
-        return error(ierr)
+        return error(ierr + _restored_workspace_note(before_ws))
     # DXF2DImportOptions.results holds the created sketches - one per DXF layer carrying 2D
     # geometry, named after that layer. 3D geometry in the file is ignored.
     landed = objects or _created_objects(safe(lambda: options.results))
@@ -248,7 +260,7 @@ def _import_dxf(mgr, design, path, into_component, plane, before_ws=(None, None)
         return error(f"The DXF import reported no failure but no sketch landed in {label}: "
                      "importToTarget2 returned no objects, DXF2DImportOptions.results is empty and "
                      "the component gained no sketch. A DXF holding only 3D geometry imports "
-                     "nothing - a 2D import ignores it.")
+                     "nothing - a 2D import ignores it." + _restored_workspace_note(before_ws))
 
     ws_keys, ws_note = _workspace_disclosure(before_ws)
     return ok({
@@ -290,13 +302,13 @@ def _import_svg(mgr, design, path, sketch, sketch_component="", before_ws=(None,
     before = safe(lambda: target.sketchCurves.count, 0) or 0
     objects, ierr = _run_import(mgr, options, target)
     if ierr:
-        return error(ierr)
+        return error(ierr + _restored_workspace_note(before_ws))
     after = safe(lambda: target.sketchCurves.count, 0) or 0
 
     if not objects and after <= before:
         return error(f"The SVG import reported no failure but sketch '{sketch_name}' gained no "
                      f"curves (still {after}) and importToTarget2 returned no objects. The file may "
-                     "hold no path geometry.")
+                     "hold no path geometry." + _restored_workspace_note(before_ws))
 
     ws_keys, ws_note = _workspace_disclosure(before_ws)
     return ok({
@@ -314,31 +326,109 @@ def _import_svg(mgr, design, path, sketch, sketch_component="", before_ws=(None,
     })
 
 
-def _import_to_new_document(mgr, fmt, path):
+def _open_document_handles():
+    """Every open Document OBJECT in session order (not doc_get's rows), or None when the walk has a
+    hole - a slot that did not read makes 'which document is new' undecidable, not 'none'."""
+    docs = safe(lambda: app.documents)
+    total = safe(lambda: docs.count) if docs is not None else None
+    if total is None:
+        return None
+    out = []
+    for i in range(total):
+        d = safe(lambda i=i: docs.item(i))
+        if d is None:
+            return None
+        out.append(d)
+    return out
+
+
+def _newcomer(before):
+    """(document, open_index) for the ONE document open now that was not open in `before`, else
+    (None, None) - equality, never identity, since a Document wrapper is not identity-stable."""
+    after = _open_document_handles()
+    if before is None or after is None:
+        return None, None
+    fresh = [(i, d) for i, d in enumerate(after)
+             if not any(safe(lambda d=d, b=b: d == b, False) for b in before)]
+    if len(fresh) != 1:
+        return None, None
+    return fresh[0][1], fresh[0][0]
+
+
+def _index_of(doc):
+    """The 'open:N' index `doc` answers to right now, or None when the session walk cannot place it
+    - read BEFORE any close, since a closed document leaves that walk."""
+    handles = _open_document_handles()
+    if handles is None:
+        return None
+    hits = [i for i, d in enumerate(handles) if safe(lambda d=d: d == doc, False)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _discard(doc):
+    """Close the empty document THIS call opened and say which happened - closed again, or left
+    open at the address that reaches it."""
+    name = safe(lambda: doc.name)
+    index = _index_of(doc)
+    try:
+        discarded = doc.close(False) is True
+    except Exception:  # noqa: BLE001 - a rollback that refuses is reported, never sunk
+        discarded = False
+    if discarded:
+        return f" The empty document '{name}' this call opened was closed again."
+    where = (f" at open:{index}" if index is not None else "")
+    how = (f"doc_close(name='open:{index}')" if index is not None
+           else "doc_close, addressing it by the open:N doc_get publishes")
+    return (f" This call left an empty document '{name}' open{where} and could not close it - "
+            f"close it with {how}.")
+
+
+def _blank_document_note(before):
+    """The sentence for a document importToNewDocument opened and then FAILED into, told apart by
+    DIFFERENCE against `before`. '' when no single newcomer can be identified."""
+    doc, _index = _newcomer(before)
+    return _discard(doc) if doc is not None else ""
+
+
+def _import_to_new_document(mgr, fmt, path, before_ws=(None, None)):
+    # A SUCCESSFUL import hands over a new document, and Design is the workspace that document
+    # belongs in - so only the error paths below put the caller's workspace back.
     options, oerr = _options(mgr, fmt, path)
     if oerr:
         return error(oerr)
+    # A FAILED importToNewDocument can still leave a document open and ACTIVE, so the session list
+    # is read on both sides of the call and the newcomer is discarded rather than left in front of
+    # a caller that never asked for it.
+    before_docs = _open_document_handles()
     try:
         doc = mgr.importToNewDocument(options)
     except Exception as e:
-        return error(f"Import failed (importToNewDocument raised): {e}")
+        return error(f"Import failed (importToNewDocument raised): {e}"
+                     + _blank_document_note(before_docs)
+                     + _restored_workspace_note(before_ws))
     if doc is None:
         return error("importToNewDocument returned null, which the API reports for a FAILED import "
-                     "- no document was created.")
+                     "- no document was created." + _blank_document_note(before_docs)
+                     + _restored_workspace_note(before_ws))
 
     new_design = safe(lambda: adsk.fusion.Design.cast(
         doc.products.itemByProductType('DesignProductType')))
     if new_design is None:
+        # This path HOLDS the document, so its address is read off it directly - a difference walk
+        # can answer nothing while the document is right here, and this one is left open to inspect.
+        index = _index_of(doc)
+        at = f" at open:{index}" if index is not None else ""
         return error(f"A new document was opened for '{path}' but it carries no Design product to "
-                     "read the imported geometry back from. The document is open - inspect it with "
-                     "workspace_orient.")
+                     f"read the imported geometry back from. The document is open{at} - inspect it "
+                     "with workspace_orient." + _restored_workspace_note(before_ws))
     bodies, _sketches = _common.design_wide_counts(new_design)
     root = safe(lambda: new_design.rootComponent)
     occurrences = (safe(lambda: root.occurrences.count, 0) or 0) if root is not None else 0
 
     if bodies <= 0 and occurrences <= 0:
         return error(f"A new document was created for '{path}' but holds no body and no occurrence "
-                     "- the import landed nothing. Discard it with doc_close.")
+                     "- the import landed nothing." + _discard(doc)
+                     + _restored_workspace_note(before_ws))
 
     return ok({
         "imported": True,
@@ -375,14 +465,17 @@ def handler(file_path: str = "", format: str = "", into_component: str = "", ske
     if mgr is None:
         return error("Application.importManager is unavailable - nothing can be imported.")
 
+    # Read BEFORE the new-document branch so BOTH import routes have a workspace to put back. That
+    # importToNewDocument switches the workspace the way importToTarget2 does is NOT MEASURED - the
+    # read costs nothing, and the restore below is a no-op when nothing changed.
+    before_ws = _active_workspace()
     if new_document:
-        return _import_to_new_document(mgr, fmt, path)
+        return _import_to_new_document(mgr, fmt, path, before_ws)
 
     design = _common.design()
     if not design:
         return error("No active design to import into. Open or create a document first (see "
                      "doc_new), or pass new_document=true.")
-    before_ws = _active_workspace()
     if fmt == "svg":
         return _import_svg(mgr, design, path, sketch, sketch_component, before_ws)
     if fmt == "dxf":

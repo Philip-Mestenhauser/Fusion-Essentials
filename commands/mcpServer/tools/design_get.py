@@ -64,6 +64,14 @@ _TREE_DEFAULT_DEPTH = 3
 _TREE_MAX_DEPTH = 8
 _TREE_MAX_NODES = 2000
 _TREE_BODY_CAP = 25          # per-node body records when tree_bodies=true
+_TREE_CHILDREN_DEFAULT = 30  # children listed per LEVEL; the rest ride on child_count
+
+# The narrowings a capped level is answered with, plus the flag that restores the withheld address.
+_TREE_NOTE = ("Light nodes: name, component, body_count, child_count. Narrow with "
+              "name_filter='<text>' (top level), component='<name>' (roots the tree there), "
+              "max_depth, max_results (children per level). tree_handles=true adds each node's "
+              "handle + full_path, the addresses an occurrence-taking tool accepts. "
+              "children_truncated marks a level cut; child_count is the true count.")
 
 
 def _body_rows(bodies):
@@ -135,7 +143,8 @@ def _unresolved_children(occ):
     return rows
 
 
-def _walk_occurrence(occ, depth, max_depth, counter, with_bodies=False):
+def _walk_occurrence(occ, depth, max_depth, counter, with_bodies=False, with_handles=False,
+                     child_cap=_TREE_CHILDREN_DEFAULT):
     counter["n"] += 1
     if counter["n"] >= _TREE_MAX_NODES:
         counter["truncated"] = True
@@ -144,22 +153,25 @@ def _walk_occurrence(occ, depth, max_depth, counter, with_bodies=False):
         return _unresolved_node(occ, broken_detail)
     node = {
         "name": safe(lambda: occ.name),
-        # The entityToken is the EXACT instance identity: Fusion enforces no name uniqueness, so a
-        # name repeats under every sub-assembly ("Bolt:1") and two siblings can even wear one
-        # fullPathName. The path is the convenience form, which refuses when it collides.
-        "handle": safe(lambda: occ.entityToken),
-        "full_path": safe(lambda: occ.fullPathName),
         "component": safe(lambda: occ.component.name),
-        # read_flag, not safe(..., False): an unreadable flag is None here (the same honesty
-        # _body_rows holds for is_solid/visible), and the freshness gate below treats None as
-        # "try it" rather than as "local".
-        "is_reference": _common.read_flag(lambda: occ.isReferencedComponent),
         # counted, not safe(..., 0): a coerced 0 would say "no bodies / no children" about a
         # collection nothing was read from. null takes the same (do not descend) branch below
         # without claiming it.
         "body_count": _common.counted(lambda: occ.bRepBodies.count),
         "child_count": _common.counted(lambda: occ.childOccurrences.count),
     }
+    if with_handles:
+        # The entityToken is the EXACT instance identity: Fusion enforces no name uniqueness, so a
+        # name repeats under every sub-assembly ("Bolt:1") and two siblings can even wear one
+        # fullPathName. The path is the convenience form, which refuses when it collides.
+        node["handle"] = safe(lambda: occ.entityToken)
+        node["full_path"] = safe(lambda: occ.fullPathName)
+    # read_flag, not safe(..., False): an unreadable flag is None here (the same honesty _body_rows
+    # holds for is_solid/visible), and the freshness gate below treats None as "try it". A flag that
+    # read FALSE is the boring case and stays off the row.
+    is_reference = _common.read_flag(lambda: occ.isReferencedComponent)
+    if is_reference is not False:
+        node["is_reference"] = is_reference
     if with_bodies and node["body_count"]:
         rows, truncated = _body_rows(safe(lambda: occ.bRepBodies, None))
         if rows:
@@ -169,7 +181,7 @@ def _walk_occurrence(occ, depth, max_depth, counter, with_bodies=False):
     # None (the flag did not read) takes the SAME branch as True: a local occurrence simply has no
     # documentReference, so attempting the read costs one safe() read and publishes real freshness
     # for an xref whose own flag is unreadable - where the False branch would silently drop it.
-    if node["is_reference"] is not False:
+    if is_reference is not False:
         try:
             dr = occ.documentReference
             if dr:
@@ -188,31 +200,54 @@ def _walk_occurrence(occ, depth, max_depth, counter, with_bodies=False):
     if unresolved_kids:
         node["children_unresolved"] = len(unresolved_kids)
     if depth + 1 < max_depth and (node["child_count"] or unresolved_kids) and counter["n"] < _TREE_MAX_NODES:
-        kids = []
+        kids, more = [], False
         try:
             for child in occ.childOccurrences:
-                if counter["n"] >= _TREE_MAX_NODES:
-                    counter["truncated"] = True
+                if len(kids) >= child_cap or counter["n"] >= _TREE_MAX_NODES:
+                    counter["truncated"] = counter["truncated"] or counter["n"] >= _TREE_MAX_NODES
+                    more = True
                     break
-                kids.append(_walk_occurrence(child, depth + 1, max_depth, counter, with_bodies))
+                kids.append(_walk_occurrence(child, depth + 1, max_depth, counter, with_bodies,
+                                             with_handles, child_cap))
         except Exception:
             pass
-        kids.extend(unresolved_kids)
+        # The unresolved rows obey the SAME level cap - appended past it, a capped level hands back
+        # more children than the caller paged for. children_unresolved keeps their true count.
+        room = max(0, child_cap - len(kids))
+        kids.extend(unresolved_kids[:room])
+        if len(unresolved_kids) > room:
+            more = True
         if kids:
             node["children"] = kids
+        if more:
+            node["children_truncated"] = True
     elif node["child_count"] or unresolved_kids:
         node["children_truncated"] = True
     return node
 
 
-def _slice_tree(design, max_depth, component, with_bodies=False):
-    """The component/occurrence tree, bounded by max_depth + node cap (truncated flag). with_bodies
-    adds each node's per-body records (name/handle/solid/visible, capped) - the read that makes a
-    body targetable without replaying old feature receipts."""
+def _matches_filter(occ, wanted):
+    """True when `wanted` (already lower-cased and non-empty) is contained in the occurrence's own
+    name or in the name of the component it places."""
+    for value in (safe(lambda: occ.name), safe(lambda: occ.component.name)):
+        if isinstance(value, str) and wanted in value.lower():
+            return True
+    return False
+
+
+def _slice_tree(design, max_depth, component, with_bodies=False, with_handles=False,
+                max_children=0, name_filter=""):
+    """The component/occurrence tree: light nodes, bounded by max_depth, the per-level max_children
+    cap and the node cap. with_bodies adds per-body records; with_handles the entityToken/full_path
+    addresses; name_filter keeps only the top-level nodes whose own or component name contains it."""
     try:
         depth = max(1, min(int(max_depth), _TREE_MAX_DEPTH))
     except Exception:
         depth = _TREE_DEFAULT_DEPTH
+    try:
+        cap = max(1, int(max_children)) if max_children else _TREE_CHILDREN_DEFAULT
+    except Exception:
+        cap = _TREE_CHILDREN_DEFAULT
     root = safe(lambda: design.rootComponent)
     if root is None:
         return None, error("No root component.")
@@ -225,20 +260,29 @@ def _slice_tree(design, max_depth, component, with_bodies=False):
             return None, error(f"Component/occurrence not found: '{component}'.")
         # Walk FIRST, read the truncated flag AFTER: a dict literal evaluates its values in
         # order, so reading counter["truncated"] before the walk would pin the pre-walk False.
-        scoped_tree = _walk_occurrence(start, 0, depth, counter, with_bodies)
+        scoped_tree = _walk_occurrence(start, 0, depth, counter, with_bodies, with_handles, cap)
         return {"root": component, "max_depth": depth, "truncated": counter["truncated"],
-                "tree": scoped_tree}, None
-    children = []
+                "tree": scoped_tree, "note": _TREE_NOTE}, None
+    wanted = (name_filter or "").strip().lower()
+    children, total, matched = [], 0, 0
     try:
         for occ in root.occurrences:
-            if counter["n"] >= _TREE_MAX_NODES:
-                counter["truncated"] = True
-                break
-            children.append(_walk_occurrence(occ, 0, depth, counter, with_bodies))
+            total += 1
+            if wanted and not _matches_filter(occ, wanted):
+                continue
+            matched += 1
+            if len(children) >= cap or counter["n"] >= _TREE_MAX_NODES:
+                counter["truncated"] = counter["truncated"] or counter["n"] >= _TREE_MAX_NODES
+                continue
+            children.append(_walk_occurrence(occ, 0, depth, counter, with_bodies, with_handles, cap))
     except Exception as e:
         return None, error(f"Could not read root occurrences: {e}")
     out = {"root": safe(lambda: root.name), "max_depth": depth, "node_count": counter["n"],
-           "truncated": counter["truncated"], "children": children}
+           "child_count": total, "children_truncated": matched > len(children),
+           "truncated": counter["truncated"], "children": children, "note": _TREE_NOTE}
+    if wanted:
+        out["name_filter"] = name_filter.strip()
+        out["matched"] = matched
     # Bodies that live directly in the ROOT component (not in any occurrence). The occurrence walk above
     # never sees these, so without this an agent reading the tree can't tell they exist - and a root body
     # is NOT a jointable occurrence (promote it to a component to joint it).
@@ -249,9 +293,11 @@ def _slice_tree(design, max_depth, component, with_bodies=False):
             if root_tr:
                 out["root_bodies_truncated"] = True
     else:
-        root_bodies = _root_body_names(root)
+        root_bodies, root_names_tr = _root_body_names(root)
         if root_bodies:
             out["root_bodies"] = root_bodies
+            if root_names_tr:
+                out["root_bodies_truncated"] = True
     if out.get("root_bodies"):
         out["root_bodies_note"] = ("Bodies directly in the root component (not occurrences). A root body "
                                    "can't be jointed - model_create_component then move it in to joint it.")
@@ -259,26 +305,43 @@ def _slice_tree(design, max_depth, component, with_bodies=False):
 
 
 def _root_body_names(root):
-    """Names of bodies directly in the root component (capped). [] if none."""
-    names = []
+    """(names, truncated) for the bodies directly in the root component, capped at _TREE_BODY_CAP -
+    the same cap and the same disclosure the tree_bodies records get."""
+    names, truncated = [], False
     try:
-        bodies = root.bRepBodies
-        for i, b in enumerate(islice(_common.iter_collection(bodies), _TREE_MAX_NODES)):
+        items = list(islice(_common.iter_collection(root.bRepBodies), _TREE_BODY_CAP + 1))
+        truncated = len(items) > _TREE_BODY_CAP
+        for i, b in enumerate(items[:_TREE_BODY_CAP]):
             names.append(safe(lambda b=b: b.name) or f"Body{i+1}")
     except Exception:
         pass
-    return names
+    return names, truncated
 
 
 # ── parametric timeline ────────────────────────────────────────────────────────────────────────────
-_TIMELINE_MAX_ITEMS = 5000
+_TIMELINE_MAX_ITEMS = 250
 _HEALTH_LABELS = {0: "healthy", 1: "warning", 2: "error", 3: "suppressed", 4: "rolled_back", 5: "unknown"}
 
 # Keep timeline rows readable (via _common.terse): a healthy row collapses to {index, name, type}; an
 # abnormal row keeps (and pops with) its is_suppressed=true / health="error" / rolled_back. Keys -> the
-# value that means "all normal".
+# value that means "all normal". 'component' joins per call, keyed to the ROOT's name.
 _TIMELINE_NOISE = {"is_group": False, "is_suppressed": False, "is_rolled_back": False,
                    "parent_group": None, "health": "healthy"}
+
+_TIMELINE_CAP_NOTE = ("Rows past the cap are not listed. Raise max_results, or narrow with "
+                      "group='<name>' or include_suppressed=false.")
+
+
+def _owner_fields(obj):
+    """A timeline row's owning component. A feature name is scoped to the component that owns it, so
+    the name alone does not say which row it addresses."""
+    # MEASURED: a timeline entity answers assemblyContext None - the timeline holds natives - so
+    # there is no occurrence path to publish beside the owning component.
+    ent = safe(lambda: obj.entity)
+    if ent is None:
+        return {}
+    name = safe(lambda: ent.parentComponent.name)
+    return {"component": name} if isinstance(name, str) and name else {}
 
 
 def _entity_type(obj):
@@ -303,6 +366,7 @@ def _object_summary(obj):
         "is_rolled_back": _common.read_flag(lambda: obj.isRolledBack),
         "parent_group": safe(lambda: obj.parentGroup.name if obj.parentGroup else None),
         "health": _HEALTH_LABELS.get(health, health),
+        **_owner_fields(obj),
     }
     msg = safe(lambda: obj.errorOrWarningMessage)
     if msg:
@@ -380,44 +444,160 @@ _PARAMS_NOTE = ("Each params[].value is in Fusion internal units (cm / radians) 
                 "carries the authored unit. Full records: param_get(include_model_parameters=true).")
 
 
-def _slice_timeline(design, include_suppressed, group, with_params=False):
+def _timeline_row(summ, obj, param_index, include_suppressed, noise=_TIMELINE_NOISE):
+    """ONE published timeline row as (row, carried_params) - the suppressed filter and the params
+    attachment, in one place so the walk and a group expansion cannot publish different shapes. A
+    row the filter drops is (None, False)."""
+    if not include_suppressed and summ["is_suppressed"] is True:
+        return None, False
+    row = terse(summ, noise)
+    if param_index is None:
+        return row, False
+    entity = safe(lambda: obj.entity)
+    prows, ptrunc = _params_for(param_index, entity) if entity is not None else (None, False)
+    if not prows:
+        return row, False
+    row["params"] = prows
+    if ptrunc:
+        row["params_truncated"] = True
+    return row, True
+
+
+def _enrich_group(summ, obj):
+    """The keys a GROUP row carries past a feature row: how many members it stands for, and whether
+    the walk lists them. Every publisher of a group row goes through here, so the walk and a group=
+    expansion cannot hand back two shapes for one container."""
+    summ["member_count"] = _common.counted(lambda: obj.count)
+    summ["is_collapsed"] = _common.read_flag(lambda: obj.isCollapsed)
+    return summ
+
+
+def _extend_with_members(items, group_obj, seen, truncated, param_index, include_suppressed,
+                         noise=_TIMELINE_NOISE, cap=_TIMELINE_MAX_ITEMS):
+    """Append a group's OWN members to `items` through _timeline_row, returning (truncated,
+    carried_params) - a COLLAPSED group is ONE row in the timeline walk, so its members are
+    reachable only by walking the group."""
+    any_params = False
+    for member in _common.iter_collection(group_obj):
+        if len(items) >= cap:
+            return True, any_params
+        summ = _object_summary(member)
+        if summ.get("is_group") is True:
+            _enrich_group(summ, member)
+        idx = summ.get("index")
+        # One timeline index is published once: `seen` carries what the walk has already listed.
+        if idx is not None and idx in seen:
+            continue
+        row, got_params = _timeline_row(summ, member, param_index, include_suppressed, noise)
+        if row is None:
+            continue
+        seen.add(idx)
+        any_params = any_params or got_params
+        items.append(row)
+    return truncated, any_params
+
+
+def _tally(states, exceptions, tallied, summ):
+    """Fold ONE feature's health into the states tally, and a failed one into exceptions - once per
+    timeline index. A row whose index read null is tallied where it is found."""
+    idx = summ.get("index")
+    if idx is not None:
+        if idx in tallied:
+            return
+        tallied.add(idx)
+    health = summ.get("health", "healthy")
+    states[health] = states.get(health, 0) + 1
+    # exception = a feature that FAILED (error/warning health) - not just suppressed (intentional).
+    if health in ("error", "warning"):
+        exceptions.append({"name": summ.get("name"), "index": idx, "health": health})
+
+
+def _tally_group(states, exceptions, tallied, group_obj, summ):
+    """Fold ONE group's members into the tally - the only route to a collapsed group's suppressed or
+    errored feature. The container itself is never scored; its index is marked, so a nested group
+    already folded in from its parent is not folded again when the walk reaches its own row."""
+    idx = summ.get("index")
+    if idx is not None:
+        if idx in tallied:
+            return
+        tallied.add(idx)
+    for member in _common.iter_collection(group_obj):
+        member_summ = _object_summary(member)
+        if member_summ.get("is_group") is True:
+            _tally_group(states, exceptions, tallied, member, member_summ)
+        else:
+            _tally(states, exceptions, tallied, member_summ)
+
+
+# The pointer a reader needs when a group row stands for members this walk never listed.
+_GROUP_NOTE = ("A group is ONE row here, carrying member_count and is_collapsed; a COLLAPSED "
+               "group's members are not listed, though summary.states counts them (an exception "
+               "from one carries index null - address it by name). "
+               "design_get(include=['timeline'], group='<name>') lists them.")
+
+# MEASURED (measure_api row timeline-group-collapse-shape): index RAISES on a member reached
+# through a COLLAPSED group while name/isGroup/isSuppressed/healthState/parentGroup all read, so
+# the row publishes index null and the name is the only address left on it.
+_GROUP_MEMBER_NOTE = "index is null on these rows - address them by name."
+
+# A group row inside a group= listing stands for members this listing did not descend into either.
+_NESTED_GROUP_NOTE = "This listing holds group row(s); group='{0}' lists what one stands for."
+
+
+def _slice_timeline(design, include_suppressed, group, with_params=False, max_rows=0):
     """The ordered parametric timeline, with healthy-row noise dropped (a normal row is
     {index,name,type}; a suppressed/errored row keeps its flags and stands out). with_params adds
-    each row's own model parameters (the readable form of a feature's radius/distance/angle)."""
+    each row's own model parameters; max_rows pages it (0 = the default cap)."""
     try:
         timeline = design.timeline
     except Exception as e:
         return None, error(f"This design has no timeline (direct-modeling, or no history): {e}")
+    try:
+        cap = max(1, int(max_rows)) if max_rows else _TIMELINE_MAX_ITEMS
+    except Exception:
+        cap = _TIMELINE_MAX_ITEMS
     want_group = (group or "").strip()
     items, truncated = [], False
-    states, exceptions = {}, []                 # exception-first rollup over the timeline
+    states, exceptions, tallied = {}, [], set()   # exception-first rollup over the timeline
     param_index = _model_parameters_by_owner(design) if with_params else None
-    any_params = False
+    any_params, seen = False, set()
+    # A feature name is per-COMPONENT, so every row names its owner - except in the single-component
+    # design where that owner is the root on every row and says nothing.
+    noise = dict(_TIMELINE_NOISE, component=safe(lambda: design.rootComponent.name))
     try:
         total = timeline.count      # a timeline that cannot be counted is a refusal, not an empty read
         for obj in _common.iter_collection(timeline):
-            if len(items) >= _TIMELINE_MAX_ITEMS:
+            if len(items) >= cap:
                 truncated = True
                 break
             summ = _object_summary(obj)
-            health = summ.get("health", "healthy")
-            states[health] = states.get(health, 0) + 1
-            # exception = a feature that FAILED (error/warning health) - not just suppressed (intentional).
-            if health in ("error", "warning"):
-                exceptions.append({"name": summ.get("name"), "index": summ.get("index"), "health": health})
+            is_group = summ["is_group"] is True
+            # A group is a CONTAINER, not a feature: its own healthState reads 'unknown', which
+            # tallied reads as a design nothing could be read from. Its MEMBERS are tallied
+            # instead - a collapsed group's suppressed feature reaches the walk no other way.
+            if is_group:
+                _enrich_group(summ, obj)
+                _tally_group(states, exceptions, tallied, obj, summ)
+            else:
+                _tally(states, exceptions, tallied, summ)
             if not include_suppressed and summ["is_suppressed"] is True:
                 continue
-            if want_group and (summ["parent_group"] or "") != want_group:
+            if want_group:
+                if is_group and summ["name"] == want_group:
+                    truncated, got_params = _extend_with_members(
+                        items, obj, seen, truncated, param_index, include_suppressed, noise, cap)
+                    any_params = any_params or got_params
+                    continue
+                if (summ["parent_group"] or "") != want_group:
+                    continue
+            idx = summ.get("index")
+            if idx is not None and idx in seen:
+                continue                     # already listed by the group expansion above
+            row, got_params = _timeline_row(summ, obj, param_index, include_suppressed, noise)
+            if row is None:
                 continue
-            row = terse(summ, _TIMELINE_NOISE)
-            if param_index is not None:
-                entity = safe(lambda obj=obj: obj.entity)
-                prows, ptrunc = _params_for(param_index, entity) if entity is not None else (None, False)
-                if prows:
-                    row["params"] = prows
-                    if ptrunc:
-                        row["params_truncated"] = True
-                    any_params = True
+            seen.add(idx)
+            any_params = any_params or got_params
             items.append(row)
     except Exception as e:
         return None, error(f"Could not read the timeline: {e}")
@@ -435,8 +615,19 @@ def _slice_timeline(design, include_suppressed, group, with_params=False):
                "groups": groups, "timeline": items}
     if truncated:
         payload["truncated"] = True
+        payload["truncated_note"] = _TIMELINE_CAP_NOTE
     if any_params:
         payload["params_note"] = _PARAMS_NOTE
+    nested = [r.get("name") for r in items if r.get("is_group") is True and r.get("name")]
+    group_notes = []
+    if nested:
+        # A group row means members this listing does not hold, whichever door published it.
+        group_notes.append(_GROUP_NOTE if not want_group
+                           else _NESTED_GROUP_NOTE.format(nested[0]))
+    if want_group and any(r.get("index") is None for r in items):
+        group_notes.append(_GROUP_MEMBER_NOTE)
+    if group_notes:
+        payload["groups_note"] = " ".join(group_notes)
     return payload, None
 
 
@@ -615,6 +806,7 @@ def _has_cam(design):
 # ── the router ─────────────────────────────────────────────────────────────────────────────────────
 
 def handler(include=None, max_depth: int = 3, component: str = "", tree_bodies: bool = False,
+            tree_handles: bool = False,
             include_suppressed: bool = True, group: str = "", timeline_params: bool = False,
             library: str = "", name_filter: str = "", max_results: int = 0,
             attribute_group: str = "", attribute_key: str = "") -> dict:
@@ -672,12 +864,13 @@ def handler(include=None, max_depth: int = 3, component: str = "", tree_bodies: 
     if "mode" in inc:
         out["mode_detail"] = mode_full          # the full capability can{} map
     if "tree" in inc:
-        out["tree"], terr = _slice_tree(design, max_depth, component, bool(tree_bodies))
+        out["tree"], terr = _slice_tree(design, max_depth, component, bool(tree_bodies),
+                                        bool(tree_handles), max_results, name_filter)
         if terr:
             return terr
     if "timeline" in inc:
         out["timeline"], tlerr = _slice_timeline(design, include_suppressed, group,
-                                                 bool(timeline_params))
+                                                 bool(timeline_params), max_results)
         if tlerr:
             return tlerr
     if "configurations" in inc:
@@ -705,7 +898,8 @@ def handler(include=None, max_depth: int = 3, component: str = "", tree_bodies: 
     remaining = [s for s in _SLICES if s not in inc]
     if want_default and remaining:
         out["note"] = ("Orientation slice. Pull deeper with include=" + str(remaining) +
-                       ". 'max_depth'/'component'/'tree_bodies' scope the tree; "
+                       ". 'max_depth'/'component'/'name_filter'/'max_results'/'tree_bodies'/"
+                       "'tree_handles' scope the tree; "
                        "'group'/'include_suppressed'/'timeline_params' the timeline; "
                        "'library'/'name_filter'/'max_results' the catalog; 'attribute_group' "
                        "(required)/'attribute_key' the attributes.")
@@ -731,11 +925,11 @@ def _normalize_include(include):
 
 TOOL_DESCRIPTION = (
     "Read the active DESIGN by zoom level. Default (no 'include'): modelling mode, a content "
-    "fingerprint, and timeline_healthy - which covers TIMELINE errors/warnings ONLY; stale "
-    "references show as is_out_of_date on tree nodes, and the whole-document verdict is "
-    "workspace_orient.is_healthy. 'include' pulls one deeper slice - each node of 'tree' carries a "
-    "handle any body-taking tool accepts, 'mode' is the full capability map, and 'materials' / "
-    "'appearances' are the catalog to assign FROM. The inputs below scope a slice."
+    "fingerprint, and timeline_healthy - TIMELINE errors/warnings ONLY; stale references show as "
+    "is_out_of_date on tree nodes, and the whole-document verdict is workspace_orient.is_healthy. "
+    "'include' pulls one deeper slice - 'tree' is light nodes ('tree_handles' adds the handle a "
+    "body-taking tool accepts), 'mode' the full capability map, 'materials'/'appearances' the "
+    "catalog to assign FROM. Lists are capped; *_truncated means the note names the narrowing."
 )
 
 tool = (
@@ -751,7 +945,9 @@ tool = (
             "description": "Start the tree at this component/occurrence name (include=tree)."})
     .add_input_property("tree_bodies", {"type": "boolean",
             "description": "Add each tree node's body records (name, handle, is_solid, visible) "
-                           "when include=tree; root_bodies upgrades to the same records."})
+                           "when include=tree."})
+    .add_input_property("tree_handles", {"type": "boolean",
+            "description": "Add each tree node's handle + full_path (include=tree)."})
     .add_input_property("include_suppressed", {"type": "boolean",
             "description": "Include suppressed timeline objects when include=timeline (default true)."})
     .add_input_property("group", {"type": "string",
@@ -761,11 +957,14 @@ tool = (
                            "value). Default false."})
     .add_input_property("library", {"type": "string",
             "description": "One material library's entries, by exact name from the census the "
-                           "catalog slices return when this is omitted."})
+                           "catalog returns when this is omitted."})
     .add_input_property("name_filter", {"type": "string",
-            "description": "Catalog entries whose name contains this text."})
+            "description": "Catalog entries, or include=tree TOP-LEVEL nodes, whose name contains "
+                           "this text."})
     .add_input_property("max_results", {"type": "integer",
-            "description": "Catalog rows per page (default 50, cap 200); the true total comes too."})
+            "description": f"Rows per page: catalog entries (default 50, cap 200), include=tree "
+                           f"children per LEVEL (default {_TREE_CHILDREN_DEFAULT}), or "
+                           f"include=timeline rows (default {_TIMELINE_MAX_ITEMS})."})
     .add_input_property("attribute_group", {"type": "string",
             "description": "Attribute group to read; required by include=attributes."})
     .add_input_property("attribute_key", {"type": "string",

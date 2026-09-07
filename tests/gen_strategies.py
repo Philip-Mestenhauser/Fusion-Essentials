@@ -79,6 +79,19 @@ def _build():
     for _a_op, a, a_id, a_only, _b_op, b, b_id, b_only in census.NUANCE:
         lines.append(f"| {a} vs {b} | {a_id} vs {b_id} | {', '.join(a_only)} | "
                      f"{', '.join(b_only)} |")
+    lines += [
+        "",
+        "### Measured by hand - the CAM overview samples",
+        "",
+        "Read with cam_compare_operations on Autodesk's CAM overview samples. No beat creates these",
+        "operations, so nothing here has a receipt row behind it, and 'd' in a value is the cutter",
+        "diameter.",
+        "",
+        "| Pair | What separates them |",
+        "|---|---|",
+    ]
+    for first, second, differs in census.MEASURED_NUANCE:
+        lines.append(f"| {first} vs {second} | {differs} |")
     lines.append("")
     return "\n".join(lines) + "\n"
 

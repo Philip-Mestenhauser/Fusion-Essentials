@@ -30,10 +30,10 @@ _FLAT_MILL_AT = [t for t, _d in _HUB_TOOLS].index("flat end mill")
 # What a caller compares before it judges any distance the dump carries.
 _MM = {"operation:metric": 1, "operation:tool_unit": "millimeters"}
 
-# The event kinds this reader takes no row off, measured on a posted 2D contour - the arcs among
-# them, which is why the cutting rows judged below are the contour's linear moves.
-_UNREAD_3AX = ["onCircular", "onClose", "onFeedMode", "onMovement", "onOpen", "onSection",
-               "onSectionEnd"]
+# The event kinds this reader takes no row off, measured on a posted 2D contour. The arcs are not
+# among them: a contour round the flange's round wall posts five of them, and the verdicts below
+# judge those beside the linear moves.
+_UNREAD_3AX = ["onClose", "onFeedMode", "onMovement", "onOpen", "onSection", "onSectionEnd"]
 
 # The floor is compared in the band the two reads' own decimals leave, not to the bit.
 _FLOOR_TOL = 0.01
@@ -47,24 +47,31 @@ _FEED_IN_SLACK = 1.0
 _MX_TILT_LIMIT = 80.0
 
 # The row kinds a dump can carry, for the census a beat reports.
-_KINDS = ("linear5d", "rapid5d", "linear", "rapid")
+_KINDS = ("linear5d", "rapid5d", "linear", "rapid", "circular")
 
 
 def _dumped(setup, program):
-    """cam_post through the dump post: the file it wrote, re-read by _dump_reader row by row."""
+    """cam_post through the dump post: the file it wrote, re-read by _dump_reader row by row.
+
+    The contour this judges runs a ROUND wall, so the file has to carry arcs as well as linear
+    moves, and the centre is read off every one of them - a file with no arc in it is a different
+    cut from the one these verdicts were measured on."""
     def check(p):
         files = p.get("files") or []
         dump = _dump_reader.read_dump(files[0]["file_path"]) if files else None
         rows = dump.rows if dump else []
         cuts = [r for r in rows if r["kind"] == "linear"]
+        arcs = [r for r in rows if r["kind"] == "circular"]
         moves = [r for r in rows if r["kind"] == "rapid"]
         return _measured(
-            f"'{setup}' posted through {_DUMP_POST}, its onLinear/onRapid events read as rows",
+            f"'{setup}' posted through {_DUMP_POST}, its onLinear/onCircular/onRapid events read "
+            "as rows",
             {"posted": p.get("posted"), "post_config": p.get("post_config"),
              "files": files, "strategy": dump and dump.strategy,
-             "linear_rows": len(cuts), "rapid_rows": len(moves),
+             "linear_rows": len(cuts), "circular_rows": len(arcs), "rapid_rows": len(moves),
              "skipped": dump and dump.skipped,
-             "first_cut": cuts[0] if cuts else None, "first_move": moves[0] if moves else None},
+             "first_cut": cuts[0] if cuts else None, "first_arc": arcs[0] if arcs else None,
+             "first_move": moves[0] if moves else None},
             p.get("posted") is True and p.get("scope") == "setup"
             and p.get("post_scope") == "fusion" and p.get("program_name") == program
             and _DUMP_POST in str(p.get("post_config") or "")
@@ -72,9 +79,12 @@ def _dumped(setup, program):
             and _num(files[0].get("size_bytes")) and files[0]["size_bytes"] > 0
             and dump is not None and dump.strategy == "contour2d"
             and sorted(dump.skipped) == _UNREAD_3AX
-            and bool(cuts) and bool(moves)
-            and all(_num(r["feed"]) and not _dump_reader._has_axis(r) for r in cuts)
-            and all(r["feed"] is None and not _dump_reader._has_axis(r) for r in moves))
+            and bool(cuts) and bool(moves) and bool(arcs)
+            and all(_num(r["feed"]) and not _dump_reader._has_axis(r) for r in cuts + arcs)
+            and all(r["feed"] is None and not _dump_reader._has_axis(r) for r in moves)
+            # the centre is what an arc carries that a linear move does not - read here so a row
+            # that landed the endpoint alone cannot pass as an arc.
+            and all(_num(r.get("cx")) and _num(r.get("cy")) and _num(r.get("cz")) for r in arcs))
     return check
 
 

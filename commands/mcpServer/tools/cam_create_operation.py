@@ -277,14 +277,15 @@ def _not_an_operation_clause(strategy) -> str:
     remedy = _NOT_AN_OPERATION.get(strategy)
     return f" '{strategy}' is not an operation: {remedy}." if remedy else ""
 
-# MEASURED on a milling setup whose Z is the world Z, drilling a hole bored along world X: the
-# generate errored on the ORIENTATION, and binding the setup's Z to that hole's own face cleared
-# that error. The heights themselves read isEditable true, so they are not what refuses.
+# MEASURED on a milling setup whose Z is the world Z, drilling a hole across it: the generate errors
+# on the ORIENTATION, binding Z to that hole's face trades it for a SECOND orientation error, and
+# flipping Z clears both. The heights read isEditable true, so they are not what refuses.
 _DRILLING_AXIS_NOTE = (
-    " A drilling cycle cuts along the SETUP's Z: a hole whose axis is not that Z errored "
-    "'Cylindrical face not in tool orientation!' at generate, and binding the setup's Z to the "
-    "hole's own face cleared it - cam_edit_setup(wcs={'z_axis': <that face handle>}) before "
-    "selecting the holes.")
+    " A drilling cycle cuts along the SETUP's Z: a hole off that Z errored 'Cylindrical face not "
+    "in tool orientation!', and binding Z to that face traded it for 'Selected face may not be "
+    "safe for cutting at current tool orientation!'. Both cleared after "
+    "cam_edit_setup(wcs={'z_axis': <that face handle>}) then "
+    "cam_edit_setup(parameters={'wcs_orientation_flipZ': 'true'}), before selecting the holes.")
 
 
 def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",

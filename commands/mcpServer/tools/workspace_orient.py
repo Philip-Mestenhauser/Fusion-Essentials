@@ -476,9 +476,9 @@ _CAPABILITY_SENTINELS = (
 _CAPABILITY_NOTE = (
     "observed_generation[strategy] is that strategy's isGenerationAllowed flag, probed with no "
     "document or setup - it describes the INSTALLATION, not the open document. false = the "
-    "entitlement reads absent (measured: creation still succeeds, then generation silently "
-    "declines); null = the probe could not read it. No license tier or SKU is asserted (Fusion "
-    "exposes no license API).")
+    "entitlement reads absent (measured: creation succeeds, then generation silently declines); "
+    "null = the probe could not read it. entitled: their one verdict. No license tier or SKU is "
+    "asserted (Fusion exposes no license API).")
 
 # Appended only where cam_get is registered: cam is a gateable family, and a tool named mid-note
 # bypasses _drop_unregistered_pointers, which only sees the 'pointers' dict.
@@ -494,15 +494,29 @@ def _capability_note():
     return _CAPABILITY_NOTE + _CAPABILITY_POINTER
 
 
+def _sentinel_flags():
+    """{sentinel strategy: its isGenerationAllowed}, read through the shared _cam_common seam - the
+    same one cam_generate's launch pre-flight excludes on, so the two cannot disagree about one
+    strategy."""
+    return {name: _cam_common.strategy_generation_allowed(name) for name in _CAPABILITY_SENTINELS}
+
+
+def _entitled_over(flags):
+    """True / False / None over the sentinel flags: true where every one reads true, false where
+    one reads false, None where any did not read - an unread flag is no entitlement, and a bare
+    all() would fold it into a confident false."""
+    if any(flag is None for flag in flags):
+        return None
+    return all(flags)
+
+
 def _capability_block():
-    """One observed_generation entry per sentinel (see _CAPABILITY_SENTINELS), plus the note. The
-    flag is read through the shared _cam_common seam - the same one cam_generate's launch pre-flight
-    excludes on, so the two cannot disagree about one strategy."""
-    return {
-        "observed_generation": {name: _cam_common.strategy_generation_allowed(name)
-                                for name in _CAPABILITY_SENTINELS},
-        "note": _capability_note(),
-    }
+    """One observed_generation entry per sentinel (see _CAPABILITY_SENTINELS), the single entitled
+    verdict over them, plus the note - the flags probed ONCE for both."""
+    flags = _sentinel_flags()
+    return {"observed_generation": flags,
+            "entitled": _entitled_over(flags.values()),
+            "note": _capability_note()}
 
 
 def handler() -> dict:

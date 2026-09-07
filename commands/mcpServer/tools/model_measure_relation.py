@@ -49,7 +49,7 @@ _REL = _inputs.Choice("relation", list(_RELATIONS), required=True, description=(
     "flush: two planar faces coplanar. "
     "clearance: minimum distance >= 'tolerance'. touching: minimum distance <= 'tolerance'. "
     "concentric: two CIRCULAR entities (a circular/arc edge, or a cylindrical face) whose CENTER "
-    "POINTS coincide within 'tolerance' - unlike coaxial, which compares the infinite axis LINES."))
+    "POINTS coincide within 'tolerance'."))
 _TOL = _inputs.Distance("tolerance", allow_zero=True, allow_negative=False, description=(
     "Linear tolerance for the offset/gap part (coaxial/flush offset, clearance/touching distance). "
     "Omit for a per-relation default of 0.1 mm."))

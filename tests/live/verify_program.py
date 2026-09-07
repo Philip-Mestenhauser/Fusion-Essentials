@@ -14,9 +14,10 @@ from verify_acts_cam import (
     CAM_SETUP, FLIP_SETUP, MACHINING_EXTENSION, _CAM, _CAM_DELIVER, _CAM_EXTENSION,
     _CAM_FB_DELIVER, _CAM_GREEN, _CAM_MULTI_POST, _CAM_SCOPE, _CAM_SECOND_SETUP, _CAM_STORY,
     _MX_SETUP, _SW_SETUP, _SW_SETUP2, _SWARF_RIG)
+from verify_acts_cloud import _CLOUD_DATA, _CLOUD_DOC, _CLOUD_DRAWING
 from verify_acts_census import (
-    _CENSUS_EXT, _CENSUS_EXT_READ, _CENSUS_LONG, _CENSUS_LONG_READ, _CENSUS_MILL,
-    _CENSUS_MILL_READ, _CENSUS_TURN, _CENSUS_TURN_READ)
+    HUB_POCKET_SETUP, _CENSUS_EXT, _CENSUS_EXT_READ, _CENSUS_LONG, _CENSUS_LONG_READ, _CENSUS_MILL,
+    _CENSUS_MILL_READ, _CENSUS_POCKET, _CENSUS_POCKET_READ, _CENSUS_TURN, _CENSUS_TURN_READ)
 from verify_acts_doc import _FINALE, _OVERTURE, _SHOWCASE
 from verify_acts_dump import _HUB_CONTOUR, _HUB_DUMP, _MX_DUMP
 from verify_acts_hub import (
@@ -27,7 +28,7 @@ from verify_acts_model import (
     _DETAILS, _DETAILS_FB, _RESIZE, _RESIZE_FB, _SOLIDS, _SOLIDS_FB)
 from verify_acts_motion import _MOTION, _VISE
 from verify_acts_sketch import _SKELETON, _SKETCHWORK
-from verify_core import _DWELL, _PLANE_VIEW, _SKETCH_PLANE
+from verify_core import CLOUD_TIER, _DWELL, _PLANE_VIEW, _SKETCH_PLANE
 from verify_layout import (
     _CHUNK_OF, _COMPONENTS, _PATTERNED, _PLACED_BOX, _SLOTS, _framed, _place_points, _place_slots,
     _place_walk, _placed, _sketch_reading_order, _sketches_first)
@@ -139,6 +140,11 @@ _ACT_PROGRAM = [
      ("cam_get", {"include": ["operations"], "setup": HUB_MILL_SETUP}), _CENSUS_LONG, []),
     ("ACT 10c8c - CAM: THE LONG FAMILIES READ",
      ("cam_get", {"include": ["operations"], "setup": HUB_MILL_SETUP}), _CENSUS_LONG_READ, []),
+    # no precondition probe: this act CREATES the setup it works in, so a read of it beforehand
+    # resolves nothing and drops the act to its fallback.
+    ("ACT 10c8d - CAM: POCKET CLEARING FIRST", None, _CENSUS_POCKET, []),
+    ("ACT 10c8e - CAM: POCKET CLEARING READ",
+     ("cam_get", {"include": ["operations"], "setup": HUB_POCKET_SETUP}), _CENSUS_POCKET_READ, []),
     ("ACT 10c9 - CAM: THE TURNING CENSUS",
      ("cam_get", {"include": ["operations"], "setup": HUB_TURN_SETUP}), _CENSUS_TURN, []),
     ("ACT 10c10 - CAM: THE TURNING CENSUS READ",
@@ -165,6 +171,15 @@ _ACT_PROGRAM = [
     # poll certifies the document, and this act reads the tree a watcher is left with.
     ("ACT 10f - CAM: THE TREE LEFT BEHIND",
      ("cam_get", {"include": ["operations"], "setup": CAM_SETUP}), _CAM_GREEN, []),
+    # THE OPT-IN CLOUD TIER, after the whole unattended story and before the discard: the acts that
+    # write into an operator's own hub. They depend on nothing the story built and nothing depends on
+    # them, and the tier holds all three back whole where cloud_config names no hub (ACT_NEEDS
+    # below), which is what an unconfigured run stamps as skipped. Each act ends by activating the
+    # document the session was on when the tier started, so a chunk boundary may fall between them
+    # and a partial --acts run leaves the session where it found it.
+    ("ACT 11a - CLOUD: THE DATA MODEL", None, _CLOUD_DATA, []),
+    ("ACT 11b - CLOUD: THE SAVED DOCUMENT", None, _CLOUD_DOC, []),
+    ("ACT 11c - CLOUD: THE DRAWING", None, _CLOUD_DRAWING, []),
     ("FINALE", None, _FINALE, None),
 ]
 
@@ -233,6 +248,9 @@ ACTS = [(name, pre, _framed(_placed(narr, _SLOTS)), _framed(fb) if fb is not Non
 # thing one row at a time through verify_core.Needs; the probe per capability name lives in
 # verify_core.CAPABILITY_PROBES.
 ACT_NEEDS = {
+    "ACT 11a - CLOUD: THE DATA MODEL": CLOUD_TIER,
+    "ACT 11b - CLOUD: THE SAVED DOCUMENT": CLOUD_TIER,
+    "ACT 11c - CLOUD: THE DRAWING": CLOUD_TIER,
     "ACT 10c - CAM: EXTENSION STRATEGIES": MACHINING_EXTENSION,
     "ACT 10c11 - CAM: THE EXTENSION FAMILIES": MACHINING_EXTENSION,
     "ACT 10c12 - CAM: THE EXTENSION FAMILIES READ": MACHINING_EXTENSION,
@@ -270,6 +288,9 @@ POLL_AFTER = {
     # reading, not the fast one.
     "ACT 10c8b - CAM: THE LONG FAMILIES": {"narrative": HUB_MILL_SETUP, "fallback": [],
                                            "max_polls": 160},
+    # the pocket-clearing setup's single operation, certified before its read act and before the
+    # turning census starts CAM writes.
+    "ACT 10c8d - CAM: POCKET CLEARING FIRST": {"narrative": HUB_POCKET_SETUP, "fallback": []},
     "ACT 10c9 - CAM: THE TURNING CENSUS": {"narrative": HUB_TURN_SETUP, "fallback": []},
     # the extension families launch onto the milling setup whose stock is the lathe's rest, and that
     # generation ran past the default 40 polls with every operation reading valid behind it.
@@ -801,8 +822,9 @@ STORY = {
                            "Operation.tool read back beside a null was_tool. The rail operation "
                            "parked for the 3-axis program is restored at the end, so the tree the "
                            "run leaves holds nothing suppressed. And on the hub's lathe job, the "
-                           "one parameter the turned part needs: doLeadOut off on the finishing "
-                           "cycle, which is what the no-warning read of that setup stands on"),
+                           "stock-to-leave switch and its two allowance rows in ONE call on the "
+                           "roughing cycle, and doLeadOut off on the finishing cycle it feeds - "
+                           "what the no-warning read of that setup stands on"),
     "cam_create_machine": ("build a run-stamped 3-axis machine into the Local library, find it in "
                            "the catalog, assign it to the setup, and refuse the duplicate name; "
                            "then a run-stamped generic_4_axis for the hub's rotary setup, which is "
@@ -928,15 +950,100 @@ STORY = {
                        "the two centre annotations with no enum family on this build, a tangent-edge "
                        "value outside the Choice, manual creation with no template, and a sheet size "
                        "from the other standard - none of them creating anything, and the session "
-                       "healthy afterwards. The creation path is cloud tier (it needs a saved source "
-                       "design) and stays out of the default sweep"),
-    "doc_get": "read the document identity before discarding",
-    "doc_close": "discard the document on camera - clean teardown",
+                       "healthy afterwards. Then the CREATION path, on the cloud tier: an A3 ISO "
+                       "drawing generated from the saved source, its own name and lineage URN read "
+                       "off the DataFile that landed"),
+    "doc_get": ("read the document identity before discarding; and, on the cloud tier, which "
+                "document the session is on before each write acts on it, plus the version history "
+                "the save/milestone/restore beats built"),
+    "doc_close": ("discard the document on camera - clean teardown; and, on the cloud tier, close "
+                  "every cloud document this run opened, by lineage URN, before deleting it"),
     "sys_reload_addin": ("the last beat of the run, once the document is discarded: reload the "
                          "add-in, watch /health stop answering and answer again as this server, "
                          "then read the restarted registry back through sys_find_tool. It "
                          "restarts the server, so nothing can be dispatched after it - which is "
                          "why it is a post-run beat and not a row in an act"),
+    # THE OPT-IN CLOUD TIER (ACT 11a-c). Every row below runs only where cloud_config names a hub,
+    # and an unconfigured run reports each of these tools skipped(cloud_tier not entitled).
+    "data_get": ("the hub this run is signed in to and the configured project listed in it - the "
+                 "row that puts on the ledger WHICH hub the artifacts were made in; then the "
+                 "uploaded file's own record (where it sits, and whether the cloud has finished "
+                 "with it - what the drawing generator needs true of its source); and the two "
+                 "read-backs standing apart from the deletes' own reports: the run folder addressed "
+                 "DIRECTLY, where the project answers that it holds no such subfolder - a refusal a "
+                 "budget cut cannot produce - and the configured folder's own file listing, scoped "
+                 "to that folder and failing on any listing that did not fully read"),
+    "data_create_folder": ("a run-stamped folder under the configured one and a move target inside "
+                           "it, each re-listed under the parent asked for with NOTHING auto-created "
+                           "on the way there - a run that had to invent the operator's folder is "
+                           "addressing a project the config does not describe"),
+    "data_upload_file": ("upload the run's marker PNG into that folder - a non-Fusion file, which "
+                         "is the only kind that can come back down again - and mint the poll handle "
+                         "the status read below asks with"),
+    "data_get_upload_status": ("poll that handle to 'complete': transfer AND cloud processing "
+                               "finished, with the lineage URN every later step addresses the file "
+                               "by. Nothing downstream runs against a file that has not landed"),
+    "data_move_file": ("move the landed file into the subfolder, with the parent RE-READ off the "
+                       "re-resolved file - DataFile.move returns a bool, and the bool is not the "
+                       "evidence"),
+    "data_download_file": ("bring the same file back to local disk with its bytes stat'd there; and "
+                           "meet the Fusion-native refusal on the saved design, which is what sends "
+                           "a caller to design_export"),
+    "data_delete_file": ("take every document this tier made back out by URN with confirm_name "
+                         "matching, each delete read back - the referencing file first, since a "
+                         "referenced one is refused rather than orphaned"),
+    "data_delete_folder": ("meet the non-empty refusal naming the subtree a recursive wipe would "
+                           "take, then delete the two folders once emptied, each with the census "
+                           "read before the delete saying it took nothing else with it"),
+    "doc_save_as": ("write the plate into the configured folder as this run's source, and the host "
+                    "beside it - each with no name collision, since a second file of one name is a "
+                    "fork this run could not then clean up by name"),
+    "doc_save": ("version the source in place, twice: once after the parameter is added, and once "
+                 "for the edit the drawing refresh is read against"),
+    "doc_save_milestone": ("mark a named milestone on the source - the two INDEPENDENT read-backs "
+                           "kept apart, a fresh fetch showing a NEW version number, and the mark on "
+                           "it, which lags the version by seconds and is reported not asserted"),
+    "doc_restore_version": ("promote the FIRST version, one the tip has moved past - promoting the "
+                            "latest takes the tool's early return, with no promote call and no tip "
+                            "either side to compare. The open session keeps its parameters through "
+                            "it, and the save after it writes them as the new tip; a pending tip is "
+                            "reported, never called a failure"),
+    "doc_copy": ("copy the source cloud-to-cloud into the same folder under its own name, the copy "
+                 "read back off the created DataFile on a DIFFERENT lineage from its source"),
+    "doc_insert_occurrence": ("insert the saved source into the host as an XREF - 'is_reference' is "
+                              "what gives doc_update_xref something to walk"),
+    "doc_update_xref": ("walk the host's one reference with only_out_of_date true, THREE times: "
+                        "straight after the insert, where the bucket is reported (measured: a "
+                        "just-inserted xref read out of date, bound a version behind the source's "
+                        "stream); again immediately, where nothing is stale and it is SKIPPED; and "
+                        "once more after the source is edited and saved, where it is UPDATED. A row "
+                        "in each bucket is what makes the partition a measurement - only_out_of_date "
+                        "false can never fill 'skipped'"),
+    "doc_open": ("open the copy and then the generated drawing by lineage URN, each named back with "
+                 "the URN it resolved; the switch is async, so the doc_get after it is what says "
+                 "the session is on it"),
+    "doc_activate": ("the overture opens a SECOND unsaved scratch document beside the story one and "
+                     "switches both ways between them by the 'open:N' index doc_get published - the "
+                     "address an UNSAVED document has instead of a URN, and the only one that "
+                     "reaches it when two documents share the name 'Untitled'; the cloud tier then "
+                     "switches between the source, the host, the copy and the drawing by lineage "
+                     "URN and comes home the same way"),
+    "drawing_get": ("the sheet read every write and both exports are taken behind: export_index "
+                    "1-based and contiguous (the numbering drawing_export's sheet_range takes, "
+                    "obtainable nowhere else) with exactly one sheet active"),
+    "drawing_update": ("a drawing generated moments ago reports itself already up to date; then, "
+                       "after the source is edited and saved, the refresh that ran with the count "
+                       "of references stale before it - the number separating it from a no-op"),
+    "drawing_dimension": "dimension the generated view with the baseline strategy",
+    "drawing_insert_image": ("place the run's marker PNG on the sheet, with "
+                             "'position_bounds_checked' saying the anchor was compared against the "
+                             "sheet BEFORE anything was placed - an image cannot be read back or "
+                             "moved afterwards, so the check having run is the read-back"),
+    "drawing_add_sketch": "draw a line chain, a rectangle and a circle on the sheet - four curves",
+    "drawing_edit_sheet": ("add a named sheet with the count read either side; it comes after every "
+                           "beat needing the generated views, since an add makes the NEW sheet "
+                           "active"),
+    "drawing_export": "write the drawing to PDF and to DXF, each measured by its bytes on disk",
 }
 
 # Tools deliberately not swept unattended, each with its reason (the ledger's skipped rows). This is
@@ -953,38 +1060,18 @@ EXCLUDED = {
                          "that beat could not confirm the restart: the call, the /health "
                          "down-then-up watch or the sys_find_tool smoke did not come back"),
     "sys_request_selection": "waits on a human pick (user-present tier)",
-    "drawing_update": "user-present tier (drawing docs)",
-    "drawing_export": "user-present tier (drawing docs)",
-    "drawing_get": "user-present tier (drawing docs); read-only - drawing_verify.py drives it",
-    "drawing_add_sketch": "user-present tier (drawing docs)",
-    "drawing_dimension": "user-present tier (drawing docs)",
-    "drawing_edit_sheet": "user-present tier (drawing docs)",
-    "drawing_insert_image": "user-present tier (drawing docs)",
     "design_set_mode": "irreversible parametric->direct conversion; not run unattended",
     "design_configure": "configuration table needs a SAVED document (a DataFile to carry it); opt-in tier - the appearance/material columns need that document too, and a body's material reads back only after the geometry catches up with the activation",
-    # cloud tier: writes to the operator's real hub - opt-in only, never in the default sweep.
-    "data_create_project": "cloud write to the operator's real hub (opt-in tier)",
-    "data_create_folder": "cloud write (opt-in tier)",
-    "data_upload_file": "cloud write (opt-in tier)",
-    "data_get": "cloud read, hub-dependent (opt-in tier)",
-    "data_get_upload_status": "cloud read (opt-in tier)",
-    "data_download_file": "cloud read to the local disk (opt-in tier)",
-    "data_move_file": "cloud write - relocates a real file in the operator's hub (opt-in tier)",
-    "data_delete_file": "cloud destructive (opt-in tier)",
-    "data_delete_folder": "cloud destructive (opt-in tier)",
-    "data_switch_hub": "changes the active hub, closes docs (opt-in tier)",
-    "doc_save_milestone": ("cloud write; needs a saved MODIFIED doc (opt-in tier) - the beat for "
-                           "its two INDEPENDENT read-backs (cloud_tip_advanced beside "
-                           "version_confirmed) rides that tier with it"),
-    "doc_save": "versions to the cloud; needs a saved doc (opt-in tier)",
-    "doc_save_as": "cloud write (opt-in tier)",
-    "doc_copy": "cloud write (opt-in tier)",
-    "doc_open": "opens cloud files; can wedge on CAM templates (opt-in tier)",
-    "doc_insert_occurrence": "needs a saved cloud source in-project (opt-in tier)",
-    "doc_insert_derive": "needs an ALREADY-OPEN saved cloud source to derive from (opt-in tier)",
-    "doc_restore_version": "needs cloud version history (opt-in tier)",
-    "doc_update_xref": "needs cloud external references (opt-in tier)",
-    "doc_activate": "needs a second open document (opt-in tier)",
+    # The rest of the cloud tier. The tools that write into an operator's hub are DRIVEN by ACT 11a-c
+    # behind the cloud_tier capability, so an unconfigured run reports them skipped(cloud_tier not
+    # entitled) rather than listed here; these three are not driven even with a config.
+    "data_create_project": ("mints a real project in the operator's hub - the config names an "
+                            "EXISTING project, and a project is not this tier's to create"),
+    "data_switch_hub": ("closes every open document, the story document among them - the cloud_tier "
+                        "probe refuses a config naming a hub other than the active one instead of "
+                        "switching to it"),
+    "doc_insert_derive": ("needs an ALREADY-OPEN saved cloud source to derive from, and a derive "
+                          "link outlives the source this tier deletes at the end of its run"),
 }
 
 # Registered tools NOT yet scripted into STEPS - the honest "todo" ledger. SHRINK-ONLY: scripting a

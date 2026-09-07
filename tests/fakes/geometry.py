@@ -262,6 +262,7 @@ class FakeMatrix3D:
         return (vx + self._t[0], vy + self._t[1], vz + self._t[2])
 
 
+@fusion_fake(live_type="InfiniteLine3D", facts=("shape-dump-infinite-line-and-sphere",))
 class FakeInfiniteLine3D:
     """Numeric adsk.core.InfiniteLine3D: origin + direction, with the colinearity test the holder
     profile reduction runs (parallel directions AND the origin offset lying along the direction)."""
@@ -324,8 +325,10 @@ class Cone:
         self.surfaceType = _api_facts.ENUMS["core.SurfaceTypes"]["ConeSurfaceType"]
 
 
+@fusion_fake(live_type="Sphere", facts=("shape-dump-infinite-line-and-sphere",))
 class Sphere:
-    """adsk.core.Sphere, a type with no live shape dump to sweep this stand-in against."""
+    """A spherical surface - the face type _sys_common reports no single axis for. Carries no
+    origin/radius: no consumer reads them off this stand-in."""
 
 
 @fusion_fake(live_type="Torus", facts=("shape-dump-torus", "enum-surface-types"))
@@ -366,6 +369,12 @@ class Circle3D:
 
 # -- viewport / camera fakes -----------------------------------------------
 
+def camera_state(cam):
+    """The field values one camera carries - what a restore is judged on, since a viewport read
+    hands back a copy."""
+    return (cam.eye, cam.target, cam.upVector, cam.cameraType, cam.isFitView,
+            cam.perspectiveAngle, cam.viewExtents)
+
 @fusion_fake(live_type="Camera",
              facts=("shape-dump-design-world", "camera-viewextents-is-linear-not-area"))
 class Camera:
@@ -384,8 +393,15 @@ class Camera:
         self.perspectiveAngle = perspective_angle
         self.viewExtents = view_extents
 
+    def _copy(self):
+        """A detached duplicate carrying the same field values - what a viewport read hands back
+        (BEHAVIOR['viewport_camera_returns_copy']). Private: live Camera exposes no copy()."""
+        dup = type(self).__new__(type(self))
+        dup.__dict__.update(self.__dict__)
+        return dup
 
-@fusion_fake(live_type="Viewport", facts=("shape-dump-design-world",))
+
+@fusion_fake(live_type="Viewport", facts=("shape-dump-design-world", "camera-returns-copy"))
 class Viewport:
     """The viewport a view tool drives: its camera, visual style, pixel size, and the image saves
     a capture makes. What the tool DID is recorded privately: `_assigned` every camera written
@@ -395,9 +411,9 @@ class Viewport:
     fit() and refresh() answer the bool the SDK declares them to; `fit_ok=False` is the fit the
     platform declines, which cam_activate_setup gates on with `vp.fit() is not True`.
 
-    The camera is one shared mutable object here - a live viewport hands back a COPY
-    (live_api_facts.BEHAVIOR['viewport_camera_returns_copy']), which only the measurement row
-    camera-returns-copy checks."""
+    Reading `camera` hands back a detached copy where BEHAVIOR['viewport_camera_returns_copy'] is
+    True (row camera-returns-copy), so a tool that mutates a read camera without assigning it back
+    moves nothing here."""
     def __init__(self, camera=None, width=1516, height=757, visual_style=0,
                  frame=(200.0, 100.0), fit_ok=True, save_ok=True, png=b"PNGBYTES"):
         self._cam = Camera() if camera is None else camera
@@ -414,6 +430,8 @@ class Viewport:
 
     @property
     def camera(self):
+        if _api_facts.BEHAVIOR["viewport_camera_returns_copy"]:
+            return self._cam._copy()
         return self._cam
 
     @camera.setter

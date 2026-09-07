@@ -653,7 +653,9 @@ class TestOrient:
         # eye == target reads a ZERO distance, which would rebuild the eye ON the target and leave
         # the view no direction at all. The shared standoff stands in, and the payload discloses it.
         _install(monkeypatch, [FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))])
-        cam = iv.app.activeViewport.camera
+        # _cam, not the camera property: a read hands back a copy, so a setup written through it
+        # would move nothing - the same trap the tool avoids by assigning its camera back.
+        cam = iv.app.activeViewport._cam
         cam.eye = FakePoint(0, 0, 0)
         cam.target = FakePoint(0, 0, 0)
         out = _payload(iv.handler(action="orient", orientation="front"))
@@ -1046,7 +1048,7 @@ class TestProjection:
     def test_angle_only_call_does_not_claim_an_applied_projection(self, monkeypatch):
         import adsk.core
         _install(monkeypatch, [self._part()])
-        iv.app.activeViewport.camera.cameraType = adsk.core.CameraTypes.PerspectiveCameraType
+        iv.app.activeViewport._cam.cameraType = adsk.core.CameraTypes.PerspectiveCameraType
         out = _payload(iv.handler(action="orient", perspective_angle_deg=40))
         assert "projection" not in out["applied"]        # nothing was applied to the projection
         assert out["applied"]["perspective_angle_deg"] == 40.0
@@ -1105,7 +1107,7 @@ class TestPerspectiveAngle:
         import adsk.core
         import math
         _install(monkeypatch, [self._part()])
-        iv.app.activeViewport.camera.cameraType = (
+        iv.app.activeViewport._cam.cameraType = (
             adsk.core.CameraTypes.PerspectiveWithOrthoFacesCameraType)
         out = _payload(iv.handler(action="orient", perspective_angle_deg=35))
         assert iv.app.activeViewport.camera.perspectiveAngle == math.radians(35)
@@ -1159,7 +1161,7 @@ class TestPerspectiveAngle:
         import adsk.core
         import math
         _install(monkeypatch, [self._part()])
-        iv.app.activeViewport.camera.cameraType = adsk.core.CameraTypes.PerspectiveCameraType
+        iv.app.activeViewport._cam.cameraType = adsk.core.CameraTypes.PerspectiveCameraType
         out = _payload(iv.handler(action="orient", perspective_angle_deg=45))
         assert math.isclose(iv.app.activeViewport.camera.perspectiveAngle, math.radians(45),
                             rel_tol=1e-9)

@@ -170,6 +170,11 @@ CLAUDE.local.md
 # never committed (see tests/live/evals/README.md "Privacy"). The scenarios are tracked; results are not.
 tests/live/evals/results/
 
+# The opt-in cloud tier's operator config: it names a real hub, project and folder, which are
+# private and machine-local. Without it the cloud_tier capability probe answers false and ACT 11a-c
+# are skipped - see tests/live/cloud_config.py for the shape.
+tests/live/cloud_config.local.json
+
 # measure_api / tool_verify run archives: per-run records; the durable state they feed
 # (tests/live/CONTRACTS.md + tests/live_api_facts.py + tests/live/VERIFIED_TOOLS.md) is tracked,
 # the archives are not.

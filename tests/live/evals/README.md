@@ -13,9 +13,20 @@ user hits them.
 ## How to run one
 
 Every scenario embeds an `AGENT PROMPT (verbatim)` block. Stage the fixture named in the
-frontmatter, then run that block through `tests/live/evals/run_eval.py`. The runner spawns a
-context-isolated headless executor: empty scratch cwd, sterile config, only the fusion-essentials
-MCP server on its wire, source tools hard-denied.
+frontmatter, then run that block through `tests/live/evals/run_eval.py`.
+
+`--executor api` is the default: a direct Messages API tool loop over the server's own `tools/list`.
+Blindness is structural - the fusion tools are the only tools that exist, and a denied one (the
+cloud deletes, the selection prompt, the script hatch, plus `--deny`) has no definition to call. It
+reads the key from `ANTHROPIC_API_KEY` and takes a model id in `--model` (default `claude-opus-5`);
+both are checked before the run dir is made. The loop stops at the scenario's call budget, its
+output-token budget, `EVAL_STALL_S` with no tool call, `--max-turns`, or the model's final report.
+
+`--executor cli` spawns a context-isolated headless Claude Code executor instead: empty scratch cwd,
+sterile config, only the fusion-essentials MCP server on its wire, source tools hard-denied. **The
+two executors carry different system prompts** - the CLI's harness prompt is not the API loop's bare
+turn - so an api run and a cli run of one scenario are different experiments and their measured
+budgets do not compare.
 
 **The block reaches the executor BYTE-IDENTICAL.** Compose nothing around it, so every run of a
 scenario is the same experiment and runs compare cleanly. The runner makes exactly three additions,
@@ -48,8 +59,9 @@ headroom.
 
 **The EXIT CODE reports harness integrity only**, not whether the scenario passed: 0 the run is
 gradeable, 2 no executor ever spawned, 3 credentials stayed rejected after the one relaunch, 4 a
-guarantee broke (blindness, or a denied tool in the transcript). A scenario FAIL or a budget overrun
-is an OUTCOME for the orchestrator to grade, so those still exit 0.
+guarantee broke (blindness, or a denied tool in the transcript), 5 the executor stopped progressing
+and was killed. A scenario FAIL or a budget overrun is an OUTCOME for the orchestrator to grade, so
+those still exit 0.
 
 Staging, grading and cleanup all address documents BY URN, since same-name lineages accumulate
 across runs. Run hygiene is scoped strictly to EVAL-CREATED documents: never `close_all`, never a
@@ -60,7 +72,8 @@ user document.
 After each run, write a per-run record (`results/run-NN_<scenario>.md`: verdict, per-postcondition
 reads, token total, tool-call count, and what the run SURFACED - a tool defect, a wire/description
 defect, an eval weakness, or clean) and persist it to the user's hub so history accrues over time:
-project **MCP Test Project** -> a folder named **Eval-<date>** (`data_create_folder`) -> upload the
+the project named in `tests/live/cloud_config.local.json` -> a folder named **Eval-<date>**
+(`data_create_folder`) -> upload the
 record (`data_upload_file`, then poll `data_get_upload_status` until `complete` - never assume).
 Local copies stay in `results/` (gitignored). The most valuable part of a record is the SURFACED
 line: each run is an agent-observing-agent probe of whether the wire surface teaches Fusion's

@@ -345,7 +345,7 @@ pipe_tool = (
     .add_input_property(*_OPERATION.as_property())
     .add_input_property("hollow", {"type": "boolean",
             "description": "Make the pipe a hollow tube (default false). Implied by 'wall_thickness'."})
-    .add_input_property(*_WALL_THICKNESS.as_property())
+    .add_input_property(*_WALL_THICKNESS.as_property(brief=True))
     .add_input_property("path_fraction", {"type": "number",
             "description": "Fraction of the path covered from its start, over 0 and at most 1 (default: all of it). A ratio - 'units' does not apply."})
     .add_input_property("path_fraction_reverse", {"type": "number",

@@ -2,12 +2,14 @@
 id: S1_Foundation
 tier: pipeline
 fixture: fresh empty design (orchestrator stages with doc_new); active hub PINNED to the canonical
-  hub and project "MCP Test Project" verified to EXIST before spawning (ask the user if missing -
+  hub and the configured project (tests/live/cloud_config.local.json) verified to EXIST before
+  spawning (ask the user if missing -
   never create). The agent's final doc_save_as of the ACTIVE document is the artifact step.
 budget:
   max_tool_calls: 140
   max_tokens: 100000
-substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
+substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag; {{PROJECT}} /
+  {{FOLDER}} -> the configured destination"
 perturbations: none (baseline)
 expected_refusals: none
 ---
@@ -68,8 +70,8 @@ PROVE the propagation: change the driving parameter, read FRESH geometry from at
 different components including at least one planned-interface element, report how each moved,
 restore, and read again.
 
-Finally save the document as P1-Gimbal into project "MCP Test Project", folder
-"Pipeline-v1/{{RUN_FOLDER}}" (create the FOLDER path if missing; never a project).
+Finally save the document as P1-Gimbal into project "{{PROJECT}}", folder
+"{{FOLDER}}/{{RUN_FOLDER}}" (create the FOLDER path if missing; never a project).
 
 You choose names, values, plane orientations, sketch layout, and order. Grading is on the STATE
 of the document and the HONESTY of your report, not the path.
@@ -97,7 +99,7 @@ its units. A claim that does not match a read is a FAIL; the read always wins ov
 - THE PROPAGATION PROOF: before/after/restored values you READ for three components including a
   planned-interface element (with units).
 - doc_get -> the active document is saved as "P1-Gimbal" with a real document_id (URN) and
-  version >= 1, in MCP Test Project / Pipeline-v1/{{RUN_FOLDER}}.
+  version >= 1, in {{PROJECT}} / {{FOLDER}}/{{RUN_FOLDER}}.
 
 REPORT - return EXACTLY this structure, nothing else:
 

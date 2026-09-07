@@ -254,7 +254,7 @@ def _ref(name, out_of_date=False):
 
 def _data_file(urn="urn:adsk:lineage:abc", version=3, latest=3,
                url="https://x/g/data", folder="Parts", folder_id="fld.1",
-               project="MCP Test Project", project_id="a.123", hub="Test Hub"):
+               project="Sample Project", project_id="a.123", hub="Test Hub"):
     """A saved doc's data-model identity on the shared cloud fakes: URN + version + web URL +
     the parent folder/project chain. The hub is stamped on the project here - DataHub has no shape
     dump, so no shared fake stands for it."""
@@ -1183,7 +1183,7 @@ class TestDataModel:
         root = FakeRoot(top_occs=[FakeOcc("A:1")], all_count=1)
         des = FakeDesign(root, timeline=[FakeTL(0)])
         df = _data_file(urn="urn:adsk:lineage:xyz", version=4, latest=5,
-                        folder="Rovers", project="MCP Test Project", project_id="a.999",
+                        folder="Rovers", project="Sample Project", project_id="a.999",
                         hub="Test Hub")
         _install(active_product=des, doc=_doc(design=des, data_file=df))
         dm = _payload(wo.handler())["document"]["data_model"]
@@ -1191,7 +1191,7 @@ class TestDataModel:
         assert dm["document_id"] == "urn:adsk:lineage:xyz"
         assert dm["version_number"] == 4 and dm["latest_version_number"] == 5
         assert dm["hub"] == "Test Hub"
-        assert dm["project"] == "MCP Test Project" and dm["project_id"] == "a.999"
+        assert dm["project"] == "Sample Project" and dm["project_id"] == "a.999"
         assert dm["folder"] == "Rovers"
 
     def test_version_numbers_say_which_handle_they_were_read_off(self):
@@ -1638,3 +1638,25 @@ class TestCapabilityBlock:
         _install(active_product=des, doc=_doc(design=des))
         og = _payload(wo.handler())["machining_capabilities"]["observed_generation"]
         assert og["swarf"] is True and og["probe_geometry"] is False
+
+    def test_the_entitlement_verdict_keeps_an_unread_flag_apart_from_a_blocked_one(self):
+        # sys_capability_map points a cold agent here for this ONE verdict. A bare all() over the
+        # flags would fold an unread None into False - a confident 'not entitled' for a probe that
+        # never answered, which is the opposite of what null means on the wire.
+        assert wo._entitled_over([True, True, True, True]) is True
+        assert wo._entitled_over([True, False, True, True]) is False
+        assert wo._entitled_over([True, None, True, True]) is None
+
+    def test_the_orient_publishes_the_verdict_beside_the_flags(self, monkeypatch):
+        # The pointer sys_capability_map hands out has to land on a FIELD: an agent that had to
+        # fold the four flags itself is the second vocabulary the map exists to prevent.
+        des = self._small_design()
+        _install(active_product=des, doc=_doc(design=des))
+        table = self._all(True)
+        table["swarf"] = None                       # the flag itself will not read
+        monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(table))
+        block = _payload(wo.handler())["machining_capabilities"]
+        # the SHARED fold, not a second one taken here: an unread flag leaves the verdict null
+        assert block["entitled"] is None
+        assert block["observed_generation"]["swarf"] is None
+        assert block["observed_generation"]["probe_geometry"] is True

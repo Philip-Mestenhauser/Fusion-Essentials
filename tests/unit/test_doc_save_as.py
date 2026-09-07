@@ -29,6 +29,27 @@ def FakeFile(name, fid="urn:adsk.file:src"):
     return FakeDataFile(name, file_id=fid)
 
 
+class _LateUrnFile(FakeDataFile):
+    """A DataFile whose id reads the LOCAL pre-upload path for its first `local_reads` reads and the
+    lineage urn afterwards - the cloud save settling part-way through the wait, which is the only
+    shape where the recovery read spends real seconds AND comes back with an address."""
+
+    def __init__(self, name, urn, local_reads):
+        super().__init__(name, file_id="C:/tmp/local-handle")
+        self._urn, self._left = urn, local_reads
+
+    @property
+    def id(self):
+        if self._left > 0:
+            self._left -= 1
+            return "C:/tmp/local-handle"
+        return self._urn
+
+    @id.setter
+    def id(self, value):
+        pass                     # the settling schedule above is what this file's id reports
+
+
 class _BlindIdFile(FakeDataFile):
     """A DataFile whose NAME reads but whose lineage id does not - the cloud read that fails one
     step past the name. It is still a file carrying that name, so every same-name count includes
@@ -111,24 +132,25 @@ def _install(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def pump_clock(monkeypatch):
-    """A VIRTUAL clock for _settled_lineage_urn's post-saveAs pump, in place of real sleep.
+    """A VIRTUAL clock for _settled_lineage_urn's post-saveAs wait, in place of real sleep.
 
-    That pump runs a fixed burst - _URN_POLL_TRIES doEvents/sleep rounds - waiting for the cloud to
-    replace the local pre-upload handle with a lineage 'urn:'. No fake here ever settles one, so
-    every no-URN case runs the burst to its end; sleeping it is dead wall-clock for a wait whose
-    outcome is fixed. The replacement only ADVANCES a counter, so the loop still runs its full try
-    count and still reaches the give-up branch, in no real time.
+    That wait pumps doEvents/sleep rounds until the cloud replaces the local pre-upload handle with
+    a lineage 'urn:', bounded by _URN_WAIT_S. No fake here ever settles one, so every no-URN case
+    runs the wait to its bound; sleeping it is dead wall-clock for an outcome that is fixed.
 
-    time.sleep is the interception point because _settled_lineage_urn does `import time` inside
-    itself: there is no module attribute on the tool module to patch instead. Yields the record so a
-    test can assert the burst actually ran."""
+    BOTH time.sleep and time.monotonic are replaced, on the time MODULE _export.pump_until and this
+    tool each read: a virtual sleep alone would leave the real monotonic deadline unreached and the
+    loop spinning for the full bound in wall-clock. Yields the record so a test can assert the wait
+    ran, and urn_wait_seconds is the same virtual span."""
     record = {"calls": 0, "virtual_seconds": 0.0}
+    base = time.monotonic()
 
     def _advance(seconds):
         record["calls"] += 1
         record["virtual_seconds"] += seconds
 
     monkeypatch.setattr(time, "sleep", _advance)
+    monkeypatch.setattr(time, "monotonic", lambda: base + record["virtual_seconds"])
     return record
 
 
@@ -197,22 +219,27 @@ class TestSaveDocumentAs:
         _install([FakeProject("CAM")], active=doc)
         out = _payload(dm.handler(name="X", project="CAM"))
         assert out["document_id"] is None
-        # the give-up branch is reached by EXHAUSTING the burst, not by skipping it: a pump that
+        # the give-up branch is reached by EXHAUSTING the wait, not by skipping it: a wait that
         # stopped early (or never ran) would report the same null having waited for nothing.
-        assert pump_clock["calls"] == dm._URN_POLL_TRIES
+        assert pump_clock["virtual_seconds"] >= dm._URN_WAIT_S
+        # and how long it waited is ON THE WIRE, in the payload and named in the note - that number
+        # is what lets a caller drop a dwell of its own instead of guessing one.
+        assert out["urn_wait_seconds"] == dm._URN_WAIT_S
+        assert str(dm._URN_WAIT_S) in out["note"] and "LOCAL path" in out["note"]
 
-    def test_the_lineage_pump_is_bounded_to_a_few_seconds(self, _install):
-        # The burst blocks Fusion's main thread, so its total budget is the number that matters.
-        budget = dm._URN_POLL_TRIES * dm._URN_POLL_SLEEP
-        assert 0 < budget <= 5.0, f"the post-saveAs URN pump would block the call for {budget:g}s"
+    def test_the_urn_wait_covers_the_measured_settle_window(self, _install):
+        # The wait blocks Fusion's main thread, so it stays bounded - but it must cover the window a
+        # cloud read is measured to trail the cloud in, or a caller still needs a dwell of its own.
+        assert dm._URN_WAIT_S == float(dm._doc_common.VERSION_LAG_WINDOW_S)
+        assert 0 < dm._URN_WAIT_S <= 30.0, f"the URN wait would block the call for {dm._URN_WAIT_S:g}s"
 
     def test_a_settled_urn_stops_the_pump_instead_of_running_it_out(self, pump_clock, _install):
-        # The other side of the boundary: the first read already answers a lineage urn, so the burst
-        # must not run at all - the tries are a give-up bound, not a fixed wait.
+        # The other side of the boundary: the first read already answers a lineage urn, so the wait
+        # must not run at all - the bound is a give-up bound, not a fixed wait.
         _install([FakeProject("CAM")], active=FakeSaveAsDoc(new_urn="urn:adsk.lineage:immediate"))
         out = _payload(dm.handler(name="X", project="CAM"))
         assert out["document_id"] == "urn:adsk.lineage:immediate"
-        assert pump_clock["calls"] == 0
+        assert pump_clock["calls"] == 0 and out["urn_wait_seconds"] == 0.0
 
     def test_document_id_surfaced_when_urn(self, _install):
         doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:abc")
@@ -265,6 +292,32 @@ class TestSaveDocumentAs:
         out = _payload(dm.handler(name="X", project="CAM"))
         assert out["saved"] is True and out["recovered_from_error"] is True
         assert out["document_id"] == "urn:adsk.lineage:settled"
+
+    def test_the_recovery_reports_the_seconds_it_spent_waiting(self, pump_clock, _install):
+        # The recovery read pumps for the urn like the success path does, so it owes the same
+        # number: without it a call that spent seconds on the wait looks instant to its caller,
+        # against a wire that says urn_wait_seconds is how long this call waited.
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(raise_on_save=True, land_on_save=False)
+        doc.dataFile = _LateUrnFile("X", "urn:adsk.lineage:late", local_reads=8)
+        _install([proj], active=doc)
+        out = _payload(dm.handler(name="X", project="CAM"))
+        assert out["document_id"] == "urn:adsk.lineage:late"
+        # eight local reads then the urn: eight pumps of _URN_POLL_SLEEP, and the payload says so
+        assert pump_clock["calls"] == 8
+        assert out["urn_wait_seconds"] == round(8 * dm._URN_POLL_SLEEP, 1)
+
+    def test_a_declined_save_refuses_briefly_instead_of_waiting_out_the_window(self, pump_clock,
+                                                                               _install):
+        # Fusion DECLINED (saveAs false) and the destination folder holds nothing new, so there is
+        # no commit to settle - spending the whole settle window here would make every honest
+        # refusal take that long, on a tool that is exempt from the server's call timeout.
+        proj = FakeProject("CAM")
+        _install([proj], active=FakeSaveAsDoc(save_ok=False, land_on_save=False))
+        res = dm.handler(name="X", project="CAM")
+        assert res["isError"] is True and "declined to save" in res["message"]
+        assert pump_clock["virtual_seconds"] <= dm._DECLINED_PROBE_S
+        assert dm._DECLINED_PROBE_S < dm._URN_WAIT_S
 
     def test_saveas_error_does_not_false_recover_a_duplicate_fork(self, _install):
         # A pre-existing same-name file (allow_duplicate_name) means a file being 'present' after the
@@ -524,8 +577,8 @@ class _LaggingFolders(_CloudArray):
 class TestFolderResolveEventual:
     def test_retries_on_self_contradiction(self, _install):
         # first resolve misses; the child IS in the (now-fresh) sibling list -> ONE retry resolves it.
-        root = _FlakyRoot("Pipeline-v1", empty_calls=1)
-        target, missing, retried = dm._resolve_folder_eventual(root, ["Pipeline-v1"])
+        root = _FlakyRoot("Stage-v1", empty_calls=1)
+        target, missing, retried = dm._resolve_folder_eventual(root, ["Stage-v1"])
         assert retried is True
         assert missing is None
         assert target is root._child
@@ -540,19 +593,19 @@ class TestFolderResolveEventual:
 
     def test_first_read_success_is_not_retried(self, _install):
         root = FakeDataFolder("Root", is_root=True)
-        _add_child(root, "Pipeline-v1")
-        target, missing, retried = dm._resolve_folder_eventual(root, ["Pipeline-v1"])
+        _add_child(root, "Stage-v1")
+        target, missing, retried = dm._resolve_folder_eventual(root, ["Stage-v1"])
         assert target is not None and retried is False   # resolved on the first read, no retry
 
     def test_saveas_recovers_and_notes_eventual_consistency(self, _install):
         doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:x")
         proj = FakeProject("CAM")
-        proj.rootFolder = _FlakyRoot("Pipeline-v1", empty_calls=1)
+        proj.rootFolder = _FlakyRoot("Stage-v1", empty_calls=1)
         _install([proj], active=doc)
         out = _payload(dm.handler(
-            name="P5", project="CAM", folder="Pipeline-v1"))
+            name="P5", project="CAM", folder="Stage-v1"))
         assert out.get("folder_resolve_retried") is True
         assert "eventual-consistency" in out["note"]
         # it actually saved INTO the recovered folder
         _, target, _, _ = doc.saveas_args
-        assert target.name == "Pipeline-v1"
+        assert target.name == "Stage-v1"

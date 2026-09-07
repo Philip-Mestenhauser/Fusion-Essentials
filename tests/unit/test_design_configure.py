@@ -19,8 +19,9 @@ from types import SimpleNamespace
 import pytest
 
 import live_api_facts as _api_facts
-from conftest import (FakeDataFile, FakeFeature, FakeOccurrence, FakeTimeline, FakeTimelineObject,
-                      MakeComp, MakeDesign, _NamedCollection, load_tool)
+from conftest import (FakeDataFile, FakeDataFolder, FakeDataProject, FakeFeature, FakeOccurrence,
+                      FakeTimeline, FakeTimelineObject, MakeComp, MakeDesign, _NamedCollection,
+                      load_tool)
 
 dc = load_tool("design_configure")
 
@@ -170,8 +171,10 @@ class _AppearanceTable:
     def columns(self):
         return self
     def add(self, body):
-        # adding the body column creates the first theme row (the live gotcha)
-        if self.rows.count == 0:
+        # adding the body column creates the first theme row (the live gotcha). The emptiness check
+        # reads the fake's own list, not the counted property, so a test that breaks the count read
+        # still gets the platform's seeded row.
+        if not self.rows._items:
             self.rows.add("Theme 1")
         col = _Col(ConfigurationAppearanceCell, kind="appearance")
         self._columns_added.append(col)
@@ -524,6 +527,14 @@ class TestCreate:
         # the success note steers the user to save+reopen to see it in the UI
         assert "reopen" in out["note"].lower()
 
+    def test_the_note_says_the_conversion_leaves_the_old_lineage_behind(self, monkeypatch):
+        # MEASURED: the pre-conversion lineage is relocated into a Fusion-managed project and
+        # deleting this design does NOT remove it - a caller cleaning up its own scratch files has
+        # no way to learn that from any read this tool offers, so the conversion says it here.
+        _install(monkeypatch, _Design(configured=False), saved=True)
+        note = _payload(dc.handler(action="create"))["note"]
+        assert "System Project - CONFIG" in note and "leaves behind" in note
+
 
 # ── add_configuration (row) ─────────────────────────────────────────────────
 
@@ -692,6 +703,40 @@ class TestAppearanceTheme:
             return None
         assert appearance_for(ref_default) is d._appearances["Red"]
         assert appearance_for(ref_small) is d._appearances["Blue"]
+
+    def test_exactly_one_theme_row_per_named_configuration_is_minted(self, monkeypatch):
+        # The bound stops AT the number wanted, not one past it: a row minted beyond that is an
+        # orphan no configuration references, and the call still reports success over it.
+        from types import SimpleNamespace as _NS
+        d = _install(monkeypatch, _Design(configured=True, bodies={"Body1": FakeFeature("Body1")},
+                                          appearances={"Red": _NS(name="Red"),
+                                                       "Blue": _NS(name="Blue")}))
+        monkeypatch.setattr(dc._BODY, "resolve", lambda raw: (d._bodies.get(raw), None))
+        monkeypatch.setattr(dc, "_resolve_appearance", lambda design, name: d._appearances.get(name))
+        dc.handler(action="add_configuration", name="Small")
+        _payload(dc.handler(action="set_appearance", body="Body1",
+                            appearances={"Default": "Red", "Small": "Blue"}))
+        appt = d.configurationTopTable.appearanceTable
+        names = [appt.rows.item(i).name for i in range(appt.rows.count)]
+        assert names == ["Theme 1", "Theme 2"], names
+
+    def test_theme_rows_that_never_read_error_instead_of_adding_forever(self, monkeypatch):
+        # The theme rows are added until the table holds one per configuration - so the count is
+        # what ENDS it. A count that will not read answers 'no rows' to a guarded read, and this
+        # tool is exempt from the server's call timeout, so an unbounded add loop returns to nobody.
+        from types import SimpleNamespace as _NS
+        d = _install(monkeypatch, _Design(configured=True, bodies={"Body1": FakeFeature("Body1")},
+                                          appearances={"Red": _NS(name="Red"),
+                                                       "Blue": _NS(name="Blue")}))
+        monkeypatch.setattr(dc._BODY, "resolve", lambda raw: (d._bodies.get(raw), None))
+        monkeypatch.setattr(dc, "_resolve_appearance", lambda design, name: d._appearances.get(name))
+        dc.handler(action="add_configuration", name="Small")
+        d.configurationTopTable.appearanceTable.rows._raises = "3 : theme row count unreadable"
+        res = dc.handler(action="set_appearance", body="Body1",
+                         appearances={"Default": "Red", "Small": "Blue"})
+        # it RETURNS, and the refusal names the count it reached against the count it needed
+        assert res["isError"] is True
+        assert "None theme rows" in res["message"] and "2 this call needs" in res["message"]
 
 
 # ── add_material: per-configuration physical material (the material theme table) ─────────────
@@ -1020,7 +1065,8 @@ class TestAddInsert:
         # an assembly design with two configs, and a configured part DataFile resolvable by name
         d = _install(monkeypatch, _Design(configured=True,
                              datafiles={"Bracket": _FakeDataFile("Bracket", ["Medium", "Small", "Large"])}))
-        monkeypatch.setattr(dc, "_resolve_datafile", lambda design, name: d._datafiles.get(name))
+        monkeypatch.setattr(dc, "_resolve_datafile",
+                            lambda design, name: (d._datafiles.get(name), None))
         dc.handler(action="add_configuration", name="HeavyDuty")   # rows: Default, HeavyDuty
         return d
 
@@ -1068,6 +1114,16 @@ class TestAddInsert:
         # no insert_config given -> inserts the part's first row (Medium)
         inserted_row, _ = d.rootComponent.occurrences.inserted[0]
         assert inserted_row.name == "Medium"
+
+    def test_the_insert_names_the_read_that_proves_it_landed(self, monkeypatch):
+        # MEASURED: this insert commits past the server's call timeout - the occurrence, the column
+        # and both cells landed while the caller was told the handler was still running. The tool is
+        # exempt from that timeout, and the note names the read for a caller who never sees it.
+        self._setup(monkeypatch)
+        out = _payload(dc.handler(action="add_insert", insert_part="Bracket",
+                                  insert_config="Medium", insert_map={"Default": "Medium"}))
+        assert "design_get(include=['configurations'])" in out["note"]
+        assert dc.item.enforce_timeout is False
 
 
 # ── activate: switch a configuration + surface a rebuild that breaks the timeline ─────────────
@@ -1699,7 +1755,8 @@ class TestAddInsertRefusals:
     def _setup(self, monkeypatch, datafile=None):
         part = datafile if datafile is not None else _FakeDataFile("Bracket", ["Medium", "Large"])
         d = _install(monkeypatch, _Design(configured=True, datafiles={"Bracket": part}))
-        monkeypatch.setattr(dc, "_resolve_datafile", lambda design, name: d._datafiles.get(name))
+        monkeypatch.setattr(dc, "_resolve_datafile",
+                            lambda design, name: (d._datafiles.get(name), None))
         return d
 
     def test_a_missing_insert_part_is_refused(self, monkeypatch):
@@ -1761,24 +1818,57 @@ class TestAddInsertRefusals:
         assert "still selects part configuration 'Medium'" in res["message"]
 
 
-# ── _resolve_datafile: urn first, then a name in the active project ────────
+# ── _resolve_datafile: urn first, then a name in the active document's project ────────
 
 class TestDataFileResolution:
+    """Data.activeProject RAISES on this build, so a by-name insert resolves through the active
+    document's own project - and says which read failed when it cannot."""
+
+    def _no_urn(self, monkeypatch):
+        monkeypatch.setattr(dc._data_common, "_resolve_data_file", lambda ref: (None, None, []))
+
+    def _project_holding(self, monkeypatch, *files, problem=None):
+        root = FakeDataFolder("Root", is_root=True, files=list(files))
+        proj = FakeDataProject("Home", project_id="p-1", root_folder=root)
+        monkeypatch.setattr(dc._data_common, "active_project",
+                            lambda: ((None, problem) if problem else (proj, None)))
+        return proj
+
     def test_a_urn_resolves_through_the_shared_decoder(self, monkeypatch):
         # the shared decoder also base64url-decodes the lineage segment of a pasted share URL, so
         # the urn path never re-rolls a startswith('urn:') test
         wanted = _FakeDataFile("Bracket", ["Medium"])
         monkeypatch.setattr(dc._data_common, "_resolve_data_file",
                             lambda ref: (wanted, ref, [ref]))
-        assert dc._resolve_datafile(_Design(), "urn:adsk.wipprod:dm.lineage:abc") is wanted
+        assert dc._resolve_datafile(_Design(), "urn:adsk.wipprod:dm.lineage:abc") == (wanted, None)
 
-    def test_a_name_resolves_against_the_active_projects_root_folder(self, monkeypatch):
+    def test_a_name_resolves_in_the_active_documents_own_project(self, monkeypatch):
+        self._no_urn(monkeypatch)
         wanted = _FakeDataFile("Bracket", ["Medium"])
-        others = [_FakeDataFile("Plate", ["Medium"]), wanted]
-        monkeypatch.setattr(dc._data_common, "_resolve_data_file", lambda ref: (None, None, []))
-        monkeypatch.setattr(dc, "app", SimpleNamespace(data=SimpleNamespace(
-            activeProject=SimpleNamespace(rootFolder=SimpleNamespace(
-                dataFiles=SimpleNamespace(count=2, item=lambda i: others[i]))))))
-        d = _Design()
-        assert dc._resolve_datafile(d, "Bracket") is wanted
-        assert dc._resolve_datafile(d, "Missing") is None
+        self._project_holding(monkeypatch, _FakeDataFile("Plate", ["Medium"]), wanted)
+        assert dc._resolve_datafile(_Design(), "Bracket") == (wanted, None)
+        assert dc._resolve_datafile(_Design(), "Missing") == (None, None)
+
+    def test_a_project_that_cannot_be_found_is_the_reported_reason(self, monkeypatch):
+        self._no_urn(monkeypatch)
+        self._project_holding(monkeypatch, problem="this hub lists no project named 'Home'.")
+        df, problem = dc._resolve_datafile(_Design(), "Bracket")
+        assert df is None and problem == "this hub lists no project named 'Home'."
+
+    def test_a_name_two_files_in_the_project_share_is_refused(self, monkeypatch):
+        # two saveAs calls under one name make two DISTINCT lineages, so the shared resolver
+        # refuses rather than inserting whichever comes first.
+        self._no_urn(monkeypatch)
+        self._project_holding(monkeypatch, _FakeDataFile("Bracket", ["Medium"]),
+                              _FakeDataFile("Bracket", ["Large"]))
+        df, problem = dc._resolve_datafile(_Design(), "Bracket")
+        assert df is None and "names 2 files" in problem
+
+    def test_the_reason_reaches_the_add_insert_refusal(self, monkeypatch):
+        _install(monkeypatch, _Design(configured=True))
+        self._no_urn(monkeypatch)
+        self._project_holding(monkeypatch, problem="the active document reports no cloud project.")
+        res = dc.handler(action="add_insert", insert_part="Bracket")
+        assert res["isError"] is True
+        assert "the active document reports no cloud project." in res["message"]
+        assert "Could not find a configured part 'Bracket'" in res["message"]

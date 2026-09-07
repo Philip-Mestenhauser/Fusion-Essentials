@@ -58,7 +58,7 @@ def _cloud_file(parent, project, cls=FakeDataFile, **kwargs):
 
 
 def _project(root):
-    return FakeDataProject("MCP Test Project", project_id="proj-1", root_folder=root)
+    return FakeDataProject("Sample Project", project_id="proj-1", root_folder=root)
 
 
 @pytest.fixture
@@ -77,7 +77,7 @@ def _tree(root_folders_raise=None):
     fixtures = _folder("Fixtures")
     parts = _folder("Parts", subs=[fixtures])
     docs = _folder("Docs")
-    root = _folder("MCP Test Project", subs=[docs, parts], is_root=True,
+    root = _folder("Sample Project", subs=[docs, parts], is_root=True,
                    folders_raise=root_folders_raise)
     return root, docs, parts, fixtures
 
@@ -220,7 +220,7 @@ class TestMoveVerification:
         # missing values must not pass as a match.
         target = _folder("Fixtures")
         target.id = None
-        root = _folder("MCP Test Project", subs=[target], is_root=True)
+        root = _folder("Sample Project", subs=[target], is_root=True)
         df = _cloud_file(_folder("Docs"), _project(root))
         wired(df)
         original_move = df.move

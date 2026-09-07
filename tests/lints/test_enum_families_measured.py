@@ -101,12 +101,7 @@ def _consumed_behavior_keys(shared_fakes_only=False):
 
 
 # Flags a shared fake deliberately does not read yet. Shrink-only; each names why.
-_UNCONSUMED_OK = {
-    "viewport_camera_returns_copy": (
-        "the shared Viewport fake models a shared MUTABLE camera on purpose (its docstring says "
-        "so) because seven view test files assert identity on it; reading the flag means "
-        "switching them to copy-on-read, a migration of its own"),
-}
+_UNCONSUMED_OK = {}
 
 
 # Emitted keys the generated facts file does not carry YET - each is a measurement-row rename or

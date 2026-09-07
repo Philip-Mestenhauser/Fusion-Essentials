@@ -5,33 +5,35 @@
 into the post's parameters plus its motion rows - then judges WHERE the toolpath cut.
 
 Numbers are the dump's own, unconverted; DumpFile.units() hands back the unit rows it states.
-read_dump/parse_dump build a DumpFile; envelope, floor and tilt are the three verdicts over its
-rows, each returning (ok, facts). Pure Python - no adsk, so an offline test reads a posted file."""
+read_dump/parse_dump build a DumpFile; envelope, floor, tilt and axis_band are the four verdicts
+over its rows, each returning (ok, facts). Pure Python - no adsk, so a test reads a posted file."""
 
 import math
 import re
 
 MAP_BLURB = ("the dump-post reader: read_dump/parse_dump turn a dump.cps .dmp into parameters and "
-             "motion rows; envelope/floor/tilt are the three (ok, facts) verdicts over those rows.")
+             "motion rows; envelope/floor/tilt/axis_band are the (ok, facts) verdicts over those "
+             "rows.")
 
 # One post event per line: "<n>: onName(args)". The dump also writes unnumbered state lines
 # (currentSection.*, STATE, tool.holder[i]) between the events - this reader takes the numbered
 # lines only, and names every event kind it does not read in DumpFile.skipped.
 _EVENT = re.compile(r"^\s*(-?\d+):\s*([A-Za-z0-9_]+)\((.*)\)\s*$")
 
-# wire event -> (row kind, where the unit tool axis starts or None, where the feed sits or None),
-# for the shapes posted dumps measured: onLinear5D(x, y, z, i, j, k, feed, _) - its eighth argument
-# unread - onRapid5D(x, y, z, i, j, k), onLinear(x, y, z, feed) and onRapid(x, y, z).
+# wire event -> (kind, xyz start, tool-axis start or None, feed index or None, arc-centre start or
+# None), measured: onLinear5D(x, y, z, i, j, k, feed, _) eighth argument unread, onRapid5D, onLinear,
+# onRapid, onCircular(clockwise, cx, cy, cz, x, y, z, feed) direction flag unread.
 _MOTION = {
-    "onRapid5D": ("rapid5d", 3, None),
-    "onLinear5D": ("linear5d", 3, 6),
-    "onRapid": ("rapid", None, None),
-    "onLinear": ("linear", None, 3),
+    "onRapid5D": ("rapid5d", 0, 3, None, None),
+    "onLinear5D": ("linear5d", 0, 3, 6, None),
+    "onRapid": ("rapid", 0, None, None, None),
+    "onLinear": ("linear", 0, None, 3, None),
+    "onCircular": ("circular", 4, None, 7, 1),
 }
 
 # The rows envelope and floor judge: a cut has to stay inside the stock and above the floor, while
-# a rapid is free to sit above both.
-CUTTING_KINDS = ("linear5d", "linear")
+# a rapid is free to sit above both. An arc is a cut.
+CUTTING_KINDS = ("linear5d", "linear", "circular")
 
 
 def _split_args(text):
@@ -72,18 +74,21 @@ def _num(text):
 
 
 def _row(spec, args):
-    """One motion row, or None where the position or the tool axis did not read as numbers."""
-    kind, axis_at, feed_at = spec
-    need = 3 if axis_at is None else axis_at + 3
-    if len(args) < need:
+    """One motion row, or None where the position, tool axis or arc centre did not read as
+    numbers."""
+    kind, point_at, axis_at, feed_at, centre_at = spec
+    starts = [n for n in (point_at, axis_at, centre_at) if n is not None]
+    if len(args) < max(starts) + 3:
         return None
-    values = [_num(a) for a in args[:need]]
-    if None in values:
-        return None
-    feed = _num(args[feed_at]) if feed_at is not None and len(args) > feed_at else None
-    row = {"kind": kind, "x": values[0], "y": values[1], "z": values[2], "feed": feed}
-    if axis_at is not None:
-        row.update({key: values[axis_at + n] for n, key in enumerate("ijk")})
+    row = {"kind": kind}
+    for keys, start in (("xyz", point_at), ("ijk", axis_at), (("cx", "cy", "cz"), centre_at)):
+        if start is None:
+            continue
+        values = [_num(a) for a in args[start:start + 3]]
+        if None in values:
+            return None
+        row.update(dict(zip(keys, values)))
+    row["feed"] = _num(args[feed_at]) if feed_at is not None and len(args) > feed_at else None
     return row
 
 
@@ -165,7 +170,8 @@ def _axis_angle(row):
 
 def envelope(dump, tol=0.0, up_tol=None):
     """Verdict: every cut sits inside the stock box the dump states, up_tol (default tol) the slack
-    above its TOP face alone - all in the dump's units."""
+    above its TOP face alone - all in the dump's units. An arc is judged at its ENDPOINT, so an
+    excursion between two endpoints is not seen."""
     box = dump.box("stock")
     up_tol = tol if up_tol is None else up_tol
     rows = [r for r in dump.rows if r["kind"] in CUTTING_KINDS]
@@ -176,7 +182,8 @@ def envelope(dump, tol=0.0, up_tol=None):
 
 
 def floor(dump, floor_z, tol=0.0):
-    """Verdict: the lowest cutting Z is at or above floor_z - floor_z and tol in the dump's units."""
+    """Verdict: the lowest cutting Z is at or above floor_z - floor_z and tol in the dump's units.
+    An arc is judged at its ENDPOINT, so a dip between two endpoints is not seen."""
     depths = [r["z"] for r in dump.rows if r["kind"] in CUTTING_KINDS]
     lowest = min(depths) if depths else None
     facts = {"floor_z": floor_z, "tol": tol, "cutting_rows": len(depths), "lowest_z": lowest}
@@ -194,3 +201,15 @@ def tilt(dump, limit_deg=90.0):
              "unreadable_axes": len(angles) - len(measured),
              "max_angle_deg": max(measured) if measured else None}
     return not over and len(measured) == len(angles), facts
+
+
+def axis_band(dump, target_deg, tol):
+    """Verdict: every row states a tool axis, and every one lies within tol of target_deg off +Z."""
+    flat = [r for r in dump.rows if not _has_axis(r)]
+    angles = [_axis_angle(r) for r in dump.rows if _has_axis(r)]
+    measured = [a for a in angles if a is not None]
+    facts = {"target_deg": target_deg, "tol": tol, "axis_rows": len(angles),
+             "unreadable_axes": len(angles) - len(measured), "rows_without_an_axis": len(flat),
+             "angle_span_deg": (min(measured), max(measured)) if measured else None}
+    return (bool(angles) and not flat and len(measured) == len(angles)
+            and all(abs(a - target_deg) <= tol for a in measured)), facts

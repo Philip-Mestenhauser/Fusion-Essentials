@@ -8,6 +8,8 @@ which reads the CLOUD data model. include=['versions'] and include=['xref_tree']
 slices (version history / referenced-component freshness rollup).
 """
 
+import time
+
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
@@ -16,6 +18,7 @@ from ..mcp_primitives.registry import register
 from ._common import ok, error, safe, terse, counted, design, all_components, iter_collection
 from . import _common
 from . import _data_read
+from . import _doc_common
 from . import _outputs
 
 app = adsk.core.Application.get()
@@ -185,6 +188,14 @@ def _milestone_names(df, max_walk):
     return names, True, limit >= count
 
 
+def _tip_age_seconds(rows):
+    """Seconds since the newest version's dateCreated, or None when that date did not read."""
+    newest = rows[0]["date_created"] if rows else None
+    if not isinstance(newest, (int, float)) or isinstance(newest, bool):
+        return None
+    return max(0, int(time.time() - newest))
+
+
 def _slice_versions(versions_max=_VERSIONS_CAP):
     """CLOUD version history of the active document's DataFile, newest-first, bounded by versions_max
     (truncated flag). The active DataFile is one version and df.versions holds the others, so the two
@@ -245,9 +256,15 @@ def _slice_versions(versions_max=_VERSIONS_CAP):
     rows = sorted(seen.values(), key=lambda r: r["version_number"], reverse=True) # newest-first
     truncated = len(rows) > cap
     history_readable = total is not None
+    age = _tip_age_seconds(rows)
     return {
         "available": True,
         "latest_version_number": latest,
+        # the newest row's own age, and the verdict derived from it: a tip that landed inside the
+        # lag window is where a number here can still be trailing the cloud. Both are null when the
+        # date did not read - an unread age is UNKNOWN, and false would call these numbers settled.
+        "tip_age_seconds": age,
+        "numbers_may_lag": None if age is None else age < _doc_common.VERSION_LAG_WINDOW_S,
         "open_version_number": open_vnum,
         "version_count": len(rows),
         # the readable/complete pair: history_complete is True ONLY when the versions collection
@@ -264,12 +281,13 @@ def _slice_versions(versions_max=_VERSIONS_CAP):
         "milestone_walk_truncated": not walked_all,
         "versions": rows[:cap],
         "truncated": truncated,
-        "note": ("Version metadata LAGS a just-completed save by up to ~20 s - re-read before "
-                 "concluding. A row the Milestones collection lists while its flag still reads false "
-                 "is is_milestone=true with flag_lagging=true. is_milestone null, "
-                 "milestone_names_readable=false and milestone_walk_truncated=true each mean "
-                 "UNKNOWN, never 'not a milestone'; only history_complete=true says these rows are "
-                 "the lineage."),
+        "note": (f"numbers_may_lag true: the tip is under {_doc_common.VERSION_LAG_WINDOW_S} s old "
+                 "and these numbers may trail the cloud - re-read; null: its date did not read. "
+                 "A row the collection lists whose "
+                 "flag reads false is is_milestone=true + flag_lagging=true. is_milestone null, "
+                 "milestone_names_readable=false and milestone_walk_truncated=true mean UNKNOWN, "
+                 "never 'not a milestone'; only history_complete=true says these rows are the "
+                 "lineage."),
     }
 
 

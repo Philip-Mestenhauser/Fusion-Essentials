@@ -9,7 +9,7 @@ import types
 import pytest
 
 import adsk.fusion
-from conftest import (BRepBody, FakeApplication, FakeFusionDocument, FakeProducts,
+from conftest import (BRepBody, FakeApplication, FakeDocuments, FakeFusionDocument, FakeProducts,
                       FakeUserInterface, MakeComp, _NamedCollection, error_message, load_tool,
                       make_design, make_occurrence, payload)
 
@@ -42,6 +42,9 @@ def _fake_manager(created=(), dxf_results=(), fail=None, options=_ABSENT, new_do
 
     def import_to_new_document(_options):
         calls["new_documents"] += 1
+        # the real manager activates Design BEFORE it can fail, which is why on_import fires first
+        if on_import is not None:
+            on_import()
         if fail is not None:
             raise fail
         return new_document
@@ -62,6 +65,38 @@ def _fake_manager(created=(), dxf_results=(), fail=None, options=_ABSENT, new_do
 def _new_doc(design, name="Imported v1"):
     """A Document whose Design product is ``design`` - what importToNewDocument returns."""
     return FakeFusionDocument(name=name, products=FakeProducts(design=design))
+
+
+class _RewrappedDocument(FakeFusionDocument):
+    """One document as the live session hands it back: every read is a DISTINCT wrapper equal to
+    its siblings. MEASURED - documents.item(0) twice gave `a == b` True and `a is b` False, so a
+    walk matching on IDENTITY sees every document as new."""
+
+    def __init__(self, identity, **kw):
+        super().__init__(**kw)
+        self.identity = identity
+
+    def wrap(self):
+        """A second wrapper for the same document - a new object, equal to this one, sharing its
+        close record so a close through either is visible on both."""
+        twin = _RewrappedDocument(self.identity, name=self._name, close_ok=self._close_ok)
+        twin._closes = self._closes
+        return twin
+
+    def __eq__(self, other):
+        return getattr(other, "identity", _ABSENT) == self.identity
+
+    def __hash__(self):
+        return hash(self.identity)
+
+
+class _RewrappingDocuments(FakeDocuments):
+    """app.documents answering the way the live one does: item(i) hands back a FRESH wrapper each
+    read rather than the object it stored."""
+
+    def item(self, i):
+        doc = super().item(i)
+        return doc.wrap() if isinstance(doc, _RewrappedDocument) else doc
 
 
 @pytest.fixture
@@ -526,15 +561,102 @@ class TestNewDocument:
         assert "no Design product" in msg
 
     def test_an_empty_new_document_is_an_error(self, wire, cad):
-        wire(new_document=_new_doc(make_design()))
+        # the document is HELD on this path, so it is closed here rather than described to the
+        # caller - the address is only quoted when the close itself refuses.
+        empty = _new_doc(make_design())
+        wire(new_document=empty)
         msg = error_message(mod.handler(file_path=cad("part.step"), new_document=True))
         assert "no body and no occurrence" in msg
-        assert "doc_close" in msg
+        assert "was closed again" in msg
+        assert empty._closes == [False]
 
     def test_a_raising_import_is_an_error(self, wire, cad):
         wire(fail=RuntimeError("unreadable archive"))
         msg = error_message(mod.handler(file_path=cad("part.f3d"), new_document=True))
         assert "importToNewDocument raised" in msg
+
+
+class TestTheDocumentAFailedNewDocumentImportLeavesOpen:
+    """A FAILED importToNewDocument leaves an empty untitled document open and ACTIVE while the
+    error names none of it. The session list is read on both sides of the call, so the ONE document
+    that appeared is closed again - or its open:N address is named when the close refuses."""
+
+    def _leaking_import(self, wire, cad, close_ok=True, **manager_kwargs):
+        """Wire an import whose manager mints a document into the session list, then fails.
+        Returns (the pre-existing document, the minted one, the error message)."""
+        home = FakeFusionDocument(name="Home")
+        leaked = FakeFusionDocument(name="Untitled", close_ok=close_ok)
+        docs = FakeDocuments([home])
+        wire(on_import=lambda: docs._items.append(leaked), **manager_kwargs)
+        mod.app.documents = docs
+        return home, leaked, error_message(mod.handler(file_path=cad("part.step"),
+                                                       new_document=True))
+
+    def test_a_raise_that_left_a_document_open_closes_it_and_says_so(self, wire, cad):
+        home, leaked, msg = self._leaking_import(
+            wire, cad, fail=RuntimeError("2 : InternalValidationError : isSuccessfullyOpened"))
+        assert "importToNewDocument raised" in msg          # the import failure still leads
+        assert "empty document 'Untitled' this call opened was closed again" in msg
+        assert leaked._closes == [False]                    # discarded, never saved
+        assert home._closes == []                           # the document already open is untouched
+
+    def test_a_leaked_document_that_will_not_close_is_named_by_its_open_index(self, wire, cad):
+        _home, leaked, msg = self._leaking_import(
+            wire, cad, close_ok=False, fail=RuntimeError("unreadable archive"))
+        assert "open:1" in msg and "doc_close(name='open:1')" in msg
+        assert leaked._closes == [False]                    # the close was attempted, and refused
+
+    def test_a_failure_that_opened_nothing_claims_no_document(self, wire, cad):
+        # the session list is unchanged, so there is no newcomer to close - and closing whatever
+        # else is open would take a document the caller owns.
+        home = FakeFusionDocument(name="Home")
+        docs = FakeDocuments([home])
+        wire(fail=RuntimeError("bad STEP entity"))
+        mod.app.documents = docs
+        msg = error_message(mod.handler(file_path=cad("part.step"), new_document=True))
+        assert "importToNewDocument raised" in msg
+        assert "closed again" not in msg and "open:" not in msg
+        assert home._closes == []
+
+    def test_the_newcomer_is_told_apart_by_equality_not_identity(self, wire, cad):
+        # the session re-wraps a Document per read, so the walk before and the walk after share NO
+        # objects. Matching on identity would call every document new and close none of them.
+        home = _RewrappedDocument("home", name="Home")
+        leaked = _RewrappedDocument("leaked", name="Untitled")
+        docs = _RewrappingDocuments([home])
+        wire(on_import=lambda: docs._items.append(leaked),
+             fail=RuntimeError("2 : InternalValidationError : isSuccessfullyOpened"))
+        mod.app.documents = docs
+        msg = error_message(mod.handler(file_path=cad("part.step"), new_document=True))
+        assert "empty document 'Untitled' this call opened was closed again" in msg
+        assert leaked._closes == [False]
+        assert home._closes == []
+
+    def test_two_new_documents_leave_the_choice_unmade(self, wire, cad):
+        # WHICH one this call opened is undecidable with two newcomers, and closing either could
+        # take a document another session opened - so nothing is closed and nothing is claimed.
+        home = FakeFusionDocument(name="Home")
+        first = FakeFusionDocument(name="Untitled")
+        second = FakeFusionDocument(name="Untitled")
+        docs = FakeDocuments([home])
+        wire(on_import=lambda: docs._items.extend([first, second]),
+             fail=RuntimeError("unreadable archive"))
+        mod.app.documents = docs
+        msg = error_message(mod.handler(file_path=cad("part.step"), new_document=True))
+        assert "importToNewDocument raised" in msg
+        assert "closed again" not in msg and "open:" not in msg
+        assert first._closes == [] and second._closes == [] and home._closes == []
+
+    def test_a_new_document_that_landed_nothing_is_closed_rather_than_left_in_front(self, wire, cad):
+        home = FakeFusionDocument(name="Home")
+        empty = _new_doc(make_design(), name="Empty v1")
+        docs = FakeDocuments([home])
+        wire(new_document=empty, on_import=lambda: docs._items.append(empty))
+        mod.app.documents = docs
+        msg = error_message(mod.handler(file_path=cad("part.step"), new_document=True))
+        assert "landed nothing" in msg
+        assert "was closed again" in msg and "Discard it with doc_close" not in msg
+        assert empty._closes == [False]
 
 
 class TestTheWorkspaceTheImportSwitchedAway:
@@ -551,6 +673,135 @@ class TestTheWorkspaceTheImportSwitchedAway:
             ui.switch_to("FusionSolidEnvironment")
 
         return wire(design=design, ui=ui, created=[BRepBody("Imported")], on_import=_side_effect)
+
+    def test_a_failed_import_puts_the_workspace_back_too(self, wire, cad):
+        # MEASURED: importToTarget2 activates Design and THEN raises, so an error path that just
+        # returns leaves a Manufacture session in Design with nothing said. The restore has to ride
+        # the error, not only the success.
+        ui = _FakeUI()
+        design = make_design()
+
+        def _fail_after_switching():
+            ui.switch_to("FusionSolidEnvironment")
+            raise RuntimeError("2 : InternalValidationError : pResult")
+
+        wire(design=design, ui=ui, created=[], on_import=_fail_after_switching)
+        msg = error_message(mod.handler(file_path=cad("part.step")))
+        assert "InternalValidationError" in msg
+        assert ui.activated == ["CAMEnvironment"]          # put back
+        assert ui.activeWorkspace.name == "Manufacture"
+        assert "view_switch_workspace" not in msg          # a clean restore says nothing extra
+
+    def test_a_failed_import_whose_restore_fails_names_it_in_the_error(self, wire, cad):
+        ui = _FakeUI(activate="lies")
+        design = make_design()
+
+        def _fail_after_switching():
+            ui.switch_to("FusionSolidEnvironment")
+            raise RuntimeError("2 : InternalValidationError : pResult")
+
+        wire(design=design, ui=ui, created=[], on_import=_fail_after_switching)
+        msg = error_message(mod.handler(file_path=cad("part.step")))
+        assert "InternalValidationError" in msg            # the import failure still leads
+        assert "left 'Design' active" in msg
+        assert "view_switch_workspace" in msg
+
+    # The remaining post-import error paths, one test each: every one of them returns AFTER
+    # importToTarget2 has already activated Design, so each has to put the workspace back too.
+
+    def _switching(self, ui, then_raise=None):
+        def _side_effect():
+            ui.switch_to("FusionSolidEnvironment")
+            if then_raise is not None:
+                raise then_raise
+        return _side_effect
+
+    def test_a_solid_import_that_landed_nothing_puts_the_workspace_back(self, wire, cad):
+        ui = _FakeUI()
+        wire(design=make_design(), ui=ui, created=[], on_import=self._switching(ui))
+        msg = error_message(mod.handler(file_path=cad("part.step")))
+        assert "nothing landed" in msg
+        assert ui.activated == ["CAMEnvironment"]
+        assert ui.activeWorkspace.name == "Manufacture"
+
+    def test_a_raising_dxf_import_puts_the_workspace_back(self, wire, cad):
+        ui = _FakeUI()
+        design = make_design(comp=MakeComp("Root", origin_planes=_origin_planes()))
+        wire(design=design, ui=ui, created=[],
+             on_import=self._switching(ui, RuntimeError("dxf blew up")))
+        msg = error_message(mod.handler(file_path=cad("plate.dxf")))
+        assert "importToTarget2 raised" in msg
+        assert ui.activated == ["CAMEnvironment"]
+
+    def test_a_dxf_import_that_landed_no_sketch_puts_the_workspace_back(self, wire, cad):
+        ui = _FakeUI()
+        design = make_design(comp=MakeComp("Root", origin_planes=_origin_planes()))
+        wire(design=design, ui=ui, created=[], on_import=self._switching(ui))
+        msg = error_message(mod.handler(file_path=cad("plate.dxf")))
+        assert "no sketch landed" in msg
+        assert ui.activated == ["CAMEnvironment"]
+
+    def test_a_raising_svg_import_puts_the_workspace_back(self, wire, cad):
+        ui = _FakeUI()
+        design = make_design(sketches=[_sketch("Logo")])
+        wire(design=design, ui=ui, created=[],
+             on_import=self._switching(ui, RuntimeError("path data is malformed")))
+        msg = error_message(mod.handler(file_path=cad("logo.svg"), sketch="Logo"))
+        assert "importToTarget2 raised" in msg
+        assert ui.activated == ["CAMEnvironment"]
+
+    def test_an_svg_import_that_gained_no_curve_puts_the_workspace_back(self, wire, cad):
+        ui = _FakeUI()
+        design = make_design(sketches=[_sketch("Logo")])
+        wire(design=design, ui=ui, created=[], on_import=self._switching(ui))
+        msg = error_message(mod.handler(file_path=cad("logo.svg"), sketch="Logo"))
+        assert "gained no" in msg
+        assert ui.activated == ["CAMEnvironment"]
+
+    # new_document=true: whether importToNewDocument switches the workspace is NOT MEASURED, so its
+    # four post-import error paths restore defensively - these drive the fake switching to prove the
+    # restore RUNS. A SUCCESSFUL one hands over a new document and keeps Design.
+
+    def test_a_raising_new_document_import_puts_the_workspace_back(self, wire, cad):
+        ui = _FakeUI()
+        wire(ui=ui, on_import=self._switching(ui),
+             fail=RuntimeError("2 : InternalValidationError : isSuccessfullyOpened"))
+        msg = error_message(mod.handler(file_path=cad("part.step"), new_document=True))
+        assert "importToNewDocument raised" in msg
+        assert ui.activated == ["CAMEnvironment"]
+        assert ui.activeWorkspace.name == "Manufacture"
+
+    def test_a_null_new_document_import_puts_the_workspace_back(self, wire, cad):
+        ui = _FakeUI()
+        wire(ui=ui, on_import=self._switching(ui), new_document=None)
+        msg = error_message(mod.handler(file_path=cad("part.step"), new_document=True))
+        assert "returned null" in msg
+        assert ui.activated == ["CAMEnvironment"]
+
+    def test_a_new_document_with_no_design_product_puts_the_workspace_back(self, wire, cad):
+        ui = _FakeUI()
+        wire(ui=ui, on_import=self._switching(ui), new_document=_new_doc(None, name="Empty v1"))
+        msg = error_message(mod.handler(file_path=cad("part.step"), new_document=True))
+        assert "no Design product" in msg
+        assert ui.activated == ["CAMEnvironment"]
+
+    def test_a_new_document_that_landed_nothing_puts_the_workspace_back(self, wire, cad):
+        ui = _FakeUI()
+        wire(ui=ui, on_import=self._switching(ui),
+             new_document=_new_doc(make_design(), name="Empty v1"))
+        msg = error_message(mod.handler(file_path=cad("part.step"), new_document=True))
+        assert "landed nothing" in msg
+        assert ui.activated == ["CAMEnvironment"]
+
+    def test_a_successful_new_document_import_keeps_design_active(self, wire, cad):
+        # the caller ASKED for a new document and Design is where it belongs - the restore is for
+        # the error paths, which hand over nothing.
+        ui = _FakeUI()
+        wire(ui=ui, on_import=self._switching(ui),
+             new_document=_new_doc(make_design(bodies=["Imported"]), name="Gearbox v1"))
+        payload(mod.handler(file_path=cad("part.step"), new_document=True))
+        assert ui.activated == []
+        assert ui.activeWorkspace.name == "Design"
 
     def test_a_restored_workspace_is_published_by_name(self, wire, cad):
         ui = _FakeUI()

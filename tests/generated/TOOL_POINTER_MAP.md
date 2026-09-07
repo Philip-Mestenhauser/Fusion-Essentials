@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 187  |  **description breadcrumbs:** 397  |  **note/error breadcrumbs:** 470
+**Tools:** 187  |  **description breadcrumbs:** 401  |  **note/error breadcrumbs:** 469
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -45,7 +45,7 @@ close orphans, factor duplicated guards into shared helpers.
 - `doc_open`  <- 24  (desc 7, note 17)
 - `assembly_get`  <- 23  (desc 10, note 13)
 - `sketch_create`  <- 23  (desc 8, note 15)
-- `model_inspect`  <- 19  (desc 3, note 16)
+- `model_inspect`  <- 20  (desc 4, note 16)
 
 ## The guidance surface (every note the agent can be told)
 
@@ -366,7 +366,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `cam_delete_machine`
 - Machine deleted from the Local machine library: its asset '
-- ' is gone from a re-walk of the library's own assets. That is the whole claim - no setup was read here, so this says nothing about a setup that already carries this machine; cam_get's default setup...
+- , is gone from a re-walk of the library's own assets. That is the whole claim - no setup was read here, so this says nothing about a setup that already carries this machine; cam_get's default setup...
 - Provide 'name' - the machine to delete, as cam_get(include=['machines']) lists it.
 - Provide 'confirm_name' - the machine's exact name again, as a safety confirmation. Machine deletion is not undoable from this server.
 - This tool deletes from the LOCAL library only (the machines this Fusion install ships with are not yours to remove), so nothing was deleted.
@@ -381,15 +381,13 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' if you really mean this machine.
 - Could not resolve the Local machine library location, so the machine's asset cannot be addressed. Nothing was deleted.
 - The walk hit its own bound, so this list is incomplete.
-- No asset in the Local machine library is named '
-- assets in the Local machine library (
-- ) - refusing to guess which one to delete. Remove the duplicate in Fusion's machine library first.
+- Local asset file names:
+- No asset in the Local machine library holds a machine named '
+- assets in the Local machine library hold a machine named '
+- ), and no ONE of them is filed as '
+- ' either - refusing to guess which to delete. Remove the duplicate in Fusion's machine library first.
 - The Local machine library walk hit its own bound before it finished, so '
 - ' cannot be shown to name only ONE asset - a duplicate past the bound would not have been seen. Nothing was deleted.
-- The Local library asset '
-- ' does not load a machine, so what it holds cannot be confirmed. Nothing was deleted.
-- ' holds the machine '
-- ' - refusing to delete an asset that is not the machine that was confirmed.
 - Fusion declined to delete '
 - ' from the Local machine library (deleteAsset returned false) - it is still there.
 - , so the delete could not be read back and is UNCONFIRMED. Re-read with cam_get(include=['machines']).
@@ -400,9 +398,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - deleteAsset returned true but the Local machine library still lists '
 - ' - the delete did not take. Re-read with cam_get(include=['machines']).
 - deleteAsset returned true and the asset is gone, but '
-- ' still resolves to the same machine through the query cam_edit_setup assigns by - the delete did not take.
+- ' still resolves to the same LOCAL machine through the query cam_edit_setup assigns by - the delete did not take.
 - ' from the Local machine library failed:
-- ' still resolves to a machine whose id cannot be read - neither can the deleted machine's, so nothing here tells them apart and the delete is UNCONFIRMED. Re-read with cam_get(include=['machines']).
+- ' still resolves to a LOCAL machine whose id cannot be read - neither can the deleted machine's, so nothing here tells them apart and the delete is UNCONFIRMED. Re-read with cam_get(include=['machi...
 
 ### `cam_delete_template`
 - Provide 'name' - the template to delete, as cam_get(include=['templates'], template_location='local') lists it.
@@ -458,7 +456,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide 'operation' - the CAM operation name to edit (see cam_get(include=['operations'])).
 - Provide 'parameters' - at least one name=value to set (e.g. {'tool_feedCutting': '3000'}) - or 'preset', a preset on this operation's tool, 'tool_index' (with 'tool_scope=document' or 'tool_library...
 - ' has no parameter(s):
-- . cam_get(include=['parameters'], operation=...) lists this operation's own parameter names; only a name it lists can be set.
+- . cam_get(include=['parameters'], operation=...) lists the rows Fusion SHOWS and counts the rest as hidden_count: a row behind a switch reads isEnabled false and is absent from that list, yet still...
 - parameter(s), each restored expression re-read.
 
 ### `cam_edit_setup`
@@ -783,7 +781,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - One file's record: metadata, version state and LINK state. Dates are UNIX epoch seconds with the UTC ISO string beside each. 'file_extension' is unreliable for a non-CAD upload - the file NAME carr...
 - Files in the project (each with its lineage URN + openable fusionWebURL). 'folder'=<path> scopes to one folder; include=['folders'] shows the folder tree instead; 'file'=<name|URN> reads ONE file's...
 - All hubs (is_active flags the current one). Switch with data_switch_hub - it CLOSES every open document. Then pass project=<name> to list files.
-- Folder tree of the project. Pass a 'folder' path + drop include=['folders'] to list that folder's FILES. (Cloud read - see 'truncated'.)
+- Folder tree under 'folder' (the whole project when none is given). Drop include=['folders'] to list a folder's FILES instead.
 - does not apply to the 'file' scope (it reads one file's record in full). Drop 'file' to use include, or drop include.
 
 ### `data_get_upload_status`
@@ -884,7 +882,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - The active design is not yet a configured design. Run action='create' first.
 - Save the document first (doc_save_as), THEN run create. Converting an unsaved document builds the table only in memory - it won't materialize as a configured design (no DataFile to carry it, and th...
 - createConfiguredDesign() returned no table.
-- Design converted to a configured design (one configuration so far). Add columns (add_parameter/add_suppress/add_visibility/set_appearance/add_material) and configurations (add_configuration). To se...
+- Design converted to a configured design (one configuration so far). Add configurations and columns with the other actions. To see it in the UI: SAVE, then REOPEN by the URN that save reports - the ...
 - Design is already a configured design; reusing its configuration table. Add configurations with action='add_configuration' and columns with add_parameter / add_suppress / add_visibility / set_appea...
 - Configuration switched + rebuilt. Pair with view_screenshot to view it, or design_get(include=['timeline']) / param_get to see what changed.
 - Provide 'name' - the configuration to activate (a configuration name or id).
@@ -929,6 +927,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Appearance map references unknown configurations:
 - This design has no appearance table.
 - appearanceTable.columns.add for '
+- The appearance table holds
+- theme rows after adding, not the
+- this call needs - one per configuration named in 'appearances'. Name fewer configurations, or add the theme rows in the UI first.
 - The appearance table has no theme column (parentTableColumn) to link configurations.
 - Appearance theme column added and configurations linked to theme rows. Switch configurations to see the color change (design_configure(action='activate', name=...)).
 - No appearance named '
@@ -958,7 +959,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' did not carry its material over - the material table is partially built; inspect it before retrying.
 - Provide 'insert_part' - the configured part to insert (lineage urn or its name in the active project).
 - Could not find a configured part '
-- ' (by urn or name in the active project). It must be saved in the SAME project as this assembly.
+- It must be saved in the SAME project as this assembly.
 - ' is not a configured design - use a normal insert for a non-configured part. (Only configured parts get an insert column.)
 - ' exposes no configuration rows.
 - insert_map references assembly configurations that don't exist:
@@ -1093,6 +1094,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No active design to export. Open or create a document first (see doc_new).
 - component(s) to separate
 - files. Each top-level occurrence is one file - ready to print/assemble individually.
+- takes no occurrence, so each file was written from that occurrence's COMPONENT.
 - top-level occurrence(s) exported to separate
 - produced NO file - see 'failed'.
 - ' not found. Pass a body/component NAME, an occurrence fullPathName (e.g. Bracket:2 - the precise way to pick one instance), or omit 'target' to export the whole design.
@@ -1109,7 +1111,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - format=dxf needs either 'dxf_sketch' (a sketch NAME) or 'dxf_face' (a find_geometry planar-face handle) to know what 2D geometry to write.
 
 ### `design_get`
-- . 'max_depth'/'component'/'tree_bodies' scope the tree; 'group'/'include_suppressed'/'timeline_params' the timeline; 'library'/'name_filter'/'max_results' the catalog; 'attribute_group' (required)/...
+- . 'max_depth'/'component'/'name_filter'/'max_results'/'tree_bodies'/'tree_handles' scope the tree; 'group'/'include_suppressed'/'timeline_params' the timeline; 'library'/'name_filter'/'max_results'...
 - Orientation slice. Pull deeper with include=
 - contents.occurrences_walk='unreadable': NEITHER root.allOccurrences nor the component.occurrences fallback enumerated, so the occurrence count is missing because it is UNKNOWN, not because the desi...
 - No active design. Open or create a document first (see doc_new).
@@ -1148,14 +1150,14 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide EITHER 'body' ('
 - ') OR 'occurrence' ('
 - ') - one Remove feature takes one item. Call the tool twice to remove two things.
-- Provide 'body' (a find_geometry handle or a body name) or 'occurrence' (a handle or fullPathName from design_get(include=['tree'])) - the item to remove.
+- Provide 'body' (a find_geometry handle or a body name) or 'occurrence' (a handle or fullPathName from design_get(include=['tree'], tree_handles=true)) - the item to remove.
 - , which is what the removal is verified against - nothing was changed.
 - Could not read the component that owns the
 - to remove - nothing was changed.
 - ' exposes no removeFeatures collection - the Remove feature is unavailable here.
 - - the collection this tool re-scans to confirm a removal - could not be read, so the effect could not be verified. Nothing was changed.
 - Refusing to remove: the
-- ' is not visible in the collection this tool re-scans to confirm a removal, so the effect could not be verified. Re-read the target with design_get(include=['tree']) / find_geometry and retry.
+- ' is not visible in the collection this tool re-scans to confirm a removal, so the effect could not be verified. Re-read the target with design_get(include=['tree'], tree_handles=true) / find_geome...
 - removeFeatures.add ran for '
 - ', but the collection re-scan that confirms it could not be read - the removal may or may not have taken. Check with design_get(include=['tree']) before acting on this result.  **[hedge]**
 - Remove reported success but '
@@ -1231,7 +1233,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `doc_get`
 - No active document. Open or create one first (doc_open / doc_new).
 - active = the focused document (document_id is its lineage URN, for doc_copy/doc_open). open_documents is a SUPERSET of visible tabs - referenced/dependency docs load as real Documents (is_visible=t...
-- Version metadata LAGS a just-completed save by up to ~20 s - re-read before concluding. A row the Milestones collection lists while its flag still reads false is is_milestone=true with flag_lagging...
+- numbers_may_lag true: the tip is under
+- s old and these numbers may trail the cloud - re-read; null: its date did not read. A row the collection lists whose flag reads false is is_milestone=true + flag_lagging=true. is_milestone null, mi...
 - The active document has no cloud DataFile (never saved to the cloud); no version history exists. Save it first (doc_save_as).
 - Covers three link kinds: kind='xref' (referenced occurrences), kind='derive' (derive features) and kind='unresolved' (an occurrence whose referenced component could not be loaded). all_current is a...
 - No active Design (the active product is not a design); the xref walk needs a design document.
@@ -1271,13 +1274,14 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Application.importManager is unavailable - nothing can be imported.
 - No active design to import into. Open or create a document first (see doc_new), or pass new_document=true.
 - import reported no failure but nothing landed in
-- : importToTarget2 returned no objects and the component gained no body and no occurrence. The file may hold no geometry, or the geometry went somewhere else - check design_get(include=['tree']).
+- : importToTarget2 returned no objects and the component gained no body and no occurrence. Read the design back with design_get(include=['tree']) - the geometry may have landed elsewhere.
 - Imported as solid/surface geometry. An assembly file lands as sub-occurrences, a single part as bodies. Inspect it with design_get(include=['tree']) and pick faces/edges for the model tools with fi...
 - importToNewDocument returned null, which the API reports for a FAILED import - no document was created.
 - A new document was opened for '
-- ' but it carries no Design product to read the imported geometry back from. The document is open - inspect it with workspace_orient.
+- ' but it carries no Design product to read the imported geometry back from. The document is open
+- - inspect it with workspace_orient.
 - A new document was created for '
-- ' but holds no body and no occurrence - the import landed nothing. Discard it with doc_close.
+- ' but holds no body and no occurrence - the import landed nothing.
 - The new document is UNSAVED and is now the active document. Save it with doc_save_as to give it a cloud identity, or discard it with doc_close.
 - Import failed (importToNewDocument raised):
 - No sketch to import the SVG into. SVG curves land in an EXISTING sketch - make one with sketch_create, then name it in 'sketch'.
@@ -1303,7 +1307,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - addByInsert returned nothing (the insert did not produce an occurrence).
 - addByInsert returned an occurrence but it reads isValid=false - the insert did not land.
 - Insert landed but the occurrence is NOT an external reference (isReferencedComponent=false) - the associative link did not form. Confirm the source and host share a project, then retry.
-- Inserted at the requested placement, from the source's last SAVED cloud version - unsaved source edits are not here (save the source, then doc_update_xref). Refine with joint_create to mate it to s...
+- Inserted at the requested placement, from the source's last SAVED cloud version. bound_version is the version this reference holds - null where none read it or two disagree; bound_is_tip whether it...
 - ' has no component to insert into.
 - Unknown rotate_axis '
 - ) was refused - the placement rotation could not be built, so nothing was inserted or removed.
@@ -1317,7 +1321,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Failed to create a new design document:
 
 ### `doc_open`
-- Document is still loading (open is asynchronous). Call workspace_orient after a moment to confirm it has become the active document before operating on it.
 - Provide 'file_id' - a DataFile id or URL from the data-model tools: a lineage 'id', a 'versionId', or a 'fusionWebURL'/'source_url'.
 - doc_open needs you to DECLARE INTENT. Pass force_api_open=true to open a NORMAL document via the API, OR is_cam_template=true if this is a multi-reference CAM/Manufacture template (the tool then in...
 - . Pass a DataFile 'id'/'versionId' or a 'fusionWebURL' from data_get / design_get(include=['tree']) / cam_get(include=['references']) (it may not exist or you may lack access).
@@ -1329,7 +1332,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No active document to restore a version of.
 - The active document has no cloud DataFile (never saved to the cloud); there is no version history to restore. Save it first (doc_save_as).
 - Specify which version to restore: pass version_number (an integer) or version_id.
-- in this document's history. Available version numbers (newest-first):
 - promote() returned false restoring version
 - ; the restore did not take effect.
 - promote() returned true, but this document's latestVersionNumber could not be read BEFORE the call - so whether a new tip appeared is not decidable here (the read after the call reports
@@ -1338,8 +1340,12 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - s of re-reading the cloud file (latest reads
 - ) - no new tip carrying version
 - 's content was observed. Confirm with doc_get include=['versions'] before promoting again.
-- is already the latest version; nothing to restore.
+- in this document's history. Available version numbers (newest-first):
+- The cloud tip advanced to
+- while this call re-read it, and
+- is not in the refreshed history. Available version numbers (newest-first):
 - promote() raised while restoring version
+- is already the latest version; nothing to restore -
 
 ### `doc_save`
 - Active document saved as a new cloud version (verified: no longer modified).
@@ -1395,7 +1401,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No external reference named '
 - '. References in this document:
 - Some references failed to update:
-- References refreshed to their latest version. If a newly-added feature (e.g. a joint origin) was missing because the reference was stale, it is now available. Covers occurrence xrefs and derive lin...
 - This document has no external references (occurrence xrefs or derive links).
 - DIFFERENT source files referenced by this document:
 - . Fusion allows same-name files in different folders, so refreshing them all could pull a version you did not ask for - refusing. Omit 'name' to refresh every out-of-date reference, or inspect the ...
@@ -2648,6 +2653,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - The sketch is still NOT fully constrained - other geometry holds the remaining freedom (sketch_get(include_entities=true) shows what).
 - The sketch's constrained state did not read back.
 - sketch entities - read their '<type>:<index>' refs with sketch_get.
+- ' resolve to ONE sketch point, so there is nothing to constrain. Name two different points, or drop the call; sketch_get(include_entities=true) lists them.
 - returned no constraint object.
 - ' returned a constraint but added no sketch geometry - nothing was created. Delete it with sketch_delete_entity(target='constraint:<index>').
 - applied with EVERY instance suppressed, so it created no curves - the pattern constraint itself is in the sketch. Re-run with fewer 'suppressed' flags set for a pattern that draws.

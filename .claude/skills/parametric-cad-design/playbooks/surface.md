@@ -14,15 +14,15 @@
 
 #### A swept and surfaced bottle
 
-Use when a container or housing whose section changes along a curved spine.
+Use when a container whose section changes along a curved spine, its neck narrower than the body.
 
 1. `sketch_create` - 'Bottle_Bottom' on XY: an ellipse dimensioned by its radii. Read back: fully constrained.
 2. `sketch_create` - 'Bottle_Profiles' on XZ: spine arc, offset rail, cv_spline neck. Read back: the arc and offset dimensions.
 3. `model_loft` - loft the ellipse to the neck section with the rails, as_surface true. Read back: is_solid false.
-4. `sketch_project` - on a plane rotated 90 deg, project the skin edges and draw the crown arc. Read back: fixed_spline entities.
-5. `surface_extrude` - extrude the crown arc into a surface past the skin. Read back: a second surface body.
-6. `surface_extend` - extend it 5 mm. Read back: the distance.
-7. `surface_trim` - trim skin with crown, then crown with skin, naming the kept cell. Read back: the cells removed.
+4. `sketch_create` - 'Bottle_Crown' on XZ: the shoulder profile, body radius to neck. Read back: fully constrained.
+5. `surface_revolve` - revolve the profile about the bottle axis. Read back: a second surface body.
+6. `surface_extend` - extend the NECK until it crosses the crown. Read back: the distance.
+7. `surface_trim` - trim ONLY where the crown crosses the body, keeping that cell. Read back: the cells removed.
 8. `model_stitch` - stitch the two at 0.1 mm. Read back: became_solid true.
 9. `model_shell` - shell to the wall, opening the mouth. Read back: volume dropped.
 10. `model_fillet` - chord-length fillets on the shoulder. Read back: face count grew.

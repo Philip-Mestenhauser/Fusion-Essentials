@@ -60,6 +60,30 @@ _DXF_FACE = _inputs.GeometryHandle("dxf_face", require="planar_face", required=F
     description="format=dxf only: the face whose outline is written (via a scratch sketch that is "
                 "removed again).")
 
+# MEASURED against an occurrence, a body proxy and their component: these six factories take a
+# COMPONENT (or the root) and RAISE "3 : invlid argument geometry" on the other two, while stl, obj
+# and 3mf wrote a file for all three. Sketches beside the body are not the cause.
+_COMPONENT_ONLY_FORMATS = ("step", "iges", "sat", "smt", "usd", "f3d")
+
+# The formats measured to take an occurrence or a body, named as the remedy's fallback.
+_ANY_TARGET_FORMATS = "stl/obj/3mf"
+
+
+def _component_only_refusal(fmt, target, desc):
+    """The refusal for a BRep-neutral export aimed at anything but a component, or None."""
+    if fmt not in _COMPONENT_ONLY_FORMATS or _is_component_target(desc):
+        return None
+    return (f"format={fmt} cannot export {desc}: its ExportManager factory takes a COMPONENT and "
+            f"answers an occurrence or a body with '3 : invlid argument geometry'. Export the "
+            f"COMPONENT by its name (not '{target}', an instance/body reference), omit 'target' for "
+            f"the whole design, or use format={_ANY_TARGET_FORMATS}, which do take this target.")
+
+
+def _is_component_target(desc):
+    """Whether _resolve_target's description says it resolved a COMPONENT (or the whole design)."""
+    return (desc or "").startswith(("component ", "whole design"))
+
+
 def _resolve_target(design, target):
     """Resolve 'target' -> (geometry, description, error): empty is the whole design, then a handle,
     then a component, an occurrence, or a body by name. Component stays FIRST among the name lookups
@@ -455,8 +479,18 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
         false_execute_paths = set()
 
         def _write_one(occ, fpath):
+            # The BRep-neutral factories RAISE on an Occurrence (measured), so for those formats
+            # each file is written from the occurrence's own COMPONENT; the mesh formats take the
+            # occurrence itself.
+            geom = occ
+            if fmt in _COMPONENT_ONLY_FORMATS:
+                geom = safe(lambda: occ.component)
+                if geom is None:
+                    occ_name = safe(lambda: occ.fullPathName) or safe(lambda: occ.name) or "?"
+                    return None, (f"the component behind '{occ_name}' did not read, and "
+                                  f"format={fmt} does not export an occurrence.")
             before = _export.snapshot(fpath)     # the baseline this file's landed check is proven on
-            executed, eerr, knobs = _export_one(em, factory_name, geom_first, occ, fpath, configure)
+            executed, eerr, knobs = _export_one(em, factory_name, geom_first, geom, fpath, configure)
             if eerr:
                 return None, f"{fmt.upper()} export failed: {eerr}"
             # VERIFY the file is actually on disk, non-empty, and written by THIS call - execute()'s
@@ -508,7 +542,9 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
             "file_count": len(files),
             "files": files,
             "note": f"Exported {len(files)} component(s) to separate {fmt.upper()} files. Each "
-            "top-level occurrence is one file - ready to print/assemble individually.",
+            "top-level occurrence is one file - ready to print/assemble individually."
+            + (f" format={fmt} takes no occurrence, so each file was written from that "
+               "occurrence's COMPONENT." if fmt in _COMPONENT_ONLY_FORMATS else ""),
         }
         if requested:
             out["options_requested"] = requested
@@ -557,6 +593,11 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
         return error(terr or (f"Export target '{target}' not found. Pass a body/component NAME, an "
     "occurrence fullPathName (e.g. Bracket:2 - the precise way to pick one instance), or omit "
     "'target' to export the whole design."))
+    # Refused BEFORE the directory is made and the file is touched: the factory's own raise names
+    # neither the target nor a route that works.
+    kind_err = _component_only_refusal(fmt, target, desc)
+    if kind_err:
+        return error(kind_err)
 
     # make sure the destination directory exists
     out_dir = os.path.dirname(path)
@@ -654,7 +695,7 @@ tool = (
     .add_input_property("dxf_component", {"type": "string",
             "description": "The component holding 'dxf_sketch', when two components carry that "
                            "name: a component name, or an occurrence fullPathName/handle from "
-                           "design_get(include=['tree'])."})
+                           "design_get(include=['tree'], tree_handles=true)."})
     .add_input_property(_DXF_FACE.name, _DXF_FACE.schema())
     .add_input_property("dxf_export_construction", {"type": "boolean",
             "description": "format=dxf only: include construction geometry (default true)."})

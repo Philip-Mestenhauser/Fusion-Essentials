@@ -280,7 +280,8 @@ class FakeDocumentReference:
     MEASURED on a genuinely STALE DeriveFeature reference: both refresh routes refuse with
     RuntimeError(_REFRESH_REFUSED) - the version ASSIGNMENT and getLatestVersion() alike - while
     isOutOfDate and dataFile.* keep reading. So a reference built out_of_date REFUSES by default,
-    and naming any other refresh outcome below declares a state instead of that measurement.
+    and naming any other refresh outcome below declares a state instead of that measurement. The
+    cloud tier's ACT 11b derive leg is where that refusal is read on a run.
 
     `refresh_lands` is the refresh that takes (version moves to the file's latest, isOutOfDate
     clears) - DECLARED, not measured, and the only reference measured at all was a derive link's.

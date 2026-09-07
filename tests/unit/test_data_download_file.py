@@ -45,7 +45,7 @@ def _cloud_file(name="probe_note.txt", file_extension="sql", writes=None, return
     """The file under download, in a 'Docs' folder of a named project."""
     return _DownloadableFile(name, extension=file_extension, writes=writes, returns=returns,
                              parent_folder=FakeDataFolder("Docs"),
-                             parent_project=FakeDataProject("MCP Test Project"))
+                             parent_project=FakeDataProject("Sample Project"))
 
 
 @pytest.fixture

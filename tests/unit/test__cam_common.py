@@ -4484,6 +4484,31 @@ class TestMachineCatalog:
         rows, _truncated, err = cc.machine_catalog()
         assert err is None and [r["name"] for r in rows] == ["Ultimaker S5"]
 
+    def test_a_name_both_libraries_hold_is_marked_on_both_rows(self, install_library):
+        # Machine.id is the description, so the two copies read one identity: the name addresses
+        # two machines and a setup carrying it does not say which copy that is.
+        install_library(_machine_lib({
+            _LOC_LOCAL: [_machine_stub("Haas", "VF-2", "Haas VF-2",
+                                       capabilities=_caps(milling=True))],
+            _LOC_F360: [_machine_stub("Haas", "VF-2", "Haas VF-2",
+                                      capabilities=_caps(milling=True))]}))
+        rows, _truncated, err = cc.machine_catalog()
+        assert err is None and len(rows) == 2
+        assert all(r["name_in_both_locations"] is True for r in rows)
+        assert {r["location"] for r in rows} == {"local", "fusion360"}
+
+    def test_two_rows_in_ONE_location_sharing_a_name_are_not_a_collision(self, monkeypatch,
+                                                                        install_library):
+        # The flag is about the SAME name in two libraries; two Local machines sharing a name is a
+        # duplicate within one library, which the location says nothing about.
+        install_library(_machine_lib({_LOC_LOCAL: [
+            _machine_stub("Haas", "VF-2", "Haas VF-2", capabilities=_caps(milling=True)),
+            _machine_stub("Haas", "VF-2b", "Haas VF-2", capabilities=_caps(milling=True))]}))
+        rows, _truncated, err = cc.machine_catalog()
+        assert err is None and len(rows) == 2
+        assert not any("name_in_both_locations" in r for r in rows)
+        assert {r["location"] for r in rows} == {"local"}
+
     def test_an_unreachable_library_is_an_error_not_an_empty_catalog(self, monkeypatch):
         def _boom():
             raise RuntimeError("library manager unavailable")

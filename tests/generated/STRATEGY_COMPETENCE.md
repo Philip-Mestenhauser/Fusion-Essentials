@@ -12,7 +12,7 @@ declines it before mutating anything, and 'skipped' carries the message the plat
 answered with; nothing in either column is a guess about cause. Create with
 cam_create_operation, aim with cam_select_geometry.
 
-Counts: 50 proven, 2 measured, 1 created, 7 refused, 11 skipped, 71 strategies.
+Counts: 54 proven, 1 measured, 1 created, 6 refused, 9 skipped, 71 strategies.
 
 | Strategy | Verdict | Geometry kind (cam_select_geometry) | Tool | Proven on / the measured reason |
 |---|---|---|---|---|
@@ -44,7 +44,7 @@ Counts: 50 proven, 2 measured, 1 created, 7 refused, 11 skipped, 71 strategies.
 | inclined_walls | refused | - | - | isGenerationAllowed reads false on this installation |
 | inspect_surface | skipped | inspectSurfacePositions - no route | probe | no API write lands a point on the surface (ledger INSPECT-1) |
 | manual | created | none | any | ACT 10c7 ManualNC creates it and reads the name back, then deletes it - a generated Manual NC answers '3 : Machining time could not be calculated.' on its time row and never appears in empty_toolpaths, so neither non-empty oracle can judge it |
-| morph | skipped | chain -> curves | ball end mill | generated EMPTY on one rim chain with 'No passes to link' (ledger MORPH-1); whether a curve PAIR feeds it is unmeasured |
+| morph | proven | chain -> curves (a curve PAIR) | ball end mill | ACT 10c7 MorphPair across the flange's two rim circles, machining time read in ACT 10c8; it wants a PAIR, one CurveSelection each - both circles fed to a single selection walk into one path and the operation reports 'No passes to link' |
 | morphed_spiral | proven | none - the setup's model | ball end mill | ACT 10c7 MorphedSpiral |
 | multi_axis_contour | proven | chain | ball end mill | ACT 10c11 MxContour on one edge chain of the hub, machining time read in ACT 10c12 (machining extension) |
 | multi_axis_morph | measured | surfaces -> driveSurfaces | ball end mill | driven on the hub with the flange wall as its drive surface, reading 123.6 s of machining time; it is not a beat because that generation ran past 240 s of polling with the status read still answering 'generating'. The chain kind lands on this operation, and it then generates with 'Drive Surfaces: No valid drive surfaces selected.' |
@@ -53,7 +53,7 @@ Counts: 50 proven, 2 measured, 1 created, 7 refused, 11 skipped, 71 strategies.
 | parallel | proven | none - the setup's model | ball end mill | ACT 10c7 Parallel |
 | pencil | proven | none - the setup's model | ball end mill | ACT 10c7 Pencil |
 | pocket2d | proven | pocket | flat end mill | ACT 10a |
-| pocket_clearing | measured | none - the setup's model | flat end mill | created and generated on the hub's milling setup with the 10 mm flat mill and read EMPTY - cam_get's time slice returned no figure for it while its sibling in the same act cut; which cutter or model it does clear is unmeasured, so it carries no beat |
+| pocket_clearing | proven | pocket | flat end mill that fits the pocket | ACT 10c8d PocketClear on the hub's flange arc slot with the 6 mm mill, machining time read in ACT 10c8e; it cut 140.5 s. It needs a SETUP OF ITS OWN because it rest-machines from the operations before it: behind the census act's sixteen whole-model families the same operation reads EMPTY whether it is created before or after Adaptive2D (measured both ways, while Adaptive2D on that same slot cuts 27.6 s either way), and the flange's 8 mm round pocket answers 'too small to be reached with given ramping constraints' for that cutter |
 | probe | proven | probe | probe | ACT 10a (machining extension) |
 | probe_geometry | proven | probe | probe | ACT 10c11 ProbeGeom with a cloned probe on one face, machining time read in ACT 10c12; a tool that is not a probe is refused naming the type it was handed (machining extension) |
 | profile2d | proven | silhouette | waterjet (a cutting tool) | ACT 10c7 WaterjetProfile |
@@ -71,10 +71,10 @@ Counts: 50 proven, 2 measured, 1 created, 7 refused, 11 skipped, 71 strategies.
 | subspindle_return | skipped | - | turning general insert | generated with 'Toolpath is not supported for the given tool and settings.' |
 | swarf | proven | chain (a RAIL PAIR) | flat end mill | ACT 10c (machining extension) |
 | thread | proven | holes -> circularFaces | thread mill that fits the bore | ACT 10c7 ThreadMill |
-| three_plus_two | skipped | orientation -> machiningDirections | flat end mill | one inclined face on the hub generated EMPTY: 'Toolpath is empty. Try checking the rest machining, collision avoidance, or machining boundaries and height settings.' |
+| three_plus_two | proven | orientation -> machiningDirections | flat end mill | ACT 10c7 ThreePlusTwo on the inclined flat cut into the shaft's plain stretch, machining time read in ACT 10c8; the flat's own normal becomes the tool axis, and the selection engages toolAxisMode in the same call |
 | trace | proven | chain | chamfer mill | ACT 10c7 TraceRim |
 | turning_adaptive_roughing | proven | none - the setup's model | turning grooving insert | ACT 10c9 TurnAdaptive |
-| turning_chamfer | refused | chamfer positions - no route | turning general insert | the operation carries no curve-selection parameter this call routes, and it generates empty with 'Chamfers: Invalid chamfer positions selection.'; refused live by ACT 10c9 |
+| turning_chamfer | proven | chamfer -> chamfers (an edge) | turning general insert | ACT 10c9 TurnChamfer on the circle bounding the hub's part-end chamfer, machining time read in ACT 10c10; its positions are a DIRECT object set, so the chain kind is refused naming 'chamfers', and that chamfer's own cone FACE raises '2 : InternalValidationError : status.isOk()' where the bounding EDGE lands |
 | turning_face | proven | none - the setup's model | turning general insert | ACT 10c4 TurnFace |
 | turning_groove_finishing | proven | none - the setup's model | turning grooving insert | ACT 10c9 TurnGrooveFinish |
 | turning_groove_roughing | proven | none - the setup's model | turning grooving insert | ACT 10c9 TurnGrooveRough |
@@ -97,4 +97,20 @@ different vocabulary from the strategies list cam_create_operation takes, so bot
 | Pair | 'strategy' parameter | Carried by the first alone | Carried by the second alone |
 |---|---|---|---|
 | turning_groove_roughing vs turning_groove_finishing | 'turningGrooveRoughing' vs 'turningGrooveFinishing' | maximumGrooveStepdown, usePecking | doLeadIn, nullPass |
+
+### Measured by hand - the CAM overview samples
+
+Read with cam_compare_operations on Autodesk's CAM overview samples. No beat creates these
+operations, so nothing here has a receipt row behind it, and 'd' in a value is the cutter
+diameter.
+
+| Pair | What separates them |
+|---|---|
+| 2D contour vs the same contour with multiple passes | doRoughingPasses, and maximumRoughingSteps 1 -> 6 |
+| 2D contour vs its Trimmed sibling | useStockContours, and 15 steps |
+| 2D contour vs its Rest machining sibling | useRestMachining and restMaterialCutterDiameter |
+| parallel vs steep areas | machineSteepAreas alone |
+| contour3d vs shallow areas | machineShallowAreas alone |
+| parallel vs scallop | 31 differences: stepover 0.5d vs 0.1d, boundaryOverlap, collapseBisector |
+| pocket vs adaptive | 114 differences: optimalLoad 0.4d, stepdown 2.5d vs 0.1d, and no leads or compensation on adaptive |
 

@@ -791,7 +791,8 @@ class TestDeepZoom:
             FakeCAMParameter("group_geometry", title="Geometry", value=True),
             FakeCAMParameter("boundaryOffset", "50mm", title="Additional Offset"),
         ])
-        g = cg._grouped_visible_params(coll)
+        g, hidden = cg._grouped_visible_params(coll)
+        assert hidden == 1                                   # the invisible row, counted not listed
         assert g["Feed & Speed"] == [
             {"name": "tool_feedCutting", "title": "Cutting Feedrate", "expression": "5252.1"},
             {"name": "tool_spindleSpeed", "title": "Spindle Speed", "expression": "12000"}]
@@ -1448,20 +1449,20 @@ class TestParameterEditableFlag:
     the parameters is where an agent learns which rows refuse - not the refusal it gets afterwards."""
 
     def test_a_row_that_refuses_a_write_is_marked_editable_false(self):
-        g = cg._grouped_visible_params(
+        g, _hidden = cg._grouped_visible_params(
             _SetupParams([FakeCAMParameter("tool_diameter", "10.", title="Diameter", editable=False)]))
         assert g["General"][0]["editable"] is False
 
     def test_a_writable_row_carries_no_editable_key(self):
         # the quiet default: most rows an agent reads are settable, and a key on every one of them
         # is 300 rows of noise.
-        g = cg._grouped_visible_params(_SetupParams([FakeCAMParameter("tolerance", "0.01", title="Tolerance")]))
+        g, _hidden = cg._grouped_visible_params(_SetupParams([FakeCAMParameter("tolerance", "0.01", title="Tolerance")]))
         assert g["General"][0] == {"name": "tolerance", "title": "Tolerance",
                                    "expression": "0.01"}
 
     def test_an_unreadable_flag_publishes_null_and_never_false(self):
         # a flag that did not answer is not a refusal - false here would name a row the write takes.
-        g = cg._grouped_visible_params(
+        g, _hidden = cg._grouped_visible_params(
             _SetupParams([_UnreadableEditableParam("tolerance", "0.01", title="Tolerance")]))
         assert g["General"][0]["editable"] is None
 
@@ -1481,6 +1482,48 @@ class TestParameterEditableFlag:
         out, _err = cg._slice_parameters(object(), "", "Op1")
         assert out["sections"]["General"][0]["editable"] is False
         assert "editable false refuses a write" in out["note"] and "DIFFERENT units" in out["note"]
+
+
+class TestGatedRowsAreCounted:
+    """MEASURED on a contour2d: a row behind a switch reads isVisible TRUE with isEnabled FALSE, so
+    the visible+enabled filter drops it; the switch landing flips it to enabled+editable and the
+    listing grows by it. The listed count is therefore not the operation's whole set."""
+
+    def test_a_hidden_row_is_counted_and_the_note_says_a_switch_lands_it(self, monkeypatch):
+        op = type("O", (), {"name": "Contour1", "strategy": "contour2d",
+                            "parameters": _SetupParams([
+                                FakeCAMParameter("useStockToLeave", "false", title="Stock to leave"),
+                                FakeCAMParameter("stockToLeave", "0.1mm", title="Stock to Leave",
+                                                 enabled=False, editable=False)])})()
+        monkeypatch.setattr(cg, "resolve_operation",
+                            lambda cam, name, label="operation": (SimpleNamespace(obj=op), None, []))
+        out, err = cg._slice_parameters(object(), "Contour1", "")
+        assert err is None and out["parameter_count"] == 1 and out["hidden_count"] == 1
+        assert "hidden_count" in out["note"] and "SAME call" in out["note"]
+        assert "isEnabled FALSE" in out["note"]
+
+    def test_a_setup_counts_its_hidden_rows_too(self, monkeypatch):
+        # MEASURED on a fresh milling setup: 304 parameters, 42 listed, 262 hidden - the 12 computed
+        # extents are a small part of that, so the extents alone do not account for the silence.
+        setup = type("S", (), {"name": "Setup1", "parameters": _SetupParams([
+            FakeCAMParameter("job_stockMode", "'default'", title="Stock Mode"),
+            FakeCAMParameter("wcs_orientation_axisZ", "0", title="Z axis", visible=False)])})()
+        monkeypatch.setattr(cg, "find_setup", lambda cam, name: (setup, ["Setup1"], None))
+        out, _err = cg._slice_parameters(object(), "", "Setup1")
+        assert out["parameter_count"] == 1 and out["hidden_count"] == 1
+        assert "stock_extents publishes" in out["note"]
+        # cam_edit_setup REFUSES a locked row outright (no switch-first ordering), so the setup note
+        # must not borrow cam_edit_operation's same-call promise
+        assert "REFUSES a row reading editable false" in out["note"]
+        assert "lands it in the SAME call" not in out["note"]
+
+    def test_an_operation_hiding_nothing_carries_no_hidden_key_or_sentence(self, monkeypatch):
+        op = type("O", (), {"name": "Face1", "strategy": "face", "parameters": _SetupParams(
+            [FakeCAMParameter("tolerance", "0.01", title="Tolerance")])})()
+        monkeypatch.setattr(cg, "resolve_operation",
+                            lambda cam, name, label="operation": (SimpleNamespace(obj=op), None, []))
+        out, _err = cg._slice_parameters(object(), "Face1", "")
+        assert "hidden_count" not in out and "hidden_count" not in out["note"]
 
 
 class TestParameterChoices:

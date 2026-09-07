@@ -492,7 +492,7 @@ def _full_file(cls=_CloudFile, **overrides):
         created_by=_ns(displayName="Ada L", userName="ada", email="ada@example.com"),
         last_updated_by=_ns(displayName="Bob K", userName="bob", email="bob@example.com"),
         parent_folder=FakeDataFolder("Docs"),
-        parent_project=FakeDataProject("MCP Test Project", project_id="proj-1"),
+        parent_project=FakeDataProject("Sample Project", project_id="proj-1"),
         shared_link=_unshared_link(),
         public_link=RuntimeError("3 : No public link available. Use sharedLink.isShared to "
                                  "create a public link."),
@@ -519,7 +519,7 @@ class TestFileFacts:
         assert out["version"]["number"] == 2 and out["version"]["latest_number"] == 3
         assert out["version"]["is_latest"] is False        # v2 of 3 - not the tip
         assert out["version"]["version_count"] == 3
-        assert out["location"]["project"]["name"] == "MCP Test Project"
+        assert out["location"]["project"]["name"] == "Sample Project"
         assert out["location"]["parent_folder"]["path"] == "Docs"
         assert out["state"] == {"is_read_only": False, "is_in_use": False, "is_complete": True}
 
@@ -697,6 +697,34 @@ class TestListFolders:
         out = _payload(dm.list_folders_handler(project="Proj"))
         assert out["time_truncated"] is False
 
+    def test_an_unreadable_folder_is_flagged_on_its_node_and_counted(self, cloud):
+        # the fetch RAISES: the node is neither a leaf nor a budget cut, and a caller proving
+        # absence needs the counterpart of the flat listing's folders_unreadable.
+        dead = FakeDataFolder("Archive", folder_id="fid:Archive",
+                              folders_raise="3 : folder could not be enumerated")
+        cloud(make_data_tree(name="Proj", folders=[dead, FakeDataFolder("Leaf", folder_id="fid:L")]))
+        out = _payload(dm.list_folders_handler(project="Proj"))
+        top = {n["name"]: n for n in out["folders"]}
+        assert top["Archive"]["children_unreadable"] is True
+        assert "folders" not in top["Archive"]
+        assert top["Leaf"].get("children_unreadable") is None    # a genuine leaf stays a leaf
+        assert out["folders_unreadable"] == 1
+        assert out["folders_unreadable_at"] == ["Archive"]
+        assert out["truncated"] is False and out["time_truncated"] is False
+
+    def test_a_root_that_will_not_enumerate_is_counted_at_the_project_root(self, cloud):
+        cloud(FakeDataProject("Proj", root_folder=FakeDataFolder(
+            "Root", is_root=True, folders_raise="3 : root would not enumerate")))
+        out = _payload(dm.list_folders_handler(project="Proj"))
+        assert out["folders"] == [] and out["folder_count"] == 0
+        assert out["folders_unreadable"] == 1
+        assert out["folders_unreadable_at"] == ["(project root)"]
+
+    def test_a_fully_readable_tree_publishes_no_unreadable_key(self, cloud):
+        cloud(self._tree())
+        out = _payload(dm.list_folders_handler(project="Proj"))
+        assert "folders_unreadable" not in out and "folders_unreadable_at" not in out
+
     def test_walk_is_breadth_first_shallow_before_deep(self, cloud, monkeypatch):
         # a deep chain must not eat the budget before the shallow siblings are even listed.
         chain = FakeDataFolder("A", folders=[FakeDataFolder(
@@ -708,3 +736,128 @@ class TestListFolders:
         top = {n["name"]: n for n in out["folders"]}
         assert set(top) == {"A", "B", "C"}                # every shallow folder listed first
         assert out["truncated"] is True
+
+
+class TestFolderTreeScope:
+    """A project-wide tree read spends its whole budget on the top of a real project, so the tree
+    takes the same 'folder' scope the file listing does - walking only under that path."""
+
+    def _tree(self):
+        vises = FakeDataFolder("Vises", folder_id="fid:Vises")
+        fixtures = FakeDataFolder("Fixtures", folder_id="fid:Fixtures", folders=[vises])
+        parts = FakeDataFolder("Parts", folder_id="fid:Parts", folders=[fixtures])
+        return make_data_tree(name="Proj", folders=[parts,
+                                                    FakeDataFolder("Templates", folder_id="fid:T")])
+
+    def test_the_walk_starts_at_the_named_folder(self, cloud):
+        cloud(self._tree())
+        out = _payload(dm.list_folders_handler(project="Proj", folder="Parts"))
+        assert out["folder"] == "Parts"
+        assert [n["name"] for n in out["folders"]] == ["Fixtures"]   # NOT Templates, NOT Parts
+        assert out["folder_count"] == 2                              # Fixtures + Vises
+
+    def test_paths_stay_project_absolute_so_they_can_be_passed_back(self, cloud):
+        cloud(self._tree())
+        out = _payload(dm.list_folders_handler(project="Proj", folder="Parts"))
+        assert out["folders"][0]["path"] == "Parts/Fixtures"
+        assert out["folders"][0]["folders"][0]["path"] == "Parts/Fixtures/Vises"
+
+    def test_no_folder_scopes_to_the_whole_project(self, cloud):
+        cloud(self._tree())
+        out = _payload(dm.list_folders_handler(project="Proj"))
+        assert out["folder"] == "(project root)"
+        assert {n["name"] for n in out["folders"]} == {"Parts", "Templates"}
+
+    def test_a_scope_that_is_not_there_is_refused_with_its_siblings(self, cloud):
+        cloud(self._tree())
+        res = dm.list_folders_handler(project="Proj", folder="Ghost")
+        assert res["isError"] is True
+        assert "Folder 'Ghost' not found" in res["message"] and "Parts" in res["message"]
+
+    def test_a_scope_whose_sibling_list_will_not_read_says_so(self, cloud):
+        # 'not found' would be a verdict this walk never reached - the refusals differ.
+        cloud(FakeDataProject("Proj", root_folder=FakeDataFolder(
+            "Root", is_root=True, folders_raise="3 : would not enumerate")))
+        res = dm.list_folders_handler(project="Proj", folder="Parts")
+        assert res["isError"] is True and "could not be resolved" in res["message"]
+
+
+class TestWalkBudgetsAreInputs:
+    """The walk's limits are the caller's to size: a caller proving a folder is absent needs a read
+    that reaches, and one that cannot has to say which limit stopped it."""
+
+    def _chain(self):
+        return make_data_tree(name="Proj", folders=[FakeDataFolder(
+            "A", folders=[FakeDataFolder("A1", folders=[FakeDataFolder("A2")])])])
+
+    def test_the_default_is_published_when_no_budget_is_given(self, cloud):
+        cloud(self._chain())
+        out = _payload(dm.list_folders_handler(project="Proj"))
+        assert out["folder_budget"] == dm._LF_FOLDER_BUDGET
+        assert out["time_budget_s"] == dm._TIME_BUDGET_S
+
+    def test_a_budget_of_one_fetches_the_root_only_and_flags_the_rest(self, cloud):
+        cloud(self._chain())
+        out = _payload(dm.list_folders_handler(project="Proj", max_depth=6, folder_budget=1))
+        assert out["folder_budget"] == 1 and out["truncated"] is True
+        assert out["folders"][0]["name"] == "A"
+        assert out["folders"][0]["folders_truncated"] is True
+        # a budget cut is a folder NOT REACHED, not a folder that would not read: counting it as
+        # unreadable would tell a caller its tree has holes the cloud put there.
+        assert "folders_unreadable" not in out
+        assert "children_unreadable" not in out["folders"][0]
+
+    def test_a_budget_of_zero_is_clamped_to_one_and_published_as_used(self, cloud):
+        cloud(self._chain())
+        out = _payload(dm.list_folders_handler(project="Proj", max_depth=6, folder_budget=0))
+        assert out["folder_budget"] == 1 and out["truncated"] is True
+
+    def test_a_budget_over_the_ceiling_is_clamped_to_it(self, cloud):
+        cloud(self._chain())
+        out = _payload(dm.list_folders_handler(project="Proj", folder_budget=10 ** 6))
+        assert out["folder_budget"] == dm._LF_FOLDER_BUDGET_MAX
+
+    def test_a_bigger_budget_reaches_past_the_default(self, cloud, monkeypatch):
+        cloud(self._chain())
+        monkeypatch.setattr(dm, "_LF_FOLDER_BUDGET", 1)      # the default alone cuts at the root
+        assert _payload(dm.list_folders_handler(project="Proj", max_depth=6))["truncated"] is True
+        out = _payload(dm.list_folders_handler(project="Proj", max_depth=6, folder_budget=8))
+        assert out["truncated"] is False and out["folder_count"] == 3
+
+    def test_a_non_numeric_budget_takes_the_default(self, cloud):
+        cloud(self._chain())
+        out = _payload(dm.list_folders_handler(project="Proj", folder_budget="lots"))
+        assert out["folder_budget"] == dm._LF_FOLDER_BUDGET
+
+    def test_a_nan_budget_takes_the_default_not_the_floor(self):
+        # NaN compares False against everything, so an unguarded max(1.0, min(nan, ceiling))
+        # returns 1.0 - the SMALLEST budget - for a caller who asked for nothing measurable.
+        assert dm._budget(float("nan"), 20, 120) == 20.0
+        assert dm._budget(float("inf"), 20, 120) == 120.0
+
+    def test_the_time_budget_is_the_deadline_the_walk_stops_at(self, cloud, monkeypatch):
+        cloud(self._chain())
+        t0 = 6000.0
+        # calls: deadline calc, root check(ok), then A's check lands past the 5 s asked for
+        _scripted_clock(monkeypatch, dm, [t0, t0, t0 + 6])
+        out = _payload(dm.list_folders_handler(project="Proj", max_depth=6, time_budget_s=5))
+        assert out["time_budget_s"] == 5.0
+        assert out["time_truncated"] is True and out["truncated"] is True
+        assert "folders_unreadable" not in out          # a stall is not an unreadable folder
+
+    def test_the_time_budget_is_clamped_at_both_ends(self, cloud):
+        cloud(self._chain())
+        assert _payload(dm.list_folders_handler(
+            project="Proj", time_budget_s=0))["time_budget_s"] == 1.0
+        assert _payload(dm.list_folders_handler(
+            project="Proj", time_budget_s=10 ** 6))["time_budget_s"] == dm._TIME_BUDGET_MAX_S
+
+    def test_the_file_walk_takes_the_same_time_budget(self, cloud):
+        cloud(_sample_project())
+        out = _payload(dm.list_project_files_handler(project="CAM", time_budget_s=45))
+        assert out["time_budget_s"] == 45.0 and out["file_count"] == 4
+
+    def test_the_file_walks_budget_is_clamped_and_published(self, cloud):
+        cloud(_sample_project())
+        out = _payload(dm.list_project_files_handler(project="CAM", time_budget_s=0))
+        assert out["time_budget_s"] == 1.0

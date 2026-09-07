@@ -49,9 +49,10 @@ A recipe `<id>` is `sys_get_guidance(recipe="<id>")` - ordered steps, a read-bac
 - `model-moulded-part` - a basket, cover, drawer front or housing with a wall, bosses and clips
 - `model-frozen-body-with-interfaces` - a purchased part, an imported STEP or a generative outcome that needs holes and seats
 - `model-parametric-family` - one part in several sizes
-- `surface-swept-bottle` - a container or housing whose section changes along a curved spine
+- `surface-swept-bottle` - a container whose section changes along a curved spine, its neck narrower than the body
 - `surface-skin-into-parts` - a product whose top, base and middle share one outer surface
 - `assemble-part-modelled-in-place` - a rocker, bracket or lever designed between parts that already sit where they belong
 - `assemble-screw-motion` - a threaded cap, lead screw or any turn-to-advance pair
 - `manufacture-choose-a-strategy` - a face, pocket, wall, hole or free-form surface needs an operation
 - `manufacture-prove-a-toolpath` - an operation generated and must be trusted
+- `manufacture-radial-hole-across-the-axis` - a hole whose axis runs across the part axis - a cross-drilling, or a hole through a boss on a turned part

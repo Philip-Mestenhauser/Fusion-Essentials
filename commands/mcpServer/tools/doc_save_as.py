@@ -5,12 +5,16 @@
 saveAs can raise or return false AFTER the file landed, so the destination is read back before the
 call is reported as a failure. WRITES."""
 
+import time
+
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from . import _doc_common
+from . import _export
 from ._data_common import (
     _agent_description, _data, _files_in_folder_by_name, _find_project, _same_name_refusal,
     _same_name_rows, _split_path, _resolve_folder_path, _ensure_folder_path, _folder_path_string,
@@ -19,24 +23,28 @@ from ._data_common import (
 app = adsk.core.Application.get()
 
 # Post-saveAs the cloud assigns the lineage URN asynchronously - doc.dataFile.id reads a local
-# pre-upload handle (not a 'urn:') for a moment first, so the main loop is pumped until it settles.
-# Capped, so a URN that never resolves cannot hang the call.
-_URN_POLL_TRIES = 12
+# pre-upload path (not a 'urn:') until it arrives, and the wait is bounded by the same window a
+# version read is measured to trail the cloud in. Capped, so a URN that never lands cannot hang.
+_URN_WAIT_S = float(_doc_common.VERSION_LAG_WINDOW_S)
 _URN_POLL_SLEEP = 0.25
 
+# A DECLINED save - saveAs answered false AND the destination folder holds nothing new - gets a
+# brief probe instead of that window: the platform said it wrote nothing, so the read can only
+# catch a URN already there, and waiting the full window would delay every honest refusal.
+_DECLINED_PROBE_S = 1.0
 
-def _settled_lineage_urn(doc):
-    """Pump briefly and return doc.dataFile.id once it is a lineage 'urn:', else None - the stable
-    identity that addresses the saved file when two files share a name."""
-    import time
-    for _ in range(_URN_POLL_TRIES):
+
+def _settled_lineage_urn(doc, wait_s=_URN_WAIT_S):
+    """(the lineage 'urn:' doc.dataFile.id settles to, seconds spent waiting) - the URN None when it
+    did not settle inside `wait_s`. That URN is the stable identity two same-named files differ by."""
+    def probe():
         df = safe(lambda: doc.dataFile)
         raw = safe(lambda: df.id) if df else None
-        if isinstance(raw, str) and raw.startswith("urn:"):
-            return raw
-        safe(lambda: adsk.doEvents())
-        time.sleep(_URN_POLL_SLEEP)
-    return None
+        return bool(isinstance(raw, str) and raw.startswith("urn:")), raw
+
+    started = time.monotonic()
+    settled, raw = _export.pump_until(probe, wait_s, _URN_POLL_SLEEP)
+    return (raw if settled else None), round(time.monotonic() - started, 1)
 
 
 def _resolve_folder_eventual(root, segments):
@@ -131,30 +139,30 @@ def handler(name: str = "", project: str = "", project_id: str = "",
             "add a version to the EXISTING file, open it by that URN (doc_open) and use doc_save; to "
             "deliberately create a same-name fork anyway, pass allow_duplicate_name=true.")
 
-    def _landed_after_error():
+    def _landed_after_error(wait_s):
         """Read back whether a saveAs that RAISED (or returned false) nevertheless landed:
-        (landed, same_name_now), landed being the file's id/urn, True when it landed under no single
-        id, else None. A pre-existing urn on an already-saved doc is NOT trusted - it would
-        false-positive an allow_duplicate_name fork. same_name_now is [] unless SEVERAL now match."""
+        (landed, same_name_now, seconds_waited), landed being the file's id/urn, True when it landed
+        under no single id, else None. A pre-existing urn on an already-saved doc is NOT trusted - it
+        would false-positive an allow_duplicate_name fork. `wait_s` bounds the URN read."""
         now = _files_in_folder_by_name(target, name)
         if now and not existing_files:
             if len(now) == 1:
-                return safe(lambda: now[0].id) or True, []
+                return safe(lambda: now[0].id) or True, [], None
             # Several files carry the name now where none did before: this call landed, but WHICH
             # lineage it wrote is not readable off the folder, so every candidate travels up.
-            return True, now
+            return True, now, None
         if not was_saved:
-            urn = _settled_lineage_urn(doc)
+            urn, waited = _settled_lineage_urn(doc, wait_s)
             if urn:
-                return urn, []
-        return None, []
+                return urn, [], waited
+        return None, [], None
 
-    def _landed_ok(file_id, how, same_name_now=()):
-        # doc.dataFile.id names this call's file ONLY for a document that was never saved: on an
-        # already-saved one it still reads the lineage it was saved FROM, a different file entirely.
-        # Unnameable publishes null, never a wrong URN.
-        resolved = (file_id if isinstance(file_id, str)
-                    else (_settled_lineage_urn(doc) if not was_saved else None))
+    def _landed_ok(file_id, how, same_name_now=(), waited=None):
+        # doc.dataFile.id names this call's file ONLY for a never-saved document, else null - never
+        # a wrong URN. This re-probe spends the FULL window even from the declined path: files under
+        # that name DID land, so a URN is settling behind them.
+        resolved, waited = ((file_id, waited) if isinstance(file_id, str)
+                            else (_settled_lineage_urn(doc) if not was_saved else (None, None)))
         payload = {
             "saved": True,
             "name": name,
@@ -167,6 +175,8 @@ def handler(name: str = "", project: str = "", project_id: str = "",
                      "reading the saved document/folder back) - reporting success rather than a false "
                      "negative, which would send a retry into a 'file already exists' collision. " + how),
         }
+        if waited is not None:
+            payload["urn_wait_seconds"] = waited
         if same_name_now:
             # One entry per file, null where the id would not read - the count and the URNs are the
             # only handles on the duplicate this recovery just measured.
@@ -184,27 +194,29 @@ def handler(name: str = "", project: str = "", project_id: str = "",
     try:
         did = doc.saveAs(name, target, _agent_description(description), "")  # adsk.core: Document.saveAs(...)
     except Exception as e:
-        # saveAs can raise (observed: InternalValidationError) AFTER the file landed - re-read before failing.
-        landed, same_name_now = _landed_after_error()
+        # saveAs can raise (observed: InternalValidationError) AFTER the file landed - re-read before
+        # failing, and give the URN the full window, since a commit may be settling behind the raise.
+        landed, same_name_now, waited = _landed_after_error(_URN_WAIT_S)
         if landed:
-            return _landed_ok(landed, f"Original error: {str(e)[:160]}", same_name_now)
+            return _landed_ok(landed, f"Original error: {str(e)[:160]}", same_name_now, waited)
         return error(f"saveAs failed for '{name}': {e}")
     if not did:
-        landed, same_name_now = _landed_after_error()
+        landed, same_name_now, waited = _landed_after_error(_DECLINED_PROBE_S)
         if landed:
-            return _landed_ok(landed, "saveAs returned false.", same_name_now)
+            return _landed_ok(landed, "saveAs returned false.", same_name_now, waited)
         return error(f"Fusion declined to save '{name}' to the destination. No change made.")
 
     # Report the lineage URN this save wrote - the stable identity that ADDRESSES the file (a name
-    # can be shared). It resolves asynchronously, so pump briefly rather than returning null.
-    new_id = _settled_lineage_urn(doc)
+    # can be shared). It resolves asynchronously, so the call waits for it rather than returning null.
+    new_id, urn_wait = _settled_lineage_urn(doc)
 
     note = ("The saved document becomes the active document. Its 'document_id' is the lineage URN - "
             "the stable identity to address it by (doc_open/doc_activate/data_delete_file); a NAME can "
-            "be shared by several files, the URN cannot.")
+            "be shared by several files, the URN cannot. 'urn_wait_seconds' is how long this call "
+            "waited for it, so a caller needs no dwell of its own.")
     if new_id is None:
-        note += (" The URN had not resolved yet (cloud save is async); read it from doc_get or "
-                 "data_get(project, folder) in a moment.")
+        note += (f" It had NOT arrived after {urn_wait}s - what dataFile.id reads meanwhile is a "
+                 "LOCAL path, not an address. Read the URN from doc_get before using one.")
     result = {
         "saved": True,
         "name": name,
@@ -213,6 +225,7 @@ def handler(name: str = "", project: str = "", project_id: str = "",
         "destination_folder": (_folder_path_string(target) or "(project root)"),
         "auto_created_parents": auto_created,
         "document_id": new_id,   # the lineage URN of the file just written (null only if not yet settled)
+        "urn_wait_seconds": urn_wait,
     }
     if existing_id and existing_id != new_id:
         result["name_collision"] = {
@@ -272,9 +285,12 @@ tool = (
         "description": "Permit a same-name fork in the target folder (default false = refuse)."})
     .strict_schema()
 )
+# enforce_timeout=False: saveAs is a blocking, uninterruptible main-thread cloud write that COMMITS,
+# and this call then waits out the URN - a timeout would report a false failure for a landed file,
+# and a retry on that report forks a duplicate lineage.
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler,
-    run_on_main_thread=True,
+    run_on_main_thread=True, enforce_timeout=False,
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_doc_save_as.py::TestSaveDocumentAs"

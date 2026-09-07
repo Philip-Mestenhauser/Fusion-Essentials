@@ -1,26 +1,34 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Blind eval executor: run a scenario's AGENT PROMPT in a context-isolated headless agent.
+"""Blind eval executor: run a scenario's AGENT PROMPT against Fusion's MCP server and record it.
 
-Blindness is a PROPERTY of the launch, not a promise in the prompt: the executor runs with
-cwd = an empty scratch directory (no repo files, no project CLAUDE.md, no project memory), a
-sterile CLAUDE_CONFIG_DIR holding ONLY the copied API credentials (no user skills, hooks, or
-settings), --strict-mcp-config with an .mcp.json naming ONLY the fusion-essentials HTTP server,
-and --allowedTools limited to mcp__fusion-essentials__* (anything else auto-denies headless).
-The transcript is the proof: audit() lists every tool the executor actually called.
+--executor api (the default) is a direct Messages API tool loop: tools/list is fetched ONCE, each
+tool becomes a Messages API definition named mcp__fusion-essentials__<tool>, and every tool_use
+block is executed against the server. Blindness is structural - fusion tools are the only tools
+defined - and a denied one (the cloud deletes, the selection prompt, the script hatch, plus
+--deny) is left out of the definitions. The key comes from ANTHROPIC_API_KEY and --model carries a
+model id. The loop stops at the scenario's call budget, its output-token budget, EVAL_STALL_S with
+no tool call, --max-turns, or the model's final report.
+
+--executor cli spawns the Claude Code CLI, where blindness is a PROPERTY of the launch: cwd = an
+empty scratch directory (no repo files, no project CLAUDE.md, no project memory), a sterile
+CLAUDE_CONFIG_DIR holding ONLY the copied API credentials (no user skills, hooks, or settings),
+--strict-mcp-config with an .mcp.json naming ONLY the fusion-essentials HTTP server, and
+--allowedTools limited to mcp__fusion-essentials__* (anything else auto-denies headless).
+The transcript is the proof either way: audit() lists every tool the executor actually called.
 
 The runner EXECUTES and RECORDS; it never grades. Grading stays with the orchestrator, which
 re-issues each postcondition read itself (evals/README.md) - the executor's self-report is
 evidence, not verdict.
 
-Run:  py -3 tests/live/evals/run_eval.py scenarios/S1_Foundation.md --model sonnet
-      (requires Fusion running + the add-in's MCP server on 127.0.0.1:27182, and the scenario's
-      fixture already staged by the orchestrator)
+Run:  py -3 tests/live/evals/run_eval.py scenarios/S1_Foundation.md --model claude-opus-5
+      (requires Fusion running + the add-in's MCP server on 127.0.0.1:27182, ANTHROPIC_API_KEY in
+      the environment, and the scenario's fixture already staged by the orchestrator)
 
 Output: tests/live/evals/results/run_<scenario>_<n>/ holding prompt.txt (the exact bytes sent),
 transcript.jsonl (the full stream), report.txt (the executor's final message), stderr.txt (the
-CLI's status stream - never credential contents), and audit.json (tool-call names/counts, both
+executor's status stream - never credential contents), and audit.json (tool-call names/counts, both
 budget comparisons - audited MCP calls and executor OUTPUT tokens - usage, the non-MCP-call check,
 and the harness_leak / auth_failure auto-flags).
 
@@ -33,6 +41,7 @@ leave the code at 0.
 """
 
 import argparse
+import difflib
 import json
 import os
 import re
@@ -51,6 +60,10 @@ if hasattr(sys.stdout, "reconfigure"):
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _RESULTS = os.path.join(_HERE, "results")
+# The operator's hub/project/folder live in the untracked cloud config, never in a scenario: a
+# prompt names them through the {{PROJECT}} / {{FOLDER}} tokens extract_prompt substitutes.
+sys.path.insert(0, os.path.dirname(_HERE))
+from cloud_config import FOLDER as CLOUD_FOLDER, PROJECT as CLOUD_PROJECT  # noqa: E402
 MCP_URL = "http://127.0.0.1:27182/mcp"
 ALLOWED = "mcp__fusion-essentials__*"
 # Hard-denied outright (belt to the empty-cwd braces). SOURCE_ACCESS breaks blindness if called;
@@ -149,19 +162,23 @@ def run_tag_for(stem, when=None):
 
 
 def extract_prompt(scenario_path, run_tag):
-    """The fenced block under '## AGENT PROMPT (verbatim)', byte-identical except the one
-    sanctioned token: {{RUN_FOLDER}} becomes this invocation's run tag (same-name
-    collisions with prior chains' artifacts are structurally impossible). Then the two fixed
-    additions, in this order and identically on every scenario: the practice skill the frontmatter
-    declares (when it declares one), and the CONNECTION_LOST rule. The task block stays FIRST so
-    nothing appended can be read as amending it. prompt.txt records the exact bytes actually sent.
-    Returns (prompt, skill_name)."""
+    """The fenced block under '## AGENT PROMPT (verbatim)', byte-identical except the sanctioned
+    tokens: {{RUN_FOLDER}} becomes this invocation's run tag (same-name collisions with prior
+    chains' artifacts are structurally impossible), and {{PROJECT}}/{{FOLDER}} the operator's
+    configured destination. Then the two fixed additions, in this order and identically on every
+    scenario: the practice skill the frontmatter declares (when it declares one), and the
+    CONNECTION_LOST rule. Returns (prompt, skill_name)."""
     text = open(scenario_path, encoding="utf-8").read()
     m = re.search(r"^## AGENT PROMPT \(verbatim\)\s*\n+```\n(.*?)\n```", text,
                   re.S | re.M)
     if not m:
         sys.exit(f"{scenario_path}: no '## AGENT PROMPT (verbatim)' fenced block found")
     prompt = m.group(1).replace("{{RUN_FOLDER}}", run_tag)
+    for token, value in (("{{PROJECT}}", CLOUD_PROJECT), ("{{FOLDER}}", CLOUD_FOLDER)):
+        if token in prompt and not value:
+            sys.exit(f"{scenario_path} names {token} but tests/live/cloud_config.local.json "
+                     "supplies no value for it - write the config, or the run saves nowhere.")
+        prompt = prompt.replace(token, value)
     skill = scenario_skill(scenario_path)
     if skill:
         prompt += "\n\n" + SKILL_HEADER + "\n\n" + skill_body(skill)
@@ -327,8 +344,8 @@ def stall_reason(idle_s, limit_s, calls, thinking_tokens):
             f"new thinking event after ~{calls} tool calls, {thinking}")
 
 
-def launch(prompt, run_dir, model, max_turns, deny=()):
-    """Spawn the executor and WATCH it: tail the transcript for the init event, kill the
+def launch_cli(prompt, run_dir, model, max_turns, deny=()):
+    """Spawn the CLI executor and WATCH it: tail the transcript for the init event, kill the
     process within seconds if it spawned tool-less (returns dead_spawn=True), kill it when it stops
     progressing (returns stalled=True), and print a heartbeat so a live run is visibly alive.
     'deny' adds fusion tool names to the run's --disallowedTools (a control run without one)."""
@@ -427,6 +444,278 @@ def launch(prompt, run_dir, model, max_turns, deny=()):
     if proc.returncode != 0 and not (dead_spawn or stalled):
         print(f"executor exited {proc.returncode}; stderr tail:\n{stderr[-2000:]}", flush=True)
     return transcript, stderr, dead_spawn, stalled
+
+
+# --- the API executor: one Messages API tool loop over the MCP server's own tools ---------------
+
+MCP_PREFIX = "mcp__fusion-essentials__"
+API_KEY_ENV = "ANTHROPIC_API_KEY"
+API_MAX_TOKENS = 16000       # per-turn output cap, non-streaming
+API_TIMEOUT_S = 600.0        # how long one Messages API turn may take before the SDK gives up
+
+
+def mcp_post(payload, timeout=120):
+    """One JSON-RPC POST to the MCP server, decoded."""
+    req = urllib.request.Request(
+        MCP_URL, data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json",
+                 "Accept": "application/json, text/event-stream"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def mcp_tools():
+    """The server's tools/list entries - fetched once per run."""
+    out = mcp_post({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+    return out["result"]["tools"]
+
+
+def _text_block(text):
+    """One MCP text block."""
+    return {"type": "text", "text": text}
+
+
+def mcp_call(name, arguments):
+    """One tools/call. Returns (is_error, the server's content blocks)."""
+    try:
+        out = mcp_post({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                        "params": {"name": name, "arguments": arguments}})
+    except OSError as err:
+        return True, [_text_block(f"connection to the MCP server failed: {err}")]
+    except ValueError as err:
+        return True, [_text_block(f"the MCP server's reply was not JSON: {err}")]
+    if "error" in out:
+        return True, [_text_block(out["error"].get("message", json.dumps(out["error"])))]
+    result = out.get("result") or {}
+    return bool(result.get("isError")), list(result.get("content") or [])
+
+
+def result_content(blocks):
+    """The server's content blocks as tool_result content: text verbatim, an MCP image re-wrapped
+    as a base64 image source, anything else as its own JSON."""
+    content = []
+    for block in blocks:
+        if block.get("type") == "text":
+            content.append(block)
+        elif block.get("type") == "image":
+            content.append({"type": "image",
+                            "source": {"type": "base64", "media_type": block.get("mimeType"),
+                                       "data": block.get("data")}})
+        else:
+            content.append(_text_block(json.dumps(block)))
+    return content or [_text_block("(the result carried no content blocks)")]
+
+
+def api_denied(deny=()):
+    """The fusion tools an API run withholds: the standing fusion denials plus this run's."""
+    return (CLOUD_DELETES | INTERACTIVE_PROMPTS | SCRIPT_HATCH) | {d for d in deny if d}
+
+
+def deny_or_exit(deny, tools):
+    """The run's --deny names, or a refusal when one names no tool the server registered."""
+    names = sorted(MCP_PREFIX + t["name"] for t in tools)
+    for name in deny:
+        if name and name not in names:
+            close = difflib.get_close_matches(name, names, n=3, cutoff=0.5)
+            sys.exit(f"--deny {name} names no tool this server registered, so the run would deny "
+                     f"nothing and read as a control arm - closest names: "
+                     f"{', '.join(close) or '(none close)'}")
+    return list(deny)
+
+
+def tool_definitions(tools, denied=()):
+    """The server's tools as Messages API definitions, named as the transcript names them, with
+    every denied tool left out."""
+    denied = set(denied)
+    defs = [{"name": MCP_PREFIX + t["name"],
+             "description": t.get("description") or "",
+             "input_schema": t.get("inputSchema") or {"type": "object"}}
+            for t in tools if MCP_PREFIX + t["name"] not in denied]
+    if defs:
+        # Every turn resends the whole tool block, and it renders before the system prompt and the
+        # messages - so the breakpoint on the last definition is what later turns read from cache.
+        defs[-1]["cache_control"] = {"type": "ephemeral"}
+    return defs
+
+
+def dispatch_tool_use(block, call=mcp_call):
+    """Execute one tool_use block against the server and return its tool_result block."""
+    name = block.get("name") or ""
+    is_error, blocks = call(name[len(MCP_PREFIX):] if name.startswith(MCP_PREFIX) else name,
+                            block.get("input") or {})
+    return {"type": "tool_result", "tool_use_id": block.get("id"),
+            "content": result_content(blocks), "is_error": is_error}
+
+
+def api_key_or_exit():
+    """The API executor's credential, or a refusal naming the variable it reads."""
+    key = os.environ.get(API_KEY_ENV)
+    if not key:
+        sys.exit(f"--executor api reads its credential from {API_KEY_ENV}, which is not set - "
+                 f"set {API_KEY_ENV}, or run with --executor cli")
+    return key
+
+
+def api_model_or_exit(model):
+    """The model id the API executor sends, or a refusal on a bare alias."""
+    if "-" not in model:
+        sys.exit(f"--executor api sends --model to the Messages API, which takes a model id "
+                 f"such as claude-opus-5 - {model!r} has no id form")
+    return model
+
+
+class ApiClient:
+    """One Messages API turn per create(), returned as a plain dict."""
+
+    def __init__(self, model, timeout_s):
+        try:
+            import anthropic
+        except ImportError:
+            sys.exit("--executor api needs the anthropic package (pip install anthropic), "
+                     "or run with --executor cli")
+        self.model = model
+        self._client = anthropic.Anthropic(timeout=timeout_s)
+
+    def create(self, messages, tools):
+        """One turn: the conversation so far plus the tool definitions, as a dict."""
+        # Two breakpoints: the tool block carries its own (tool_definitions), and this one caches
+        # the last cacheable block of the message prefix, which grows by a turn each call.
+        return self._client.messages.create(model=self.model, max_tokens=API_MAX_TOKENS,
+                                            messages=messages, tools=tools,
+                                            cache_control={"type": "ephemeral"}).to_dict()
+
+
+_USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens",
+               "cache_creation_input_tokens")
+# Turn endings that are not a report: the text stops mid-thought, so recording it as the final
+# report would hand the orchestrator a truncated answer to grade.
+_UNFINISHED = ("max_tokens", "refusal")
+
+
+def api_record():
+    """A fresh run record: what the run produced, what it spent, and why it stopped."""
+    return {"final": "", "usage": {key: 0 for key in _USAGE_KEYS}, "turns": 0, "calls": 0,
+            "stop": "", "stalled": False}
+
+
+def api_loop(client, prompt, tools, write, budget_calls=None, budget_tokens=None, max_turns=120,
+             stall_s=0, dispatch=dispatch_tool_use, clock=time.time, record=None):
+    """Run the tool loop, filling `record` as it goes so a turn that raises still reports what the
+    run spent, and return that record."""
+    record = api_record() if record is None else record
+    usage = record["usage"]
+    messages = [{"role": "user", "content": prompt}]
+    last_progress = clock()
+    while True:
+        if record["turns"] >= max_turns:
+            record["stop"] = f"max turns ({max_turns})"
+            break
+        reply = client.create(messages, tools)
+        # The idle window is read the moment the turn lands, and last_progress moves only on a
+        # dispatched call - so this is the silence the watchdog judges.
+        idle_s = clock() - last_progress
+        record["turns"] += 1
+        for key in usage:
+            usage[key] += int((reply.get("usage") or {}).get(key) or 0)
+        content = reply.get("content") or []
+        uses = [b for b in content if b.get("type") == "tool_use"]
+        stall = stall_reason(idle_s, stall_s, record["calls"], None) if uses else ""
+        results, ran = [], set()
+        if not stall:
+            for block in uses:
+                if budget_calls is not None and record["calls"] >= budget_calls:
+                    record["stop"] = f"call budget ({budget_calls} calls)"
+                    break
+                results.append(dispatch(block))
+                ran.add(id(block))
+                record["calls"] += 1
+                last_progress = clock()
+        # The transcript carries the calls that RAN: audit counts tool_use blocks, and a block the
+        # budget or the watchdog cut never reached the server.
+        write({"type": "assistant", "message": dict(reply, content=[
+            b for b in content if b.get("type") != "tool_use" or id(b) in ran])})
+        if results:
+            write({"type": "user", "message": {"content": results}})
+            messages.append({"role": "assistant", "content": content})
+            messages.append({"role": "user", "content": results})
+        if stall:
+            record["stalled"], record["stop"] = True, stall
+            break
+        if not uses:
+            reason = reply.get("stop_reason") or ""
+            if reason in _UNFINISHED:
+                record["stop"] = f"the turn ended on stop_reason {reason} with no tool call"
+            else:
+                record["final"] = "\n".join(b.get("text") or "" for b in content
+                                            if b.get("type") == "text")
+                record["stop"] = "the model's final report"
+            break
+        if record["stop"]:                       # the call budget cut this turn short
+            break
+        if budget_tokens is not None and usage["output_tokens"] >= budget_tokens:
+            record["stop"] = f"output token budget ({budget_tokens} tokens)"
+            break
+    return record
+
+
+EXECUTORS = ("api", "cli")
+# The three settings a run's launch reads off main's arguments: which executor, and the budgets
+# the API loop stops at (the CLI executor's budgets are scored after the run, not enforced).
+EXECUTOR = "api"
+BUDGET_CALLS = BUDGET_TOKENS = None
+
+
+def launch_api(prompt, run_dir, model, max_turns, deny=()):
+    """Run the prompt as a Messages API tool loop over the server's tools, and return the same
+    (transcript, status, dead_spawn, stalled) the CLI launch returns."""
+    with open(os.path.join(run_dir, "prompt.txt"), "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(prompt)
+    registered = mcp_tools()
+    deny_or_exit(deny, registered)
+    tools = tool_definitions(registered, api_denied(deny))
+    stall_s = stall_limit_s()
+    client = ApiClient(model, API_TIMEOUT_S)
+    transcript = os.path.join(run_dir, "transcript.jsonl")
+    status, start, beat = [], time.time(), {"turns": 0, "calls": 0}
+
+    with open(transcript, "w", encoding="utf-8", newline="\n") as out:
+        def write(event):
+            out.write(json.dumps(event, separators=(",", ":")) + "\n")
+            out.flush()
+            if event.get("type") == "assistant":
+                beat["turns"] += 1
+            if event.get("type") == "user":
+                beat["calls"] += len(event["message"]["content"])
+                print(f"  [{int(time.time() - start)}s] turn {beat['turns']} - "
+                      f"{beat['calls']} tool calls", flush=True)
+
+        write({"type": "system", "subtype": "init", "tools": [t["name"] for t in tools]})
+        print(f"  init OK ({len(tools)} fusion tools defined) - API executor running", flush=True)
+        run = api_record()
+        try:
+            api_loop(client, prompt, tools, write, budget_calls=BUDGET_CALLS,
+                     budget_tokens=BUDGET_TOKENS, max_turns=max_turns, stall_s=stall_s,
+                     record=run)
+        except Exception as err:
+            # A failed turn ends the run. The record already holds the turns and tokens it spent,
+            # and the message lands where the credential-rejection check reads.
+            run["stop"] = f"{type(err).__name__}: {err}"
+            status.append(run["stop"])
+            print("  the API call failed - " + status[-1], flush=True)
+        write({"type": "result", "result": run["final"], "usage": run["usage"],
+               "num_turns": run["turns"], "stop": run["stop"]})
+    status.append("stop: " + (run["stop"] or "the loop ended without recording a reason"))
+    print("  " + status[-1], flush=True)
+    with open(os.path.join(run_dir, "stderr.txt"), "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(status))
+    return transcript, "\n".join(status), False, run["stalled"]
+
+
+def launch(prompt, run_dir, model, max_turns, deny=()):
+    """Run the prompt through this run's executor."""
+    if EXECUTOR == "cli":
+        return launch_cli(prompt, run_dir, model, max_turns, deny)
+    return launch_api(prompt, run_dir, model, max_turns, deny)
 
 
 # Executors get a COPY of the API credentials; the main session rotates the single-use refresh
@@ -551,9 +840,16 @@ def exit_status(report, dead_spawn_exhausted=False, auth_exhausted=False, stalle
 
 
 def main():
+    global EXECUTOR, BUDGET_CALLS, BUDGET_TOKENS
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("scenario", help="path to a scenarios/*.md file")
-    ap.add_argument("--model", default="sonnet", help="executor model (default sonnet)")
+    ap.add_argument("--model", default="claude-opus-5",
+                    help="executor model (default claude-opus-5) - the api executor takes a model "
+                         "id, the cli executor also takes a CLI alias such as sonnet")
+    ap.add_argument("--executor", choices=EXECUTORS, default="api",
+                    help="api (default): a Messages API tool loop over the server's tools - reads "
+                         f"{API_KEY_ENV} and takes --model as a model id. cli: the Claude Code CLI "
+                         "subprocess, for a comparison run")
     ap.add_argument("--max-turns", type=int, default=None,
                     help="hard runaway backstop (default: max(120, 2x the scenario's max_tool_calls) - "
                          "so a big-budget scenario is not severed mid-report; pass a value to override)")
@@ -563,6 +859,11 @@ def main():
                          "without sys_get_guidance. Add names one at a time: an unknown name empties "
                          "the CLI's tool registry")
     args = ap.parse_args()
+    if args.executor == "api":
+        # Both refusals land before the first run dir exists, so a missing key or a CLI alias
+        # cannot leave an empty run dir behind in the batch folder.
+        api_key_or_exit()
+        api_model_or_exit(args.model)
 
     scenario = os.path.abspath(args.scenario)
     stem = os.path.splitext(os.path.basename(scenario))[0]
@@ -571,11 +872,12 @@ def main():
     batch_dir = os.path.join(_RESULTS, "Eval-" + time.strftime("%Y-%m-%d"))
     os.makedirs(batch_dir, exist_ok=True)
     # Per-RUN cloud subfolder tag: each invocation's saves land under
-    # Pipeline-v1/<run_tag> via the {{RUN_FOLDER}} token, so a run's artifacts can never
+    # <configured folder>/<run_tag> via the {{RUN_FOLDER}} token, so a run's artifacts can never
     # name-collide with a prior chain's. Chains still hand artifacts forward BY URN.
     run_tag = run_tag_for(stem)
 
     budget_calls, budget_tokens = scenario_budget(scenario)
+    EXECUTOR, BUDGET_CALLS, BUDGET_TOKENS = args.executor, budget_calls, budget_tokens
     # --max-turns default is DERIVED from the scenario's own call budget when not passed explicitly:
     # 120 sat below several scenario budgets (S1 154, S2a 130, S7 138) and severed a run at turn 121
     # pre-report. 2x the budget leaves headroom for the report turns; the explicit flag still wins.
@@ -608,7 +910,8 @@ def main():
             n += 1
         run_dir = os.path.join(batch_dir, f"run_{stem}_{n:02d}")
         os.makedirs(run_dir)
-        print(f"run dir: {run_dir}\nmodel: {args.model}  budget: {budget_calls} calls / "
+        print(f"run dir: {run_dir}\nexecutor: {args.executor}  model: {args.model}  "
+              f"budget: {budget_calls} calls / "
               f"{budget_tokens} output tokens  max_turns: {max_turns}  "
               f"cloud folder tag: {run_tag}  skill: {skill or 'none'}  "
               f"denied: {', '.join(args.deny) or 'none'}", flush=True)
@@ -642,11 +945,13 @@ def main():
             preflight_server()
             continue
         if report["auth_failure_suspected"]:
-            print(f"  auth marker in the CLI's status stream, but the executor made "
+            print(f"  auth marker in the executor's status stream, but the executor made "
                   f"{report['tool_calls_mcp']} MCP calls - NOT relaunching (a replay with no "
                   f"restage would re-run the prompt against already-mutated live state).",
                   flush=True)
-        if dead_spawn or report["spawn_flake_suspected"]:
+        # A dead spawn is a subprocess failure. The API executor starts no subprocess, so its
+        # zero-call run is the model's own outcome and a replay would only re-run the prompt.
+        if args.executor == "cli" and (dead_spawn or report["spawn_flake_suspected"]):
             if not spawn_backoffs:
                 dead_spawn_exhausted = True
                 print("DEAD SPAWN persisted through all retries - giving up; the API/CLI side "

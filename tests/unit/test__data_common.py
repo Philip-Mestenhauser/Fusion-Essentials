@@ -10,7 +10,7 @@ refusal when a NAME matches several files. No live Fusion needed.
 import pytest
 
 from conftest import (FakeApplication, FakeData, FakeDataFile, FakeDataFolder, FakeDataProject,
-                      load_tool)
+                      FakeFusionDocument, load_tool)
 
 dm = load_tool("_data_common")
 
@@ -87,6 +87,70 @@ class TestFolderPathString:
         assert dm._folder_path_string(root.dataFolders.add("Parts")) == "Parts"
 
 
+class _DeadActiveProject(FakeData):
+    """The measured session: reading Data.activeProject RAISES while dataProjects still answers.
+    The setter swallows, so the shared fake's constructor still runs."""
+    @property
+    def activeProject(self):
+        raise RuntimeError("2 : InternalValidationError : group")
+
+    @activeProject.setter
+    def activeProject(self, value):
+        pass
+
+
+class TestActiveProject:
+    """app.data.activeProject raises on this build, so the project is the DataProject the ACTIVE
+    DOCUMENT's own DataFile hands back - the object itself, never a name looked up again."""
+
+    def _session(self, monkeypatch, projects, owner=None, data_file=True,
+                 data_class=FakeData):
+        doc = FakeFusionDocument(
+            name="Part", data_file=FakeDataFile("Part", parent_project=owner) if data_file else None)
+        monkeypatch.setattr(dm, "app", FakeApplication(active_document=doc,
+                                                       data=data_class(projects=projects)))
+        return doc
+
+    def test_the_documents_own_project_object_is_the_one_returned(self, monkeypatch):
+        owner = FakeDataProject("Home", project_id="p-doc")
+        self._session(monkeypatch, [FakeDataProject("Other", project_id="p-0")], owner=owner)
+        assert dm.active_project() == (owner, None)
+
+    def test_the_dead_active_project_read_is_never_taken(self, monkeypatch):
+        owner = FakeDataProject("Home", project_id="p-doc")
+        self._session(monkeypatch, [owner], owner=owner, data_class=_DeadActiveProject)
+        assert dm.active_project() == (owner, None)
+
+    def test_a_hub_sibling_of_the_same_name_is_not_the_answer(self, monkeypatch):
+        # identity is the project's id, not its name: two projects can carry one name, and a
+        # by-name re-find would hand a part search the WRONG project's root folder.
+        owner = FakeDataProject("Home", project_id="p-doc")
+        self._session(monkeypatch, [FakeDataProject("Home", project_id="p-1"),
+                                    FakeDataProject("Home", project_id="p-2")], owner=owner)
+        proj, problem = dm.active_project()
+        assert proj is owner and proj.id == "p-doc" and problem is None
+
+    def test_a_project_the_hub_list_does_not_carry_still_resolves(self, monkeypatch):
+        owner = FakeDataProject("Home", project_id="p-doc")
+        self._session(monkeypatch, [], owner=owner)
+        assert dm.active_project() == (owner, None)
+
+    def test_an_active_document_with_no_data_file_names_that_read(self, monkeypatch):
+        self._session(monkeypatch, [FakeDataProject("Home")], data_file=False)
+        proj, problem = dm.active_project()
+        assert proj is None and "no cloud data file" in problem and "doc_save_as" in problem
+
+    def test_a_data_file_answering_no_parent_project_names_that_read(self, monkeypatch):
+        self._session(monkeypatch, [FakeDataProject("Home")], owner=None)
+        proj, problem = dm.active_project()
+        assert proj is None and "did not answer a parentProject" in problem
+
+    def test_no_active_document_names_that_read(self, monkeypatch):
+        monkeypatch.setattr(dm, "app", FakeApplication(active_document=None, data=FakeData()))
+        proj, problem = dm.active_project()
+        assert proj is None and "no active document" in problem
+
+
 class TestAgentDescription:
     def test_prefixes_marker(self):
         assert dm._agent_description("stock sizing") == "[AI agent] stock sizing"
@@ -110,7 +174,7 @@ class TestAgentDescription:
 def cloud(monkeypatch):
     """Install a project tree plus the URN lookup the resolver finishes through."""
     def _use(root, files_by_urn=None):
-        proj = FakeDataProject("MCP Test Project", project_id="proj-1", root_folder=root)
+        proj = FakeDataProject("Sample Project", project_id="proj-1", root_folder=root)
         data = FakeData(projects=[proj], files_by_id=files_by_urn)
         monkeypatch.setattr(dm, "app", FakeApplication(data=data))
         return proj
@@ -156,7 +220,7 @@ class TestResolveFileReference:
         df = _file("probe_note.txt", "urn:lin:AAA")
         cloud(self._one_deep_tree(), {"urn:lin:AAA": df})
         got, meta, err = dm.resolve_file_reference(
-            "probe_note.txt", project="MCP Test Project")
+            "probe_note.txt", project="Sample Project")
         assert err is None and got is df
         assert meta["matched_by"] == "name" and meta["folder_path"] == "Docs"
 
@@ -164,13 +228,13 @@ class TestResolveFileReference:
         df = _file("probe_note.txt", "urn:lin:AAA")
         cloud(self._one_deep_tree(), {"urn:lin:AAA": df})
         got, _meta, err = dm.resolve_file_reference(
-            "PROBE_NOTE.TXT", project="MCP Test Project")
+            "PROBE_NOTE.TXT", project="Sample Project")
         assert err is None and got is df
 
     def test_a_partial_name_never_matches(self, cloud):
         # 'note' must not grab 'probe_note.txt' - a substring resolver picks the wrong file silently.
         cloud(self._one_deep_tree(), {"urn:lin:AAA": _file("probe_note.txt", "urn:lin:AAA")})
-        got, _meta, err = dm.resolve_file_reference("note", project="MCP Test Project")
+        got, _meta, err = dm.resolve_file_reference("note", project="Sample Project")
         assert got is None and "No file named 'note'" in err
         assert "probe_note.txt" in err                    # what IS there
 
@@ -179,7 +243,7 @@ class TestResolveFileReference:
         parts = FakeDataFolder("Parts", files=[_file("notes.txt", "urn:lin:BBB")])
         root = FakeDataFolder("Root", folders=[docs, parts], is_root=True)
         cloud(root, {"urn:lin:AAA": _file("notes.txt", "urn:lin:AAA")})
-        got, _meta, err = dm.resolve_file_reference("notes.txt", project="MCP Test Project")
+        got, _meta, err = dm.resolve_file_reference("notes.txt", project="Sample Project")
         assert got is None                                # never the first hit
         assert "names 2 files" in err
         assert "urn:lin:AAA" in err and "urn:lin:BBB" in err
@@ -192,14 +256,14 @@ class TestResolveFileReference:
         root = FakeDataFolder("Root", folders=[docs, parts], is_root=True)
         cloud(root, {"urn:lin:BBB": wanted})
         got, meta, err = dm.resolve_file_reference(
-            "notes.txt", project="MCP Test Project", folder="Parts")
+            "notes.txt", project="Sample Project", folder="Parts")
         assert err is None and got is wanted
         assert meta["folder_path"] == "Parts"
 
     def test_a_missing_scope_folder_is_named(self, cloud):
         cloud(self._one_deep_tree(), {})
         got, _meta, err = dm.resolve_file_reference(
-            "notes.txt", project="MCP Test Project", folder="Nope")
+            "notes.txt", project="Sample Project", folder="Nope")
         assert got is None and "missing segment 'Nope'" in err
         assert "could not be READ" not in err            # it looked, and the folder is not there
 
@@ -208,14 +272,14 @@ class TestResolveFileReference:
         # states a verdict this walk never reached.
         cloud(FakeDataFolder("Root", is_root=True, folders_raise="cloud read failed"), {})
         got, _meta, err = dm.resolve_file_reference(
-            "notes.txt", project="MCP Test Project", folder="Nope")
+            "notes.txt", project="Sample Project", folder="Nope")
         assert got is None
         assert "could not be READ" in err and "unknown" in err
 
     def test_an_unknown_project_lists_the_ones_there_are(self, cloud):
         cloud(self._one_deep_tree(), {})
         got, _meta, err = dm.resolve_file_reference("notes.txt", project="Ghost")
-        assert got is None and "MCP Test Project" in err
+        assert got is None and "Sample Project" in err
 
     def test_a_match_inside_a_capped_listing_is_flagged_not_claimed_unique(self, cloud, monkeypatch):
         # Uniqueness is only proven over what was actually walked - a capped listing never compared
@@ -226,7 +290,7 @@ class TestResolveFileReference:
         cloud(FakeDataFolder("Root", folders=[docs], is_root=True), {"urn:lin:AAA": df})
         monkeypatch.setattr(data_read, "_MAX_FILES", 1)
         got, meta, err = dm.resolve_file_reference(
-            "probe_note.txt", project="MCP Test Project")
+            "probe_note.txt", project="Sample Project")
         assert err is None and got is df
         assert meta["scope_truncated"] is True
 
@@ -234,7 +298,7 @@ class TestResolveFileReference:
         df = _file("probe_note.txt", "urn:lin:AAA")
         cloud(self._one_deep_tree(), {"urn:lin:AAA": df})
         _got, meta, _err = dm.resolve_file_reference(
-            "probe_note.txt", project="MCP Test Project")
+            "probe_note.txt", project="Sample Project")
         assert meta["scope_truncated"] is False
 
     def test_an_empty_reference_is_refused(self, cloud):
@@ -256,7 +320,7 @@ class TestIdentifierVsName:
         df = _file("httpd-mount.f3d", "urn:lin:AAA")
         cloud(self._tree_with("httpd-mount.f3d", "urn:lin:AAA"), {"urn:lin:AAA": df})
         got, meta, err = dm.resolve_file_reference(
-            "httpd-mount.f3d", project="MCP Test Project")
+            "httpd-mount.f3d", project="Sample Project")
         assert err is None and got is not None
         assert meta["matched_by"] == "name"
 
@@ -264,7 +328,7 @@ class TestIdentifierVsName:
         df = _file("rev2://draft.f3d", "urn:lin:BBB")
         cloud(self._tree_with("rev2://draft.f3d", "urn:lin:BBB"), {"urn:lin:BBB": df})
         got, meta, err = dm.resolve_file_reference(
-            "rev2://draft.f3d", project="MCP Test Project")
+            "rev2://draft.f3d", project="Sample Project")
         assert err is None and got is not None and meta["matched_by"] == "name"
 
     def test_a_name_lookalike_without_a_project_gets_the_name_refusal(self, cloud):
@@ -309,7 +373,7 @@ class TestResolveFileReferenceWithUnreadableFolders:
     def test_a_miss_says_a_folder_went_unsearched(self, cloud):
         cloud(self._tree_with_a_dead_folder(), {})
         got, _meta, err = dm.resolve_file_reference(
-            "ghost.txt", project="MCP Test Project")
+            "ghost.txt", project="Sample Project")
         assert got is None
         assert "No file named 'ghost.txt'" in err
         assert "1 folder(s) could not be read and were not searched" in err
@@ -325,7 +389,7 @@ class TestResolveFileReferenceWithUnreadableFolders:
                               is_root=True)
         cloud(root, {})
         got, _meta, err = dm.resolve_file_reference(
-            "notes.txt", project="MCP Test Project")
+            "notes.txt", project="Sample Project")
         assert got is None and "names 2 files" in err
         assert "could not be read and were not searched" in err
         assert "Archive" in err
@@ -336,7 +400,7 @@ class TestResolveFileReferenceWithUnreadableFolders:
         df = _file("probe_note.txt", "urn:lin:AAA")
         cloud(self._tree_with_a_dead_folder(), {"urn:lin:AAA": df})
         got, meta, err = dm.resolve_file_reference(
-            "probe_note.txt", project="MCP Test Project")
+            "probe_note.txt", project="Sample Project")
         assert err is None and got is df
         assert meta["folders_unreadable"] == 1
 
@@ -345,7 +409,7 @@ class TestResolveFileReferenceWithUnreadableFolders:
         df = _file("probe_note.txt", "urn:lin:AAA")
         cloud(FakeDataFolder("Root", folders=[docs], is_root=True), {"urn:lin:AAA": df})
         got, meta, err = dm.resolve_file_reference(
-            "probe_note.txt", project="MCP Test Project")
+            "probe_note.txt", project="Sample Project")
         assert err is None and got is df
         assert meta["folders_unreadable"] == 0
 
@@ -354,7 +418,7 @@ class TestResolveFileReferenceWithUnreadableFolders:
         # Recording only the dataFiles failure would report this walk as complete.
         cloud(self._tree_with_a_dead_folder(self._dead_subfolders_folder()), {})
         got, _meta, err = dm.resolve_file_reference(
-            "ghost.txt", project="MCP Test Project")
+            "ghost.txt", project="Sample Project")
         assert got is None
         assert "1 folder(s) could not be read" in err
         assert "Archive" in err
@@ -367,7 +431,7 @@ class TestResolveFileReferenceWithUnreadableFolders:
         dead = [self._dead_files_folder("Dead%02d" % i) for i in range(cap + 1)]
         cloud(FakeDataFolder("Root", folders=dead, is_root=True), {})
         got, _meta, err = dm.resolve_file_reference(
-            "ghost.txt", project="MCP Test Project")
+            "ghost.txt", project="Sample Project")
         assert got is None
         assert f"{cap + 1} folder(s) could not be read" in err        # the COUNT is complete
         assert err.count("Dead") == cap                              # the NAMES are capped

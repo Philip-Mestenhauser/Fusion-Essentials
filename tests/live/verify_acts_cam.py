@@ -14,6 +14,7 @@ two setups one NC program spans. Their non-empty oracle is each operation's own 
 hasToolpath reads TRUE on an empty swarf toolpath, so it cannot answer that question.
 """
 
+import re
 import time
 
 from verify_core import (
@@ -195,6 +196,18 @@ def _launched_on(setup, skip_valid=False):
     return check
 
 
+def _settled(scope):
+    """cam_get_status as the SETTLE before a compare: cam_compare_operations refuses while a named
+    operation still has generating to do, so the beat asserts the scope has none in flight. Not
+    _all_current - this runs before the act's own cam_generate, so stale operations are expected."""
+    def check(p):
+        live = p.get("live_states") or {}
+        return _measured(f"nothing in {scope} has generating left to do",
+                         {"completed": p.get("completed"), "live_states": live},
+                         p.get("completed") is True and _num(live.get("total")))
+    return check
+
+
 def _relaunched(setup):
     """cam_generate(skip_valid=true) over a setup the job's later edits may have left stale: a
     launch carrying the count it covers, or the ALREADY-VALID skip. The skip's reason has to be that
@@ -257,6 +270,30 @@ def _op_named(setup, strategy, name):
                          p.get("operation") == name and p.get("setup") == setup
                          and p.get("strategy") == strategy
                          and "generation_mode_note" not in p)
+    return check
+
+
+def _paths_address_every_operation(setup):
+    """cam_get(include=['operations']): every row's 'path' IS its address - the setup, the folder it
+    sits in where it sits in one, then its own name - and no two rows share a name.
+
+    Both halves are asserted because either alone admits the ambiguity: a path that dropped its
+    folder segment would address two same-named rows identically, and two rows sharing a name would
+    force the ordinal '<name>#<n>' form no read here publishes."""
+    def check(p):
+        rows = [r for s in ((p.get("operations") or {}).get("setups") or [])
+                if s.get("setup") == setup for r in (s.get("operations") or [])]
+        mismatched = []
+        for r in rows:
+            want = " / ".join([setup] + ([r["folder"]] if r.get("folder") else []) + [r["name"]])
+            if r.get("path") != want:
+                mismatched.append({"name": r.get("name"), "path": r.get("path"), "want": want})
+        names = [r.get("name") for r in rows]
+        return _measured(f"every operation of '{setup}' is addressed by its own path",
+                         {"operations": len(rows), "mismatched": mismatched[:3],
+                          "foldered": sum(1 for r in rows if r.get("folder")),
+                          "duplicate_names": sorted({n for n in names if names.count(n) > 1})},
+                         bool(rows) and not mismatched and len(set(names)) == len(names))
     return check
 
 
@@ -758,14 +795,20 @@ _CAM_STORY = [
     # reads inactive, so the name here is the setup that actually became active.
     ("cam_activate_setup", {"setup": CAM_SETUP},
      lambda p: p["activated"] == CAM_SETUP, None),
+    # the compare's precondition, read rather than waited out: it refuses while either named
+    # operation still has generating to do, and the selections it walks are what that guards.
+    ("cam_get_status", {"target": CAM_SETUP}, _settled(f"setup '{CAM_SETUP}'"), None),
     # two DIFFERENT strategies must differ somewhere: a zero-difference diff would mean the two
     # names resolved to one operation. Both names are read back off the resolved operations.
     ("cam_compare_operations", lambda c: {"operation_a": _ctx_get(c, "face_op", "the face op"),
                                           "operation_b": _ctx_get(c, "adaptive_op",
                                                                   "the created adaptive op")},
-     lambda p: p["operation_a"] == _RECALL.get("face_op")
-     and p["operation_b"] == _RECALL.get("adaptive_op")
-     and p["difference_count"] >= 1 and all(d["parameter"] for d in p["differences"]), None),
+     lambda p: _compare_geometry(_RECALL.get("face_op"), _RECALL.get("adaptive_op"))(p)
+     and all(d["parameter"] for d in p["differences"]), None),
+    # The listed rows are not the operation's whole set: the read counts what its own filter dropped.
+    ("cam_get", lambda c: {"include": ["parameters"],
+                           "operation": _ctx_get(c, "adaptive_op", "the created adaptive op")},
+     lambda p: _params_counted(_RECALL.get("adaptive_op"))(p), None),
     # FOLDERS: organize the job the way a shop sheet reads - milling vs drilling.
     ("cam_edit_folders", {"action": "create", "setup": CAM_SETUP, "name": "Milling"},
      lambda p: p["created"] is True and p["folder"] == "Milling" and p["setup"] == CAM_SETUP,
@@ -790,6 +833,23 @@ _CAM_STORY = [
                                                    _ctx_get(c, "drill_op", "the drill op"),
                                                    _BORE_OP]},
      lambda p: p["moved"] == 3 and p["into"] == "Drilling", None),
+    # WALK-ORDER ADDRESSING, now that the job is split across the setup and two folders. Operation
+    # .name DEDUPES rather than refusing, which would mint a second 'Face1' nothing asked for and
+    # leave the two tellable apart only by walk position. Both arms that could reach that refuse
+    # BEFORE mutating - the create here, the rename below - each naming the count it collided with.
+    ("cam_create_operation", lambda c: {"setup": CAM_SETUP, "strategy": "face",
+                                        "name": _ctx_get(c, "face_op", "the face op"),
+                                        "tool_scope": "document", "tool_index": _FACE_MILL,
+                                        "generate": False},
+     _refused("already answer to", "dedupes rather than refusing", "cam_get"), None),
+    # the rename arm, on an operation in one FOLDER aimed at a name an operation in ANOTHER carries
+    # - the refusal is document-wide, not per folder. Nothing is written, so no rename reaches the
+    # platform: setting Operation.name is itself a generation trigger (ledger BORE-PARK-REPRO-1).
+    ("cam_edit_operation", lambda c: {"operation": _ctx_get(c, "drill_op", "the drill op"),
+                                      "rename": _ctx_get(c, "face_op", "the face op")},
+     _refused("already answer to", "dedupes rather than refusing"), None),
+    ("cam_get", {"include": ["operations"], "setup": CAM_SETUP},
+     _paths_address_every_operation(CAM_SETUP), None),
     # A MACHINE OF OUR OWN before the library one: built from a template into the Local library and
     # then proven usable three ways - the create's own re-resolve, the catalog it must list in, and a
     # real assignment. The name carries the run stamp because the library keeps it (see MACHINE_NAME).
@@ -1344,6 +1404,8 @@ _CAM = (
          and p["entity_index"] < p["reference_index"], None),
         ("cam_activate_setup", {"setup": "Setup1"},
          lambda p: p["activated"] == "Setup1", None),
+        # the compare's precondition, read rather than waited out - see _settled.
+        ("cam_get_status", {"target": "Setup1"}, _settled("setup 'Setup1'"), None),
         ("cam_compare_operations", lambda c: {"operation_a": _ctx_get(c, "face_op", "the face op"),
                                               "operation_b": _ctx_get(c, "adaptive_op",
                                                                       "the created adaptive op")},
@@ -1564,18 +1626,48 @@ def _param_landed(name, fragment):
 
 
 def _param_value(name, value):
-    """The same read-back on a NUMERIC parameter, compared for EQUALITY: the carry test above reads
-    a stored '13' as carrying the 3 that was asked for, which is a count off by ten."""
+    """The same read-back on a NUMERIC parameter, compared for EQUALITY through the ONE
+    _leading_number parse: the carry test above reads a stored '13' as carrying the 3 that was asked
+    for, and a length read-back states its unit ('0.5 mm')."""
     def check(p):
         rows = p.get("changed") or []
         row = next((r for r in rows if r.get("name") == name), None)
-        try:
-            got = float(str((row or {}).get("after")).strip())
-        except (TypeError, ValueError):
-            got = None
+        got = _leading_number((row or {}).get("after"))
         return _measured(f"operation parameter '{name}' reads back {value}",
                          {"edited": p.get("edited"), "changed": rows},
-                         p.get("edited") is True and got is not None and got == float(value))
+                         p.get("edited") is True and got is not None
+                         and got == _leading_number(value))
+    return check
+
+
+_LEADING_NUMBER = re.compile(r"\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)")
+
+
+def _leading_number(text):
+    """The number a read-back opens with, any unit suffix dropped - None where it opens with
+    none."""
+    match = _LEADING_NUMBER.match(str(text))
+    return float(match.group(1)) if match else None
+
+
+def _reads_back(after, value):
+    """True where a read-back states `value`: a number compared as a number even where the
+    expression states its unit ('0.5mm'), anything else compared as text."""
+    number = _leading_number(value)
+    return (_leading_number(after) == number if number is not None
+            else str(after).strip().lower() == str(value).strip().lower())
+
+
+def _landed_in_one_call(values):
+    """cam_edit_operation carrying several parameters at once: every one of {name: value} reads
+    back what it was asked for. Nothing here is gated - the gated shape is _unlocked_in_one_call."""
+    def check(p):
+        rows = {r.get("name"): r for r in (p.get("changed") or [])}
+        return _measured(f"{'/'.join(values)} landed in ONE call",
+                         {"edited": p.get("edited"), "changed": p.get("changed")},
+                         p.get("edited") is True and len(rows) >= len(values)
+                         and all(_reads_back((rows.get(n) or {}).get("after"), v)
+                                 for n, v in values.items()))
     return check
 
 
@@ -1586,15 +1678,58 @@ def _unlocked_in_one_call(switch, gated, value):
     def check(p):
         rows = {r.get("name"): r for r in (p.get("changed") or [])}
         gated_row = rows.get(gated) or {}
-        try:
-            got = float(str(gated_row.get("after")).strip())
-        except (TypeError, ValueError):
-            got = None
         return _measured(f"'{switch}' and '{gated}'={value} in ONE call, the gated row unlocked",
                          {"edited": p.get("edited"), "changed": p.get("changed")},
-                         p.get("edited") is True and got == float(value)
+                         p.get("edited") is True and _reads_back(gated_row.get("after"), value)
                          and gated_row.get("unlocked_here") is True
                          and "unlocked_here" not in (rows.get(switch) or {}))
+    return check
+
+
+# The selection-property keys cam_compare_operations decodes and scales. An enum crossing as an int
+# or a length crossing in internal cm is what these two sets catch.
+_ENUM_KEYS = ("loopType", "sideType", "extensionType", "extensionMethod")
+_LENGTH_KEYS = ("startExtensionLength", "endExtensionLength", "silhouetteTolerance",
+                "minimumHoleDiameter", "minimumCornerRadius", "maximumCornerRadius",
+                "minimumPocketDepth", "maximumPocketDepth")
+
+
+def _compare_geometry(op_a, op_b):
+    """cam_compare_operations: the parameter diff PLUS the geometry half - the selection sets read,
+    every enum decoded to a spelling and every length scaled into the units the payload names."""
+    def check(p):
+        rows = [row for side in ("operation_a", "operation_b")
+                for d in (p.get("geometry_differences") or [])
+                if isinstance(d.get(side), dict)
+                for row in (d[side].get("properties") or [])]
+        enums = [(k, v) for row in rows for k, v in row.items() if k in _ENUM_KEYS]
+        lengths = [(k, v) for row in rows for k, v in row.items() if k in _LENGTH_KEYS]
+        return _measured(
+            f"'{op_a}' vs '{op_b}': parameters differ and the geometry half reads decoded",
+            {"difference_count": p.get("difference_count"),
+             "geometry_difference_count": p.get("geometry_difference_count"),
+             "geometry_units": p.get("geometry_units"),
+             "enums": enums[:6], "lengths": lengths[:6]},
+            p.get("operation_a") == op_a and p.get("operation_b") == op_b
+            and p.get("difference_count", 0) >= 1
+            and p.get("geometry_units") == "mm"
+            and all(isinstance(v, str) for _k, v in enums)
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for _k, v in lengths))
+    return check
+
+
+def _params_counted(operation):
+    """cam_get(include=['parameters']): the LISTED rows and the count of the ones the visible+enabled
+    filter dropped, so the listed count is not read as the operation's whole set."""
+    def check(p):
+        params = p.get("parameters") or {}
+        return _measured(f"'{operation}' parameters listed beside hidden_count",
+                         {"parameter_count": params.get("parameter_count"),
+                          "hidden_count": params.get("hidden_count")},
+                         params.get("operation") == operation
+                         and params.get("parameter_count", 0) >= 1
+                         and params.get("hidden_count", 0) >= 1
+                         and "hidden_count" in (params.get("note") or ""))
     return check
 
 

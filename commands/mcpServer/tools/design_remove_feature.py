@@ -87,7 +87,8 @@ def handler(body: str = "", occurrence: str = "") -> dict:
                      "feature takes one item. Call the tool twice to remove two things.")
     if not b_raw and not o_raw:
         return error("Provide 'body' (a find_geometry handle or a body name) or 'occurrence' (a "
-                     "handle or fullPathName from design_get(include=['tree'])) - the item to remove.")
+                     "handle or fullPathName from design_get(include=['tree'], tree_handles=true)) "
+                     "- the item to remove.")
 
     if b_raw:
         target, terr = _BODY.resolve(b_raw)
@@ -130,7 +131,8 @@ def handler(body: str = "", occurrence: str = "") -> dict:
     if n_before == 0:
         return error(f"Refusing to remove: the {kind} '{label}' is not visible in the collection this "
                      "tool re-scans to confirm a removal, so the effect could not be verified. Re-read "
-                     "the target with design_get(include=['tree']) / find_geometry and retry.")
+                     "the target with design_get(include=['tree'], tree_handles=true) / find_geometry "
+                     "and retry.")
 
     err_before, _, _ = _common.timeline_health(design)
     try:

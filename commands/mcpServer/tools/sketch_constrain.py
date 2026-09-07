@@ -178,6 +178,25 @@ def _coincident_curve_note(ref):
             f"along it - to land on a KEYPOINT of {ref.strip()} instead, anchor entity_two: {forms}.")
 
 
+def _names_a_point(base_ref, anchor):
+    """Whether a ref resolves to a SketchPoint, decided on the ref FORM: every ':start/:end/:mid/
+    :center' anchor yields one, and 'point:<n>' names one."""
+    # The FORM, not isinstance: two distinct sketch CURVES share one entityToken (a split's pieces),
+    # so an identity comparison over curve operands would refuse a legitimate pair.
+    return bool(anchor) or (base_ref or "").strip().lower().rpartition(":")[0] == "point"
+
+
+def _one_operand(a, b):
+    """Whether two resolved operands are ONE entity - by object identity, else by native_identity;
+    an identity that will not read is no evidence and answers False."""
+    if a is None or b is None:
+        return False
+    if a is b:
+        return True
+    ia = _common.native_identity(a)
+    return ia is not None and ia == _common.native_identity(b)
+
+
 def _anchor_refusal(cname, label, anchor):
     """The refusal for an anchor on a slot that takes a whole entity - it names the constraints that
     DO take one, so the caller can see whether the anchor or the constraint is the wrong half."""
@@ -637,6 +656,11 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
         e2, perr = _common.anchor_point(sketch, e2, anchor_two)
         if perr:
             return error(f"entity_two '{entity_two}': {perr}")
+    if (cname == "coincident" and _names_a_point(base_one, anchor_one)
+            and _names_a_point(base_two, anchor_two) and _one_operand(e1, e2)):
+        return error(f"'{entity_one}' and '{entity_two}' resolve to ONE sketch point, so there is "
+                     "nothing to constrain. Name two different points, or drop the call; "
+                     "sketch_get(include_entities=true) lists them.")
 
     ents = None
     if kind in _LIST_OPERAND_KINDS:
@@ -881,7 +905,7 @@ tool = (
     .add_input_property("entities", {"type": "string", "description": "Comma-separated refs for polygon/offset/pattern."})
     .add_input_property(*_SURFACE.as_property())
     .add_input_property(*_DISTANCE.as_property())
-    .add_input_property(*_DISTANCE_TWO.as_property())
+    .add_input_property(*_DISTANCE_TWO.as_property(brief=True))
     .add_input_property("quantity", {"type": "integer", "description": "Pattern count, including the original."})
     .add_input_property("quantity_two", {"type": "integer", "description": "rectangular_pattern count in direction two."})
     .add_input_property("angle", {"type": "number", "description": "circular_pattern total angle in degrees."})

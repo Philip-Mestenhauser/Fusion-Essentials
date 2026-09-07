@@ -4,8 +4,8 @@
 """MCP building block: a LIVE, factual index of the server's tool FAMILIES (the breadth map).
 
 sys_capability_map() lists every tool family (by name prefix) with a one-line summary, its entry-point
-tool, and tool count - read live from the registry so it can't drift. Pair with sys_find_tool to search
-within a family. Read-only, no adsk.*.
+tool, and tool count - read live from the registry so it can't drift - plus each capability NAME beside
+the tool whose read answers it. Pair with sys_find_tool to search within a family. Read-only, no adsk.*.
 """
 
 from ._common import ok
@@ -42,6 +42,23 @@ _FAMILY = {
 # family-of-name is shared with the registry's family-gating helper (mcp_primitives/registry.py) -
 # one definition, so this map and the gating checkboxes can never disagree on what a "family" is.
 _family_of = family_of
+
+# One entry per capability NAME - the names the live sweep gates steps on (tests/live/verify_core.py
+# CAPABILITY_PROBES) - beside the tool whose read answers it. The map POINTS and that tool probes,
+# so this module touches no adsk.* and answers even while the main thread is parked behind a modal.
+_CAPABILITIES = {"machining_extension": "workspace_orient"}
+
+_CAPABILITY_NOTE = ("read_with names the tool whose read answers that capability - call it for the "
+                    "verdict, which is not taken here.")
+
+
+def _capabilities_block():
+    """{capability: {read_with: <tool>}} plus the note - the same disclose-then-point shape the
+    family rows use, so a cold agent knows the capability exists and which read settles it."""
+    return {
+        "names": {name: {"read_with": tool} for name, tool in sorted(_CAPABILITIES.items())},
+        "note": _CAPABILITY_NOTE,
+    }
 
 
 def handler() -> dict:
@@ -82,6 +99,7 @@ def handler() -> dict:
         "family_count": len(out),
         "tool_count": sum(f["tool_count"] for f in out),
         "families": out,
+        "capabilities": _capabilities_block(),
         "gated": {
             "tools": gated_tools,
             # The rows here are the ones that CAN be server-disabled, so the client-deny diagnosis
@@ -107,7 +125,8 @@ TOOL_DESCRIPTION = (
     "server do?' for a cold agent that doesn't yet know which capabilities exist (surface? mesh? "
     "config?). Then call workspace_orient for the active document's state. Read live from the "
     "running server - never stale. Pair with sys_find_tool to search WITHIN a family. Factual "
-    "index - no workflow advice. Takes no arguments."
+    "index - no workflow advice. Takes no arguments. Also publishes 'capabilities': each capability "
+    "NAME beside the tool whose read answers it, to plan against before acting."
 )
 
 tool = Tool.create_simple(name="sys_capability_map", description=TOOL_DESCRIPTION).strict_schema()

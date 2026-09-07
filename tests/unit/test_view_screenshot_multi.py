@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import Camera, FakeApplication, FakePoint, Viewport, load_tool
+from conftest import Camera, FakeApplication, FakePoint, Viewport, camera_state, load_tool
 
 cv = load_tool("view_screenshot_multi")
 
@@ -210,18 +210,21 @@ class TestPerViewFailureIsolation:
 
 class TestCameraRestore:
     def test_original_camera_is_reasserted_after_a_successful_run(self, rig):
+        before = camera_state(rig.vp._original_camera)
         cv.handler(views=["front", "top"])
-        # apply assigned per-view cameras; the finally must put the SAVED camera back last.
-        assert rig.vp._assigned[-1] is rig.vp._original_camera
+        # apply assigned per-view cameras; the finally must put the SAVED camera back last. A
+        # viewport read hands back a copy, so the restore is judged on the STATE put back.
+        assert camera_state(rig.vp._assigned[-1]) == before
 
     def test_original_camera_is_reasserted_even_when_a_capture_raises(self, rig, monkeypatch):
         def exploding_capture(viewport, width, height, prefix="fe_mcp_shot", **switches):
             raise RuntimeError("disk full")
 
+        before = camera_state(rig.vp._original_camera)
         monkeypatch.setattr(cv._view_common, "capture_png_b64", exploding_capture)
         with pytest.raises(RuntimeError):
             cv.handler(views=["front"])
-        assert rig.vp._assigned and rig.vp._assigned[-1] is rig.vp._original_camera
+        assert rig.vp._assigned and camera_state(rig.vp._assigned[-1]) == before
 
     def test_a_camera_restore_the_viewport_refuses_is_named_on_the_summary(self, rig,
                                                                            monkeypatch):
@@ -229,12 +232,19 @@ class TestCameraRestore:
         # Swallowing that in the finally reported a clean multi-shot over a changed document.
         # The per-view orients still land; only putting the ORIGINAL camera back is refused, which
         # is the state that leaves the viewport moved after the call returns.
+        # The camera the tool saves is the FIRST copy it reads; refusing that object alone leaves
+        # the per-view orients landing, which is the state this test is about.
+        reads = []
+
+        def read_a_copy(self):
+            reads.append(self._cam._copy())
+            return reads[-1]
+
         def refuse_the_restore(self, value):
-            if value is self._original_camera:
+            if reads and value is reads[0]:
                 raise RuntimeError("viewport busy")
             self._assigned.append(value)
-        monkeypatch.setattr(type(rig.vp), "camera",
-                            property(lambda s: s._cam, refuse_the_restore))
+        monkeypatch.setattr(type(rig.vp), "camera", property(read_a_copy, refuse_the_restore))
         result = cv.handler(views=["front", "top"])
         assert result["isError"] is False                 # the images were still captured
         summary = _texts(result)[0]

@@ -22,10 +22,14 @@ import hashlib
 import json
 import os
 import re
+import struct
 import sys
 import tempfile
 import time
 import urllib.request
+import zlib
+
+import cloud_config
 
 BASE = "http://127.0.0.1:27182"
 MCP = BASE + "/mcp"
@@ -247,10 +251,68 @@ def _machining_extension_probe():
     return all(observed.values())
 
 
+CLOUD_TIER = "cloud_tier"
+
+
+def _cloud_tier_probe():
+    """True/False/None for the opt-in cloud tier: the operator's local config, then the hub, project
+    and FOLDER it names, each confirmed before any act can write.
+
+    The folder is checked here and not left to the first create because data_create_folder is
+    mkdir -p: a mistyped path does not fail, it MINTS the missing segments in the operator's hub and
+    leaves them there when the run's own deletes then miss. So a destination that does not read is
+    not entitled - False, not None, because the cost of guessing is folders in someone's hub, and no
+    act may reach a create on a maybe. None is kept for the hub read alone, which decides nothing
+    about a path. Each answer prints the sentence an operator acts on, since the receipt row carries
+    only the verdict."""
+    config, problem = cloud_config.load_config()
+    if problem:
+        print("cloud tier: " + problem)
+        return False
+    call = facade("call")
+    is_error, payload = call("data_get", {})
+    if is_error or not isinstance(payload, dict):
+        print(f"cloud tier: data_get did not answer, so the hub named in "
+              f"{cloud_config.CONFIG_NAME} could not be checked - {str(payload)[:160]}")
+        return None
+    hub = payload.get("active_hub")
+    if hub != config["hub"]:
+        print(f"cloud tier: the active hub is {hub!r} and {cloud_config.CONFIG_NAME} names "
+              f"{config['hub']!r} - switch hub in Fusion, or fix the config. Nothing was touched.")
+        return False
+    projects = [str(p.get("name")) for p in (payload.get("projects") or [])]
+    if config["project"] not in projects:
+        print(f"cloud tier: hub {hub!r} lists no project named {config['project']!r} - "
+              f"fix {cloud_config.CONFIG_NAME}. Nothing was touched.")
+        return False
+    is_error, folder = call("data_get", {"project": config["project"], "folder": config["folder"],
+                                         "recursive": False})
+    if is_error or not isinstance(folder, dict):
+        print(f"cloud tier: project {config['project']!r} does not answer with folder "
+              f"{config['folder']!r} - {str(folder)[:160]} The tier stops here rather than at its "
+              "first create, because data_create_folder is mkdir -p: it would CREATE the mistyped "
+              f"segments in the hub and leave them there. Fix {cloud_config.CONFIG_NAME}; nothing "
+              "was created.")
+        return False
+    return True
+
+
 # One probe function per capability name. A capability a step or act declares is looked up here at
 # the start of a run; a name with no probe answers None and routes as unmet, so a typo cannot read
 # as entitled.
-CAPABILITY_PROBES = {"machining_extension": _machining_extension_probe}
+CAPABILITY_PROBES = {"machining_extension": _machining_extension_probe,
+                     CLOUD_TIER: _cloud_tier_probe}
+
+# Capabilities that are an OPT-IN TIER rather than a licence. A licence capability may never hold
+# back a tool's only step - the same tool has to be driven by an ungated one, or an unentitled
+# installation loses that tool's coverage. A tier is the opposite: it exists so that tools which
+# touch an operator's own cloud data are held back BY DEFAULT, and being skipped is their resting
+# state (test_tool_verify_receipt reads this to keep the two invariants apart).
+OPT_IN_TIERS = frozenset({CLOUD_TIER})
+
+# One sentence beside a capability's skip verdict - what an operator does to turn the tier on. A
+# capability with no entry says only that it is not entitled.
+CAPABILITY_DETAIL = {CLOUD_TIER: "opt-in: " + cloud_config.CONFIG_NAME + " names hub, project, folder"}
 
 
 def probe_capabilities(names, probes=None):
@@ -269,10 +331,14 @@ def capability_met(entitlements, capability):
 
 def capability_skip_reason(capability, entitlements):
     """The receipt's bucket line for a step the capability tier held back - and, when the probe
-    itself could not read, the fact that no flag was ever seen."""
+    itself could not read, the fact that no flag was ever seen. A capability carrying a
+    CAPABILITY_DETAIL adds it, so a skipped row says what to do about it rather than only that it
+    happened."""
     unread = entitlements.get(capability) is None
+    detail = CAPABILITY_DETAIL.get(capability)
     return (f"{capability} not entitled"
-            + (" - the capability probe did not read" if unread else ""))
+            + (" - the capability probe did not read" if unread else "")
+            + (f" ({detail})" if detail else ""))
 
 
 # Bytecode classes for the value-predicate guard below. A PUSH leaves the argument's fate to a later
@@ -412,6 +478,29 @@ SVG96_PATH = EXPORT_DIR + "/eval_square96.svg"
 with open(SVG96_PATH, "w", encoding="utf-8") as _svg96_fixture:
     _svg96_fixture.write('<svg xmlns="http://www.w3.org/2000/svg">'
                          '<rect x="0" y="0" width="96" height="96"/></svg>')
+
+
+def write_png(path, size=64, rgb=(255, 140, 0)):
+    """Write a solid-colour PNG from scratch, and return the path - no image library.
+
+    The one raster fixture the harness authors: the file the cloud tier round-trips through an
+    operator's hub (a Fusion design cannot be downloaded, so a non-CAD file is the only one that
+    comes back) and the image both drawing harnesses place on a sheet."""
+    def chunk(tag, data):
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+    ihdr = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)
+    row = b"\x00" + bytes(rgb) * size
+    with open(path, "wb") as fh:
+        fh.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+                 + chunk(b"IDAT", zlib.compress(row * size)) + chunk(b"IEND", b""))
+    return path
+
+
+# A STABLE path, rewritten in place on every import: a stamped name would leave one more file in
+# EXPORT_DIR per pytest run. The cloud file it becomes needs no stamp either - each run uploads it
+# into a run-stamped folder of its own.
+MARKER_PNG = write_png(EXPORT_DIR + "/sweep_marker.png")
 
 
 # save-extractors: pull a handle/profile off a step's payload into ctx for a later args-callable.
@@ -1271,18 +1360,21 @@ def _param_deleted(name):
 
 
 def _params_listed(*names):
-    """param_get (collection): the user parameters the design answered with - the count is len()
-    over the rows actually read, so the two cannot disagree, and every named parameter is present
-    carrying the number Fusion evaluated for it."""
+    """param_get (collection): the AUTHORED user parameters the design answered with - 'returned'
+    counts the rows actually read and 'user_parameter_count' the whole set the design holds, so a
+    page can never claim to be the design; every named parameter is present carrying its value."""
     def check(p):
         rows = p.get("user_parameters") or []
         by_name = {r.get("name"): r for r in rows}
         missing = [n for n in names if n not in by_name]
         return _measured(f"user parameters listed (want {list(names)})",
                          {"user_parameter_count": p.get("user_parameter_count"),
-                          "rows_read": len(rows), "missing": missing,
+                          "returned": p.get("returned"), "rows_read": len(rows),
+                          "generated_skipped": p.get("generated_skipped"), "missing": missing,
                           "names": sorted(n for n in by_name if n)[:12]},
-                         p.get("user_parameter_count") == len(rows) and not missing
+                         p.get("returned") == len(rows)
+                         and _num(p.get("user_parameter_count"))
+                         and p.get("user_parameter_count") >= len(rows) and not missing
                          and all(_num(by_name[n].get("value")) for n in names))
     return check
 
@@ -1347,6 +1439,44 @@ def _document_closed(p):
                      p.get("closed_count") == 1 and bool(p.get("closed"))
                      and not p.get("errors") and p.get("save_changes") is False
                      and bool((p.get("acted_on") or {}).get("name")))
+
+
+def _home_document(p):
+    """doc_get on the way in: whatever document the session is ON, and the 'open:N' address that
+    reaches it - what an act that switches away activates back to when it is done.
+
+    Exactly one open row may claim to be active, and it must carry an open_index: an UNSAVED
+    document has no lineage URN and its display name may be one another open document also answers
+    to, so the index is the only address that reaches it. Whether it is SAVED is reported, never
+    asserted - a partial run finds whatever is open."""
+    active = p.get("active") or {}
+    rows = [r for r in (p.get("open_documents") or []) if r.get("is_active")]
+    return _measured("one active document, reachable by its open:N address",
+                     {"name": active.get("name"), "has_data_file": active.get("has_data_file"),
+                      "open_count": p.get("open_count"),
+                      "active_rows": [(r.get("name"), r.get("open_index")) for r in rows]},
+                     bool(active.get("name"))
+                     and _num(p.get("open_count")) and p["open_count"] >= 1
+                     and len(rows) == 1 and _num(rows[0].get("open_index")))
+
+
+def _home_address(p):
+    """That document's 'open:N' address off the same read - the one an act comes home to."""
+    row = next(r for r in p["open_documents"] if r.get("is_active"))
+    return "open:%d" % row["open_index"]
+
+
+def _activated(name=None):
+    """doc_activate: 'activated' is the VERIFIED state - true where the foreground caught up,
+    'pending' where the call was accepted and the async switch has not. Either is the switch taken;
+    false is not. A name Fusion mints is reported rather than asserted."""
+    def check(p):
+        return _measured(f"'{name or p.get('document_name')}' activated",
+                         {"activated": p.get("activated"), "is_active": p.get("is_active"),
+                          "document_name": p.get("document_name")},
+                         p.get("activated") in (True, "pending")
+                         and (name is None or p.get("document_name") == name))
+    return check
 
 
 def _imported(p):

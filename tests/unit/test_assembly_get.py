@@ -287,11 +287,34 @@ class TestProbe:
         assert out["root_bodies"] == []
         assert "root_bodies lists geometry" not in out["note"]   # note clause only when non-empty
 
+    def test_the_default_occurrence_row_withholds_the_pose_and_names_the_slice(self, kin_design):
+        # the measured flood: ~40 lines of origin/axes/bbox on each of 50 rows, 76 KB in all. The
+        # default row is identity + wiring; a withheld half is only safe if the note names it.
+        kin_design(occs=[_occ("Block:1", "Block", origin=(2.0, 0.0, 0.0),
+                              body_bbox=((-1, -1, -1), (1, 1, 1)))])
+        out = _payload(ap.handler(units="mm"))
+        o = out["occurrences"][0]
+        for key in ("origin", "x_axis", "y_axis", "z_axis", "bbox_center", "bbox_size"):
+            assert key not in o
+        assert set(o) >= {"name", "component", "grounded", "body_count", "joints"}
+        assert "include=['poses']" in out["note"]
+
+    def test_the_default_read_is_a_fraction_of_the_posed_one(self, kin_design):
+        # MEASURED live on a scripted 64-occurrence rig: 7.2 KB default against 11.5 KB with poses,
+        # and 44.9 KB against 72.1 KB once include=['all_occurrences'] widens it to all 256. The
+        # fake rig here mirrors that ratio offline.
+        kin_design(occs=[_occ(f"P{i}:1", f"P{i}", origin=(float(i), 1.0, 2.0), rotation_deg=30.0,
+                              body_bbox=((0, 0, 0), (2, 1, 1))) for i in range(50)])
+        size = lambda p: len(json.dumps(p, separators=(",", ":")))
+        light = size(_payload(ap.handler())["occurrences"])
+        posed = size(_payload(ap.handler(include=["poses"]))["occurrences"])
+        assert light * 2 < posed
+
     def test_positions_scaled_to_display_units(self, kin_design):
         # origin in cm -> reported in mm
         kin_design(occs=[_occ("Block:1", "Block", origin=(2.0, 0.0, 0.0),
                               bbox=((-1, -1, -1), (1, 1, 1)))])
-        out = _payload(ap.handler(units="mm"))
+        out = _payload(ap.handler(units="mm", include=["poses"]))
         o = out["occurrences"][0]
         assert o["origin"] == [20.0, 0.0, 0.0]          # 2cm -> 20mm
         assert o["bbox_center"] == [0.0, 0.0, 0.0]
@@ -305,7 +328,7 @@ class TestProbe:
             "Shaft:1", "Shaft",
             bbox=((-8, -3, 0), (4, 9, 1)),                 # sketch-polluted 120x120x10 (cm/10)
             body_bbox=((-3.4, -0.5, 0), (3.4, 0.5, 1)))])  # the body's true 68x10x10 mm
-        o = _payload(ap.handler(units="mm"))["occurrences"][0]
+        o = _payload(ap.handler(units="mm", include=["poses"]))["occurrences"][0]
         assert o["bbox_size"] == [68.0, 10.0, 10.0]
         assert o["bbox_center"] == [0.0, 0.0, 5.0]
 
@@ -314,8 +337,9 @@ class TestProbe:
         # .boundingBox here would report a box made purely of sketches/datums.
         kin_design(occs=[_occ("Empty:1", "Empty", bbox=((-6, -6, 0), (6, 6, 0)),
                               body_bbox="empty", body_count=0)])
-        o = _payload(ap.handler())["occurrences"][0]
+        o = _payload(ap.handler(include=["poses"]))["occurrences"][0]
         assert "bbox_size" not in o and "bbox_center" not in o
+        assert o["origin"] == [0.0, 0.0, 0.0]     # the pose slice DID run - the bbox alone is gone
 
     def test_ground_flags_and_grounded_list(self, kin_design):
         block = _occ("Block:1", "Block", grounded=True, ground_to_parent=True)
@@ -362,9 +386,9 @@ class TestProbe:
     def test_positions_scaled_to_cm_and_inch(self, kin_design):
         # same 2cm origin reported in cm (unchanged) and in inches (2cm / 2.54).
         kin_design(occs=[_occ("Block:1", "Block", origin=(2.54, 0.0, 0.0))])
-        cm = _payload(ap.handler(units="cm"))["occurrences"][0]
+        cm = _payload(ap.handler(units="cm", include=["poses"]))["occurrences"][0]
         assert cm["origin"] == [2.54, 0.0, 0.0]
-        inch = _payload(ap.handler(units="in"))["occurrences"][0]
+        inch = _payload(ap.handler(units="in", include=["poses"]))["occurrences"][0]
         assert inch["origin"] == [1.0, 0.0, 0.0]    # 2.54 cm -> 1 inch
 
     def test_occurrence_joint_cross_index(self, kin_design):
@@ -423,7 +447,7 @@ class TestProbe:
 class TestOrientation:
     def test_identity_rotation_reads_axis_aligned_basis(self, kin_design):
         kin_design(occs=[_occ("Block:1", "Block", rotation_deg=0.0)])
-        o = _payload(ap.handler())["occurrences"][0]
+        o = _payload(ap.handler(include=["poses"]))["occurrences"][0]
         assert o["x_axis"] == [1.0, 0.0, 0.0]
         assert o["y_axis"] == [0.0, 1.0, 0.0]
         assert o["z_axis"] == [0.0, 0.0, 1.0]
@@ -431,7 +455,7 @@ class TestOrientation:
     def test_90deg_z_rotation_basis(self, kin_design):
         # a +90 deg rotation about Z: x->+Y, y->-X, z unchanged.
         kin_design(occs=[_occ("Crank:1", "Crank", rotation_deg=90.0)])
-        o = _payload(ap.handler())["occurrences"][0]
+        o = _payload(ap.handler(include=["poses"]))["occurrences"][0]
         assert o["x_axis"] == [0.0, 1.0, 0.0]
         assert o["y_axis"] == [-1.0, 0.0, 0.0]
         assert o["z_axis"] == [0.0, 0.0, 1.0]
@@ -440,7 +464,7 @@ class TestOrientation:
         # getAsCoordinateSystem raises -> axes omitted, origin still reported.
         kin_design(occs=[_occ("Plain:1", "Plain",
                               transform2=_BlindPlacement(0.0, (1.0, 0.0, 0.0)))])
-        o = _payload(ap.handler(units="cm"))["occurrences"][0]
+        o = _payload(ap.handler(units="cm", include=["poses"]))["occurrences"][0]
         assert "x_axis" not in o and "y_axis" not in o and "z_axis" not in o
         assert o["origin"] == [1.0, 0.0, 0.0]
 
@@ -1944,7 +1968,7 @@ class TestAllOccurrencesSlice:
         nested = _occ("Bolt:1", "Bolt", origin=(1.0, 2.0, 3.0),
                          full_path="Tower:1+Bolt:1")
         kin_design(occs=[top], all_occs=[top, nested])
-        out = _payload(ap.handler(include=["all_occurrences"], units="mm"))
+        out = _payload(ap.handler(include=["all_occurrences", "poses"], units="mm"))
         rows = {r["full_path"]: r for r in out["all_occurrences"]}
         assert set(rows) == {"Tower:1", "Tower:1+Bolt:1"}
         assert rows["Tower:1+Bolt:1"]["origin"] == [10.0, 20.0, 30.0]
@@ -1956,13 +1980,27 @@ class TestAllOccurrencesSlice:
         occ = _occ("Tower:1", "Tower", origin=(1.0, 0.0, 0.0), body_bbox=((0, 0, 0), (2, 1, 1)),
                    grounded=True, ground_to_parent=True, body_count=3, rotation_deg=0.0)
         kin_design(occs=[occ], joints=[_joint("J1", _REVOLUTE, "Tower:1", None)])
-        out = _payload(ap.handler(include=["all_occurrences"], units="mm"))
+        out = _payload(ap.handler(include=["all_occurrences", "poses"], units="mm"))
         top, nested = out["occurrences"][0], out["all_occurrences"][0]
         assert set(nested) - set(top) == {"full_path"}       # the ONE key the slice adds
         assert {k: v for k, v in nested.items() if k != "full_path"} == top
         assert nested["grounded"] is True and nested["ground_to_parent"] is True
         assert nested["body_count"] == 3 and nested["joints"] == ["J1"]
         assert nested["bbox_size"] == [20.0, 10.0, 10.0] and nested["z_axis"] == [0.0, 0.0, 1.0]
+
+    def test_poses_reaches_the_nested_rows_too(self, kin_design):
+        # the two arrays are built by two calls: a poses flag wired into only one of them leaves
+        # the nested rows - the ones a caller opens this slice FOR - poseless.
+        top = _occ("Tower:1", "Tower")
+        nested = _occ("Bolt:1", "Bolt", origin=(1.0, 2.0, 3.0), full_path="Tower:1+Bolt:1")
+        kin_design(occs=[top], all_occs=[top, nested])
+        rows = {r["full_path"]: r for r in
+                _payload(ap.handler(include=["all_occurrences"], units="mm"))["all_occurrences"]}
+        assert "origin" not in rows["Tower:1+Bolt:1"]
+        rows = {r["full_path"]: r for r in
+                _payload(ap.handler(include=["all_occurrences", "poses"],
+                                    units="mm"))["all_occurrences"]}
+        assert rows["Tower:1+Bolt:1"]["origin"] == [10.0, 20.0, 30.0]
 
     def test_the_slice_walks_all_occurrences_not_the_top_level_collection(self, kin_design):
         # root.occurrences holds ONE occurrence while the design holds three - a slice built on the

@@ -71,6 +71,9 @@ def _fingerprinted_paths():
     de-duplicated (an output that also sits under the input tree is hashed once)."""
     paths = set(_generated_artifacts())
     paths.update(glob.glob(os.path.join(TESTS_DIR, "*.py")))
+    # the live act modules are generator INPUTS too: gen_strategies reads verify_acts_census's
+    # CENSUS, so a PROVEN/MEASURED flip there rides a stale fingerprint without them.
+    paths.update(glob.glob(os.path.join(TESTS_DIR, "live", "*.py")))
     for root, _dirs, names in os.walk(_INPUT_TREE):
         if "__pycache__" in root:
             continue

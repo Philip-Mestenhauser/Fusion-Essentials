@@ -15,11 +15,11 @@ import adsk.core
 from ._common import safe
 
 MAP_BLURB = (
-    "the cloud data-model substrate: resolve_file_reference - the ONE "
-    "URN-or-name-in-a-project DataFile resolver, a name matching several files REFUSED; "
+    "the cloud data-model substrate: resolve_file_reference / _file_in_folder_by_name - the "
+    "URN-or-name-in-a-project and one-folder resolvers, a shared name REFUSED; "
     "navigate_folder_path - the folder-PATH walk from a project root, creating nothing, and the "
-    "miss triple each caller words its refusal from; name_extension - the NAME carries the true "
-    "extension; _file_in_folder_by_name - one folder, a shared name REFUSED")
+    "miss triple a refusal is worded from; active_project - the active document's OWN DataProject; "
+    "name_extension - the NAME holds the true extension")
 
 app = adsk.core.Application.get()
 
@@ -64,6 +64,25 @@ def _find_project(data, name=None, project_id=None):
         except Exception:
             continue
     return None, available
+
+
+def active_project():
+    """(project, problem): the DataProject the ACTIVE document's own DataFile hands back, and the
+    read that failed when it does not - each read taken apart so the problem names one."""
+    # Data.activeProject raises InternalValidationError on this build; the document's own DataFile
+    # answers the project object itself, which is what a same-named sibling cannot be mistaken for.
+    doc = safe(lambda: app.activeDocument)
+    if doc is None:
+        return None, "there is no active document to read a project from."
+    df = safe(lambda: doc.dataFile)
+    if df is None:
+        return None, ("the active document has no cloud data file, so it is in no project yet - "
+                      "save it with doc_save_as first.")
+    proj = safe(lambda: df.parentProject)
+    if proj is None:
+        return None, ("the active document's data file did not answer a parentProject - retry, or "
+                      "address the file by its lineage urn instead.")
+    return proj, None
 
 
 def _split_path(path):

@@ -123,9 +123,11 @@ class TestTargetResolution:
         assert em._calls[-1]["geom"] is comp
         assert "design" in out["target"].lower() or "root" in out["target"].lower()
 
+    # A BODY and an OCCURRENCE reach the mesh factories only (see TestComponentOnlyFormats), so the
+    # resolution tests below drive format=stl - the target vocabulary is what they pin.
     def test_body_by_name(self, tmp_path, monkeypatch):
         _, em, _ = _install(monkeypatch, bodies=[BRepBody("Widget")])
-        out = _payload(dx.handler(format="step", target="Widget", file_path=str(tmp_path / "p.step")))
+        out = _payload(dx.handler(format="stl", target="Widget", file_path=str(tmp_path / "p.stl")))
         assert em._calls[-1]["geom"].name == "Widget"
         assert "Widget" in out["target"]
 
@@ -133,7 +135,7 @@ class TestTargetResolution:
         design, em, _ = _install(monkeypatch, bodies=[BRepBody("Body1")])
         h = "/v" + "X" * 70
         design._tokens[h] = BRepBody("FromHandle")
-        out = _payload(dx.handler(format="step", target=h, file_path=str(tmp_path / "p.step")))
+        out = _payload(dx.handler(format="stl", target=h, file_path=str(tmp_path / "p.stl")))
         assert em._calls[-1]["geom"].name == "FromHandle"
 
     def test_long_body_name_not_mistaken_for_handle(self, tmp_path, monkeypatch):
@@ -142,7 +144,7 @@ class TestTargetResolution:
         long_name = "Left-Outrigger-Pivot-Bracket-Weldment-Subassembly-Body-Number-Seven"
         assert len(long_name) > 60
         _, em, _ = _install(monkeypatch, bodies=[BRepBody(long_name)])
-        out = _payload(dx.handler(format="step", target=long_name, file_path=str(tmp_path / "p.step")))
+        out = _payload(dx.handler(format="stl", target=long_name, file_path=str(tmp_path / "p.stl")))
         assert em._calls[-1]["geom"].name == long_name
         assert long_name in out["target"]
 
@@ -150,9 +152,55 @@ class TestTargetResolution:
         # occurrence resolution goes through the shared _resolve_occurrence (exact name/fullPathName)
         occ = _occ("Gear:1")
         _, em, _ = _install(monkeypatch, occurrences=[occ])
-        out = _payload(dx.handler(format="step", target="Gear:1", file_path=str(tmp_path / "p.step")))
+        out = _payload(dx.handler(format="stl", target="Gear:1", file_path=str(tmp_path / "p.stl")))
         assert em._calls[-1]["geom"] is occ
         assert "Gear:1" in out["target"]
+
+    def test_a_step_export_of_an_occurrence_is_refused_naming_the_routes_that_work(self,
+                                                                                   tmp_path,
+                                                                                   monkeypatch):
+        # MEASURED on one occurrence carrying a body plus two sketches: createSTEPExportOptions
+        # RAISES "3 : invlid argument geometry" on an Occurrence and on a BRepBody, while the same
+        # component exported 8,905 bytes - so the refusal comes BEFORE the factory, naming a route.
+        _, em, _ = _install(monkeypatch, occurrences=[_occ("Gear:1")])
+        res = dx.handler(format="step", target="Gear:1", file_path=str(tmp_path / "p.step"))
+        assert res["isError"] is True
+        assert "Gear:1" in res["message"] and "COMPONENT" in res["message"]
+        assert "stl" in res["message"]                      # the format that DOES take it
+        assert em._executed is None                         # nothing was written
+
+    def test_a_mesh_export_of_that_same_occurrence_is_allowed(self, tmp_path, monkeypatch):
+        # The exact boundary: the refusal is per-FORMAT, not per-target - stl took all three live.
+        occ = _occ("Gear:1")
+        _, em, _ = _install(monkeypatch, occurrences=[occ])
+        out = _payload(dx.handler(format="stl", target="Gear:1", file_path=str(tmp_path / "p.stl")))
+        assert em._calls[-1]["geom"] is occ and out["exported"] is True
+
+    def test_usd_and_f3d_refuse_an_occurrence_too(self, tmp_path, monkeypatch):
+        # MEASURED alongside step/iges/sat/smt: usd and f3d RAISE on an occurrence and on a body
+        # while writing 3,096 / 76,158 bytes from the same component - they are not mesh formats.
+        for fmt in ("usd", "f3d"):
+            _, em, _ = _install(monkeypatch, occurrences=[_occ("Gear:1")])
+            res = dx.handler(format=fmt, target="Gear:1", file_path=str(tmp_path / f"p.{fmt}"))
+            assert res["isError"] is True, fmt
+            assert "COMPONENT" in res["message"] and em._executed is None, fmt
+
+    def test_3mf_and_obj_take_an_occurrence(self, tmp_path, monkeypatch):
+        # The boundary the remedy sentence rests on: all three formats it names were measured
+        # landing a file from an occurrence, so naming them sends the caller somewhere that works.
+        for fmt in ("stl", "obj", "3mf"):
+            occ = _occ("Gear:1")
+            _, em, _ = _install(monkeypatch, occurrences=[occ])
+            out = _payload(dx.handler(format=fmt, target="Gear:1",
+                                      file_path=str(tmp_path / f"q.{fmt}")))
+            assert em._calls[-1]["geom"] is occ and out["exported"] is True, fmt
+
+    def test_a_step_export_of_a_COMPONENT_is_allowed(self, tmp_path, monkeypatch):
+        # The other side of the same boundary: a component is what the BRep factories take.
+        _, em, _ = _install(monkeypatch, components=["Frame"])
+        out = _payload(dx.handler(format="step", target="Frame",
+                                  file_path=str(tmp_path / "p.step")))
+        assert em._calls[-1]["geom"].name == "Frame" and out["exported"] is True
 
     def test_missing_named_target_errors(self, tmp_path, monkeypatch):
         _install(monkeypatch, bodies=[BRepBody("Body1")])
@@ -1029,6 +1077,26 @@ class TestSplitByComponent:
         # each occurrence was the geometry handed to the exporter (one execute per part)
         geoms = [c["geom"].name for c in em._calls]
         assert set(geoms) == {"Body:1", "Cab:1", "Wheels:1"}
+
+    def test_a_BREP_split_writes_each_file_from_the_occurrences_COMPONENT(self, tmp_path,
+                                                                          monkeypatch):
+        # MEASURED: the BRep-neutral factories RAISE on an Occurrence, so handing them the split's
+        # raw occurrences fails EVERY file of the default-format "one file per part" workflow.
+        occs = [_occ("Body:1"), _occ("Cab:1")]
+        _, em, _ = _install(monkeypatch, occurrences=occs)
+        out = _payload(dx.handler(format="step", file_path=str(tmp_path),
+                                  split_by_component=True))
+        assert out["file_count"] == 2
+        assert [c["geom"].name for c in em._calls] == ["Body", "Cab"]     # the COMPONENTS
+        assert "written from that occurrence's COMPONENT" in out["note"]
+
+    def test_a_MESH_split_still_writes_each_file_from_the_occurrence(self, tmp_path, monkeypatch):
+        # The exact boundary: the reroute is per-FORMAT. stl took an occurrence live, and routing
+        # it to the component would silently change what a print job's file holds.
+        _, em, _ = _install(monkeypatch, occurrences=[_occ("Body:1"), _occ("Cab:1")])
+        out = _payload(dx.handler(format="stl", file_path=str(tmp_path), split_by_component=True))
+        assert [c["geom"].name for c in em._calls] == ["Body:1", "Cab:1"]  # the OCCURRENCES
+        assert "COMPONENT" not in out["note"]
 
     def test_split_publishes_the_option_knobs_PER_FILE(self, tmp_path, monkeypatch):
         # The split path configures its own options object PER FILE, so the read-back is per file

@@ -2133,8 +2133,11 @@ def _resolve_occurrence(name, raw, candidates=None):
                       "design_get(include=['tree']) emits an occurrence handle.")
     walk = _common.occurrence_walk(des)
     occs = walk.occurrences
+    # MEASURED: Fusion mints occurrence names carrying a LEADING SPACE (' Handle:1'), invisible in
+    # every listing, so the NAME comparison strips both sides as _match_timeline_objects does - and
+    # two occurrences differing only by that space are ONE ambiguity, never a first match.
     paths = [(_common.safe(lambda o=o: o.fullPathName) or "") for o in occs]
-    names = [(_common.safe(lambda o=o: o.name) or "") for o in occs]
+    names = [(_common.safe(lambda o=o: o.name) or "").strip() for o in occs]
     # 2) exact fullPathName - ALL hits, never the first. Two siblings CAN wear one path, and no
     # string tells them apart, so the refusal hands back the handles that do.
     by_path = [o for o, fp in zip(occs, paths) if fp == want]

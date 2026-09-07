@@ -321,5 +321,5 @@ def wrap(handler):
 # The input property advertised on every write tool (so an agent knows it can target a document).
 EXPECT_DOCUMENT_PROP = ("expect_document", {
     "type": "string",
-    "description": "Doc name or URN this write must land on; REFUSED if it is not active.",
+    "description": "Doc name/URN this write must land on; REFUSED if not active.",
 })

@@ -116,6 +116,11 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
             msg += (" - an input is likely not in assembly context. Pass Joint Origins by NAME "
     "(bare or '<occurrence>:<JO name>') so this tool proxies them into the assembly; "
     "for geometry, use a fresh find_geometry handle.")
+        pair = _joints.pair_used_clause(str(e), n1, n2, _joints.PAIR_USED_ANCHOR_NOTE)
+        if pair:
+            # The platform text ends mid-sentence, so the clause is terminated onto it the way the
+            # as-built sibling terminates its own.
+            msg = msg.rstrip(" .") + "." + pair
         return error(msg)
     if not joint:
         return error("joints.add returned nothing.")

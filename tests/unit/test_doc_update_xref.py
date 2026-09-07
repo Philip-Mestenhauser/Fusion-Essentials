@@ -110,6 +110,31 @@ class TestUpdateBehavior:
         assert out["updated_count"] == 0
         assert out["skipped"][0]["name"] == "PartA"
 
+    def test_an_all_skipped_run_sends_stale_looking_geometry_at_the_recompute(self, _install):
+        # MEASURED: an OPEN host's derive link follows the source's newly saved version by itself,
+        # so this tool correctly refreshes nothing while the derived bodies still show the older
+        # content. Repeating the refreshed-to-latest note there leaves the caller with no next step.
+        _install([FakeRef("PartA", is_out_of_date=False)])
+        note = _payload(xr.handler(only_out_of_date=True))["note"]
+        assert "Nothing to refresh" in note
+        assert "design_recompute" in note
+
+    def test_a_run_that_refreshed_something_keeps_the_refreshed_note(self, _install):
+        _install([FakeRef("PartA", is_out_of_date=True, refreshes=True)])
+        note = _payload(xr.handler(only_out_of_date=True))["note"]
+        assert "References refreshed to their latest version" in note
+        assert "design_recompute" not in note
+
+    def test_one_refreshed_beside_one_skipped_is_still_a_refreshed_run(self, _install):
+        # the note turns on 'nothing was refreshed', NOT on 'something was skipped': a run that
+        # updated one reference and left a current one alone did do the work it reports.
+        _install([FakeRef("PartA", is_out_of_date=True, refreshes=True),
+                  FakeRef("PartB", is_out_of_date=False)])
+        out = _payload(xr.handler(only_out_of_date=True))
+        assert out["updated_count"] == 1 and len(out["skipped"]) == 1
+        assert "References refreshed to their latest version" in out["note"]
+        assert "Nothing to refresh" not in out["note"]
+
     def test_force_updates_up_to_date_when_flag_false(self, _install):
         ref = FakeRef("PartA", is_out_of_date=False, latest_returns=True)
         _install([ref])

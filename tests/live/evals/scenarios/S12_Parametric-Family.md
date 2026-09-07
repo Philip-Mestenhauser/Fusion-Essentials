@@ -2,13 +2,15 @@
 id: S12_Parametric-Family
 tier: pipeline
 fixture: fresh empty design (orchestrator stages with doc_new); active hub PINNED to the canonical
-  hub and project "MCP Test Project" verified to EXIST before spawning. The executor's one
+  hub and the configured project (tests/live/cloud_config.local.json) verified to EXIST before
+  spawning. The executor's one
   doc_save_as (a configuration table needs a saved document) is the artifact step; the
   orchestrator closes the document afterwards and the cloud file stays under the run folder.
 budget:
   max_tool_calls: 125
   max_tokens: 150000
-substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
+substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag; {{PROJECT}} /
+  {{FOLDER}} -> the configured destination"
 perturbations: none (baseline)
 expected_refusals: none
 ---
@@ -32,8 +34,8 @@ already loaded). No local files, no shell.
 
 The active design is already staged as a fresh empty Fusion document. Work IN the active design;
 do not create, open, or switch documents. A configuration table can only be authored on a SAVED
-document: before you author it, save the document ONCE as P12-Dumbbell into project "MCP Test
-Project", folder "Pipeline-v1/{{RUN_FOLDER}}" (create the FOLDER path if missing; never a
+document: before you author it, save the document ONCE as P12-Dumbbell into project
+"{{PROJECT}}", folder "{{FOLDER}}/{{RUN_FOLDER}}" (create the FOLDER path if missing; never a
 project). If that project does not exist, STOP and report BLOCKED.
 
 Cold start: call sys_capability_map, then workspace_orient, before reaching for specific tools.

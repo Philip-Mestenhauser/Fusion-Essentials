@@ -218,15 +218,22 @@ def _rename(op, current, want):
     return rec, None
 
 
+# MEASURED: a 'face' operation renamed with no cam_generate call went from no_toolpath to valid -
+# setting Operation.name generates the operation on a strategy whose generation completes.
+_RENAME_GENERATES = (" Setting the name generates the operation where its strategy can: a 'face' op "
+                     "went no_toolpath to valid with no cam_generate call. cam_get_status reads "
+                     "what this rename left.")
+
+
 def _rename_note(rec, was):
-    """What the rename OBSERVED - the name Operation.name reads back, and the address to use when
-    the platform stored a different one."""
+    """What the rename OBSERVED - the name Operation.name reads back, the address to use when the
+    platform stored a different one, and the generation a rename provokes."""
     if rec.get("name_unchanged"):
         return f"Operation.name already reads '{rec['operation']}' - nothing was written."
     lead = f"Operation.name now reads '{rec['operation']}' (was '{was}')."
-    if not rec.get("name_deduped"):
-        return lead
-    return lead + f" Address the operation as '{rec['operation']}' from here."
+    if rec.get("name_deduped"):
+        lead += f" Address the operation as '{rec['operation']}' from here."
+    return lead + _RENAME_GENERATES
 
 
 def _preset_name_of(preset):
@@ -420,8 +427,11 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
             resolved[name] = p
     if missing:
         return error(f"Operation '{operation}' has no parameter(s): {', '.join(missing)}. "
-                     "cam_get(include=['parameters'], operation=...) lists this operation's own "
-                     "parameter names; only a name it lists can be set.")
+                     "cam_get(include=['parameters'], operation=...) lists the rows Fusion SHOWS "
+                     "and counts the rest as hidden_count: a row behind a switch reads isEnabled "
+                     "false and is absent from that list, yet still lands when the switch rides "
+                     "the SAME call - so a name missing from that list is not the refusal, and a "
+                     "name missing HERE is.")
 
     # isEditable False says the UI never offers the edit, not that the platform drops it (measured:
     # a locked parameter takes the write, no raise). ALL rows locked is refused here before any

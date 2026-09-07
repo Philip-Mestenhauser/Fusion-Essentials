@@ -24,7 +24,8 @@ RECIPE_IDS = ("sketch-anchored-profile", "sketch-link-between-bores", "sketch-or
               "model-moulded-part", "model-frozen-body-with-interfaces", "model-parametric-family",
               "surface-swept-bottle", "surface-skin-into-parts",
               "assemble-part-modelled-in-place", "assemble-screw-motion",
-              "manufacture-choose-a-strategy", "manufacture-prove-a-toolpath")
+              "manufacture-choose-a-strategy", "manufacture-prove-a-toolpath",
+              "manufacture-radial-hole-across-the-axis")
 
 # The recipe cam_get's strategies note points a caller at - a fact of the document like the ids
 # above, so the pointer and the served id are one string and gen_guidance can refuse a document

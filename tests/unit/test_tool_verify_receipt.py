@@ -22,6 +22,7 @@ import pytest
 TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(TESTS_DIR, "live"))
 import tool_verify  # noqa: E402
+import verify_core  # noqa: E402  probe_capabilities/capability_skip_reason read their tables here
 import verify_runner  # noqa: E402  source_hash reads SRC_ROOT/_HERE off ITS namespace, not the facade
 
 
@@ -706,6 +707,27 @@ class TestCapabilityProbe:
         assert tool_verify._machining_extension_probe() is None
 
 
+def _licence_partition(acts, act_needs, opt_in):
+    """(held, free) over an act program: the tools a LICENCE capability holds back, and the tools
+    some ungated step drives.
+
+    An OPT-IN TIER's steps are in NEITHER set. They are not licence-held; and reading them as
+    ungated would let a cloud step stand in as a licence-gated tool's base-licence variant - a
+    variant that runs on no default sweep, which is the opposite of what the invariant asks for."""
+    tiered_acts = {a for a, cap in act_needs.items() if cap in opt_in}
+    gated_acts = set(act_needs) - tiered_acts
+    held, free = set(), set()
+    for name, _pre, narr, fb in acts:
+        for step in (list(narr) + list(fb or [])):
+            if step[0] == tool_verify._DWELL:
+                continue
+            cap = tool_verify.step_capability(step[2])
+            if name in tiered_acts or cap in opt_in:
+                continue
+            (held if (name in gated_acts or cap is not None) else free).add(step[0])
+    return held, free
+
+
 class TestCapabilityTier:
     """The tier itself: what a declaration means, and which receipt bucket an unmet one lands in."""
 
@@ -732,6 +754,44 @@ class TestCapabilityTier:
         ent = {"no": False, "dunno": None}
         assert tool_verify.capability_skip_reason("no", ent) == "no not entitled"
         assert "probe did not read" in tool_verify.capability_skip_reason("dunno", ent)
+
+    def test_a_capability_detail_rides_the_skip_reason(self):
+        # The detail is what an operator reading a skipped row acts on. A capability with no entry
+        # keeps the bare verdict, so the two shapes cannot merge.
+        assert tool_verify.capability_skip_reason("no", {"no": False}) == "no not entitled"
+        reason = tool_verify.capability_skip_reason(tool_verify.CLOUD_TIER, {"cloud_tier": False})
+        assert reason.startswith("cloud_tier not entitled")
+        assert "cloud_config.local.json" in reason and "hub, project, folder" in reason
+
+    @staticmethod
+    def _detailed(monkeypatch):
+        """A capability whose probe answers false and whose skip row carries a detail sentence."""
+        monkeypatch.setitem(verify_core.CAPABILITY_PROBES, "fake_tier", lambda: False)
+        monkeypatch.setitem(verify_core.CAPABILITY_DETAIL, "fake_tier", "opt-in: write the config")
+
+    def test_a_gated_acts_ledger_row_carries_the_capability_detail(self, monkeypatch):
+        # consumer one: the ACT-level skip in run(). A row saying only 'not entitled' leaves the
+        # reader with no way to turn the tier on.
+        self._detailed(monkeypatch)
+        acts = [("ACT F", None, [("a_get", {}, "ok", None)], [("fb_get", {}, "ok", None)])]
+        ledger, _seen, modes = self._run(monkeypatch, acts, {"ACT F": "fake_tier"}, entitled=False,
+                                         tools=["a_get", "fb_get"])
+        assert ledger["a_get"] == "skipped: fake_tier not entitled (opt-in: write the config)"
+        assert ledger["fb_get"] == ledger["a_get"]
+        assert modes == [("ACT F", "skipped(fake_tier not entitled (opt-in: write the config))")]
+
+    def test_a_gated_steps_ledger_row_carries_the_capability_detail(self, monkeypatch):
+        # consumer two: the per-STEP skip in run(), which words its bucket through the same helper.
+        self._detailed(monkeypatch)
+        acts = [("ACT S", None, [
+            ("a_get", {}, "ok", None),
+            ("gated_get", {}, tool_verify._needs("fake_tier", lambda p: p["n"] == 1), None),
+        ], [])]
+        ledger, seen, _modes = self._run(monkeypatch, acts, {}, entitled=False,
+                                         tools=["a_get", "gated_get"])
+        assert ledger["gated_get"] == ("skipped: fake_tier not entitled "
+                                       "(opt-in: write the config)")
+        assert seen == ["a_get"]
 
     def test_the_declaration_is_read_through_both_wrappers(self):
         needs = tool_verify._needs("yes", lambda p: p.get("n"))
@@ -904,21 +964,51 @@ class TestCapabilityTier:
             + ", ".join(sorted(set(tool_verify.ACT_NEEDS) - names)))
 
     def test_every_extension_only_act_keeps_a_base_licence_variant(self):
-        # the tier's whole point: a gated act may not take a TOOL's only step with it. Every tool
-        # the gated acts and steps drive must also be driven by a step no capability gates, or an
-        # unentitled installation loses that tool's coverage rather than one strategy's.
-        gated_acts = set(tool_verify.ACT_NEEDS)
+        # A LICENCE capability may not take a TOOL's only step with it: every tool its acts and steps
+        # drive must also be driven by an ungated step, or an unentitled installation loses that
+        # tool's coverage rather than one strategy's.
+        held, free = _licence_partition(tool_verify.ACTS, tool_verify.ACT_NEEDS,
+                                        tool_verify.OPT_IN_TIERS)
+        assert held, "no act declares a licence capability - this invariant has no subject"
+        assert not (held - free), (
+            "tools whose every step rides a LICENCE capability: " + ", ".join(sorted(held - free)))
+
+    def test_an_opt_in_step_is_not_a_licence_gated_tools_base_variant(self):
+        # The rule the real program cannot currently exercise: a tool whose only ungated-looking step
+        # lives in an OPT-IN act has no base-licence variant at all - that step runs on no default
+        # sweep. Counting an opt-in step as 'free' would report this program clean.
+        acts = [("ACT LIC", None, [("x_get", {}, "ok", None)], []),
+                ("ACT TIER", None, [("x_get", {}, "ok", None)], [])]
+        needs = {"ACT LIC": "machining_extension", "ACT TIER": "fake_tier"}
+        held, free = _licence_partition(acts, needs, frozenset({"fake_tier"}))
+        assert held == {"x_get"} and free == set()
+        assert held - free == {"x_get"}
+
+    def test_a_step_level_opt_in_declaration_is_read_the_same_way(self):
+        acts = [("ACT LIC", None, [("x_get", {}, tool_verify._needs("machining_extension"), None),
+                                   ("x_get", {}, tool_verify._needs("fake_tier"), None)], [])]
+        held, free = _licence_partition(acts, {}, frozenset({"fake_tier"}))
+        assert held == {"x_get"} and free == set()
+
+    def test_an_opt_in_tier_is_the_only_thing_holding_its_own_tools(self):
+        # The other half of the pair: the cloud tier's tools ARE meant to have no ungated step - that
+        # is what makes an unconfigured run skip them. A tool that drifted into an ungated act would
+        # be driven against an operator's hub by a default sweep, which is exactly what the tier is
+        # for, so the drift is caught here rather than live.
+        tiered = {a for a, cap in tool_verify.ACT_NEEDS.items() if cap in tool_verify.OPT_IN_TIERS}
+        assert tiered, "no act declares an opt-in tier - the tier has no consumer"
         held, free = set(), set()
         for name, _pre, narr, fb in tool_verify.ACTS:
             for step in (list(narr) + list(fb or [])):
                 if step[0] == tool_verify._DWELL:
                     continue
-                if name in gated_acts or tool_verify.step_capability(step[2]):
-                    held.add(step[0])
-                else:
-                    free.add(step[0])
-        assert not (held - free), (
-            "tools whose every step rides the capability tier: " + ", ".join(sorted(held - free)))
+                (held if name in tiered else free).add(step[0])
+        # the tools the tier alone drives - the data/doc/drawing families that write to a real hub
+        cloud_only = held - free
+        assert {"data_upload_file", "data_delete_file", "doc_save_as", "drawing_export"} <= cloud_only
+        assert not any(t.startswith("data_") for t in free), (
+            "a data_* tool is driven by an act no opt-in tier gates: "
+            + ", ".join(sorted(t for t in free if t.startswith("data_"))))
 
 
 class TestFacadeLateBinding:

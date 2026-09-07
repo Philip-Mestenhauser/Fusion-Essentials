@@ -39,6 +39,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tool_verify import call, health_gate, registered_tools  # noqa: E402  shared HTTP plumbing
+import cloud_config  # noqa: E402  the operator's hub/project/folder, never a literal in this file
+CLOUD_PROJECT = cloud_config.PROJECT
 
 LEDGER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERIFIED_API_FACTS.md")
 FACTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -55,7 +57,7 @@ TOOLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
 # (...Options.create()) carrying no int member at all: the sweep row reports such a name as
 # not-an-enum and the generated facts file records it in NOT_ENUMS, so only a name that does not
 # RESOLVE fails the row.
-_ENUM_FAMILY_RE = re.compile(r"adsk\.(core|fusion|cam|drawing)\.([A-Za-z]*(?:Types|States?|Modes|Directions|Locations|Positions|Alignments?|Sizes|Formats|Operations|Options))\b")
+_ENUM_FAMILY_RE = re.compile(r"adsk\.(core|fusion|cam|drawing)\.([A-Za-z]*(?:Types|States?|Modes|Methods|Directions|Locations|Positions|Alignments?|Sizes|Formats|Operations|Options))\b")
 # A family reached only through _drawing_common.enum_value("<Family>", "<member>") never appears as
 # a literal adsk.drawing.<Family> in tool source, so the textual scan above cannot see it - the
 # STRING argument is the real reference. enum_value resolves exclusively against adsk.drawing.
@@ -229,6 +231,7 @@ def cam_add_face_op(setup, tool, name):
 def run(context):
     app = adsk.core.Application.get()
     des = adsk.fusion.Design.cast(app.activeProduct)
+    CLOUD_PROJECT = {project!r}
 {box_line}{body}'''
 
 
@@ -807,6 +810,65 @@ ROWS = [
          and bb.item(0) is not None,
          "brepbodies-protocol: count=" + str(bb.count) + " hit=" + str(hit is not None)
          + " miss=" + repr(miss) + " iterated=" + str(len(names)))
+""",
+    },
+    {
+        "id": "timeline-group-collapse-shape",
+        "claim": "A TimelineGroup is created COLLAPSED, and collapse decides what timeline.item(i) enumerates: collapsed, the group's own row is present and its members are absent; expanded, the members are present (carrying parentGroup) and the group's own row is NOT enumerated at all. TimelineObject.index RAISES 'InternalValidationError : res >= 0' on a member reached through a COLLAPSED group while name/isGroup/isSuppressed/healthState/parentGroup all read, so such a row is addressable by NAME only; the same member answers an int index once the group is expanded",
+        "encoded_in": "commands/mcpServer/tools/design_get.py _tally_group + _GROUP_MEMBER_NOTE; "
+                      "tests/unit/test_design_get.py TestTimelineSlice",
+        "facts_on_pass": {
+            "behavior.timeline_group_created_collapsed": True,
+            "behavior.timeline_collapsed_member_index_raises": True,
+            "behavior.timeline_group_row_enumerated_only_when_collapsed": True,
+        },
+        "body": """
+    root = des.rootComponent
+    tl = des.timeline
+    base = tl.count
+    for i in range(3):
+        s = root.sketches.add(root.xYConstructionPlane)
+        s.name = "TGrpMeasure%d" % i
+    g = tl.timelineGroups.add(base, base + 2)
+    g.name = "TGrpMeasure"
+    created_collapsed = g.isCollapsed
+    rows_collapsed = tl.count
+    row_present_collapsed = any(tl.item(i).isGroup and tl.item(i).name == "TGrpMeasure"
+                                for i in range(tl.count))
+    member = g.item(0)
+    index_raised = False
+    try:
+        member.index
+    except Exception as e:
+        index_raised = "InternalValidationError" in str(e)
+    reads = {}
+    for attr in ("name", "isGroup", "isSuppressed", "healthState", "parentGroup"):
+        try:
+            getattr(member, attr)
+            reads[attr] = True
+        except Exception:
+            reads[attr] = False
+    g.isCollapsed = False
+    rows_expanded = tl.count
+    row_present_expanded = any(tl.item(i).isGroup and tl.item(i).name == "TGrpMeasure"
+                               for i in range(tl.count))
+    index_when_expanded = None
+    try:
+        index_when_expanded = g.item(0).index
+    except Exception:
+        pass
+    emit(created_collapsed is True and index_raised is True and all(reads.values())
+         and row_present_collapsed is True and row_present_expanded is False
+         and rows_expanded == rows_collapsed + 2
+         and isinstance(index_when_expanded, int),
+         "timeline-group-collapse-shape: created_collapsed=" + str(created_collapsed)
+         + " rows_collapsed=" + str(rows_collapsed)
+         + " rows_expanded=" + str(rows_expanded)
+         + " group_row_collapsed=" + str(row_present_collapsed)
+         + " group_row_expanded=" + str(row_present_expanded)
+         + " member_index_raised=" + str(index_raised)
+         + " member_reads=" + str(reads)
+         + " member_index_expanded=" + str(index_when_expanded))
 """,
     },
     {
@@ -2180,18 +2242,19 @@ ROWS = [
     },
     {
         "id": "shape-dump-data-world",
-        "claim": "The cloud data model dumps three types from a READ-ONLY, bounded look: the project named 'MCP Test Project' found in app.data.dataProjects is a DataProject (app.data.activeProject RAISES '2 : InternalValidationError : group' on 2705.1.11 in every context tried - a fresh session, an unsaved scratch document, and a cloud document open and active - so no row and no tool can lean on it), its rootFolder a DataFolder, and the DataFile dumped is the root folder's first file - or, when the root holds no file, the first file of the root's FIRST subfolder. At most those two folders are opened and only item(0) of each is touched: no recursive walk, which has been measured killing the add-in. When neither folder holds a file, DataFile is dumped from the class object under the same class-dir-equals-instance-dir-minus-'this' reading, taken here on DataFolder; the detail names which of the three sources supplied it",
+        "claim": "The cloud data model dumps three types from a READ-ONLY, bounded look: the configured project (named by the tests/live cloud config) found by name in app.data.dataProjects is a DataProject (app.data.activeProject RAISES '2 : InternalValidationError : group' on 2705.1.11 in every context tried - a fresh session, an unsaved scratch document, and a cloud document open and active - so no row and no tool can lean on it), its rootFolder a DataFolder, and the DataFile dumped is the root folder's first file - or, when the root holds no file, the first file of the root's FIRST subfolder. At most those two folders are opened and only item(0) of each is touched: no recursive walk, which has been measured killing the add-in. When neither folder holds a file, DataFile is dumped from the class object under the same class-dir-equals-instance-dir-minus-'this' reading, taken here on DataFolder; the detail names which of the three sources supplied it",
         "encoded_in": "tests/fakes/data_docs.py - the shared fakes for these cloud types",
         "body": """
     # Data.activeProject raises on 2705.1.11 in every context, so the project is found by name.
     projects = app.data.dataProjects
     proj = None
     for i in range(projects.count):
-        if projects.item(i).name == "MCP Test Project":
+        if projects.item(i).name == CLOUD_PROJECT:
             proj = projects.item(i)
             break
     if proj is None:
-        emit(False, "shape-dump-data-world: no project named 'MCP Test Project' in the active hub")
+        emit(False, "shape-dump-data-world: no project named '" + CLOUD_PROJECT
+             + "' (named by the tests/live cloud config) in the active hub")
         return
     folder = proj.rootFolder
     dfile = None
@@ -2221,7 +2284,7 @@ ROWS = [
     },
     {
         "id": "shape-dump-data-cloud-collections",
-        "claim": "The cloud COLLECTION types dump from the same READ-ONLY, bounded look as shape-dump-data-world: DataFiles and DataFolders off the root folder of the project named 'MCP Test Project' in app.data.dataProjects (activeProject raises on 2705.1.11), DataProjects and DataHubs off app.data - at most the root folder plus its FIRST subfolder are opened and only item(0) of each is touched, no recursive walk. All four carry asArray, and so does the parentReferences of the one DataFile reached (parentReferences answers a DataFiles). DataFileFuture is dumped from the class object under the class-dir-equals-instance-dir-minus-'this' reading, re-measured in this row on the live DataProjects, and carries both uploadState and dataFile. Data.activeHub carries a SETTER function, so 'no public setter' is not what stops a programmatic hub switch. MEASURED BY HAND and deliberately NOT re-measured by any row: assigning it LANDS - data_switch_hub reported switched:true both ways between 'Mechio' and 'Philip Mestenhauser' on 2705.1.4 - and the switch CLOSES every open document, which would destroy the sweep's own scratch",
+        "claim": "The cloud COLLECTION types dump from the same READ-ONLY, bounded look as shape-dump-data-world: DataFiles and DataFolders off the root folder of the configured project (named by the tests/live cloud config), found by name in app.data.dataProjects (activeProject raises on 2705.1.11), DataProjects and DataHubs off app.data - at most the root folder plus its FIRST subfolder are opened and only item(0) of each is touched, no recursive walk. All four carry asArray, and so does the parentReferences of the one DataFile reached (parentReferences answers a DataFiles). DataFileFuture is dumped from the class object under the class-dir-equals-instance-dir-minus-'this' reading, re-measured in this row on the live DataProjects, and carries both uploadState and dataFile. Data.activeHub carries a SETTER function, so 'no public setter' is not what stops a programmatic hub switch. MEASURED BY HAND and deliberately NOT re-measured by any row: assigning it LANDS - data_switch_hub reported switched:true both ways between the account's two hubs on 2705.1.4 - and the switch CLOSES every open document, which would destroy the sweep's own scratch",
         "encoded_in": ("tests/fakes/data_docs.py FakeData, FakeDataFolder, FakeDataFile and the _CloudArray "
                        "collection fakes (_CloudProjects among them); data_delete_file.py's "
                        "parentReferences.asArray() read"),
@@ -2229,11 +2292,12 @@ ROWS = [
     data = app.data
     proj = None
     for i in range(data.dataProjects.count):
-        if data.dataProjects.item(i).name == "MCP Test Project":
+        if data.dataProjects.item(i).name == CLOUD_PROJECT:
             proj = data.dataProjects.item(i)
             break
     if proj is None:
-        emit(False, "shape-dump-data-cloud-collections: no project named 'MCP Test Project'")
+        emit(False, "shape-dump-data-cloud-collections: no project named '" + CLOUD_PROJECT
+             + "' (named by the tests/live cloud config)")
         return
     folder = proj.rootFolder
     dfile = None
@@ -2279,7 +2343,7 @@ ROWS = [
     },
     {
         "id": "shape-dump-drawing-world",
-        "claim": "The row makes and removes its OWN source, so nothing it measures depends on what a project happens to hold: it adds a scratch design carrying one placed box, saves it into the cloud project 'MCP Test Project' as MeasureDrawingSource, takes that document's DataFile as the createDrawingInput source, and in a finally closes the document and deletes the file. Right after saveAs the DataFile's id is the LOCAL cache path - the cloud urn: id lands asynchronously, about two seconds - so the row pumps doEvents under a 20 second clock bound until the urn: form answers and FAILS naming the timeout if it never does. Before saving, ONE listing of that folder's own dataFiles (never recursive) deletes any MeasureDrawingSource a previous run left behind; that listing LAGS its own deletes, so an entry it names can already be gone and the row reports the entries seen and the deletes that took rather than inferring a leftover from the difference. The same lag makes deleteMe RAISE InternalValidationError while a just-closed file is still settling, so the removal pumps doEvents and retries under a clock bound - measured taking two or three attempts. DrawingManager.get() answers a DrawingManager and createDrawingInput answers a CreateDrawingInput whose customSize hands out a CustomSheetSize already carrying a positive width and height and at least two zones each way, so 'a DEFAULT CustomSheetSize' is read rather than assumed. The deleting of the source is reported but does NOT gate the row: a False leaves the file for the next run's sweep and the detail names it. The eleven document-side types (DrawingDocument, Drawing, Sheets, Sheet, Views, View, DrawingSketches, DrawingSketch, Images, DrawingExportManager, DocumentSettings) come off their CLASS objects: adsk.core.DocumentTypes carries no drawing member at all, so documents.add cannot make one, and DrawingManager.createDrawing would mint a SECOND cloud file, which this row does not call. The class dump rests on the class-dir-equals-instance-dir-minus-'this' reading, re-measured here on CreateDrawingInput, which the row holds both of. The collection types are named Views/Images, NOT DrawingViews/DrawingImages, and the settings type is DocumentSettings - the labels are what the fake-shape lint maps a fake onto, so each live one is read back rather than assumed",
+        "claim": "The row makes and removes its OWN source, so nothing it measures depends on what a project happens to hold: it adds a scratch design carrying one placed box, saves it into the configured cloud project (named by the tests/live cloud config) as MeasureDrawingSource, takes that document's DataFile as the createDrawingInput source, and in a finally closes the document and deletes the file. Right after saveAs the DataFile's id is the LOCAL cache path - the cloud urn: id lands asynchronously, about two seconds - so the row pumps doEvents under a 20 second clock bound until the urn: form answers and FAILS naming the timeout if it never does. Before saving, ONE listing of that folder's own dataFiles (never recursive) deletes any MeasureDrawingSource a previous run left behind; that listing LAGS its own deletes, so an entry it names can already be gone and the row reports the entries seen and the deletes that took rather than inferring a leftover from the difference. The same lag makes deleteMe RAISE InternalValidationError while a just-closed file is still settling, so the removal pumps doEvents and retries under a clock bound - measured taking two or three attempts. DrawingManager.get() answers a DrawingManager and createDrawingInput answers a CreateDrawingInput whose customSize hands out a CustomSheetSize already carrying a positive width and height and at least two zones each way, so 'a DEFAULT CustomSheetSize' is read rather than assumed. The deleting of the source is reported but does NOT gate the row: a False leaves the file for the next run's sweep and the detail names it. The eleven document-side types (DrawingDocument, Drawing, Sheets, Sheet, Views, View, DrawingSketches, DrawingSketch, Images, DrawingExportManager, DocumentSettings) come off their CLASS objects: adsk.core.DocumentTypes carries no drawing member at all, so documents.add cannot make one, and DrawingManager.createDrawing would mint a SECOND cloud file, which this row does not call. The class dump rests on the class-dir-equals-instance-dir-minus-'this' reading, re-measured here on CreateDrawingInput, which the row holds both of. The collection types are named Views/Images, NOT DrawingViews/DrawingImages, and the settings type is DocumentSettings - the labels are what the fake-shape lint maps a fake onto, so each live one is read back rather than assumed",
         "encoded_in": ("tests/fakes/drawing.py's drawing world - FakeDrawingDocument, FakeDrawing, "
                        "FakeSheets/FakeSheet, FakeViews/FakeView, FakeDrawingSketches/"
                        "FakeDrawingSketch, FakeImages, FakeDrawingExportManager, "
@@ -2292,7 +2356,7 @@ ROWS = [
     projects = app.data.dataProjects
     project = None
     for i in range(projects.count):
-        if projects.item(i).name == "MCP Test Project":
+        if projects.item(i).name == CLOUD_PROJECT:
             project = projects.item(i)
             break
     folder = None if project is None else project.rootFolder
@@ -2408,7 +2472,7 @@ ROWS = [
          "shape-dump-drawing-world: " + str(len(counts)) + " types, min attrs "
          + str(min(counts)) + ", source " + SOURCE_NAME + " saved into "
          + ("'" + project.name + "'" if project is not None
-            else "NO project named 'MCP Test Project' - nothing was saved")
+            else "NO project named '" + CLOUD_PROJECT + "' - nothing was saved")
          + " and its cloud urn: id "
          + ("settled in " + str(settle) + "s" if urn is not None
             else "NEVER settled inside the 20s bound, so no CreateDrawingInput was taken")
@@ -3635,6 +3699,35 @@ ROWS = [
 """,
     },
     {
+        "id": "shape-dump-infinite-line-and-sphere",
+        "claim": "core.InfiniteLine3D and core.Sphere - two transient geometry types created off their own static factory with no document open. InfiniteLine3D.create(origin, direction) carries origin, direction and isColinearTo (true for a second line on the same axis, false for one offset from it - the test the holder profile reduction runs); Sphere.create(origin, radius) carries origin (the sphere CENTRE) and radius",
+        "encoded_in": "tests/fakes/geometry.py FakeInfiniteLine3D (test__holder.py, test_assembly_move.py, test_joint_create_origin.py, and the Line3D fake's asInfiniteLine) and Sphere (test__sys_common.py's sphere-face record, which reads the TYPE NAME only) - this dump is the SHAPES key test_fake_shapes_exist.py sweeps both against",
+        "body": """
+    line = adsk.core.InfiniteLine3D.create(
+        adsk.core.Point3D.create(1.0, 2.0, 3.0), adsk.core.Vector3D.create(0.0, 0.0, 1.0))
+    n_line = dump_shape("InfiniteLine3D", line)
+    # A second line ON the axis and one offset from it: an isColinearTo that answered the same for
+    # both would pass a rig built from one line alone.
+    same = adsk.core.InfiniteLine3D.create(
+        adsk.core.Point3D.create(1.0, 2.0, 9.0), adsk.core.Vector3D.create(0.0, 0.0, 1.0))
+    apart = adsk.core.InfiniteLine3D.create(
+        adsk.core.Point3D.create(4.0, 2.0, 3.0), adsk.core.Vector3D.create(0.0, 0.0, 1.0))
+    colinear = (line.isColinearTo(same), line.isColinearTo(apart))
+    # Centred away from the world origin: a sphere created at (0,0,0) reads (0,0,0) back under any
+    # convention, so that rig cannot tell a centre from anything else.
+    sph = adsk.core.Sphere.create(adsk.core.Point3D.create(2.0, 3.0, -1.0), 0.5)
+    n_sph = dump_shape("Sphere", sph)
+    o = sph.origin
+    at_centre = (abs(o.x - 2.0) < 1e-9 and abs(o.y - 3.0) < 1e-9 and abs(o.z + 1.0) < 1e-9)
+    emit(n_line > 0 and n_sph > 0 and colinear == (True, False)
+         and at_centre and abs(sph.radius - 0.5) < 1e-9,
+         "shape-dump-infinite-line-and-sphere: InfiniteLine3D " + str(n_line)
+         + " attrs isColinearTo(on-axis, offset)=" + repr(colinear) + "; Sphere " + str(n_sph)
+         + " attrs origin=" + repr((o.x, o.y, o.z)) + " (created at (2.0, 3.0, -1.0)) radius="
+         + repr(sph.radius))
+""",
+    },
+    {
         "id": "fillet-tangent-chain-loop-faces",
         "claim": "A fillet driven from ONE edge of an 8-edge tangent top loop (4 lines + 4 arcs, isTangentChain=True) lands FilletFeature.faces.count == 8 - the chain expands across every tangent neighbour, so the number of edges HANDED IN predicts nothing about what got filleted",
         "encoded_in": "_edge_common.py's tangent-chain wording and its off-the-feature face read-back",
@@ -4295,7 +4388,11 @@ ROWS = [
                   "ObjectCollection, each refusing the other with a TypeError. The relative stock "
                   "box is the one thing that did NOT follow: stockXLow/High still read the "
                   "ORIGINAL body's extents after the swap, so this row reports them rather than "
-                  "claiming the setup re-derived"),
+                  "claiming the setup re-derived. That staleness is a CACHE, not a frozen "
+                  "derivation - discriminated by hand on a saved copy of this rig: the box also "
+                  "survived a face toolpath regenerating valid against the new body, and a save + "
+                  "reopen then read the NEW body's extents (-21/21 -> -31/31). This row measures "
+                  "the in-session reads only; the reopen leg needs a cloud round trip"),
         "encoded_in": ("cam_create_setup.py's models comment and "
                        ".claude/skills/insert-into-template/reference.md, whose part swap depends "
                        "on the selection surviving; tests/fakes/cam.py FakeSetup / FakeSetupInput"),
@@ -4832,6 +4929,25 @@ ROWS = [
          "cam-generate-future: pre_state=" + str(pre_state) + " pre_path=" + str(pre_path)
          + " ops=" + str(n_ops) + " numberOfCompleted=" + str(n_done)
          + " (informational only) post_state=" + str(post_state))
+""",
+    },
+    {
+        "id": "cam-has-no-simulation-api",
+        "claim": ("adsk.cam exposes NO toolpath simulation, collision, gouge or stock-verification "
+                  "API: no module-level name matches simulate/collision/gouge/verify, and "
+                  "GeneratedDataType carries exactly three int members - the additive analyses. "
+                  "This row asserts the ABSENCE, so a build that grows the API turns it red"),
+        "encoded_in": "cam_inspect_toolpaths.py, which reads validity and up-to-dateness rather than correctness; no tool in this surface offers toolpath simulation",
+        "body": """
+    import re as _re
+    pat = _re.compile("simulat|collision|gouge|verif", _re.I)
+    named = sorted(n for n in dir(adsk.cam) if not n.startswith("_") and pat.search(n))
+    T = getattr(adsk.cam, "GeneratedDataType", None)
+    members = sorted(n for n in dir(T) if not n.startswith("_")
+                     and isinstance(getattr(T, n), int)) if T is not None else []
+    emit(not named and len(members) == 3,
+         "cam-has-no-simulation-api: adsk.cam names matching simulate/collision/gouge/verify="
+         + (", ".join(named) or "none") + " GeneratedDataType=" + (", ".join(members) or "absent"))
 """,
     },
     {
@@ -6694,7 +6810,8 @@ def _compose(row):
     if row.get("need_box"):
         box_line += '    body = make_box(des, "PB_{0}")\n'.format(row["id"].replace("-", "_"))
     body = row["body_fn"]() if "body_fn" in row else row["body"]
-    return _TEMPLATE.format(box_line=box_line, body=body.strip("\n") + "\n")
+    return _TEMPLATE.format(project=CLOUD_PROJECT, box_line=box_line,
+                            body=body.strip("\n") + "\n")
 
 
 def _verdict_lines(payload):
@@ -6973,7 +7090,27 @@ def check():
     return 0
 
 
+def cloud_rows():
+    """The ids of every row whose script addresses the operator's cloud project. Derived from the
+    bodies, so a new cloud row joins the pre-flight by READING CLOUD_PROJECT, not by being listed."""
+    out = []
+    for row in ROWS:
+        body = row["body_fn"]() if "body_fn" in row else row.get("body", "")
+        if "CLOUD_PROJECT" in body:
+            out.append(row["id"])
+    return out
+
+
 def run_measurements(write_json, only=None):
+    # FIRST, before any read of the session: these rows find their project BY NAME, and unconfigured
+    # each would fail on an empty name and take the all-PASS gate down with it. Nothing here needs
+    # Fusion, so the refusal costs no connection and opens no scratch document.
+    blocked = [r for r in cloud_rows() if not only or r in only]
+    if blocked and not CLOUD_PROJECT:
+        sys.exit("{0} row(s) need the operator's cloud project by name ({1}), and {2} names none. "
+                 "Write it holding {3}, or re-run with --only naming rows that do not read it."
+                 .format(len(blocked), ", ".join(blocked), cloud_config.CONFIG_PATH,
+                         cloud_config.CONFIG_SHAPE))
     fusion_version = _fusion_version()
     if "sys_execute_script" not in registered_tools():
         sys.exit("sys_execute_script is not registered - enable allow_execute_api_script in the "

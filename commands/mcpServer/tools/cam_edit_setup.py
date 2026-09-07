@@ -55,6 +55,15 @@ _WCS_HANDLE = _inputs.GeometryHandle("wcs_handle", require="any")
 _WCS_JO = _inputs.JointOriginRef("wcs_jo")
 
 
+# Said only where two listed rows share a name. A row's identity is description/vendor/model and
+# both copies read the same triple, so nothing here tells them apart.
+_SHARED_NAME_NOTE = (
+    " A row marked name_in_both_locations shares its name with the OTHER location's copy: the name "
+    "addresses two machines, an assignment by it reaches the local one, and a setup reading that "
+    "machine name does not say which copy it carries. Delete the local copy to reach the shipped "
+    "one by name.")
+
+
 def _object_collection():
     return adsk.core.ObjectCollection.create()
 
@@ -66,13 +75,20 @@ def read_machines(vendor: str = "", machine_type: str = "", max_results: int = 1
     rows, truncated, err = machine_catalog(vendor, machine_type, max_results)
     if err:
         return error(err)
-    return ok({
-        "machines": rows, "count": len(rows), "truncated": truncated,
-        "note": ("Pass a machine's exact 'name' to cam_edit_setup(machine=...); "
-                 "machine_type='milling' narrows past the additive printers. Assigning a "
-                 "simulation_ready machine can be REFUSED - machine_strip_simulation=true "
-                 "assigns it without its simulation model, and the stripped copy's spindle "
-                 "maximum and axis ranges read back unchanged through Setup.machine.")})
+    note = ("Pass a machine's exact 'name' to cam_edit_setup(machine=...); "
+            "machine_type='milling' narrows past the additive printers. Assigning a "
+            "simulation_ready machine can be REFUSED - machine_strip_simulation=true "
+            "assigns it without its simulation model, and the stripped copy's spindle "
+            "maximum and axis ranges read back unchanged through Setup.machine.")
+    if any(r.get("name_in_both_locations") for r in rows):
+        note += _SHARED_NAME_NOTE
+    if truncated:
+        # The flag is computed over the LISTED rows, so a collision whose other copy fell past the
+        # cap carries no mark at all - said here rather than left to read as 'no collisions'.
+        note += (" The listing was CAPPED, and name_in_both_locations is read over the listed rows "
+                 "only - a copy past the cap is not marked. Narrow with vendor/machine_type, or "
+                 "raise max_results, before reading an unmarked row as unique.")
+    return ok({"machines": rows, "count": len(rows), "truncated": truncated, "note": note})
 
 
 def _resolve_bodies(names):

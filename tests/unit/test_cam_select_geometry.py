@@ -761,6 +761,25 @@ class TestPocketFilter:
         op, res = self._run(monkeypatch, {"min_depth": "deep"})
         assert res["isError"] is True and "min_depth" in res["message"]
 
+    def test_the_schema_advertises_exactly_the_keys_the_handler_reads(self):
+        # The schema is generated from the same tables _apply_pocket_filter reads, so a key the
+        # wire offers that the handler would refuse cannot exist - the typing replaces a prose
+        # description that stated the key list without anything failing when it drifted.
+        schema = cg.tool.input_schema["properties"]["pocket_filter"]
+        assert tuple(schema["properties"]) == cg._POCKET_FILTER_KEYS
+        assert schema["additionalProperties"] is False
+        assert schema["properties"]["holes"]["type"] == "boolean"
+        assert [schema["properties"][k]["type"] for k, _p in cg._POCKET_FILTER_LENGTHS] == \
+            ["number"] * len(cg._POCKET_FILTER_LENGTHS)
+        assert "needs holes=true" in schema["properties"]["min_hole_diameter"]["description"]
+
+    def test_every_length_key_the_schema_advertises_is_one_the_handler_accepts(self, monkeypatch):
+        # The other half: an advertised key the handler refuses would be a schema that lies.
+        for key, _prop in cg._POCKET_FILTER_LENGTHS:
+            flt = {"holes": True, key: 2.0} if key == "min_hole_diameter" else {key: 2.0}
+            _op, res = self._run(monkeypatch, flt)
+            assert res["isError"] is False, (key, res)
+
 
 # ── the sketch selection (whole sketches, by name) ───────────────────────────
 
@@ -1197,6 +1216,10 @@ def _turn_thread_op(name="Thread1", **kw):
     return _Op(name, {"threadFaces": _Param(_HoleParamValue())}, **kw)
 
 
+def _turn_chamfer_op(name="Chamfer1", **kw):
+    return _Op(name, {"chamfers": _Param(_HoleParamValue())}, **kw)
+
+
 class TestTurningObjectSets:
     def test_groove_lands_on_the_grooves_parameter(self, monkeypatch):
         op = _groove_op()
@@ -1217,6 +1240,32 @@ class TestTurningObjectSets:
                                   generate=False))
         assert op.parameters.itemByName("threadFaces").value.value == faces
         assert out["selections"] == 1 and out["selection_param"] == "threadFaces"
+
+    def test_chamfer_lands_on_the_chamfers_parameter(self, monkeypatch):
+        # MEASURED on the hub's turning setup: the chamfer's bounding circular EDGE on 'chamfers'
+        # generated 0.3 s of toolpath, where that chamfer's own cone FACE raised
+        # '2 : InternalValidationError : status.isOk()' - the same split 'grooves' reads.
+        op = _turn_chamfer_op()
+        cam = _CAM([_Setup([op])])
+        edges = [_Edge()]
+        _install(monkeypatch, cam, edges)
+        out = _payload(cg.handler(operation="Chamfer1", selection="chamfer", handles=["e"],
+                                  generate=False))
+        assert op.parameters.itemByName("chamfers").value.value == edges
+        assert out["selections"] == 1 and out["selection_param"] == "chamfers"
+
+    def test_chamfer_refuses_a_face_handle_before_the_parameter_raises(self, monkeypatch):
+        op = _turn_chamfer_op()
+        cam = _CAM([_Setup([op])])
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        import adsk.fusion
+        adsk.fusion.BRepFace = BRepFace
+        adsk.fusion.BRepEdge = BRepEdge
+        monkeypatch.setattr(cg._inputs, "_resolve_token_entity", lambda des, h: _Face(2.2))
+        monkeypatch.setattr(cg._inputs._common, "design", lambda: object())
+        res = cg.handler(operation="Chamfer1", selection="chamfer", handles=["h"], generate=False)
+        assert res["isError"] is True and "must be an edge" in res["message"]
+        assert op.parameters.itemByName("chamfers").value.value == []
 
     def test_groove_refuses_a_face_handle_before_the_parameter_raises(self, monkeypatch):
         # the groove parameter itself raises on a face, and a raise there reads as a tool fault
@@ -2263,11 +2312,22 @@ class TestDriveParamRouting:
         # true); on trace it is the only selection parameter the operation carries.
         op = _trace_op()
         cam = _CAM([_Setup([op])])
-        _install(monkeypatch, cam, [_Edge(), _Edge()])
-        out = _payload(cg.handler(operation="Trace1", selection="chain", handles=["a", "b"],
+        _install(monkeypatch, cam, [_Edge()])
+        out = _payload(cg.handler(operation="Trace1", selection="chain", handles=["a"],
                                   generate=False))
         assert _selection_on(op, "curves").count == 1
         assert out["selections"] == 1
+
+    def test_two_drive_curves_land_as_two_selections(self, monkeypatch):
+        # MEASURED on morph: two rim circles fed to ONE CurveSelection walk into a single path and
+        # the operation reports 'No passes to link'; one selection EACH cut 77.7 s of toolpath.
+        op = _trace_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        out = _payload(cg.handler(operation="Trace1", selection="chain", handles=["a", "b"],
+                                  generate=False))
+        assert _selection_on(op, "curves").count == 2
+        assert out["selections"] == 2
 
     def test_curves_is_probed_before_the_machining_boundary(self, monkeypatch):
         # morph and project carry BOTH (measured over every allowed strategy): 'curves' is their

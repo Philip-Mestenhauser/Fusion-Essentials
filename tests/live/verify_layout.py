@@ -13,7 +13,7 @@ runs before them:
   which is why a read-back asserts a landing position through `_px`/`_py` rather than against the
   authored number;
   `_framed` inserts a camera row wherever the next subject is not already on screen, sized off the
-  chunk footprints `_placed_boxes` measured.
+  chunk footprints `_placed_boxes` measured, widened by any `_MEASURED_BOX` row a run recorded.
 
 A chunk is the unit all three share: the sketch or component a step works on, named by
 `_place_owner`. tool_verify.py re-exports this surface.
@@ -258,6 +258,86 @@ _RELATION_TOOLS = ("joint_create", "joint_create_as_built", "joint_edit", "joint
 # _SLOTS, once the acts are defined.
 _PLACED_BOX = {}
 _CHUNK_OF = {}
+# {chunk: [x0, x1, y0, y1]} in the placed world, off a run's model_inspect reads. The authored box
+# counts only the coordinates the steps carry, so it is a LOWER bound; a row here WIDENS a frame
+# through _chunk_box and never narrows one.
+_MEASURED_BOX = {
+    "ArrP1": [200.0, 585.8, 1479.0, 1654.0],
+    "ArrP2": [280.0, 592.3, 1444.0, 1629.0],
+    "ArrP3": [400.0, 606.3, 1479.0, 1628.5],
+    "AsbPin": [210.0, 230.0, 1789.0, 1809.0],
+    "AsbPlate": [200.0, 240.0, 1779.0, 1819.0],
+    "AxisPost": [1022.0, 1032.0, 1599.0, 1609.0],
+    "BallPost": [1022.0, 1032.0, 1599.0, 1609.0],
+    "BallSphere": [1021.0, 1033.0, 1598.0, 1610.0],
+    "BayCameo": [502.0, 592.0, 1344.0, 1404.0],
+    "BoreCameo": [522.5, 533.5, 2144.5, 2155.5],
+    "Bracket": [-60.0, 60.0, -40.0, 40.0],
+    "CombineCameo": [392.0, 442.0, 1344.0, 1394.0],
+    "ConA": [854.0, 874.0, 1779.0, 1799.0],
+    "ConB": [854.0, 874.0, 1779.0, 1799.0],
+    "DatumBench": [580.0, 640.0, 1934.0, 1974.0],
+    "DihedralL": [320.0, 380.0, 1934.0, 1974.0],
+    "EmbossBlock": [600.0, 640.0, 100.0, 120.0],
+    "FeatureCameo": [-240.0, 390.0, -50.0, 110.0],
+    "FillDemo": [-6.0, 6.0, -6.0, 6.0],
+    "GrpA": [792.0, 812.0, 1479.0, 1499.0],
+    "GrpB": [872.0, 892.0, 1479.0, 1499.0],
+    "HolderPart": [480.0, 520.0, 2042.0, 2062.0],
+    "Hub": [1160.0, 1240.0, -40.0, 40.0],
+    "IndBal": [493.0, 527.0, 1794.0, 1804.0],
+    "IndCyl": [403.0, 437.0, 1794.0, 1804.0],
+    "IndPin": [448.0, 482.0, 1794.0, 1804.0],
+    "IndPla": [538.0, 572.0, 1794.0, 1804.0],
+    "IndRev": [313.0, 347.0, 1794.0, 1804.0],
+    "IndRig": [583.0, 617.0, 1794.0, 1804.0],
+    "IndSld": [358.0, 392.0, 1794.0, 1804.0],
+    "JawFixed": [-70.0, 70.0, 43.0, 78.0],
+    "JawMoving": [-70.0, 70.0, -78.0, -43.0],
+    "JointBase": [300.0, 630.0, 1779.0, 1819.0],
+    "LeadScrew": [-30.0, 30.0, -125.0, -80.0],
+    "LnkA": [694.0, 714.0, 1779.0, 1799.0],
+    "LnkB": [694.0, 714.0, 1779.0, 1799.0],
+    "LoftCameo": [300.0, 332.0, 1344.0, 1376.0],
+    "MateArm": [1.7, 36.2, -2067.6, -2042.0],
+    "MateSeat": [934.0, 954.0, 1779.0, 1799.0],
+    "Msh": [651.8, 727.0, 1343.7, 1419.0],
+    "PatchRail": [980.0, 1000.0, 1934.0, 1934.0],
+    "PinCameo": [523.0, 1022.0, 1419.0, 2155.0],
+    "PipeCut": [800.0, 840.0, -20.0, 20.0],
+    "PipeHalf": [757.0, 763.0, -3.0, 3.0],
+    "PipeRun": [715.0, 725.0, -5.0, 5.0],
+    "PoseCameo": [814.0, 834.0, 1779.0, 1799.0],
+    "ReplBlock": [660.0, 690.0, 0.0, 30.0],
+    "ReplRoof": [655.0, 695.0, -80.0, 80.0],
+    "RevolveCameo": [22.0, 38.0, -8.0, 8.0],
+    "RigidPost": [1022.0, 1032.0, 1599.0, 1609.0],
+    "RmScratch": [980.0, 1000.0, 2042.0, 2062.0],
+    "Ruled": [1060.0, 1100.0, 1919.0, 1934.0],
+    "RuledSolid": [200.0, 240.0, 2042.0, 2082.0],
+    "SAlign": [799.0, 840.0, 1934.0, 1964.0],
+    "SDel": [899.6, 1000.4, 1933.9, 1954.1],
+    "SHole": [0.0, 640.0, 0.0, 10.0],
+    "SRev": [-10.0, 10.0, -10.0, 10.0],
+    "STOCK": [-63.0, 63.0, -43.0, 43.0],
+    "ScaleBlock": [1244.1, 1346.5, 322.0, 403.2],
+    "ShellCap": [580.0, 610.0, 2042.0, 2072.0],
+    "Spl": [300.0, 340.0, 2042.0, 2082.0],
+    "Stc": [400.0, 420.0, 2042.0, 2062.0],
+    "Surf": [697.0, 740.0, 1934.0, 1964.0],
+    "SwarfFrustum": [200.0, 260.0, 1942.0, 1982.0],
+    "SweepCameo": [245.0, 255.0, -5.0, 5.0],
+    "TangentLoop": [318.5, 381.5, 2140.5, 2203.5],
+    "TangentRun": [194.0, 260.0, 2140.5, 2202.0],
+    "ThreadBore": [787.0, 811.0, 1344.0, 1368.0],
+    "ThreadPost": [830.1, 859.9, 2032.1, 2061.9],
+    "ThreadPost2": [910.1, 919.9, 2042.1, 2051.9],
+    "TorusPost": [596.0, 606.0, 2142.0, 2152.0],
+    "TorusRing": [555.0, 647.0, 2101.0, 2193.0],
+    "TwicePlaced": [760.0, 820.0, 2042.0, 2062.0],
+    "TwoSideCap": [670.0, 700.0, 2042.0, 2072.0],
+    "ViseBase": [-95.0, 95.0, -95.0, 95.0],
+}
 # The chunk names that are COMPONENTS - a body in one is framed as an occurrence ('Name:1'), a body
 # at the root as the sketch that drew it.
 _COMPONENTS = set()
@@ -435,12 +515,75 @@ def _framed(steps):
     return out
 
 
+def _union(a, b):
+    """The box holding both, or whichever one is there."""
+    if a is None or b is None:
+        return a or b
+    return [min(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), max(a[3], b[3])]
+
+
+def _chunk_box(chunk):
+    """The world box one chunk occupies: its authored box WIDENED by the measured extents where a
+    run recorded them. A union, never a replacement - a measurement of one body does not bound a
+    chunk whose other bodies were never read."""
+    return _union(_PLACED_BOX.get(chunk), _MEASURED_BOX.get(chunk))
+
+
+def measured_boxes(inspected):
+    """{chunk: [x0, x1, y0, y1]} from {entity name: its model_inspect payload} - the _MEASURED_BOX
+    rows a run's own reads produce, so the next layout move is made from measurement rather than
+    from the coordinates the steps were written with. An entity whose min/max corner did not read
+    is left out; a corner that reads null would record a box the geometry does not have."""
+    out = {}
+    for name, payload in (inspected or {}).items():
+        lo = (payload or {}).get("min_point") or {}
+        hi = (payload or {}).get("max_point") or {}
+        corners = (lo.get("x"), lo.get("y"), hi.get("x"), hi.get("y"))
+        if any(not isinstance(v, (int, float)) or isinstance(v, bool) for v in corners):
+            continue
+        stem = re.sub(r":\d+$", "", str(name))
+        chunk = _CHUNK_OF.get(stem, stem)
+        out[chunk] = _union(out.get(chunk), [lo["x"], hi["x"], lo["y"], hi["y"]])
+    return out
+
+
+# The drift gate ACT 9 runs, one row per chunk. These four travel furthest from their authored
+# cell - a joint carries one clear of the packed field, a pattern and a mirror overrun two more -
+# so a re-pack that moves anything moves one of them. 5 mm sits two orders above the read-to-read
+# agreement measured (0.05 mm) and an order below the smallest move that matters (_FIELD_GUTTER).
+_DRIFT_CHUNKS = ("MateArm", "TorusRing", "BallSphere", "FeatureCameo")
+_DRIFT_TOL_MM = 5.0
+
+
+def layout_drift_mm(chunk, inspected):
+    """The largest mm any edge of `chunk` has moved from its _MEASURED_BOX row, or None where the
+    read carried no usable corner - which is no agreement, never agreement."""
+    got = measured_boxes(inspected).get(chunk)
+    want = _MEASURED_BOX.get(chunk)
+    if got is None or want is None:
+        return None
+    return max(abs(got[i] - want[i]) for i in range(4))
+
+
+def layout_placed_as_measured(chunk, min_point, max_point):
+    """True where `chunk` still sits where _MEASURED_BOX records it, within _DRIFT_TOL_MM."""
+    drift = layout_drift_mm(chunk, {chunk: {"min_point": min_point, "max_point": max_point}})
+    return drift is not None and drift <= _DRIFT_TOL_MM
+
+
+def drift_row(chunk):
+    """ACT 9's receipt row for ONE chunk - the four share this predicate, so the gate widens by a
+    name in _DRIFT_CHUNKS rather than by another copy of the check."""
+    return ("model_inspect", {"target": chunk + ":1", "units": "mm"},
+            lambda p: layout_placed_as_measured(chunk, p["min_point"], p["max_point"]), None)
+
+
 def _frame_box(names):
     """The world box the named entities occupy, or None when none of them is placed. A name is
     resolved through _CHUNK_OF first: a sketch rides on the body that owns it, and it is that body's
     box the camera will see."""
     stems = [re.sub(r":\d+$", "", str(n)) for n in names]
-    got = [_PLACED_BOX[c] for c in (_CHUNK_OF.get(s, s) for s in stems) if c in _PLACED_BOX]
+    got = [b for b in (_chunk_box(_CHUNK_OF.get(s, s)) for s in stems) if b]
     if not got:
         return None
     return [min(b[0] for b in got), max(b[1] for b in got),

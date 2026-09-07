@@ -2,12 +2,13 @@
 id: S6_Vise
 tier: pipeline
 fixture: fresh empty design (orchestrator stages with doc_new); active hub PINNED; project
-  "MCP Test Project" verified to EXIST. The vise this scenario builds becomes the FIXTURE X-REF
+  the configured project verified to EXIST. The vise this scenario builds becomes the FIXTURE X-REF
   SOURCE the template chain consumes. Missing fixture = ask - never create a project.
 budget:
   max_tool_calls: 146
   max_tokens: 285000
-substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
+substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag; {{PROJECT}} /
+  {{FOLDER}} -> the configured destination"
 perturbations: none (baseline)
 expected_refusals: none
 ---
@@ -73,7 +74,7 @@ FRESH jaw component positions from an assembly read and show the gap midpoint si
 center (report the numbers you read). The positions must be OCCURRENCE positions that moved -
 a read showing static occurrences with redrawn geometry inside them is a FAIL.
 
-Finally save the document as P6-Vise into MCP Test Project / Pipeline-v1/{{RUN_FOLDER}} (create the folder path if missing; never a project).
+Finally save the document as P6-Vise into {{PROJECT}} / {{FOLDER}}/{{RUN_FOLDER}} (create the folder path if missing; never a project).
 
 POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH units.
 
@@ -99,7 +100,7 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
 - the slideway SLOT exists as slot geometry (a fresh sketch read shows the slot's curves - report
   what the read lists for it) and the vise NAME reads back as sketch text (a fresh sketch read
   returns the text string and the font it carries; report both).
-- doc_get -> saved as "P6-Vise", real URN, version >= 1, in MCP Test Project / Pipeline-v1/{{RUN_FOLDER}}.
+- doc_get -> saved as "P6-Vise", real URN, version >= 1, in {{PROJECT}} / {{FOLDER}}/{{RUN_FOLDER}}.
 
 REPORT - return EXACTLY this structure, nothing else:
 

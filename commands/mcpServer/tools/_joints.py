@@ -5,6 +5,7 @@
 Joint/AsBuiltJoint-by-name lookup every joint tool resolves an existing joint through."""
 
 import math
+import re
 
 import adsk.core
 import adsk.fusion
@@ -34,11 +35,30 @@ def is_as_built_joint(x):
 
 # The "what to reuse from here" catalog line for the generated CLAUDE.md helper map.
 MAP_BLURB = (
-    "build_joint_geometry/apply_motion - the keypoint factory and motion dispatch; all_joints/"
-    "find_joint - the walk over joints AND asBuiltJoints, REFUSING a shared name; DRIVES_ANY - the "
-    "drivable gate; motion_link_record/link_ratio_values - the link record and ratio codec; "
-    "all_joint_origins/jo_assembly_proxy - the JointOrigin walk and proxy; component_world_matrix "
-    "- the matrix-to-world ladder")
+    "build_joint_geometry/apply_motion - keypoint factory + motion dispatch; all_joints/"
+    "find_joint - walks joints+asBuiltJoints, REFUSING a shared name; DRIVES_ANY - drivable "
+    "gate; motion_link_record/link_ratio_values - link record + ratio codec; "
+    "all_joint_origins/jo_assembly_proxy - JointOrigin walk + proxy; component_world_matrix - "
+    "world matrix ladder; pair_used_clause/PAIR_USED - used-pair refusal")
+
+
+# The words Fusion refuses a SECOND joint on an already-jointed PAIR with - the ONE gate both create
+# tools ride, so a different add() failure never gets this diagnosis.
+PAIR_USED = re.compile(r"joint in system exists|over ?constrain", re.IGNORECASE)
+
+# Measured on BOTH create tools: one pair refused a second joint through ':origin' snaps and again
+# through ':top' snaps with the identical text, so the offending input is the pair, not the anchor.
+PAIR_USED_ANCHOR_NOTE = " The same refusal comes back whichever anchor is passed."
+
+
+def pair_used_clause(platform_text, id1, id2, anchor_note=""):
+    """The clause naming the PAIR as what a joint create was refused on, or '' when Fusion's text
+    does not name an existing joint."""
+    if not PAIR_USED.search(platform_text or ""):
+        return ""
+    return (f" Fusion names an existing joint, not the geometry: '{id1}' and '{id2}' are already "
+            f"jointed to each other.{anchor_note} Change the existing joint with joint_edit, or "
+            "joint a different pair.")
 
 
 def planar_outward_normal(entity):

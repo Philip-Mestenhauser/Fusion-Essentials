@@ -102,7 +102,7 @@ tool = (
     Tool.create_simple(name="model_compute_holder", description=TOOL_DESCRIPTION)
     .add_input_property(*_BODY.as_property())
     .add_input_property(*_AXIS.as_property())
-    .add_input_property(*_END.as_property())
+    .add_input_property(*_END.as_property(brief=True))
     .add_input_property("name", {"type": "string",
             "description": "Holder name for the JSON (default: the active document name)."})
     .add_input_property("product_id", {"type": "string", "description": "Optional product ID metadata."})

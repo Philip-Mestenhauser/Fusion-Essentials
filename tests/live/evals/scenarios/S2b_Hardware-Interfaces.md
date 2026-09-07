@@ -3,14 +3,15 @@ id: S2b_Hardware-Interfaces
 tier: pipeline
 fixture: P2a-Gimbal (the S2a artifact - the primary bodies, ENGAGED at their support interfaces
   and clearance-verified where parts move) OPENED as the active document by the orchestrator from
-  the Pipeline-v1 tree BY URN, active hub PINNED first. The agent builds the pivot interfaces and
+  the configured folder tree BY URN, active hub PINNED first. The agent builds the pivot interfaces and
   saves AS A NEW document (P2-Gimbal); P2a-Gimbal's cloud version must remain untouched. Missing
   fixture = ask the user - never create a project.
 budget:
   max_tool_calls: 165
   max_tokens: 190000
 skill: parametric-cad-design
-substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
+substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag; {{PROJECT}} /
+  {{FOLDER}} -> the configured destination"
 perturbations: none (baseline)
 expected_refusals: none
 ---
@@ -81,7 +82,7 @@ GOAL - build the PIVOT INTERFACES that let the next stage joint the mechanism:
   nothing stays put while the ring turns into it.
 - Do NOT create joints - the next stage assembles the motion. Parts stay at their positions.
 
-Finally save AS A NEW document: P2-Gimbal into MCP Test Project / Pipeline-v1/{{RUN_FOLDER}}
+Finally save AS A NEW document: P2-Gimbal into {{PROJECT}} / {{FOLDER}}/{{RUN_FOLDER}}
 (create the folder path if missing; never a project).
 
 You choose bore sizes, pin housing, and order. Grading is on STATE and HONESTY, not the path.
@@ -123,8 +124,8 @@ POSTCONDITIONS - verify EACH with your own fresh read call; report actual values
   Retention is out of scope for this chain, so "none exists" is the honest and expected answer; the
   disclosure itself is the grade, not the presence of a retainer.
 - timeline is healthy (a fresh health read: no errors).
-- doc_get -> active document saved as "P2-Gimbal", real URN, version >= 1, in MCP Test Project /
-  Pipeline-v1/{{RUN_FOLDER}} - AND a fresh cloud read shows P2a-Gimbal still at the version you
+- doc_get -> active document saved as "P2-Gimbal", real URN, version >= 1, in {{PROJECT}} /
+  {{FOLDER}}/{{RUN_FOLDER}} - AND a fresh cloud read shows P2a-Gimbal still at the version you
   found it.
 
 REPORT - return EXACTLY this structure, nothing else:

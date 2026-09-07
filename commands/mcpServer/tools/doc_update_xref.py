@@ -61,6 +61,15 @@ def _derive_refs(doc):
     return out
 
 
+_REFRESHED_NOTE = ("References refreshed to their latest version. If a newly-added feature (e.g. a "
+                   "joint origin) was missing because the reference was stale, it is now available. "
+                   "Covers occurrence xrefs and derive links (see 'kind' on each row).")
+
+_NOTHING_TO_REFRESH_NOTE = ("Nothing to refresh - every reference already reads current. If the "
+                            "geometry still looks stale, that is the recompute, not the reference: "
+                            "design_recompute.")
+
+
 def _refresh_one(ref, label, only_out_of_date, use_setter=False):
     """Refresh ONE reference - an occurrence xref's DocumentReference or a DeriveFeature's, same
     shape - to its latest version: ('updated'|'skipped'|'error', record). use_setter picks HOW:
@@ -147,9 +156,7 @@ def handler(name: str = "", only_out_of_date: bool = True) -> dict:
         "updated": updated,
         "skipped": skipped,
         "total_references": len(xref_items) + len(derive_items),
-        "note": ("References refreshed to their latest version. If a newly-added feature (e.g. a "
-                "joint origin) was missing because the reference was stale, it is now available. "
-                "Covers occurrence xrefs and derive links (see 'kind' on each row)."),
+        "note": _NOTHING_TO_REFRESH_NOTE if not updated and skipped else _REFRESHED_NOTE,
     })
 
 

@@ -1,8 +1,10 @@
 """Unit tests for ``sys_capability_map`` - the LIVE family index (breadth map).
 
-No adsk.* (pure registry introspection). Patch get_tools to a known set of fake tools and assert: the
-grouping by name-prefix family, summary/entry_tool/tool_count per family, the registry-derived fallback
-for an UNMAPPED family, and that counts sum to the tool total (it's an index of the real registry).
+Patch get_tools to a known set of fake tools and assert: the grouping by name-prefix family,
+summary/entry_tool/tool_count per family, the registry-derived fallback for an UNMAPPED family, that
+counts sum to the tool total (it's an index of the real registry), and the capability rows the
+_CAPABILITIES registry derives. No adsk.* - the map points at the tool that reads a capability
+rather than probing one itself.
 """
 
 import json
@@ -60,6 +62,39 @@ class TestFamilyMap:
         _install(["cam_get"])
         out = _payload(cm.handler())
         assert "sys_find_tool" in out["note"]                      # breadth <-> depth cross-link
+
+
+class TestCapabilities:
+    # The block is DERIVED from _CAPABILITIES (capability name -> the tool whose read answers it),
+    # so swapping the registry swaps the published rows.
+
+    def test_one_row_per_capability_naming_the_tool_that_reads_it(self, monkeypatch):
+        monkeypatch.setattr(cm, "_CAPABILITIES", {"z_cap": "z_get", "a_cap": "a_get"})
+        _install(["sys_capability_map"])
+        out = _payload(cm.handler())
+        assert out["capabilities"]["names"] == {
+            "a_cap": {"read_with": "a_get"},
+            "z_cap": {"read_with": "z_get"},
+        }
+
+    def test_the_map_takes_no_verdict_of_its_own(self, monkeypatch):
+        # It touches no adsk.*, which is what keeps it answering while the main thread is parked -
+        # so a row carries the POINTER and never an entitlement the map would have had to probe.
+        monkeypatch.setattr(cm, "_CAPABILITIES", {"a_cap": "a_get"})
+        _install(["sys_capability_map"])
+        row = _payload(cm.handler())["capabilities"]["names"]["a_cap"]
+        assert set(row) == {"read_with"}
+        assert cm.item.run_on_main_thread is False
+
+    def test_the_note_is_the_pointer_and_claims_nothing_it_cannot_back(self):
+        # It names no key of the pointed-at tool's payload: nothing here fails when one of those
+        # is renamed, so the note would go stale silently.
+        _install(["sys_capability_map"])
+        note = _payload(cm.handler())["capabilities"]["note"]
+        assert "read_with names the tool" in note
+        assert "not taken here" in note
+        for key in ("machining_capabilities", "observed_generation", "entitled"):
+            assert key not in note
 
 
 class TestFamilyOf:

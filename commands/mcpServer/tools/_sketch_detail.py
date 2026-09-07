@@ -161,7 +161,9 @@ def sketch_world_frame(sketch, design, occurrence=None) -> dict:
 _unquote = unquote_text
 _font_read_back = font_read_back
 
-# Constraint class name -> friendly type + the attribute names that hold its referenced entities.
+# Constraint class -> the spelling sketch_constrain's 'constraint' input takes + the attributes
+# holding its referenced SKETCH entities. A surface-side attribute is a model face or construction
+# plane, outside this sketch's id space, so listing it would only add a '?'.
 _CONSTRAINT_REFS = {
     "PerpendicularConstraint": ("perpendicular", ("lineOne", "lineTwo")),
     "ParallelConstraint": ("parallel", ("lineOne", "lineTwo")),
@@ -172,13 +174,20 @@ _CONSTRAINT_REFS = {
     "SymmetryConstraint": ("symmetry", ("entityOne", "entityTwo", "symmetryLine")),
     "HorizontalConstraint": ("horizontal", ("line",)),
     "VerticalConstraint": ("vertical", ("line",)),
+    "HorizontalPointsConstraint": ("horizontal_points", ("pointOne", "pointTwo")),
+    "VerticalPointsConstraint": ("vertical_points", ("pointOne", "pointTwo")),
     "CoincidentConstraint": ("coincident", ("point", "entity")),
+    "CoincidentToSurfaceConstraint": ("coincident_to_surface", ("point",)),
+    "LineOnPlanarSurfaceConstraint": ("line_on_surface", ("line",)),
+    "LineParallelToPlanarSurfaceConstraint": ("line_parallel_to_surface", ("line",)),
+    "PerpendicularToSurfaceConstraint": ("perpendicular_to_surface", ("curve",)),
     "MidPointConstraint": ("midpoint", ("point", "midPointCurve")),
     "SmoothConstraint": ("smooth", ("curveOne", "curveTwo")),
-    "OffsetConstraint": ("offset", ()),
+    "OffsetConstraint": ("offset", ("parentCurves", "childCurves")),
     "PolygonConstraint": ("polygon", ("lines",)),          # 'lines' is a vector (many)
-    "CircularPatternConstraint": ("circular_pattern", ()),
-    "RectangularPatternConstraint": ("rectangular_pattern", ()),
+    "CircularPatternConstraint": ("circular_pattern", ("centerPoint", "entities")),
+    "RectangularPatternConstraint": ("rectangular_pattern",
+                                     ("entities", "directionOneEntity", "directionTwoEntity")),
 }
 
 
@@ -276,6 +285,17 @@ def _texts(sketch, f):
     return out
 
 
+# Control points ride INSIDE a row of the _XRAY_CAP-capped entity list, so a traced spline would
+# multiply the payload past that bound; control_point_count carries the true total whatever is cut.
+_CV_POINT_CAP = 64
+
+
+def _projected(curve) -> dict:
+    """{'reference': True} for a curve Fusion projected in from model geometry, else {} - MEASURED:
+    isReference reads True on a projected copy and False on a drawn one."""
+    return {"reference": True} if _common.read_flag(lambda: curve.isReference) else {}
+
+
 def _entities(sketch, f):
     """List every entity with id, type, isConstruction, and key geometry, in display units (f = cm ->
     display-unit factor)."""
@@ -288,7 +308,7 @@ def _entities(sketch, f):
         ln = lines.item(i)
         con = bool(safe(lambda ln=ln: ln.isConstruction, False))
         construction += 1 if con else 0
-        rec = {"id": f"line:{i}", "type": "line", "construction": con}
+        rec = {"id": f"line:{i}", "type": "line", "construction": con, **_projected(ln)}
         rec.update(_line_geo(ln, f))
         out.append(rec)
 
@@ -298,7 +318,7 @@ def _entities(sketch, f):
         con = bool(safe(lambda a=a: a.isConstruction, False))
         construction += 1 if con else 0
         c = safe(lambda: a.centerSketchPoint.geometry)
-        out.append({"id": f"arc:{i}", "type": "arc", "construction": con,
+        out.append({"id": f"arc:{i}", "type": "arc", "construction": con, **_projected(a),
         "center": _xy(c, f),
         "radius": _round(safe(lambda: a.radius), f)})
 
@@ -308,7 +328,7 @@ def _entities(sketch, f):
         con = bool(safe(lambda cc=cc: cc.isConstruction, False))
         construction += 1 if con else 0
         c = safe(lambda: cc.centerSketchPoint.geometry)
-        out.append({"id": f"circle:{i}", "type": "circle", "construction": con,
+        out.append({"id": f"circle:{i}", "type": "circle", "construction": con, **_projected(cc),
         "center": _xy(c, f),
         "radius": _round(safe(lambda: cc.radius), f)})
 
@@ -318,7 +338,7 @@ def _entities(sketch, f):
         con = bool(safe(lambda el=el: el.isConstruction, False))
         construction += 1 if con else 0
         c = safe(lambda: el.centerSketchPoint.geometry)
-        out.append({"id": f"ellipse:{i}", "type": "ellipse", "construction": con,
+        out.append({"id": f"ellipse:{i}", "type": "ellipse", "construction": con, **_projected(el),
         "center": _xy(c, f),
         "major_radius": _round(safe(lambda: el.majorAxisRadius), f),
         "minor_radius": _round(safe(lambda: el.minorAxisRadius), f)})
@@ -329,7 +349,7 @@ def _entities(sketch, f):
         con = bool(safe(lambda sp=sp: sp.isConstruction, False))
         construction += 1 if con else 0
         fit_pts = safe(lambda sp=sp: sp.fitPoints)
-        out.append({"id": f"spline:{i}", "type": "spline", "construction": con,
+        out.append({"id": f"spline:{i}", "type": "spline", "construction": con, **_projected(sp),
         "is_closed": safe(lambda sp=sp: bool(sp.isClosed)),
         "fit_point_count": safe(lambda fit_pts=fit_pts: fit_pts.count) if fit_pts is not None else None})
 
@@ -338,11 +358,23 @@ def _entities(sketch, f):
         cv = cv_splines.item(i)
         con = bool(safe(lambda cv=cv: cv.isConstruction, False))
         construction += 1 if con else 0
-        ctrl_pts = safe(lambda cv=cv: cv.controlPoints)
+        # MEASURED: controlPoints is a SketchPointVector - a plain SEQUENCE whose .count and
+        # .item(i) BOTH raise, so a collection-style read answers null on every spline. list() is
+        # the protocol it does carry, and its members are ordinary SketchPoints.
+        ctrl_pts = safe(lambda cv=cv: list(cv.controlPoints))
+        # MEASURED on an SVG-traced spline: controlPoints reads EMPTY and .degree RAISES "Spline
+        # has invalid intention degree". No spline is describable by zero control points, so an
+        # empty read publishes unknown rather than a 0 a caller would compare against.
+        described = bool(ctrl_pts)
         # SketchControlPointSpline has no isClosed (live-verified).
-        out.append({"id": f"cv_spline:{i}", "type": "cv_spline", "construction": con,
-        "degree": safe(lambda cv=cv: cv.degree),
-        "control_point_count": safe(lambda ctrl_pts=ctrl_pts: ctrl_pts.count) if ctrl_pts is not None else None})
+        rec = {"id": f"cv_spline:{i}", "type": "cv_spline", "construction": con, **_projected(cv),
+               "degree": safe(lambda cv=cv: cv.degree),
+               "control_point_count": len(ctrl_pts) if described else None,
+               "control_points": ([_xy(safe(lambda p=p: p.geometry), f)
+                                   for p in ctrl_pts[:_CV_POINT_CAP]] if described else None)}
+        if described and len(ctrl_pts) > _CV_POINT_CAP:
+            rec["control_points_truncated"] = True
+        out.append(rec)
 
     fixed_splines = safe(lambda: curves.sketchFixedSplines)
     for i in range(safe(lambda: fixed_splines.count, 0) if fixed_splines else 0):
@@ -350,7 +382,8 @@ def _entities(sketch, f):
         con = bool(safe(lambda fx=fx: fx.isConstruction, False))
         construction += 1 if con else 0
         # SketchFixedSpline exposes no isClosed/fitPoints/degree (live-verified).
-        out.append({"id": f"fixed_spline:{i}", "type": "fixed_spline", "construction": con})
+        out.append({"id": f"fixed_spline:{i}", "type": "fixed_spline", "construction": con,
+                    **_projected(fx)})
 
     pts = safe(lambda: sketch.sketchPoints)
     origin = safe(lambda: sketch.originPoint)
@@ -931,6 +964,11 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
                  "A 'text:<i>' entity carries the sketch text's string, height, font and sketch-space "
                  "bounding_box; that same id is what sketch_set_text(index=<i>) edits and "
                  "sketch_delete_entity(target='text:<i>') removes.")
+    if any(e.get("reference") for e in entities):
+        note += (" reference:true marks a curve PROJECTED in from model geometry, not drawn here.")
+    if any("?" in c.get("entities", []) for c in constraints):
+        note += (" A constraint entity of '?' has no id in this payload - nothing listed in "
+                 "'entities' matches it.")
     if truncated:
         note += (f" entities/constraints/dimensions each capped at {_XRAY_CAP}; counts above "
                  "(constraint_count/dimension_count/counts) are the full, uncapped totals.")

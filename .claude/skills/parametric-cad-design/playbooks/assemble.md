@@ -11,7 +11,7 @@
 **exercise-the-mechanism** - Drive it to home and a representative extreme; keep moving joints few, the rest rigid; link two joints with a motion link when one motion implies the other when the mechanism has a driven joint; not for a joint with no travel of interest. Prove: `joint_drive`: the value at each pose; `assembly_inspect_interference`: overlaps at each pose, intended fit or defect.
 Example: a nut overlapping a plain shaft is a thread modelled as a cylinder.
 
-**fasteners-mint-parameters** - Expect a set of adsk_ parameters per fastener and read only the authored set; name each fastener instance by its spec when library fasteners are inserted; not for a design with no library parts. Prove: `param_get`: the user parameters with include_model_parameters left false; the adsk_ names are the fasteners', the rest are yours.
+**fasteners-mint-parameters** - Expect a set of adsk_ parameters per fastener and read only the authored set; name each fastener instance by its spec when library fasteners are inserted; not for a design with no library parts. Prove: `param_get`: the authored user parameters are what comes back and generated_skipped counts the adsk_ ones the fasteners minted; include_generated=true lists those.
 
 ### Recipes
 

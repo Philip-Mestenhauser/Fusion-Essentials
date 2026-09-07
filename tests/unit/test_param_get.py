@@ -52,8 +52,106 @@ class TestGetHandler:
         ups = FakeUserParameters([_p("P%d" % i) for i in range(10)])
         monkeypatch.setattr(params._common, "design", lambda: _design(ups, []))
         out = _payload(params.handler())
-        assert out["user_parameter_count"] == 3
+        # the design's own total stays honest; 'returned' is what the walk actually read
+        assert out["user_parameter_count"] == 10 and out["returned"] == 3
         assert [p["name"] for p in out["user_parameters"]] == ["P0", "P1", "P2"]
+
+    def test_a_clamped_walk_says_the_counts_cover_only_what_it_reached(self, monkeypatch):
+        # 'matched' and 'generated_skipped' are computed over the WALK, not the table, so a design
+        # past the clamp reports tallies about a subset with nothing saying they are one.
+        monkeypatch.setattr(params, "_MAX_PARAMS", 3)
+        ups = FakeUserParameters([_p("P%d" % i) for i in range(10)])
+        monkeypatch.setattr(params._common, "design", lambda: _design(ups, []))
+        out = _payload(params.handler())
+        assert out["walk_truncated"] is True
+        assert "stopped at 3 of 10" in out["note"]
+
+    def test_a_walk_that_reached_every_row_claims_no_gap(self, monkeypatch):
+        monkeypatch.setattr(params, "_MAX_PARAMS", 3)
+        ups = FakeUserParameters([_p("P%d" % i) for i in range(3)])
+        monkeypatch.setattr(params._common, "design", lambda: _design(ups, []))
+        out = _payload(params.handler())
+        assert "walk_truncated" not in out and "note" not in out
+
+    def test_the_row_page_is_capped_and_the_note_names_the_narrowing(self, monkeypatch):
+        # MEASURED: 74 KB of parameter rows on one assembly. A capped page is only usable if the
+        # payload says how to ask for less rather than handing back a place to read the rest.
+        monkeypatch.setattr(params, "_ROWS_CAP", 2)
+        ups = FakeUserParameters([_p("P%d" % i) for i in range(5)])
+        monkeypatch.setattr(params._common, "design", lambda: _design(ups, []))
+        out = _payload(params.handler())
+        assert out["returned"] == 2 and out["matched"] == 5 and out["truncated"] is True
+        assert "favorites_only" in out["note"] and "name=" in out["note"]
+
+    def test_a_page_exactly_at_the_cap_is_not_flagged_truncated(self, monkeypatch):
+        # the boundary: cap-many matching rows is a COMPLETE answer, and flagging it sends the
+        # caller narrowing a list that was never cut.
+        monkeypatch.setattr(params, "_ROWS_CAP", 2)
+        ups = FakeUserParameters([_p("P0"), _p("P1")])
+        monkeypatch.setattr(params._common, "design", lambda: _design(ups, []))
+        out = _payload(params.handler())
+        assert out["returned"] == 2 and "truncated" not in out
+
+
+class TestGeneratedParameters:
+    """MEASURED on the Airport Seating assembly: 258 of 311 user parameters were adsk_* rows minted
+    by inserted standard screws. The authored set is what the modeller drives."""
+
+    def _design_with(self, monkeypatch, names, favorites=()):
+        ups = FakeUserParameters([FakeUserParameter(name=n, expression="1 mm", value=1.0,
+                                                    unit="mm", favorite=(n in favorites))
+                                  for n in names])
+        design = _design(ups, [])
+        monkeypatch.setattr(params._common, "design", lambda: design)
+        return design
+
+    def test_generated_rows_are_counted_not_listed(self, monkeypatch):
+        self._design_with(monkeypatch, ["PartLen", "adsk_M6x20_Length", "adsk_M6x20_Pitch"])
+        out = _payload(params.handler())
+        assert [p["name"] for p in out["user_parameters"]] == ["PartLen"]
+        assert out["generated_skipped"] == 2 and out["user_parameter_count"] == 3
+        assert "include_generated=true" in out["note"]
+
+    def test_include_generated_lists_them(self, monkeypatch):
+        self._design_with(monkeypatch, ["PartLen", "adsk_M6x20_Length"])
+        out = _payload(params.handler(include_generated=True))
+        assert {p["name"] for p in out["user_parameters"]} == {"PartLen", "adsk_M6x20_Length"}
+        assert "generated_skipped" not in out
+
+    def test_the_prefix_match_is_case_insensitive_and_anchored(self, monkeypatch):
+        # anchored, not contained: a parameter the modeller named 'my_adsk_ref' is authored, and
+        # dropping it would hide a knob nothing else lists.
+        self._design_with(monkeypatch, ["ADSK_Bolt_L", "my_adsk_ref"])
+        out = _payload(params.handler())
+        assert [p["name"] for p in out["user_parameters"]] == ["my_adsk_ref"]
+        assert out["generated_skipped"] == 1
+
+    def test_a_design_with_no_generated_rows_says_nothing_about_them(self, monkeypatch):
+        self._design_with(monkeypatch, ["PartLen"])
+        out = _payload(params.handler())
+        assert "generated_skipped" not in out and "note" not in out
+
+    def test_favorites_only_keeps_the_flagged_rows(self, monkeypatch):
+        self._design_with(monkeypatch, ["PartLen", "PartWid"], favorites=["PartLen"])
+        out = _payload(params.handler(favorites_only=True))
+        assert [p["name"] for p in out["user_parameters"]] == ["PartLen"]
+        assert out["matched"] == 1 and out["user_parameter_count"] == 2
+
+    def test_favorites_only_off_keeps_every_row(self, monkeypatch):
+        self._design_with(monkeypatch, ["PartLen", "PartWid"], favorites=["PartLen"])
+        out = _payload(params.handler())
+        assert len(out["user_parameters"]) == 2
+
+    def test_the_authored_read_is_a_fraction_of_the_whole_table(self, monkeypatch):
+        # MEASURED live on a scripted 311-parameter rig (53 authored, 258 adsk_*): 8.5 KB authored
+        # against 45.9 KB for every row, favorites_only 0.2 KB. The fake rig mirrors that offline.
+        import json
+        self._design_with(monkeypatch, [f"Part{i}" for i in range(53)]
+                          + [f"adsk_Screw{i}_Len" for i in range(258)])
+        size = lambda p: len(json.dumps(p, separators=(",", ":")))
+        authored = size(_payload(params.handler()))
+        whole = size(_payload(params.handler(include_generated=True)))
+        assert authored < 20_000 < whole
 
     def test_an_uncountable_collection_refuses_instead_of_reporting_zero(self, monkeypatch):
         # userParameters.count raising means the parameters could not be read AT ALL. Reporting

@@ -2,14 +2,15 @@
 id: S4_Details
 tier: pipeline
 fixture: P3-Gimbal (the S3 artifact - the jointed, motion-linked gyroscope at rest) OPENED as the
-  active document by the orchestrator from MCP Test Project / Pipeline-v1 BY URN, active hub
+  active document by the orchestrator from the configured project/folder BY URN, active hub
   PINNED first. The agent details the LIVING mechanism and saves AS A NEW document (P4-Gimbal);
   P3-Gimbal's cloud version must remain untouched. Missing fixture = ask - never create a project.
 budget:
   max_tool_calls: 110
   max_tokens: 150000
 skill: parametric-cad-design
-substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
+substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag; {{PROJECT}} /
+  {{FOLDER}} -> the configured destination"
 perturbations: none (baseline)
 expected_refusals: none
 ---
@@ -71,7 +72,7 @@ mm, or derive it from geometry you read (the subject's distance from the swing a
 size against the ring's swept extent) and state the arithmetic. A gap that is zero or negative
 means the swing reaches that subject - a FAIL.
 
-Finally save AS A NEW document: P4-Gimbal into MCP Test Project / Pipeline-v1/{{RUN_FOLDER}} (create the folder path if missing; never a project).
+Finally save AS A NEW document: P4-Gimbal into {{PROJECT}} / {{FOLDER}}/{{RUN_FOLDER}} (create the folder path if missing; never a project).
 
 POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH units.
 
@@ -93,8 +94,8 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
   stands in for it (the subject's distance from the swing axis and its own size vs the ring's swept
   extent). Zero or negative is a FAIL. The interference check grades none of these: it reports zero
   for material that never reaches a ring and for a hole, which removes material.
-- timeline healthy; doc_get -> saved as "P4-Gimbal", real URN, version >= 1, in MCP Test Project
-  / Pipeline-v1/{{RUN_FOLDER}} - AND P3-Gimbal still at the version you found it.
+- timeline healthy; doc_get -> saved as "P4-Gimbal", real URN, version >= 1, in {{PROJECT}}
+  / {{FOLDER}}/{{RUN_FOLDER}} - AND P3-Gimbal still at the version you found it.
 
 REPORT - return EXACTLY this structure, nothing else:
 

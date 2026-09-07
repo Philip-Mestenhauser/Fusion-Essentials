@@ -11,7 +11,7 @@ from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from . import _common
 from . import _inputs
-from ._common import error, ok, safe, timeline_health
+from ._common import error, ok, safe, short_ref, timeline_health
 
 _ACTIONS = ("roll", "suppress", "group", "ungroup", "delete_after_marker",
             "set_attribute", "delete_attribute")
@@ -22,7 +22,6 @@ _PREVIEW_MAX = 12                        # cap the discard preview; the count ca
 
 # This tool's own wire bound on the attribute strings it carries - not a platform limit.
 _ATTR_MAX_CHARS = 10000
-_CLIP = 60                               # how much of a value an error message quotes
 # Design.findAttributes reads a leading lowercase 're:' as a regular expression rather than a
 # literal name, so the check that refuses the prefix matches that exact lower-case spelling -
 # 'RE:shop' is an ordinary literal group name.
@@ -374,12 +373,6 @@ def _do_delete_after_marker(timeline, confirm):
                        "API cannot restore them."})
 
 
-def _clip(text):
-    """A value quoted in an error message, cut to _CLIP characters."""
-    s = "" if text is None else str(text)
-    return s if len(s) <= _CLIP else s[:_CLIP] + f"... ({len(s)} chars)"
-
-
 def _attr_names(group, name):
     """(group, name, error_text) - the attribute's group/name pair, stripped and bounded."""
     g, n = (group or "").strip(), (name or "").strip()
@@ -456,8 +449,8 @@ def _do_set_attribute(design, feature, group, name, value):
                      "was attached.")
     now = safe(lambda: back.value)
     if now != value:
-        return error(f"Attribute '{group}/{name}' on '{label}' reads '{_clip(now)}' after setting it "
-                     f"to '{_clip(value)}' - the value did not take.")
+        return error(f"Attribute '{group}/{name}' on '{label}' reads '{short_ref(now)}' after setting it "
+                     f"to '{short_ref(value)}' - the value did not take.")
     out = {"attribute_set": True, "feature": label, "attribute_group": group,
            "attribute_name": name, "value": now, "entity_type": type(entity).__name__,
            "note": ("The attribute is attached to the entity the timeline item wraps, not to the "
@@ -508,7 +501,7 @@ def _do_delete_attribute(design, feature, group, name):
                      f"'{group}/{name}' as absent is the attribute being gone.")
     if back is not None:
         return error(f"Deleting attribute '{group}/{name}' from '{label}' returned {bool(did)} but "
-                     f"itemByName still returns it (value '{_clip(safe(lambda: back.value))}') - it "
+                     f"itemByName still returns it (value '{short_ref(safe(lambda: back.value))}') - it "
                      "was not deleted.")
     out = {"attribute_deleted": True, "feature": label, "attribute_group": group,
            "attribute_name": name, "deleted_value": old,

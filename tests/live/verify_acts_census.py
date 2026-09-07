@@ -13,8 +13,9 @@ tests/generated/STRATEGY_COMPETENCE.md publishes beside the proven ones.
 from verify_acts_cam import (
     _all_cut, _launched_on, _offers, _op_deleted, _op_named, _reveal, _selected)
 from verify_acts_hub import (
-    HUB_COMP, HUB_MILL_SETUP, HUB_TURN_SETUP, _BALL_AT, _CHAMFER_AT, _FLAT6_AT, _FLAT_AT,
-    _GROOVE_AT, _HUB_X, _SLOT_AT, _THREAD_INSERT_AT, _TURN_AT)
+    HUB_COMP, HUB_MILL_SETUP, HUB_TURN_SETUP, _BALL_AT, _CHAMFER_AT, _CHAMFER_R, _FLAT6_AT,
+    _FLAT_AT, _FLANGE_R, _FLANGE_T, _GROOVE_AT, _HUB_X, _PART_END, _SLOT_AT, _setup_created,
+    _THREAD_INSERT_AT, _TURN_AT)
 from verify_core import (
     _RECALL, _ctx_get, _fg, _measured, _near, _num, _recall, _refused, _watch)
 
@@ -23,6 +24,10 @@ from verify_core import (
 # strategy takes no tool but a probe. Added in ONE call, before anything generates.
 _CENSUS_TOOLS = (("waterjet", None), ("thread mill", 6.0), ("probe", None))
 _WATERJET_AT, _THREAD_MILL_AT, _PROBE_AT = 0, 1, 2
+
+# The pocket-clearing beat's own setup and operation - see _CENSUS_POCKET for why it needs one.
+HUB_POCKET_SETUP = "PocketClearFirst"
+_POCKET_OP = "PocketClear"
 
 # THE GEOMETRY THE CENSUS AIMS AT, in the hub's own numbers. The flange rim carries a 1.5 mm round,
 # so the circle at the flange TOP is that fillet's upper tangent - r 38.5, not the flange's own 40.
@@ -35,6 +40,16 @@ _SHAFT_R, _SHAFT_MID_Z = 25.0, -32.5     # the shaft wall the turned thread runs
 # The flange's outer wall, which the swarf family cuts with the side of the cutter. Its centroid
 # sits at half its height: the wall runs from the rim round's lower tangent down to the underside.
 _WALL_R, _WALL_Z = 40.0, -10.75
+# THE INCLINED FLAT on the shaft's plain stretch, which three_plus_two tilts its axis onto. Its
+# centroid is where the 30 deg datum's own outward direction leaves the hub axis, MEASURED there;
+# the AREA is what says the query found the flat and not a wall beside it.
+_FLAT_AREA, _FLAT_TOL = 416.9, 1.0
+_FLAT_NEAR = [_HUB_X + 18.05, 10.42, -34.5]
+# The pair of rim circles morph is driven by - the flange's top tangent circle and its underside
+# rim, which bound the flange wall between them.
+_LOWER_RIM_Z = -_FLANGE_T
+# The chamfer at the part end, whose bounding circle the turning chamfer cycle is aimed at.
+_CHAMFER_EDGE_Z = -_PART_END
 
 # The whole-model 3D families: MEASURED, each generates a NON-EMPTY toolpath over the setup's own
 # model with no geometry selection at all, so one create is the whole beat. What decides membership
@@ -78,14 +93,33 @@ NUANCE = (
      ("doLeadIn", "nullPass")),
 )
 
+# The neighbour pairs measured BY HAND with cam_compare_operations on the CAM overview samples, as
+# (first, second, what separates them). No beat creates these operations, so the table publishes
+# them under the census's own word for a reading with no receipt row behind it - measured - and
+# 'd' in a value is the cutter diameter.
+MEASURED_NUANCE = (
+    ("2D contour", "the same contour with multiple passes",
+     "doRoughingPasses, and maximumRoughingSteps 1 -> 6"),
+    ("2D contour", "its Trimmed sibling", "useStockContours, and 15 steps"),
+    ("2D contour", "its Rest machining sibling",
+     "useRestMachining and restMaterialCutterDiameter"),
+    ("parallel", "steep areas", "machineSteepAreas alone"),
+    ("contour3d", "shallow areas", "machineShallowAreas alone"),
+    ("parallel", "scallop",
+     "31 differences: stepover 0.5d vs 0.1d, boundaryOverlap, collapseBisector"),
+    ("pocket", "adaptive",
+     "114 differences: optimalLoad 0.4d, stepdown 2.5d vs 0.1d, and no leads or compensation on "
+     "adaptive"),
+)
+
 _MILL_NAMES = ([n for _s, n, _i in _WHOLE_MODEL]
                + ["Slot", "Circular", "ThreadMill", "TraceRim", "ProjectRim", "Adaptive2D",
-                  "WaterjetProfile"])
+                  "WaterjetProfile", "ThreePlusTwo", "MorphPair"])
 # The Machining Extension's own families this milling setup can feed, each on the geometry kind it
 # was measured to take. The ROTARY families are not among them: they wrap a model about a rotary
 # axis, and the sibling that drives one builds a setup with a machine and a bound WCS to turn about.
 _EXT_NAMES = ["MxContour", "AdvSwarf", "ProbeGeom"]
-_TURN_NAMES = [n for _s, n, _i in _TURNED] + ["TurnThread", "TurnSingleGroove"]
+_TURN_NAMES = [n for _s, n, _i in _TURNED] + ["TurnThread", "TurnSingleGroove", "TurnChamfer"]
 
 
 def _pocket_floor(p):
@@ -134,6 +168,19 @@ def _flange_top(p):
                      len(ms) == 1 and m.get("kind") == "planar_face"
                      and _near(pos[2], 0.0, 0.1) and nrm[2] > 0.999
                      and _num(m.get("area")) and m["area"] > 0)
+
+
+def _wedge_flat(p):
+    """find_geometry: the inclined flat on the shaft, told by its AREA. Its plane is neither an
+    origin plane nor the shaft wall, so a query that landed on a neighbour reads a different
+    area here - which is the reading that says the tool axis is tilted onto the flat itself."""
+    ms = p.get("matches") or []
+    m = ms[0] if ms else {}
+    return _measured(f"one planar flat of {_FLAT_AREA} mm2 on the shaft",
+                     {"count": len(ms), "area": m.get("area"), "position": m.get("position"),
+                      "normal": m.get("normal")},
+                     len(ms) == 1 and m.get("kind") == "planar_face"
+                     and _near(m.get("area"), _FLAT_AREA, _FLAT_TOL))
 
 
 def _round_at(radius, z):
@@ -312,6 +359,36 @@ _CENSUS_MILL = [
     ("cam_select_geometry", {"operation": "WaterjetProfile", "selection": "silhouette",
                              "generate": False},
      lambda p: p["setup_models_selected"] is True, None),
+    # THE TILTED AXIS: the inclined flat on the shaft, whose own normal becomes the tool axis. The
+    # orientation kind lands the face on machiningDirections and engages toolAxisMode in one call.
+    ("find_geometry", {"target": HUB_COMP, "kind": "planar_face", "nearest_to": _FLAT_NEAR,
+                       "max_results": 1}, _wedge_flat, _fg("census_flat")),
+    ("cam_create_operation",
+     lambda c: {"setup": HUB_MILL_SETUP, "strategy": "three_plus_two", "name": "ThreePlusTwo",
+                "tool_scope": "document",
+                "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _FLAT_AT,
+                "generate": False},
+     _op_named(HUB_MILL_SETUP, "three_plus_two", "ThreePlusTwo"), None),
+    ("cam_select_geometry",
+     lambda c: {"operation": "ThreePlusTwo", "selection": "orientation",
+                "handles": [_ctx_get(c, "census_flat", "the shaft's inclined flat")],
+                "generate": False}, _selected(1), None),
+    # THE CURVE PAIR: morph is driven by TWO rim circles, one CurveSelection each. Measured, the
+    # same pair fed as ONE selection walks into a single path and reports 'No passes to link'.
+    ("find_geometry", {"target": HUB_COMP, "kind": "circular_edge", "radius": _FLANGE_R,
+                       "nearest_to": [_HUB_X, 0, _LOWER_RIM_Z], "max_results": 1},
+     _round_at(_FLANGE_R, _LOWER_RIM_Z), _fg("census_lower_rim")),
+    ("cam_create_operation",
+     lambda c: {"setup": HUB_MILL_SETUP, "strategy": "morph", "name": "MorphPair",
+                "tool_scope": "document",
+                "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _BALL_AT,
+                "generate": False},
+     _op_named(HUB_MILL_SETUP, "morph", "MorphPair"), None),
+    ("cam_select_geometry",
+     lambda c: {"operation": "MorphPair", "selection": "chain",
+                "handles": [_ctx_get(c, "census_rim", "the flange-top circle"),
+                            _ctx_get(c, "census_lower_rim", "the flange's underside rim")],
+                "generate": False}, _selected(2), None),
     # THE MANUAL NC PASS. This beat proves the CREATE and nothing more: measured, a generated manual
     # operation's time row answers "3 : Machining time could not be calculated." and it never
     # appears in empty_toolpaths, so neither oracle this act uses can judge it. It is taken back out
@@ -370,6 +447,39 @@ _CENSUS_LONG_READ = [
 ] + _reveal(_LONG_NAMES) + [
     ("cam_get", {"include": ["time"], "setup": HUB_MILL_SETUP},
      _all_cut(HUB_MILL_SETUP, len(_LONG_NAMES), names=_LONG_NAMES), None),
+]
+
+
+# ACT 10c8d: POCKET CLEARING, in a SETUP OF ITS OWN so that it runs FIRST. The family rest-machines
+# from the operations before it, so behind the census setup's sixteen whole-model families the same
+# operation generates EMPTY; a setup no other operation has cleared is what gives it a toolpath.
+_CENSUS_POCKET = [
+    _watch(HUB_COMP + ":1"),
+    ("cam_create_setup", {"name": HUB_POCKET_SETUP, "operation_type": "milling",
+                          "models": [HUB_COMP + ":1"]},
+     _setup_created(HUB_POCKET_SETUP, "milling"), None),
+    ("cam_create_operation",
+     lambda c: {"setup": HUB_POCKET_SETUP, "strategy": "pocket_clearing", "name": _POCKET_OP,
+                "tool_scope": "document",
+                "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _FLAT6_AT,
+                "generate": False},
+     _op_named(HUB_POCKET_SETUP, "pocket_clearing", _POCKET_OP), None),
+    ("cam_select_geometry",
+     lambda c: {"operation": _POCKET_OP, "selection": "pocket",
+                "handles": [_ctx_get(c, "census_pocket", "the arc-slot pocket floor")],
+                "generate": False}, _selected(1), None),
+    ("cam_generate", {"target": HUB_POCKET_SETUP, "skip_valid": False},
+     _launched_on(HUB_POCKET_SETUP), None),
+]
+
+
+# ACT 10c8e: its read, behind the act boundary's poll - machining time above zero is the oracle,
+# since hasToolpath reads true on an empty one.
+_CENSUS_POCKET_READ = [
+    _watch(HUB_COMP + ":1"),
+] + _reveal([_POCKET_OP]) + [
+    ("cam_get", {"include": ["time"], "setup": HUB_POCKET_SETUP},
+     _all_cut(HUB_POCKET_SETUP, 1, names=[_POCKET_OP]), None),
 ]
 
 
@@ -485,9 +595,9 @@ _CENSUS_TURN = _creates(HUB_TURN_SETUP, _TURNED, "hub_tool_base") + [
      lambda c: {"operation": "TurnSingleGroove", "selection": "groove",
                 "handles": [_ctx_get(c, "census_groove", "the shaft groove")],
                 "generate": False}, _selected(1), None),
-    # THE TURNING CHAMFER, created and taken straight back out: its chamfer-position input has no
-    # route through this selection surface - the refusal lists every curve parameter the call looks
-    # for - so it would generate EMPTY and the act boundary's poll would fail on it.
+    # THE TURNING CHAMFER, aimed at the chamfer that breaks the part end. Its positions are a DIRECT
+    # object set, not a curve one, so the chain kind is refused first - naming what the call looked
+    # for - and the 'chamfer' kind then lands the chamfer's own bounding circle on 'chamfers'.
     ("cam_create_operation",
      lambda c: {"setup": HUB_TURN_SETUP, "strategy": "turning_chamfer", "name": "TurnChamfer",
                 "tool_scope": "document",
@@ -497,8 +607,14 @@ _CENSUS_TURN = _creates(HUB_TURN_SETUP, _TURNED, "hub_tool_base") + [
     ("cam_select_geometry",
      lambda c: {"operation": "TurnChamfer", "selection": "chain",
                 "handles": [_ctx_get(c, "census_groove", "the shaft groove")]},
-     _refused("has no curve-selection parameter"), None),
-    ("cam_delete", {"entity": "TurnChamfer"}, _op_deleted("TurnChamfer"), None),
+     _refused("has no curve-selection parameter", "'chamfers' (selection='chamfer')"), None),
+    ("find_geometry", {"target": HUB_COMP, "kind": "circular_edge", "radius": _CHAMFER_R,
+                       "nearest_to": [_HUB_X, 0, _CHAMFER_EDGE_Z], "max_results": 1},
+     _round_at(_CHAMFER_R, _CHAMFER_EDGE_Z), _fg("census_chamfer")),
+    ("cam_select_geometry",
+     lambda c: {"operation": "TurnChamfer", "selection": "chamfer",
+                "handles": [_ctx_get(c, "census_chamfer", "the part-end chamfer's circle")],
+                "generate": False}, _selected(1), None),
     ("cam_generate", {"target": HUB_TURN_SETUP, "skip_valid": False},
      _launched_on(HUB_TURN_SETUP), None),
 ]
@@ -610,17 +726,23 @@ CENSUS = _LONG + (
     ("folder", REFUSED, "-", "-",
      "operations.add answered with a name and the setup's operation count did not move; "
      "refused live by ACT 10c7"),
-    ("turning_chamfer", REFUSED, "chamfer positions - no route", "turning general insert",
-     "the operation carries no curve-selection parameter this call routes, and it generates empty "
-     "with 'Chamfers: Invalid chamfer positions selection.'; refused live by ACT 10c9"),
-    ("pocket_clearing", MEASURED, "none - the setup's model", "flat end mill",
-     "created and generated on the hub's milling setup with the 10 mm flat mill and read EMPTY - "
-     "cam_get's time slice returned no figure for it while its sibling in the same act cut; which "
-     "cutter or model it does clear is unmeasured, so it carries no beat"),
+    ("turning_chamfer", PROVEN, "chamfer -> chamfers (an edge)", "turning general insert",
+     "ACT 10c9 TurnChamfer on the circle bounding the hub's part-end chamfer, machining time read "
+     "in ACT 10c10; its positions are a DIRECT object set, so the chain kind is refused naming "
+     "'chamfers', and that chamfer's own cone FACE raises '2 : InternalValidationError : "
+     "status.isOk()' where the bounding EDGE lands"),
+    ("pocket_clearing", PROVEN, "pocket", "flat end mill that fits the pocket",
+     "ACT 10c8d PocketClear on the hub's flange arc slot with the 6 mm mill, machining time read "
+     "in ACT 10c8e; it cut 140.5 s. It needs a SETUP OF ITS OWN because it rest-machines from the "
+     "operations before it: behind the census act's sixteen whole-model families the same "
+     "operation reads EMPTY whether it is created before or after Adaptive2D (measured both ways, "
+     "while Adaptive2D on that same slot cuts 27.6 s either way), and the flange's 8 mm round "
+     "pocket answers 'too small to be reached with given ramping constraints' for that cutter"),
     # --- skipped, each on the message the platform answered with --------------------------------
-    ("three_plus_two", SKIPPED, "orientation -> machiningDirections", "flat end mill",
-     "one inclined face on the hub generated EMPTY: 'Toolpath is empty. Try checking the rest "
-     "machining, collision avoidance, or machining boundaries and height settings.'"),
+    ("three_plus_two", PROVEN, "orientation -> machiningDirections", "flat end mill",
+     "ACT 10c7 ThreePlusTwo on the inclined flat cut into the shaft's plain stretch, machining "
+     "time read in ACT 10c8; the flat's own normal becomes the tool axis, and the selection "
+     "engages toolAxisMode in the same call"),
     ("blend", SKIPPED, "two or more drive curves - no route", "ball end mill",
      "'Drive Curves: Incorrect number of drive curves. Select two or more drive curves.' - and the "
      "chain kind lands on this operation's machining BOUNDARY instead"),
@@ -630,9 +752,10 @@ CENSUS = _LONG + (
      "'Base: No base surface was selected / Feature: No feature was selected' - an additive family"),
     ("inspect_surface", SKIPPED, "inspectSurfacePositions - no route", "probe",
      "no API write lands a point on the surface (ledger INSPECT-1)"),
-    ("morph", SKIPPED, "chain -> curves", "ball end mill",
-     "generated EMPTY on one rim chain with 'No passes to link' (ledger MORPH-1); whether a curve "
-     "PAIR feeds it is unmeasured"),
+    ("morph", PROVEN, "chain -> curves (a curve PAIR)", "ball end mill",
+     "ACT 10c7 MorphPair across the flange's two rim circles, machining time read in ACT 10c8; it "
+     "wants a PAIR, one CurveSelection each - both circles fed to a single selection walk into one "
+     "path and the operation reports 'No passes to link'"),
     ("turning_trace", SKIPPED, "chain -> modelContour", "turning general insert",
      "its drive input reads a CadContours2dParameterValue - the curve family - so a chain applies "
      "to it (1 path, 4 segments on a measured box) and clears 'Model Contour: No model contour "

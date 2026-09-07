@@ -13,13 +13,26 @@ from . import _common
 from ._param_common import _param_summary
 
 _MAX_PARAMS = 2000
+_ROWS_CAP = 300              # rows emitted per read, either list
+
+# The naming library parts use for their own parameters. The filter below is a NAME test and nothing
+# more, so a parameter the modeller happened to name adsk_something is skipped by it too.
+_GENERATED_PREFIX = "adsk_"
 
 _OWNER_NOTE = ("Model parameter rows carry their maker: 'owner' (its name), 'owner_type', "
                "'owner_sketch' when the owner lives in a sketch, and 'role' - the slot the "
                "parameter fills on that owner. A key that did not read is absent from the row.")
 
+_NARROW_NOTE = "Narrow with name='<one parameter>' or favorites_only=true."
 
-def handler(name: str = "", include_model_parameters: bool = False) -> dict:
+
+def _is_generated(nm):
+    """True when the parameter's name starts with the library prefix, case-insensitively."""
+    return isinstance(nm, str) and nm.lower().startswith(_GENERATED_PREFIX)
+
+
+def handler(name: str = "", include_model_parameters: bool = False,
+            include_generated: bool = False, favorites_only: bool = False) -> dict:
     """See TOOL_DESCRIPTION."""
     design = _common.design()
     if not design:
@@ -46,46 +59,81 @@ def handler(name: str = "", include_model_parameters: bool = False) -> dict:
             return error(f"Parameter not found: '{name}'.")
         return ok({"parameter": _param_summary(target)})
 
-    # Collection.
-    user_params = []
+    # Collection. The AUTHORED set by default: rows whose name starts with the library prefix are
+    # counted rather than listed.
+    user_params, kept, generated = [], 0, 0
     try:
         ups = design.userParameters
-        cap = min(ups.count, _MAX_PARAMS)   # an uncountable collection is a refusal, not an empty read
-        for p in islice(_common.iter_collection(ups), cap):
-            user_params.append(_param_summary(p))
+        total = ups.count       # an uncountable collection is a refusal, not an empty read
+        walked = min(total, _MAX_PARAMS)
+        for p in islice(_common.iter_collection(ups), walked):
+            nm = safe(lambda p=p: p.name)
+            if not include_generated and _is_generated(nm):
+                generated += 1
+                continue
+            if favorites_only and _common.read_flag(lambda p=p: p.isFavorite) is not True:
+                continue
+            kept += 1
+            if len(user_params) < _ROWS_CAP:
+                user_params.append(_param_summary(p))
     except Exception as e:
         return error(f"Could not read user parameters: {e}")
 
-    payload = {"user_parameter_count": len(user_params), "user_parameters": user_params}
+    payload = {"user_parameter_count": total, "matched": kept, "returned": len(user_params),
+               "user_parameters": user_params}
+    notes = []
+    if walked < total:
+        # The counts below cover the rows the walk reached, not the whole table.
+        payload["walk_truncated"] = True
+        notes.append(f"The walk stopped at {walked} of {total} user parameters, so 'matched' and "
+                     "'generated_skipped' count only those.")
+    if generated:
+        payload["generated_skipped"] = generated
+        notes.append(f"{generated} of {walked} user parameters were skipped: their names start "
+                     f"{_GENERATED_PREFIX} (the naming library parts use). include_generated=true "
+                     "lists them.")
+    if kept > len(user_params):
+        payload["truncated"] = True
+        notes.append(f"Listed {len(user_params)} of {kept} matching rows. " + _NARROW_NOTE)
 
     if include_model_parameters:
-        model_params = []
+        model_params, model_kept = [], 0
         seen = {p["name"] for p in user_params}
         try:
             for p in design.allParameters:
-                if len(model_params) >= _MAX_PARAMS:
+                if model_kept >= _MAX_PARAMS:
                     break
                 nm = safe(lambda: p.name)
                 if nm and nm in seen:
                     continue  # already listed as a user parameter
-                model_params.append(_param_summary(p))
+                model_kept += 1
+                if len(model_params) < _ROWS_CAP:
+                    model_params.append(_param_summary(p))
         except Exception:
             pass
-        payload["model_parameter_count"] = len(model_params)
+        payload["model_parameter_count"] = model_kept
         payload["model_parameters"] = model_params
+        if model_kept > len(model_params):
+            payload["model_parameters_truncated"] = True
+            notes.append(f"Listed {len(model_params)} of {model_kept} model parameters. "
+                         + _NARROW_NOTE)
         # Advertised only when a row actually carries owner keys - a note describing keys that are
         # not there would send a caller looking for them.
         if any("owner_type" in row for row in model_params):
-            payload["note"] = _OWNER_NOTE
+            notes.append(_OWNER_NOTE)
 
+    if notes:
+        payload["note"] = " ".join(notes)
     return ok(payload)
 
 
 TOOL_DESCRIPTION = (
 "Read the active design's parameters - name, expression, value, unit, comment. 'value' is in the "
 "parameter's own 'unit'; 'value_units' names it and 'value_internal' is the raw cm/radians figure. "
-"User parameters by default; include_model_parameters=true adds feature/model ones, or 'name' "
-"fetches a single parameter. Change one with param_set."
+"The AUTHORED user parameters by default (ones named adsk_* are counted in generated_skipped, not "
+"listed); include_model_parameters=true adds feature/model ones, or 'name' fetches a single "
+"parameter. Lists are capped - 'truncated' means the note names the narrowing. Change one with "
+"param_set."
 )
 
 tool = (
@@ -94,6 +142,11 @@ tool = (
             "description": "Optional single parameter name to fetch."})
     .add_input_property("include_model_parameters", {"type": "boolean",
             "description": "Include feature/model parameters (default false)."})
+    .add_input_property("include_generated", {"type": "boolean",
+            "description": f"List the {_GENERATED_PREFIX}*-named parameters too (default false - "
+                           "they are counted in generated_skipped)."})
+    .add_input_property("favorites_only", {"type": "boolean",
+            "description": "Only parameters whose 'favorite' flag reads true (default false)."})
     .strict_schema()
 )
 

@@ -1027,10 +1027,10 @@ tool = (
                     "name": {"type": "string"},
                     "spindle_speed": {"type": ["number", "string"]},
                     "feed": {"type": ["number", "string"]}}}}}},
-            "description": "Tools to add. Each: {from_type:'drill'} clones a sample, {library_url,index} copies one."})
+            "description": "Tools to add. Each: {from_type:'drill'} clones a sample, {library_url,index} copies one. Its presets[] read spindle_speed/feed as 'preset' below does."})
     .add_input_property("remove_indices", {"type": "array", "items": {"type": "integer"},
             "description": "Tool indices to remove."})
-    .add_input_property("tool", {"type": "integer", "description": "Tool index (edit / presets / where_used / parameters)."})
+    .add_input_property("tool", {"type": "integer", "description": "Tool index (edit / add_preset / remove_preset / where_used / parameters)."})
     .add_input_property("parameters", {"type": "object",
             "description": "Tool parameters to set (edit): {name: expression}."})
     .add_input_property("tool_type", {"type": "string",

@@ -726,6 +726,8 @@ class TestReadMachines:
         _install_machine_lib(monkeypatch, [_machine("Haas", "VF-%d" % i) for i in range(3)])
         out = _payload(ces.read_machines(max_results=2))
         assert out["count"] == 2 and out["truncated"] is True
+        # the collision flag is read over the LISTED rows, so a capped listing says so
+        assert "a copy past the cap is not marked" in out["note"]
 
     def test_machine_type_filters_by_capability_and_rows_carry_kind(self, monkeypatch):
         # The bundled library is mostly additive printers; machine_type='milling' must keep only
@@ -764,6 +766,25 @@ class TestReadMachines:
         assert "read back unchanged through Setup.machine" in note
         assert "refuses assigning any" not in note
         assert "posting/kinematics" not in note
+        assert "name_in_both_locations" not in note      # no listed name is shared here
+
+    def test_a_name_both_libraries_hold_earns_the_collision_sentence(self, monkeypatch):
+        # The catalog marks the pair; this read is what tells the caller the name addresses two
+        # machines and which copy an assignment by it reaches.
+        _install_machine_lib(monkeypatch, [_machine("Haas", "VF-2", "Haas VF-2")],
+                             [_machine("Haas", "VF-2", "Haas VF-2")])
+        out = _payload(ces.read_machines())
+        assert [r.get("name_in_both_locations") for r in out["machines"]] == [True, True]
+        assert "name_in_both_locations" in out["note"]
+        assert "reaches the local one" in out["note"]
+
+    def test_two_local_machines_sharing_a_name_earn_no_collision_sentence(self, monkeypatch):
+        # A duplicate INSIDE one library is not the two-library collision the sentence describes.
+        _install_machine_lib(monkeypatch, [_machine("Haas", "VF-2", "Haas VF-2"),
+                                           _machine("Haas", "VF-2b", "Haas VF-2")], [])
+        out = _payload(ces.read_machines())
+        assert not any(r.get("name_in_both_locations") for r in out["machines"])
+        assert "name_in_both_locations" not in out["note"]
 
 
 # ── machine_strip_simulation: the ONE assignment path for simulation-ready machines ─────────────────

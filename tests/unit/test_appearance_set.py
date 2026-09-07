@@ -445,9 +445,13 @@ class TestReuseExistingAppearance:
         assert raced.appearanceProperties.item(0).value == ("color", 30, 142, 62, 255)
 
     def test_a_colour_copy_that_returns_nothing_is_an_honest_failure(self):
+        # MEASURED: addByCopy RAISES on a name already taken, so the refusal states the read it
+        # took (the name is not in the document) instead of a cause nothing observed.
         _install(_root(bodies=[FakeBody("B1")]))[1].addByCopy = lambda base, name: None
         res = ap.handler(target="B1", color="#1E8E3E")
         assert res["isError"] is True and "addByCopy" in res["message"]
+        assert "AgentColor_1E8E3E" in res["message"]
+        assert "already exists in document" in res["message"]
 
     def test_different_color_still_creates_its_own_appearance(self):
         b1, b2 = FakeBody("B1"), FakeBody("B2")
@@ -876,6 +880,7 @@ class TestTheColorBase:
         res = ap.handler(target="Body1", color="#1E8E3E")
         assert res["isError"] is True
         assert ap._BASE_NAME in res["message"] and "addByCopy" in res["message"]
+        assert "already exists in document" in res["message"]   # the measured raise, not a guess
 
     def test_a_base_that_lands_between_the_lookup_and_the_copy_is_reused(self, monkeypatch):
         # a parallel call can create the base name in the gap: addByCopy refuses the duplicate, and
@@ -1098,6 +1103,9 @@ class TestOpacityOverride:
         assert out["opacity"] == 40
         assert out["opacity_rendered"] is None
         assert "UNCONFIRMED" in out["note"]
+        # ...and the note names the ONE read that answers: the body's occurrence proxy. Without it
+        # "unconfirmed" leaves the caller no route to the rendered value.
+        assert "occurrence PROXY" in out["note"] and "target the occurrence" in out["note"]
 
     def test_a_component_opacity_is_read_back_off_a_body_not_off_the_component(self, monkeypatch):
         # A Component renders nothing itself, so its own opacity would read back the number just

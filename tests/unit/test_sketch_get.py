@@ -42,7 +42,7 @@ class TestSketchGetRouting:
     def test_no_name_lists_summary(self, monkeypatch):
         called = {}
 
-        def fake_summary(component=""):
+        def fake_summary(component="", max_results=0):
             called["summary"] = True
             return {"isError": False}
         monkeypatch.setattr(sketches, "_list_sketches", fake_summary)
@@ -56,13 +56,15 @@ class TestSketchGetRouting:
         # the WHOLE design when one component was asked for.
         seen = {}
 
-        def fake_summary(component=""):
-            seen["component"] = component
+        def fake_summary(component="", max_results=0):
+            seen["component"], seen["max_results"] = component, max_results
             return {"isError": False}
         monkeypatch.setattr(sketches, "_list_sketches", fake_summary)
         _no_detail_engine(monkeypatch)
-        sketches.handler(sketch_name="", component="Frame")
-        assert seen.get("component") == "Frame"
+        sketches.handler(sketch_name="", component="Frame", max_results=60)
+        # the page size rides with the scope: dropped here, the note's remedy would name a knob the
+        # router never passed on, and the withheld rows would stay unreachable.
+        assert seen.get("component") == "Frame" and seen.get("max_results") == 60
 
     def test_name_delegates_to_detail_engine(self, monkeypatch):
         seen = {}
@@ -96,7 +98,7 @@ class TestSketchGetRouting:
     def test_whitespace_name_treated_as_no_name(self, monkeypatch):
         called = {}
 
-        def fake_summary(component=""):
+        def fake_summary(component="", max_results=0):
             called["summary"] = True
             return {"isError": False}
         monkeypatch.setattr(sketches, "_list_sketches", fake_summary)
@@ -179,6 +181,51 @@ class TestSketchSummaryWalk:
         payload = json.loads(sketches._list_sketches("")["content"][0]["text"])
         assert payload["sketch_count"] == 2
         assert all("component_paths" not in r for r in payload["sketches"])
+        assert "note" not in payload
+
+    def _dense(self, monkeypatch, held, scope="", max_results=0):
+        """One component holding `held` sketches beside a component holding one - the shape a
+        sketch-dense document has (245 sketches on one measured part, 71 KB of list)."""
+        big = self._comp("Bench", [f"Sketch{i}" for i in range(held)])
+        small = self._comp("Plate", ["PlateSketch"])
+        root = self._comp("Root")
+        d = make_design(comp=root, all_components=[root, big, small])
+        monkeypatch.setattr(sketches._common, "design", lambda: d)
+        res = sketches._list_sketches(scope, max_results)
+        return json.loads(res["content"][0]["text"])
+
+    def test_a_dense_component_is_paged_and_the_true_count_still_published(self, monkeypatch):
+        cap = sketches._LIST_PER_COMPONENT_CAP
+        payload = self._dense(monkeypatch, held=cap + 40)
+        # The rows are cut; the COUNTS are not - a caller reading sketch_count off a paged list
+        # would otherwise be told the document holds only what fitted.
+        assert payload["sketch_count"] == cap + 41 and payload["returned"] == cap + 1
+        assert payload["truncated"] is True
+        assert payload["components_truncated"] == [
+            {"component": "Bench", "sketch_count": cap + 40, "listed": cap}]
+        # the page is PER COMPONENT, so the small component is listed whole rather than crowded out
+        assert [r["name"] for r in payload["sketches"] if r["component"] == "Plate"] == [
+            "PlateSketch"]
+        assert "max_results" in payload["note"]
+
+    def test_max_results_is_what_reaches_the_withheld_rows(self, monkeypatch):
+        # The remedy has to actually REACH row 26 of a 65-sketch component. Scoping does not: the
+        # page applies per component whether or not a scope named one, so component='Bench' hands
+        # back the same first page. Raising the page size is the read that gets the rest.
+        cap = sketches._LIST_PER_COMPONENT_CAP
+        scoped = self._dense(monkeypatch, held=cap + 40, scope="Bench")
+        assert len(scoped["sketches"]) == cap and scoped["truncated"] is True
+        whole = self._dense(monkeypatch, held=cap + 40, scope="Bench", max_results=cap + 40)
+        assert [r["name"] for r in whole["sketches"]] == [f"Sketch{i}" for i in range(cap + 40)]
+        assert "truncated" not in whole and "note" not in whole
+
+    def test_a_component_holding_exactly_the_page_is_not_truncated(self, monkeypatch):
+        # The exact boundary: at the page size nothing was withheld, so no truncation is claimed
+        # and no note sends the caller after rows that are all already here.
+        cap = sketches._LIST_PER_COMPONENT_CAP
+        payload = self._dense(monkeypatch, held=cap)
+        assert payload["sketch_count"] == cap + 1 and len(payload["sketches"]) == cap + 1
+        assert "truncated" not in payload and "components_truncated" not in payload
         assert "note" not in payload
 
     # ONE token for two distinct components - measured on a host holding two inserted references.

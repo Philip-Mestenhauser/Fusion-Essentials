@@ -1015,9 +1015,9 @@ def machine_library():
 
 
 def machine_location(lib, machine):
-    """Which library location holds `machine`: 'local', 'fusion360', or 'local or fusion360' when
-    the Local query itself failed and the two cannot be told apart. ONE FILTERED Local query -
-    query_machines searches Local first, so a Local hit carrying this machine's id means Local."""
+    """'local' when a Local (vendor, model) query answers this machine's id, 'fusion360' by
+    elimination, and 'local or fusion360' when that query RAISED. Machine.id is the description, so
+    either copy of a shared name reads 'local' - the copy an assignment by that name reaches."""
     vendor, model = (safe(lambda: machine.vendor) or ""), (safe(lambda: machine.model) or "")
     fid = safe(lambda: machine.id)
     try:
@@ -1293,7 +1293,19 @@ def machine_catalog(vendor: str = "", machine_type: str = "", max_results: int =
         return False                  # every location is listed, so the walk never stops early
 
     _walk_machine_locations(lib, vendor, "", visit)
+    _mark_shared_names(rows)
     return rows, total[0] > len(rows), None
+
+
+def _mark_shared_names(rows):
+    """Flag every listed row whose NAME another location also lists: that name addresses two
+    machines, and nothing in a row tells the copies apart. Read over the LISTED rows only."""
+    seen = {}
+    for r in rows:
+        seen.setdefault((r["name"] or "").lower(), set()).add(r["location"])
+    for r in rows:
+        if len(seen[(r["name"] or "").lower()]) > 1:
+            r["name_in_both_locations"] = True   # absent = this name is listed in one location
 
 
 # WALL-CLOCK budget for the by-description walk, which enumerates both locations UNFILTERED. It is

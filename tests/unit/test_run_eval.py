@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import time
+import types
 
 import pytest
 
@@ -67,7 +68,7 @@ class TestRunTag:
 
 class TestPromptAssembly:
     _SCENARIO = ("---\nid: X\n---\n\n## AGENT PROMPT (verbatim)\n\n```\n"
-                 "Save into Pipeline-v1/{{RUN_FOLDER}}\n```\n\n## Grader notes\n\nnever sent\n")
+                 "Save into Stage-v1/{{RUN_FOLDER}}\n```\n\n## Grader notes\n\nnever sent\n")
 
     _SKILL = "---\nname: p\ndescription: >-\n  when to reach for it\n---\n\n# Practice\n\nGround one part.\n"
 
@@ -82,7 +83,7 @@ class TestPromptAssembly:
         path.write_text(self._SCENARIO, encoding="utf-8")
         prompt, skill = run_eval.extract_prompt(str(path), "Eval-20260201-204000-S")
         assert skill is None
-        assert prompt == ("Save into Pipeline-v1/Eval-20260201-204000-S\n\n"
+        assert prompt == ("Save into Stage-v1/Eval-20260201-204000-S\n\n"
                           + run_eval.CONNECTION_LOST)
 
     def test_a_declared_skill_is_appended_after_the_task_block(self, tmp_path, monkeypatch):
@@ -92,7 +93,7 @@ class TestPromptAssembly:
         prompt, skill = run_eval.extract_prompt(str(path), "Eval-20260201-204000-S")
         assert skill == "p"
         # the task stays FIRST, the practice sits between it and the connection rule
-        assert prompt.startswith("Save into Pipeline-v1/Eval-20260201-204000-S\n\n")
+        assert prompt.startswith("Save into Stage-v1/Eval-20260201-204000-S\n\n")
         assert prompt.index("# Practice") > prompt.index("Save into")
         assert prompt.index("# Practice") < prompt.index(run_eval.CONNECTION_LOST)
         assert "Ground one part." in prompt
@@ -296,7 +297,7 @@ class TestMainStopsOnAStall:
         scenario = self._scenario(tmp_path)
         monkeypatch.setattr(run_eval, "_RESULTS", str(tmp_path / "results"))
         monkeypatch.setattr(run_eval, "preflight_server", lambda: None)
-        monkeypatch.setattr(sys, "argv", ["run_eval.py", scenario])
+        monkeypatch.setattr(sys, "argv", ["run_eval.py", scenario, "--executor", "cli"])
         monkeypatch.setattr(time, "sleep", lambda _s: None)
         launches = []
 
@@ -318,7 +319,7 @@ class TestMainStopsOnAStall:
         scenario = self._scenario(tmp_path)
         monkeypatch.setattr(run_eval, "_RESULTS", str(tmp_path / "results"))
         monkeypatch.setattr(run_eval, "preflight_server", lambda: None)
-        monkeypatch.setattr(sys, "argv", ["run_eval.py", scenario])
+        monkeypatch.setattr(sys, "argv", ["run_eval.py", scenario, "--executor", "cli"])
         monkeypatch.setattr(time, "sleep", lambda _s: None)
         launches = []
 
@@ -351,7 +352,8 @@ class TestDeniedTools:
         monkeypatch.setattr(run_eval, "_RESULTS", str(tmp_path / "results"))
         monkeypatch.setattr(run_eval, "preflight_server", lambda: None)
         guidance = "mcp__fusion-essentials__sys_get_guidance"
-        monkeypatch.setattr(sys, "argv", ["run_eval.py", str(scenario), "--deny", guidance])
+        monkeypatch.setattr(sys, "argv", ["run_eval.py", str(scenario), "--executor", "cli",
+                                          "--deny", guidance])
         seen = {}
 
         def fake_launch(prompt, run_dir, model, max_turns, deny=()):
@@ -366,6 +368,355 @@ class TestDeniedTools:
         assert seen["deny"] == [guidance]
         with open(os.path.join(seen["run_dir"], "denied.txt"), encoding="utf-8") as fh:
             assert fh.read().strip() == guidance
+
+
+class TestApiToolDefinitions:
+    """The tool surface an API run hands the model: the server's tools, minus the denied ones."""
+
+    _TOOLS = [{"name": "doc_get", "description": "read the doc",
+               "inputSchema": {"type": "object", "properties": {"include": {"type": "array"}}}},
+              {"name": "data_delete_file", "description": "delete a cloud file",
+               "inputSchema": {"type": "object"}},
+              {"name": "sys_get_guidance", "description": "design practice",
+               "inputSchema": {"type": "object"}}]
+
+    def test_a_definition_carries_the_servers_schema_under_the_wire_name(self):
+        defs = run_eval.tool_definitions(self._TOOLS)
+        doc_get = [d for d in defs if d["name"] == _MCP][0]
+        assert doc_get["input_schema"] == self._TOOLS[0]["inputSchema"]
+        assert doc_get["description"] == "read the doc"
+        # one cache breakpoint, on the last definition - the tool block is resent every turn
+        assert [d for d in defs if "cache_control" in d] == [defs[-1]]
+
+    def test_a_denied_tool_is_absent_from_the_definitions(self):
+        # Denial by omission: a tool with no definition cannot be called at all. data_delete_file
+        # is a standing denial, sys_get_guidance this run's control arm.
+        denied = run_eval.api_denied(["mcp__fusion-essentials__sys_get_guidance"])
+        assert [d["name"] for d in run_eval.tool_definitions(self._TOOLS, denied)] == [_MCP]
+
+
+class _Clock:
+    """A fake clock the fake client advances INSIDE create(), the way a slow turn does."""
+
+    def __init__(self, per_turn=0.0):
+        self.now, self.per_turn = 0.0, per_turn
+
+    def __call__(self):
+        return self.now
+
+    def tick(self):
+        self.now += self.per_turn
+
+
+class _FakeApi:
+    """A Messages API stand-in: each create() answers with the next scripted reply."""
+
+    def __init__(self, replies, clock=None):
+        self.replies = list(replies)
+        self.sent = []
+        self.clock = clock
+
+    def create(self, messages, tools):
+        self.sent.append(list(messages))
+        if self.clock:
+            self.clock.tick()
+        return self.replies.pop(0)
+
+
+def _use(tid, **inp):
+    return {"type": "tool_use", "id": tid, "name": _MCP, "input": inp}
+
+
+def _reply(blocks, output_tokens=0, stop_reason="end_turn"):
+    return {"content": blocks, "stop_reason": stop_reason,
+            "usage": {"output_tokens": output_tokens, "input_tokens": 5}}
+
+
+def _ok(block):
+    return {"type": "tool_result", "tool_use_id": block["id"], "content": "ok", "is_error": False}
+
+
+def _loop(replies, client_clock=None, **kw):
+    """(record, events) for one api_loop over a fake client and a fake server."""
+    events = []
+    client = _FakeApi(replies, client_clock)
+    kw.setdefault("dispatch", _ok)
+    record = run_eval.api_loop(client, "build it", [], events.append, **kw)
+    return record, events
+
+
+class TestApiLoop:
+    """What stops the loop, and what it writes while it runs. The client and the server are fakes;
+    a client that runs out of scripted replies is a loop that failed to stop."""
+
+    def test_it_runs_tools_until_the_model_reports(self):
+        record, events = _loop([_reply([_use("t1")]), _reply([_use("t2")]),
+                                _reply([{"type": "text", "text": "FINAL: done"}], 7)])
+        assert (record["calls"], record["turns"]) == (2, 3)
+        assert record["final"] == "FINAL: done" and "final report" in record["stop"]
+        assert [e["type"] for e in events] == ["assistant", "user", "assistant", "user",
+                                               "assistant"]
+
+    def test_the_call_over_the_budget_is_never_dispatched(self):
+        record, _ = _loop([_reply([_use("t1"), _use("t2"), _use("t3")])], budget_calls=2)
+        assert record["calls"] == 2 and "call budget (2 calls)" in record["stop"]
+
+    def test_the_call_at_the_budget_still_runs(self):
+        # The other side of the same boundary: at the cap the run continues to the report turn.
+        record, _ = _loop([_reply([_use("t1"), _use("t2")]),
+                           _reply([{"type": "text", "text": "FINAL"}])], budget_calls=2)
+        assert record["calls"] == 2 and record["final"] == "FINAL"
+
+    def test_output_tokens_exactly_at_the_budget_stop_the_run(self):
+        record, _ = _loop([_reply([_use("t1")], 60), _reply([_use("t2")], 60)],
+                          budget_tokens=120)
+        assert record["usage"]["output_tokens"] == 120 and "token budget" in record["stop"]
+
+    def test_one_token_under_the_budget_keeps_going(self):
+        record, _ = _loop([_reply([_use("t1")], 60), _reply([_use("t2")], 60),
+                           _reply([{"type": "text", "text": "FINAL"}])], budget_tokens=121)
+        assert record["calls"] == 2 and record["final"] == "FINAL"
+
+    def test_a_turn_that_takes_longer_than_the_stall_limit_ends_the_run(self):
+        # The silence is INSIDE create(): the watchdog reads the idle window the moment the turn
+        # lands, before anything is dispatched, so the cut tool_use never reaches the server.
+        clock = _Clock(per_turn=700.0)
+        events = []
+        record = run_eval.api_loop(_FakeApi([_reply([_use("t1")])], clock), "build it", [],
+                                   events.append, stall_s=600, dispatch=_ok, clock=clock)
+        assert record["stalled"] is True and "NO PROGRESS" in record["stop"]
+        assert record["calls"] == 0
+        assert [e["type"] for e in events] == ["assistant"]
+
+    def test_turns_inside_the_limit_never_trip_the_watchdog(self):
+        # The counterpart: a working executor whose turns take real time is not a stall.
+        clock = _Clock(per_turn=100.0)
+        record, _ = _loop([_reply([_use("t1")]), _reply([_use("t2")]),
+                           _reply([{"type": "text", "text": "FINAL"}])], stall_s=600, clock=clock,
+                          client_clock=clock)
+        assert record["stalled"] is False and record["calls"] == 2
+
+    def test_the_max_turns_backstop_stops_the_loop(self):
+        record, _ = _loop([_reply([_use("t1")])], max_turns=1)
+        assert record["turns"] == 1 and "max turns (1)" in record["stop"]
+
+    def test_a_truncated_turn_is_not_recorded_as_the_final_report(self):
+        # stop_reason max_tokens means the text stops mid-thought; grading it as the report would
+        # score a sentence the model never finished.
+        record, _ = _loop([_reply([{"type": "text", "text": "I will now ext"}], 9,
+                                  stop_reason="max_tokens")])
+        assert record["final"] == "" and "max_tokens" in record["stop"]
+
+    def test_a_refused_turn_is_not_recorded_as_the_final_report(self):
+        record, _ = _loop([_reply([{"type": "text", "text": ""}], 2, stop_reason="refusal")])
+        assert record["final"] == "" and "refusal" in record["stop"]
+
+    def test_a_failing_turn_leaves_the_spend_in_the_record(self):
+        # The client raises on the second turn (its scripted replies run out). The record is the
+        # caller's, so the run still reports the turn and the tokens it already burned.
+        record = run_eval.api_record()
+        with pytest.raises(IndexError):
+            run_eval.api_loop(_FakeApi([_reply([_use("t1")], 40)]), "build it", [],
+                              lambda event: None, dispatch=_ok, record=record)
+        assert (record["turns"], record["calls"]) == (1, 1)
+        assert record["usage"]["output_tokens"] == 40
+
+    def test_the_transcript_lines_are_the_ones_audit_reads(self, tmp_path):
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        path = tmp_path / "transcript.jsonl"
+        with open(path, "w", encoding="utf-8") as fh:
+            def write(event):
+                fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+
+            client = _FakeApi([_reply([_use("t1")]), _reply([_use("t2")]),
+                               _reply([{"type": "text", "text": "FINAL: done"}], 12)])
+            record = run_eval.api_loop(client, "build it", [], write, dispatch=_ok)
+            fh.write(json.dumps({"type": "result", "result": record["final"],
+                                 "usage": record["usage"], "num_turns": record["turns"]}) + "\n")
+        report, final = run_eval.audit(str(path), str(run_dir), 5, 1000)
+        assert report["tool_calls_mcp"] == 2 and report["call_sequence"] == [_MCP, _MCP]
+        assert report["output_tokens"] == 12 and report["within_token_budget"] is True
+        assert report["blind"] is True and report["harness_leak"] is False
+        assert final == "FINAL: done"
+
+    def test_the_transcript_records_only_the_calls_that_ran(self, tmp_path):
+        # audit counts tool_use blocks, so a block the budget cut would read as a call the server
+        # never saw - and a run stopped AT its budget would read as over it.
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        path = tmp_path / "transcript.jsonl"
+        with open(path, "w", encoding="utf-8") as fh:
+            def write(event):
+                fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+
+            client = _FakeApi([_reply([_use("t1"), _use("t2"), _use("t3")])])
+            record = run_eval.api_loop(client, "build it", [], write, budget_calls=2, dispatch=_ok)
+            fh.write(json.dumps({"type": "result", "result": record["final"],
+                                 "usage": record["usage"], "num_turns": record["turns"]}) + "\n")
+        report, _final = run_eval.audit(str(path), str(run_dir), 2)
+        assert record["calls"] == 2
+        assert report["tool_calls_mcp"] == 2 and report["within_call_budget"] is True
+
+
+class TestApiDispatch:
+    """One tool_use block executed against the server, and the result block it becomes."""
+
+    def test_the_server_is_called_bare_and_its_payload_comes_back_unchanged(self):
+        seen = {}
+        # the size a rich read answers with - a result path that truncates passes on a short one
+        payload = json.dumps({"ok": True, "bodies": [{"name": f"Body{i}", "volume": i * 1.5}
+                                                     for i in range(200)]})
+        assert len(payload) > 4000
+
+        def call(name, arguments):
+            seen.update(name=name, arguments=arguments)
+            return False, [{"type": "text", "text": payload}]
+
+        result = run_eval.dispatch_tool_use(
+            {"type": "tool_use", "id": "t1", "name": _MCP, "input": {"include": ["bodies"]}},
+            call=call)
+        assert seen == {"name": "doc_get", "arguments": {"include": ["bodies"]}}
+        assert result == {"type": "tool_result", "tool_use_id": "t1", "is_error": False,
+                          "content": [{"type": "text", "text": payload}]}
+
+    def test_a_mixed_text_and_image_result_keeps_every_block(self):
+        blocks = [{"type": "text", "text": "front view"},
+                  {"type": "image", "data": "QUJD", "mimeType": "image/png"},
+                  {"type": "text", "text": "captured"}]
+        result = run_eval.dispatch_tool_use({"id": "t1", "name": _MCP},
+                                            call=lambda n, a: (False, blocks))
+        assert result["content"] == [
+            {"type": "text", "text": "front view"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                         "data": "QUJD"}},
+            {"type": "text", "text": "captured"}]
+
+    def test_an_image_only_result_reaches_the_model_as_an_image(self):
+        # A screenshot result often carries no text block at all; a text-only reader would hand a
+        # visual-check scenario a note saying nothing came back.
+        result = run_eval.dispatch_tool_use(
+            {"id": "t1", "name": _MCP},
+            call=lambda n, a: (False, [{"type": "image", "data": "QUJD",
+                                        "mimeType": "image/jpeg"}]))
+        assert [b["type"] for b in result["content"]] == ["image"]
+        assert result["content"][0]["source"] == {"type": "base64", "media_type": "image/jpeg",
+                                                  "data": "QUJD"}
+
+    def test_a_refused_call_comes_back_as_an_error_result(self):
+        result = run_eval.dispatch_tool_use(
+            {"id": "t1", "name": _MCP},
+            call=lambda n, a: (True, [{"type": "text", "text": "no body named 'Bolt'"}]))
+        assert result["is_error"] is True
+        assert result["content"] == [{"type": "text", "text": "no body named 'Bolt'"}]
+
+    def test_a_result_with_no_blocks_says_that_rather_than_going_out_empty(self):
+        result = run_eval.dispatch_tool_use({"id": "t1", "name": _MCP},
+                                            call=lambda n, a: (False, []))
+        assert result["content"] == [{"type": "text",
+                                      "text": "(the result carried no content blocks)"}]
+
+
+class TestDenyValidation:
+    _TOOLS = [{"name": "sys_get_guidance"}, {"name": "doc_get"}]
+
+    def test_an_unknown_deny_name_refuses_naming_it_and_the_near_miss(self):
+        # A silently ignored name turns the control arm of an A/B into a treatment run, while
+        # denied.txt still says the tool was withheld.
+        with pytest.raises(SystemExit) as err:
+            run_eval.deny_or_exit(["mcp__fusion-essentials__sys_get_guidence"], self._TOOLS)
+        assert "sys_get_guidence" in str(err.value)
+        assert "mcp__fusion-essentials__sys_get_guidance" in str(err.value)
+
+    def test_a_registered_deny_name_passes(self):
+        names = ["mcp__fusion-essentials__sys_get_guidance"]
+        assert run_eval.deny_or_exit(names, self._TOOLS) == names
+
+
+class TestApiRequestShape:
+    """The request one turn sends. ApiClient.create is called against a stub, so the tests need
+    neither the SDK nor a key."""
+
+    def test_the_turn_carries_the_model_the_cap_and_the_prefix_cache_breakpoint(self):
+        sent = {}
+
+        class _Messages:
+            def create(self, **kw):
+                sent.update(kw)
+                return types.SimpleNamespace(to_dict=lambda: {"content": []})
+
+        client = types.SimpleNamespace(model="claude-opus-5",
+                                       _client=types.SimpleNamespace(messages=_Messages()))
+        reply = run_eval.ApiClient.create(client, [{"role": "user", "content": "hi"}], [])
+        assert reply == {"content": []}
+        assert sent["model"] == "claude-opus-5" and sent["max_tokens"] == run_eval.API_MAX_TOKENS
+        # the growing message prefix caches too, beside the tool block's own breakpoint
+        assert sent["cache_control"] == {"type": "ephemeral"}
+
+
+class TestApiStartupRefusals:
+    def test_a_missing_key_refuses_naming_the_variable(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        with pytest.raises(SystemExit) as err:
+            run_eval.api_key_or_exit()
+        assert "ANTHROPIC_API_KEY" in str(err.value)
+
+    def test_a_set_key_starts_the_run(self, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        assert run_eval.api_key_or_exit() == "sk-ant-test"
+
+    def test_a_bare_alias_is_refused_and_a_model_id_passes(self):
+        # The cli executor takes aliases like 'sonnet'; the Messages API takes ids only.
+        with pytest.raises(SystemExit) as err:
+            run_eval.api_model_or_exit("sonnet")
+        assert "sonnet" in str(err.value) and "claude-opus-5" in str(err.value)
+        assert run_eval.api_model_or_exit("claude-opus-5") == "claude-opus-5"
+
+
+class TestExecutorSelection:
+    def test_the_run_setting_picks_the_launcher(self, monkeypatch):
+        monkeypatch.setattr(run_eval, "launch_cli", lambda *a: "cli ran")
+        monkeypatch.setattr(run_eval, "launch_api", lambda *a: "api ran")
+        monkeypatch.setattr(run_eval, "EXECUTOR", "cli")
+        assert run_eval.launch("p", "dir", "m", 1) == "cli ran"
+        monkeypatch.setattr(run_eval, "EXECUTOR", "api")
+        assert run_eval.launch("p", "dir", "m", 1) == "api ran"
+
+    def test_main_hands_the_executor_and_both_budgets_to_the_loop(self, tmp_path, monkeypatch):
+        # The loop enforces the budgets, so a run whose budgets never left main stops at neither.
+        scenario = tmp_path / "S0_X.md"
+        scenario.write_text("---\nbudget:\n  max_tool_calls: 7\n  max_tokens: 900\n---\n\n"
+                            "## AGENT PROMPT (verbatim)\n\n```\nbuild it\n```\n", encoding="utf-8")
+        monkeypatch.setattr(run_eval, "_RESULTS", str(tmp_path / "results"))
+        monkeypatch.setattr(run_eval, "preflight_server", lambda: None)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setattr(sys, "argv", ["run_eval.py", str(scenario)])
+
+        def fake_launch(prompt, run_dir, model, max_turns, deny=()):
+            transcript = os.path.join(run_dir, "transcript.jsonl")
+            with open(transcript, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"type": "result", "result": "", "usage": {}}) + "\n")
+            return transcript, "", False, True
+
+        monkeypatch.setattr(run_eval, "launch", fake_launch)
+        run_eval.main()
+        assert (run_eval.EXECUTOR, run_eval.BUDGET_CALLS, run_eval.BUDGET_TOKENS) == ("api", 7, 900)
+
+    def test_a_missing_key_stops_main_before_a_run_dir_exists(self, tmp_path, monkeypatch):
+        # The refusal runs on the default invocation, so it must not leave an empty run dir (and a
+        # dated batch folder) behind in the results tree.
+        scenario = tmp_path / "S0_X.md"
+        scenario.write_text("---\nid: X\n---\n\n## AGENT PROMPT (verbatim)\n\n```\nbuild it\n```\n",
+                            encoding="utf-8")
+        results = tmp_path / "results"
+        monkeypatch.setattr(run_eval, "_RESULTS", str(results))
+        monkeypatch.setattr(run_eval, "preflight_server", lambda: None)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setattr(sys, "argv", ["run_eval.py", str(scenario)])
+        with pytest.raises(SystemExit) as err:
+            run_eval.main()
+        assert "ANTHROPIC_API_KEY" in str(err.value)
+        assert not results.exists()
 
 
 class TestExitStatus:

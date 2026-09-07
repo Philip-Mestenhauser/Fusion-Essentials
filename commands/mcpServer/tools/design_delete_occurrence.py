@@ -119,8 +119,8 @@ tool = (
     Tool.create_simple(name="design_delete_occurrence", description=_DESC)
     .add_input_property("occurrence", {"type": "string",
             "description": "Occurrence to delete: a 'handle' (the entityToken from "
-            "design_get(include=['tree']) - the exact identity) or a fullPathName/name (refused when "
-            "several instances answer to it)."})
+            "design_get(include=['tree'], tree_handles=true) - the exact identity) or a "
+            "fullPathName/name (refused when several instances answer to it)."})
     .strict_schema()
 )
 item = Item.create_tool_item(

@@ -318,18 +318,39 @@ _CHOICES_NOTE = (
     "expressions it takes; pass one of them verbatim.")
 
 
+# Said only where rows were dropped; parameter_count is the LISTED rows. MEASURED on a contour2d:
+# of 384 hidden, 205 read isVisible true with isEnabled FALSE and 179 read isVisible false. A gated
+# row flips to enabled+editable when its switch lands, and the listing grows by it.
+_HIDDEN_NOTE = (
+    " {n} more parameter(s) did not read visible+enabled and are NOT listed (hidden_count). A row "
+    "behind a switch reads isEnabled FALSE until that switch is on, and cam_edit_operation writes "
+    "such a row after the switch in the SAME call - its refusal names the pair. Others read "
+    "isVisible false, licence and mode flags among them. parameter_count counts the LISTED rows.")
+
+# The same disclosure for a SETUP. MEASURED on a fresh milling setup: 304 parameters, 42 listed,
+# 262 hidden - of which the 12 computed extents stock_extents publishes are a small part.
+_SETUP_HIDDEN_NOTE = (
+    " {n} more parameter(s) did not read visible+enabled and are NOT listed (hidden_count); the "
+    "computed extents among them are what stock_extents publishes. cam_edit_setup REFUSES a row "
+    "reading editable false outright, so a hidden row here is NOT reachable the way "
+    "cam_edit_operation reaches one behind its switch. parameter_count counts the LISTED rows.")
+
+
 def _any_choices(groups) -> bool:
     """Whether any grouped row published a 'choices' set - what gates the note above."""
     return any("choices" in row for rows in groups.values() for row in rows)
 
 
 def _grouped_visible_params(param_coll):
-    """{section_title: [{name, title, expression}]} for the VISIBLE + ENABLED parameters, grouped by
-    the `group_*` sentinels, plus 'editable' on a row whose isEditable did not read True."""
+    """({section_title: [{name, title, expression}]} for the VISIBLE + ENABLED parameters, grouped
+    by the `group_*` sentinels, plus 'editable' on a row whose isEditable did not read True; how
+    many rows that filter DROPPED)."""
     groups = {}
+    hidden = 0
     current = "General"
     for p in iter_collection(param_coll):
         if not (safe(lambda p=p: p.isVisible, False) and safe(lambda p=p: p.isEnabled, False)):
+            hidden += 1
             continue
         nm = safe(lambda p=p: p.name) or ""
         title = safe(lambda p=p: p.title) or nm
@@ -353,7 +374,7 @@ def _grouped_visible_params(param_coll):
             row["choices"] = choices
         groups.setdefault(current, []).append(row)
     # drop empty sections (a sentinel with no following values)
-    return {g: rows for g, rows in groups.items() if rows}
+    return {g: rows for g, rows in groups.items() if rows}, hidden
 
 
 # The setup's stock/model extents: COMPUTED parameters reading isVisible False, so the grouping
@@ -402,11 +423,14 @@ def _slice_setup_parameters(cam, setup, units):
     if params is None:
         return None, error(f"Setup '{setup}' exposes no readable parameters - nothing about its "
                            "stock or job settings can be read.")
-    groups = _grouped_visible_params(params)
+    groups, hidden = _grouped_visible_params(params)
     out = {"setup": safe(lambda: s.name), "sections": groups,
            "parameter_count": sum(len(v) for v in groups.values()),
            "note": _SETUP_PARAM_NOTE + " " + _EDITABLE_NOTE
-                   + (_CHOICES_NOTE if _any_choices(groups) else "")}
+                   + (_CHOICES_NOTE if _any_choices(groups) else "")
+                   + (_SETUP_HIDDEN_NOTE.format(n=hidden) if hidden else "")}
+    if hidden:
+        out["hidden_count"] = hidden   # absent = every parameter the setup carries is listed
     extents = _stock_extents(params, factor, (units or "mm").strip().lower())
     if extents:
         out["stock_extents"] = extents
@@ -426,12 +450,15 @@ def _slice_parameters(cam, operation, setup, units="mm"):
     op, oerr = _resolve_op_in_scope(cam, operation, setup)
     if oerr:
         return None, oerr
-    groups = _grouped_visible_params(safe(lambda: op.parameters))
+    groups, hidden = _grouped_visible_params(safe(lambda: op.parameters))
     out = {"operation": safe(lambda: op.name),
            "sections": groups,
            "parameter_count": sum(len(v) for v in groups.values()),
            "note": _EDITABLE_NOTE + (_CHOICES_NOTE if _any_choices(groups) else "")
+                   + (_HIDDEN_NOTE.format(n=hidden) if hidden else "")
                    + " " + STRATEGY_PAIR_NOTE}
+    if hidden:
+        out["hidden_count"] = hidden   # absent = every parameter the operation carries is listed
     out.update(strategy_pair(op))
     return out, None
 

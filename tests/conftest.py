@@ -76,7 +76,8 @@ from tests.fakes.scaffold import _make_object_collection, entity_proxy, fusion_f
 from tests.fakes.geometry import Camera, Circle3D, Cone, Cylinder, FakeBoundingBox3D  # noqa: E402
 from tests.fakes.geometry import FakeInfiniteLine3D, FakeMatrix3D, FakePoint  # noqa: E402
 from tests.fakes.geometry import FakeValueInput, FakeVector3D, Line3D, Plane  # noqa: E402
-from tests.fakes.geometry import Sphere, Torus, Viewport, make_bbox  # noqa: E402
+from tests.fakes.geometry import Sphere, Torus, Viewport  # noqa: E402
+from tests.fakes.geometry import camera_state, make_bbox  # noqa: E402
 from tests.fakes.mesh import FakeMeshManager, FakeTriangleMeshCalculator  # noqa: E402
 from tests.fakes.mesh import MeshBody, _FakeTriangleMesh, _MeshBodies  # noqa: E402
 from tests.fakes.mesh import make_face_groups, make_mesh_manager  # noqa: E402

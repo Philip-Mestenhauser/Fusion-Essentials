@@ -3467,6 +3467,27 @@ class TestSharedResolverBehaviour:
         occ, err = inp._resolve_occurrence("t", "Bolt")
         assert occ is None and "ambiguous" in err.lower()
 
+    def test_a_leading_space_name_is_reached_by_the_name_the_caller_can_type(self):
+        # MEASURED: Fusion mints occurrence names with a leading space, and no listing shows it. Both
+        # occurrences are NESTED, so no fullPathName can equal the typed string and the NAME branch
+        # is the only one that can answer; the sibling contains the stem, so substring gives two.
+        spaced = _FakeOcc(" Handle:1", "Asm:1+ Handle:1", token="tok-spaced")
+        longer = _FakeOcc("Handle:10", "Asm:1+Handle:10", token="tok-longer")
+        _install_occurrences(spaced, longer)
+        occ, err = inp._resolve_occurrence("t", "Handle:1")
+        assert err is None and occ is spaced
+
+    def test_two_names_differing_only_by_that_space_are_one_ambiguity(self):
+        # the other half of the same decision: stripping cannot silently pick the unpadded one.
+        # Nested again, so the unpadded sibling cannot be reached by its PATH instead.
+        spaced = _FakeOcc(" Handle:1", "Asm:1+ Handle:1", token="tok-spaced")
+        plain = _FakeOcc("Handle:1", "Asm:2+Handle:1", token="tok-plain")
+        _install_occurrences(spaced, plain)
+        occ, err = inp._resolve_occurrence("t", "Handle:1")
+        assert occ is None
+        assert "names 2 occurrences" in err
+        assert "Asm:1+ Handle:1" in err and "Asm:2+Handle:1" in err
+
 
 # ── the by-NAME candidate list has to DISCRIMINATE ───────────────────────────────────────────────
 # Two occurrences sharing a NAME can share a PATH as well (a local component named like an xref

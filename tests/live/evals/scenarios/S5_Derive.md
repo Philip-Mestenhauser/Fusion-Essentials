@@ -11,7 +11,8 @@ fixture: the S4 artifact P4-Gimbal (verified BY URN) OPENED by the orchestrator 
 budget:
   max_tool_calls: 60
   max_tokens: 150000
-substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
+substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag; {{PROJECT}} /
+  {{FOLDER}} -> the configured destination"
 perturbations: none (baseline)
 expected_refusals: none
 ---
@@ -66,7 +67,7 @@ between frame and inner ring):
     prep surfaces you added do not count toward the box), axes oriented to the machining
     direction you choose.
 
-Finally save the document as P5-RingModel into MCP Test Project / Pipeline-v1/{{RUN_FOLDER}} (create the folder path if missing; never a project).
+Finally save the document as P5-RingModel into {{PROJECT}} / {{FOLDER}}/{{RUN_FOLDER}} (create the folder path if missing; never a project).
 
 POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH units.
 
@@ -86,7 +87,7 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
   measured and the origin's read-back position - they must match).
 - one-way proof: your prep work - INCLUDING the local edits on the derived body - did NOT touch
   the source: a fresh cloud read shows P4-Gimbal still at the version you found it.
-- doc_get -> saved as "P5-RingModel", real URN, version >= 1, in MCP Test Project / Pipeline-v1/{{RUN_FOLDER}}.
+- doc_get -> saved as "P5-RingModel", real URN, version >= 1, in {{PROJECT}} / {{FOLDER}}/{{RUN_FOLDER}}.
 
 REPORT - return EXACTLY this structure, nothing else:
 

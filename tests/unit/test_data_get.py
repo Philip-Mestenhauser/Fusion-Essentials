@@ -246,11 +246,52 @@ class TestFolderDepthDefault:
 
         # what that number DOES: a six-level chain read at the forwarded depth stops four levels
         # down, and the last node says its children are unknown rather than implying it has none.
-        tree, count, truncated, _stalled = dops._folder_tree_bounded(_folder_chain(6),
-                                                                     seen["max_depth"])
+        tree, count, truncated, _stalled, unread = dops._folder_tree_bounded(_folder_chain(6),
+                                                                             seen["max_depth"])
         assert _paths(tree) == ["L1", "L1/L2", "L1/L2/L3", "L1/L2/L3/L4"]
         assert count == 4 and truncated is False    # the DEPTH cap stopped it, not the fetch budget
+        assert unread == {}                         # every folder on the way down enumerated
         assert tree[0]["folders"][0]["folders"][0]["folders"][0]["children_unknown"] is True
+
+
+class TestFolderTreeScopeAndBudgets:
+    """The tree read's scope and its two budgets are the caller's: a project-wide walk hits the
+    fetch budget on a real project, so 'folder' and the budgets have to REACH the walk."""
+
+    def _seen(self, monkeypatch):
+        seen = {}
+        stub_tool_module(monkeypatch, "_data_read",
+            type("DO", (), {"list_folders_handler": staticmethod(
+                lambda **kw: (seen.update(kw)
+                              or _ok({"project": "P1", "folder_count": 0, "folders": []})))}))
+        return seen
+
+    def test_the_folder_scope_and_both_budgets_reach_the_walk(self, stub, monkeypatch):
+        seen = self._seen(monkeypatch)
+        _payload(dge.handler(project="P1", include=["folders"], folder="Parts/Fixtures",
+                             folder_budget=60, time_budget_s=45))
+        assert seen["folder"] == "Parts/Fixtures"
+        assert seen["folder_budget"] == 60 and seen["time_budget_s"] == 45
+
+    def test_the_published_defaults_are_the_walks_own(self, stub, monkeypatch):
+        # the schema promises numbers a caller sizes against - they come off the core, not a copy.
+        props = dge.tool.to_dict()["inputSchema"]["properties"]
+        assert f"default {dops._LF_FOLDER_BUDGET}" in props["folder_budget"]["description"]
+        assert f"max {dops._LF_FOLDER_BUDGET_MAX}" in props["folder_budget"]["description"]
+        assert f"default {int(dops._TIME_BUDGET_S)}" in props["time_budget_s"]["description"]
+
+    def test_an_unreadable_folder_is_taught_in_the_note(self, stub, monkeypatch):
+        stub_tool_module(monkeypatch, "_data_read",
+            type("DO", (), {"list_folders_handler": staticmethod(
+                lambda **kw: _ok({"project": "P1", "folder_count": 3, "truncated": False,
+                                  "folders_unreadable": 2,
+                                  "folders_unreadable_at": ["Archive"], "folders": []}))}))
+        note = _payload(dge.handler(project="P1", include=["folders"]))["note"]
+        assert "2 folder(s) would not enumerate" in note and "children_unreadable" in note
+
+    def test_a_readable_tree_gets_no_unreadable_clause(self, stub):
+        assert "would not enumerate" not in _payload(
+            dge.handler(project="P1", include=["folders"]))["note"]
 
 
 class TestGuards:

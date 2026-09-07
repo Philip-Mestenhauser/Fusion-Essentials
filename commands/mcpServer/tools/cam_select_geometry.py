@@ -32,8 +32,9 @@ _GROOVE = "groove"
 _THREAD = "thread"
 _PROBE = "probe"
 _ORIENTATION = "orientation"
+_CHAMFER = "chamfer"
 _SELECTIONS = (_CHAIN, _POCKET, _FACE, _SILHOUETTE, _SKETCH, _POCKET_RECOGNITION, _HOLES,
-               _SURFACES, _GROOVE, _THREAD, _PROBE, _ORIENTATION)
+               _SURFACES, _GROOVE, _THREAD, _PROBE, _ORIENTATION, _CHAMFER)
 
 # Which operation parameter carries the selection: the first of these the op has, so the ORDER is
 # the routing. A deburr op carries edgeSel AND machiningBoundarySel, so the drive param is probed
@@ -85,19 +86,25 @@ _RAIL_PAIR_PARAMS = (SWARF_CONTOURS_PARAM,)
 _RAILS_REQUIRED = 2
 _RAILS_ORDER = "as passed - the LOWER rail must be first"
 
+# Parameters whose references are read as SEPARATE curves, so each seeds its own CurveSelection.
+# MEASURED on morph: two rim circles fed to ONE selection walk into a single path and the operation
+# reports 'No passes to link'; the same pair as one selection EACH cut 77.7 s of toolpath.
+_PER_REFERENCE_PARAMS = (SWARF_CONTOURS_PARAM, _DRIVE_CURVES_PARAM)
+
 # The DIRECT (B) family: per selection kind, the parameter name(s) whose CadObjectParameterValue
 # takes a CAD-object list on .value, probed in order. 'holes' carries two spellings - DRILL
 # 'holeFaces', BORE/CIRCULAR 'circularFaces'.
 _DIRECT_PARAM = {_HOLES: ("holeFaces", "circularFaces"), _GROOVE: ("grooves",),
                  _THREAD: ("threadFaces",), _PROBE: ("probe_selection",),
-                 _ORIENTATION: ("machiningDirections",)}
+                 _ORIENTATION: ("machiningDirections",), _CHAMFER: ("chamfers",)}
 
 # What each direct kind is for - the refusal an operation carrying none of its parameters gets.
 _DIRECT_MISS = {_HOLES: "drilling/boring strategies (drill / bore / circular / tap / ...)",
                 _GROOVE: "a turning groove strategy",
                 _THREAD: "a turning thread strategy",
                 _PROBE: "the probe and probe_geometry strategies",
-                _ORIENTATION: "a strategy that takes tool-axis orientations, e.g. three_plus_two"}
+                _ORIENTATION: "a strategy that takes tool-axis orientations, e.g. three_plus_two",
+                _CHAMFER: "the turning_chamfer strategy"}
 
 # 'surfaces' = the same shape, one parameter per ROLE, and an op can carry several at once - so the
 # role is an input, not a probe order. The op's 'model' parameter is the same class but is NOT one
@@ -118,14 +125,14 @@ _CURVE_BUILDER = {
 
 # Each selection takes ONE object type on its input: ChainSelection B-Rep edges, FaceContour/Pocket
 # a BRepFace, Silhouette/PocketRecognition a BRepBody, SketchSelection ENTIRE sketches; 'grooves'
-# the groove's bounding EDGE (its own face raises InternalValidationError), threadFaces a face.
+# and 'chamfers' a bounding EDGE (a face raises InternalValidationError), threadFaces a face.
 _GEOMETRY_INPUT = {_CHAIN: "handles", _POCKET: "handles", _FACE: "handles", _HOLES: "handles",
                    _SURFACES: "handles", _GROOVE: "handles", _THREAD: "handles",
-                   _PROBE: "handles", _ORIENTATION: "handles",
+                   _PROBE: "handles", _ORIENTATION: "handles", _CHAMFER: "handles",
                    _SILHOUETTE: "bodies", _POCKET_RECOGNITION: "bodies", _SKETCH: "sketches"}
 _HANDLE_REQUIRE = {_CHAIN: "edge", _POCKET: "face", _FACE: "face", _HOLES: "face",
                    _SURFACES: "face", _GROOVE: "edge", _THREAD: "face", _PROBE: "face",
-                   _ORIENTATION: "face"}
+                   _ORIENTATION: "face", _CHAMFER: "edge"}
 _BODY_SELECTIONS = (_SILHOUETTE, _POCKET_RECOGNITION)
 # loopType/sideType exist on FaceContourSelection, SilhouetteSelection and SketchSelection only.
 _LOOP_SIDE_SELECTIONS = (_FACE, _SILHOUETTE, _SKETCH)
@@ -140,8 +147,7 @@ SIDE_TYPE = _inputs.Choice("side_type", list(_SIDE_TYPE),
                            description="face/silhouette/sketch: loop cut order.")
 SURFACE_TARGET = _inputs.Choice("surface_target", list(_SURFACE_TARGET_PARAM),
                                 description="surfaces: which surface set of the strategy the faces "
-                                            "are. Defaults to drive; an operation that has no drive "
-                                            "surfaces is refused naming the sets it does carry.")
+                                            "are. Defaults to drive.")
 
 # pocket_recognition search criteria -> the PocketRecognitionSelection property each sets.
 _POCKET_FILTER_LENGTHS = (("min_hole_diameter", "minimumHoleDiameter"),
@@ -150,6 +156,15 @@ _POCKET_FILTER_LENGTHS = (("min_hole_diameter", "minimumHoleDiameter"),
                           ("min_depth", "minimumPocketDepth"),
                           ("max_depth", "maximumPocketDepth"))
 _POCKET_FILTER_KEYS = ("holes",) + tuple(k for k, _ in _POCKET_FILTER_LENGTHS)
+
+# The wire schema for those keys, built from the same tables _apply_pocket_filter reads - a key it
+# does not read cannot reach the schema, and every length is stated in the call's own 'units'.
+_POCKET_FILTER_PROPERTIES = dict(
+    [("holes", {"type": "boolean", "description": "count holes as pockets"})]
+    + [(key, {"type": "number", "description": "in 'units'"})
+       for key, _prop in _POCKET_FILTER_LENGTHS])
+# The gate _apply_pocket_filter enforces, stated on the key it constrains rather than in prose.
+_POCKET_FILTER_PROPERTIES["min_hole_diameter"]["description"] += "; needs holes=true"
 
 # Which selection kind each optional knob belongs to - the property simply does not exist on the
 # other classes, so passing one is a caller error, not something to drop silently.
@@ -440,9 +455,12 @@ def _engage_mode(op, mode_param, want, subject):
 
 def _rail_groups(name, entities, knobs):
     """(one entity list per CurveSelection to build, the knobs each is built with) - one selection
-    over all entities, or one PER entity for a rail-pair parameter, where is_open defaults True."""
-    if name not in _RAIL_PAIR_PARAMS:
+    over all entities, or one PER entity where the parameter reads its references as separate
+    curves; a rail pair is that shape plus an is_open that defaults True."""
+    if name not in _PER_REFERENCE_PARAMS:
         return [list(entities)], knobs
+    if name not in _RAIL_PAIR_PARAMS:
+        return [[e] for e in entities], knobs
     rail_knobs = dict(knobs)
     if rail_knobs.get("is_open") is None:
         rail_knobs["is_open"] = True
@@ -916,7 +934,8 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
 TOOL_DESCRIPTION = (
     "SELECT the machining geometry on a CAM operation. 'selection' picks the family, and the family "
     "fixes the input. EDGE 'handles': chain (Fusion walks the chain) / groove (turning groove "
-    "positions). FACE 'handles': pocket / face / holes (min/max_diameter) / surfaces (surface_target "
+    "positions) / chamfer (turning chamfer edges). FACE 'handles': pocket / face / holes "
+    "(min/max_diameter) / surfaces (surface_target "
     "picks the set) / thread (turning) / probe / orientation (3+2: the normals become tool axes). "
     "'bodies': silhouette / pocket_recognition (omit for the setup's own models). 'sketches': sketch "
     "(whole sketches, not one curve). A chain routes to the strategy's drive input (swarf rails, "
@@ -931,8 +950,8 @@ tool = (
     .add_input_property("selection", {"type": "string", "enum": list(_SELECTIONS),
             "description": "The geometry family."})
     .add_input_property("handles", {"type": "array", "items": {"type": "string"},
-            "description": "find_geometry handles: EDGES for chain and groove; FACES for "
-                           "pocket/face/holes/surfaces/thread/probe/orientation."})
+            "description": "find_geometry handles; 'selection' fixes whether they must be EDGES "
+                           "or FACES."})
     .add_input_property(*BODIES.as_property())
     .add_input_property(*SKETCHES.as_property())
     .add_input_property(*_sketch_detail.component_scope("component", narrows="sketches / bodies"))
@@ -940,10 +959,9 @@ tool = (
     .add_input_property("reverted", {"type": "boolean", "description": "Chain: flip side/direction."})
     .add_input_property(*LOOP_TYPE.as_property())
     .add_input_property(*SIDE_TYPE.as_property())
-    .add_input_property("pocket_filter", {"type": "object",
-            "description": "pocket_recognition criteria: holes (bool - count holes as pockets), "
-                           "min_hole_diameter (needs holes=true), min/max_corner_radius, "
-                           "min/max_depth; lengths in 'units'."})
+    .add_input_property("pocket_filter", {"type": "object", "additionalProperties": False,
+            "properties": _POCKET_FILTER_PROPERTIES,
+            "description": "pocket_recognition search criteria."})
     .add_input_property("min_diameter", {"type": "number", "description": "holes: min cylinder dia. (in 'units'); filters the PASSED handles only, never discovers - pass every candidate face."})
     .add_input_property("max_diameter", {"type": "number", "description": "holes: max cylinder dia. (in 'units')."})
     .add_input_property(*SURFACE_TARGET.as_property())

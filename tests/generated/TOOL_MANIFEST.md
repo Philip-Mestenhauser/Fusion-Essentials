@@ -123,7 +123,7 @@ PRODUCES:
 | ⚠ | `sketch_delete_entity` | Delete ONE sketch entity, constraint, dimension or text from a named sketch |
 | ✎ | `sketch_dimension` | Add a DIMENSIONAL constraint to a sketch and optionally drive its value (sketch_constrain does the geometric half) |
 | ✎ | `sketch_edit_curve` | Edit an EXISTING sketch curve in place |
-| · | `sketch_get` | Read sketches by zoom level: a summary list of every sketch, or ONE sketch's overview - entity counts, is_fully_constrained, and a 'profiles' list (area, centro... |
+| · | `sketch_get` | Read sketches by zoom level: a summary list of the design's sketches (paged per component by max_results; 'truncated' means the note names the narrowing), or ON... |
 | ✎ | `sketch_insert_svg` | Import an SVG from LOCAL DISK into an EXISTING sketch at (x,y) in the sketch's own frame |
 | ✎ | `sketch_move` | MOVE existing sketch entities by one transform in the sketch's own frame: translate 'dx'/'dy', rotate 'rotation_deg' about ('center_x','center_y'), scale by 'sc... |
 | ✎ | `sketch_project` | Create sketch curves from existing model geometry |
@@ -135,7 +135,7 @@ PRODUCES:
 |---|---|---|
 | ✎ | `cam_activate_setup` | Activate a CAM setup by name and fit the view so it's ready to capture with view_screenshot |
 | ✎ | `cam_apply_template` | Apply a CAM toolpath template to a setup, recreating the template's operations in that setup |
-| · | `cam_compare_operations` | Compare two CAM operations by name and report which parameters differ, with the value on each side |
+| · | `cam_compare_operations` | Compare two CAM operations by name: which PARAMETERS differ, with the value on each side, and which GEOMETRY selection sets differ - chains, faces, boundary/sto... |
 | ✎ | `cam_create_machine` | Create a MACHINE in the LOCAL machine library from a Fusion machine template - the answer when cam_edit_setup(machine=...) finds no match |
 | ✎ | `cam_create_operation` | CREATE a CAM milling operation in a setup |
 | ✎ | `cam_create_setup` | Create a CAM (Manufacture) SETUP on the active part - the prerequisite for any CAM job, since the other CAM tools (cam_apply_template, cam_generate) need a setu... |

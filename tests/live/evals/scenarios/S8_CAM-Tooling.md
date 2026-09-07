@@ -2,7 +2,7 @@
 id: S8_CAM-Tooling
 tier: pipeline
 fixture: P7-Template (the S7 artifact) OPENED as the active document by the orchestrator from
-  MCP Test Project / Pipeline-v1 BY URN, active hub PINNED first. The agent builds the CAM layer
+  the configured project/folder BY URN, active hub PINNED first. The agent builds the CAM layer
   IN the template and saves it in place (this scenario advances P7-Template's version - by
   design; the template is the chain's second mutable artifact). Missing fixture = ask.
 budget:

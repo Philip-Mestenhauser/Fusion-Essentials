@@ -4,6 +4,7 @@ bounded-read cap on 'differences'.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -97,6 +98,81 @@ class TestGuards:
         assert out["difference_count"] == 1
         assert out["differences"][0]["operation_a"] == "100"
         assert out["differences"][0]["operation_b"] == "900"
+
+
+class _RecordingParameters:
+    """A CAM parameter collection that COUNTS every itemByName - the lookup _geometry_facts makes
+    per selection parameter. It records rather than raises: safe() swallows a raise, so a raising
+    stand-in would let the read happen and still report a refusal."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.lookups = 0
+
+    @property
+    def count(self):
+        return self._inner.count
+
+    def item(self, i):
+        return self._inner.item(i)
+
+    def itemByName(self, name):
+        self.lookups += 1
+        return self._inner.itemByName(name)
+
+
+def _unsettled(name, params, tool_desc="Tool1"):
+    """An operation MID-GENERATION: the flag raised over a state that has not answered (NoToolpath,
+    no toolpath yet) - what op_settled reads as generating still to do."""
+    op = FakeOperation(name, parameters=make_cam_parameters(*params.items()),
+                       tool=FakeTool(description=tool_desc),
+                       has_toolpath=False, operation_state=3)
+    op.isGenerating = True
+    return op
+
+
+class TestGeneratingGuard:
+    def test_the_guard_refuses_BEFORE_any_selection_parameter_is_read(self, install):
+        # ORDER, not just presence. The crash observation is about walking selection objects on a
+        # regenerating document, so a guard placed after _geometry_facts would refuse having
+        # already made the read it exists to prevent - and this counter is what tells them apart.
+        a = _op("A", {"feed": "100"})
+        b = _unsettled("B", {"feed": "200"})
+        b.parameters = _RecordingParameters(b.parameters)
+        install([a, b])
+        res = cc.handler(operation_a="A", operation_b="B")
+        assert res["isError"] is True
+        assert b.parameters.lookups == 0, "the refusal read selection parameters before refusing"
+
+    def test_an_unsettled_operation_refuses_the_compare_naming_the_count(self, install):
+        # The geometry half reads the selection objects off both operations; one compare on a
+        # document whose operations were still regenerating ended the Fusion process.
+        a = _op("A", {"feed": "100"})
+        b = _unsettled("B", {"feed": "200"})
+        install([a, b])
+        res = cc.handler(operation_a="A", operation_b="B")
+        assert res["isError"] is True
+        assert "1 of the 2 named operations still has generating to do (B)" in res["message"]
+        assert "cam_get_status until completed=true" in res["message"]
+        b.isGenerating = False
+        assert cc.handler(operation_a="A", operation_b="B")["isError"] is False
+
+    def test_the_count_and_its_verb_agree_when_both_are_unsettled(self, install):
+        # '1 ... still have' was the wart; the verb is interpolated off the count, so both spellings
+        # need a case or only the singular is ever read.
+        install([_unsettled("A", {"feed": "100"}), _unsettled("B", {"feed": "200"})])
+        res = cc.handler(operation_a="A", operation_b="B")
+        assert res["isError"] is True
+        assert "2 of the 2 named operations still have generating to do (A, B)" in res["message"]
+
+    def test_a_flag_left_raised_over_a_settled_operation_does_not_refuse(self, monkeypatch, install):
+        # MEASURED: isGenerating stays true for ~1.1 s past the Future completing, so the raw flag
+        # would refuse a compare cam_get_status already calls completed - and the refusal's own
+        # remedy would never come true. Both settle on _cam_common.op_settled.
+        a, b = _op("A", {"feed": "100"}), _op("B", {"feed": "200"})
+        b.isGenerating = True                     # state 0 with a toolpath: the flag is lagging
+        install([a, b])
+        assert cc.handler(operation_a="A", operation_b="B")["isError"] is False
 
 
 class TestDiffLogic:
@@ -274,3 +350,182 @@ class TestCaps:
         out = _payload(cc.handler(operation_a="A", operation_b="B",
                                                      max_results="lots"))
         assert len(out["differences"]) == 3 and out["truncated"] is False
+
+
+# ── the GEOMETRY half: what is SELECTED, which no parameter expression carries ────────────────────
+
+class _CurveSelection:
+    """One CAM curve selection: the read-back channel (outputGeometry, value) plus the per-kind
+    properties this one answers - an unset name raises, the way a class not carrying it does."""
+
+    def __init__(self, segments=(), entities=0, **props):
+        self.outputGeometry = [SimpleNamespace(count=n) for n in segments]
+        self.value = list(range(entities))
+        for key, value in props.items():
+            setattr(self, key, value)
+
+
+class _CurveSelections:
+    """A CurveSelections collection: count + item, the bounded walk the compare reads."""
+
+    def __init__(self, items=()):
+        self._items = list(items)
+
+    @property
+    def count(self):
+        return len(self._items)
+
+    def item(self, index):
+        return self._items[index]
+
+
+class _CurveParam(FakeCAMParameter):
+    """A curve-selection parameter, whose .value answers getCurveSelections()."""
+
+    def __init__(self, name, selections=()):
+        super().__init__(name)
+        self.value = SimpleNamespace(getCurveSelections=lambda: _CurveSelections(selections))
+
+
+class _ObjectSetParam(FakeCAMParameter):
+    """A direct/surface set parameter, whose .value.value is the CAD-object list."""
+
+    def __init__(self, name, entities=0):
+        super().__init__(name)
+        self.value = SimpleNamespace(value=list(range(entities)))
+
+
+def _geo_op(name, params):
+    """An operation carrying selection parameters and nothing else."""
+    return FakeOperation(name, parameters=FakeCAMParameters(list(params)),
+                         tool=FakeTool(description="T"))
+
+
+class TestGeometryDiff:
+    """Two operations can carry byte-identical parameter expressions and cut different material:
+    what is selected lives on the selection objects, not in any expression."""
+
+    def test_the_same_parameters_with_a_different_chain_knob_are_not_identical(self, install):
+        install([_geo_op("A", [_CurveParam("contours", [_CurveSelection([4], 4, isOpen=False)])]),
+                 _geo_op("B", [_CurveParam("contours", [_CurveSelection([4], 4, isOpen=True)])])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        assert out["difference_count"] == 0            # nothing in the expressions moved
+        assert out["geometry_difference_count"] == 1
+        row = out["geometry_differences"][0]
+        assert row["parameter"] == "contours"
+        assert row["operation_a"]["properties"][0]["isOpen"] is False
+        assert row["operation_b"]["properties"][0]["isOpen"] is True
+
+    def test_a_tangential_extension_on_one_chain_is_a_difference(self, install):
+        # The ledger's own case: two 2D contours on the same chain, one extended tangentially, read
+        # 0 of 462 parameter differences - the extension lives on the ChainSelection.
+        import adsk.cam
+        distance = getattr(adsk.cam.ExtensionTypes, "DistanceExtensionType")
+        boundary = getattr(adsk.cam.ExtensionTypes, "BoundaryExtensionType")
+        install([_geo_op("A", [_CurveParam("contours", [
+                    _CurveSelection([4], 4, extensionType=boundary, startExtensionLength=0.0)])]),
+                 _geo_op("B", [_CurveParam("contours", [
+                    _CurveSelection([4], 4, extensionType=distance, startExtensionLength=0.5)])])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        assert out["difference_count"] == 0
+        assert out["geometry_difference_count"] == 1
+        row = out["geometry_differences"][0]["operation_b"]["properties"][0]
+        # the enum decodes to its member spelling, not the ordinal a caller cannot read
+        assert row["extensionType"] == "distance"
+        # ...and the length is Fusion's internal CM scaled into the requested units: 0.5 cm = 5 mm
+        assert row["startExtensionLength"] == 5.0
+        assert out["geometry_units"] == "mm"
+
+    def test_a_selection_length_is_scaled_into_the_requested_units(self, install):
+        # 0.5 cm reads 5 mm, 0.5 cm, and 0.19685 in - the raw cm would misreport every one of them.
+        for units, want in (("mm", 5.0), ("cm", 0.5), ("in", 0.196850)):
+            install([_geo_op("A", [_CurveParam("contours", [
+                        _CurveSelection([4], 4, minimumCornerRadius=0.5)])]),
+                     _geo_op("B", [_CurveParam("contours", [
+                        _CurveSelection([4], 4, minimumCornerRadius=0.0)])])])
+            out = _payload(cc.handler(operation_a="A", operation_b="B", units=units))
+            row = out["geometry_differences"][0]["operation_a"]["properties"][0]
+            assert row["minimumCornerRadius"] == want, units
+            assert out["geometry_units"] == units
+
+    def test_an_unknown_units_key_is_refused_naming_the_valid_ones(self, install):
+        install([_geo_op("A", []), _geo_op("B", [])])
+        res = cc.handler(operation_a="A", operation_b="B", units="furlong")
+        assert res["isError"] is True and "furlong" in res["message"] and "mm" in res["message"]
+
+    def test_a_loop_type_decodes_to_the_spelling_cam_select_geometry_takes(self, install):
+        # the enum int crossing raw would hand back a number that input does not accept
+        import adsk.cam
+        inside = getattr(adsk.cam.LoopTypes, "OnlyInsideLoops")
+        install([_geo_op("A", [_CurveParam("contours", [_CurveSelection([1], 1, loopType=inside)])]),
+                 _geo_op("B", [_CurveParam("contours", [_CurveSelection([1], 1)])])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        row = out["geometry_differences"][0]["operation_a"]["properties"][0]
+        assert row["loopType"] == "inside"
+
+    def test_a_differing_entity_count_on_a_direct_set_is_a_difference(self, install):
+        install([_geo_op("A", [_ObjectSetParam("holeFaces", 3)]),
+                 _geo_op("B", [_ObjectSetParam("holeFaces", 7)])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        assert out["geometry_difference_count"] == 1
+        row = out["geometry_differences"][0]
+        assert row["operation_a"] == {"entities": 3} and row["operation_b"] == {"entities": 7}
+
+    def test_a_set_only_one_side_carries_reads_not_present(self, install):
+        install([_geo_op("A", [_ObjectSetParam("driveSurfaces", 2)]), _geo_op("B", [])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        row = next(r for r in out["geometry_differences"] if r["parameter"] == "driveSurfaces")
+        assert row["operation_a"] == {"entities": 2} and row["operation_b"] == "(not present)"
+
+    def test_matching_selections_are_counted_same_not_reported(self, install):
+        install([_geo_op("A", [_ObjectSetParam("holeFaces", 3)]),
+                 _geo_op("B", [_ObjectSetParam("holeFaces", 3)])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        assert out["same_geometry_count"] == 1 and out["geometry_differences"] == []
+
+    def test_a_zero_zero_answer_names_what_it_did_not_compare(self, install):
+        install([_geo_op("A", [_ObjectSetParam("holeFaces", 3)]),
+                 _geo_op("B", [_ObjectSetParam("holeFaces", 3)])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        assert "not read here" in out["note"] and "open both operations in Fusion" in out["note"]
+        assert out["geometry_properties_read"] == list(cc._SELECTION_PROPS)
+
+    def test_no_selection_set_answering_is_a_different_zero(self, install):
+        # neither op carries a selection parameter: the geometry counts are absent evidence, and
+        # publishing geometry_properties_read would claim reads that never happened.
+        install([_geo_op("A", []), _geo_op("B", [])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        assert out["geometry_difference_count"] == 0 and out["same_geometry_count"] == 0
+        assert "NO selection set answered" in out["note"]
+        assert "geometry_properties_read" not in out and "geometry_units" not in out
+
+    def test_a_parameter_difference_does_not_silence_the_no_geometry_disclosure(self, install):
+        # two ops differing only in feed and carrying NO selection parameter: the diff is non-zero,
+        # so gating the disclosure on it published a silent 0/0 the description promises to explain.
+        a = _op("A", {"tool_feedCutting": "100"})
+        b = _op("B", {"tool_feedCutting": "900"})
+        install([a, b])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        assert out["difference_count"] == 1 and out["geometry_difference_count"] == 0
+        assert "NO selection set answered" in out["note"]
+
+    def test_one_difference_anywhere_drops_that_disclosure(self, install):
+        install([_geo_op("A", [_ObjectSetParam("holeFaces", 3)]),
+                 _geo_op("B", [_ObjectSetParam("holeFaces", 4)])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        assert "not read here" not in out["note"] and "geometry_properties_read" not in out
+
+    def test_the_selection_rows_are_capped_one_over_and_not_at_the_cap(self, install):
+        cap = cc._SELECTION_ROWS_CAP
+        at = [_CurveSelection([1], 1) for _ in range(cap)]
+        over = [_CurveSelection([1], 1) for _ in range(cap + 1)]
+        install([_geo_op("A", [_CurveParam("contours", at)]),
+                 _geo_op("B", [_CurveParam("contours", over)])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        row = out["geometry_differences"][0]
+        assert row["operation_a"]["selections"] == cap
+        assert len(row["operation_a"]["properties"]) == cap
+        assert "properties_truncated" not in row["operation_a"]
+        assert row["operation_b"]["selections"] == cap + 1
+        assert len(row["operation_b"]["properties"]) == cap
+        assert row["operation_b"]["properties_truncated"] is True

@@ -4,13 +4,14 @@ tier: pipeline
 fixture: P2-Gimbal (the S2b artifact - all hardware solid, zero overlap, support contacts at the
   carrier-on-pedestal and crank-on-frame engagements, pins in clearance bores, no joints)
   OPENED as the active document
-  by the orchestrator from MCP Test Project / Pipeline-v1 BY URN, active hub PINNED first. The
+  by the orchestrator from the configured project/folder BY URN, active hub PINNED first. The
   agent assembles the motion and saves AS A NEW document (P3-Gimbal); P2-Gimbal's cloud version
   must remain untouched. Missing fixture = ask the user - never create a project.
 budget:
   max_tool_calls: 150
   max_tokens: 130000
-substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
+substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag; {{PROJECT}} /
+  {{FOLDER}} -> the configured destination"
 perturbations: none (baseline)
 expected_refusals: none
 ---
@@ -89,7 +90,7 @@ pedestal or the carrier at a travel extreme is a real BINDING defect: report it 
 the offending pose and volume. The ring range is FIXED at +/-30, so there is nothing to narrow: a
 bind inside that range is a FAIL of this scenario, never a smaller range to declare instead.
 
-Finally save AS A NEW document: P3-Gimbal into MCP Test Project / Pipeline-v1/{{RUN_FOLDER}} (create the folder path if missing; never a project).
+Finally save AS A NEW document: P3-Gimbal into {{PROJECT}} / {{FOLDER}}/{{RUN_FOLDER}} (create the folder path if missing; never a project).
 
 POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH units/degrees.
 
@@ -114,7 +115,7 @@ POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH
   support engagements are not overlaps); any overlap is NAMED with its volume and the two bodies,
   and a ring binding into the pedestal or carrier at a travel extreme is reported as a FAIL with
   the pose (report the checker's actual output at each pose).
-- doc_get -> saved as "P3-Gimbal", real URN, version >= 1, in MCP Test Project / Pipeline-v1/{{RUN_FOLDER}} -
+- doc_get -> saved as "P3-Gimbal", real URN, version >= 1, in {{PROJECT}} / {{FOLDER}}/{{RUN_FOLDER}} -
   AND P2-Gimbal still at the version you found it.
 
 REPORT - return EXACTLY this structure, nothing else:

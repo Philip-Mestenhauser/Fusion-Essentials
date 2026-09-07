@@ -659,6 +659,51 @@ class TestEntityAnchors:
         _name, args = s.geometricConstraints.calls[0]
         assert args[0].name == "L0E"
 
+    def test_a_coincident_between_two_refs_that_are_ONE_point_is_refused_before_the_write(self, install):
+        # A closed_path welds its seam, so the two ends meeting there are a SINGLE SketchPoint; the
+        # solver answers a coincident onto itself with VCS_SKETCH_SOLVING_FAILED, which names
+        # nothing the caller can act on.
+        seam = _endpoint("SEAM", 4.0, 0.0)
+        s = FakeSketch("S",
+                       lines=[_AnchoredLine("L0", _endpoint("L0S", 0.0, 0.0), seam),
+                              _AnchoredLine("L1", seam, _endpoint("L1E", 4.0, 4.0))],
+                       points=[FakeCurve("P0", "point")])
+        install(s)
+        res = sc.handler(constraint="coincident", sketch_name="S",
+                         entity_one="line:0:end", entity_two="line:1:start")
+        assert res["isError"] is True
+        assert "'line:0:end' and 'line:1:start'" in res["message"]
+        assert "ONE sketch point" in res["message"]
+        assert s.geometricConstraints.calls == []       # nothing was written
+
+    def test_two_DISTINCT_wrappers_of_one_point_are_refused_too(self, install):
+        # The live shape: every read mints a fresh wrapper, so the seam's two ends come back as two
+        # objects `is` never matches - one entityToken is what says they are one point.
+        left, right = _endpoint("SEAM", 4.0, 0.0), _endpoint("SEAM", 4.0, 0.0)
+        left.entityToken = right.entityToken = "TOK-SEAM"
+        s = FakeSketch("S",
+                       lines=[_AnchoredLine("L0", _endpoint("L0S", 0.0, 0.0), left),
+                              _AnchoredLine("L1", right, _endpoint("L1E", 4.0, 4.0))],
+                       points=[FakeCurve("P0", "point")])
+        install(s)
+        res = sc.handler(constraint="coincident", sketch_name="S",
+                         entity_one="line:0:end", entity_two="line:1:start")
+        assert left is not right                        # two objects, one point
+        assert res["isError"] is True and "ONE sketch point" in res["message"]
+        assert s.geometricConstraints.calls == []
+
+    def test_two_CURVES_sharing_one_token_are_not_refused_as_one_point(self, install):
+        # MEASURED in this repo: two distinct sketch CURVES (a split's pieces) share one
+        # entityToken, so an identity check over curve operands would refuse a legitimate pair
+        # with a message about points. The guard reads the ref FORM, so a curve pair never meets it.
+        a, b = FakeCurve("L0", "line"), FakeCurve("L1", "line")
+        a.entityToken = b.entityToken = "TOK-SPLIT"
+        s = FakeSketch("S", lines=[a, b], points=[FakeCurve("P0", "point")])
+        install(s)
+        res = sc.handler(constraint="coincident", sketch_name="S",
+                         entity_one="line:0", entity_two="line:1")
+        assert "ONE sketch point" not in (res.get("message") or "")
+
     def test_both_point_slots_of_horizontal_points_take_anchors(self, install):
         s = _anchored_sketch(); install(s)
         _payload(sc.handler(constraint="horizontal_points", sketch_name="S",

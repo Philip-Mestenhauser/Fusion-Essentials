@@ -114,9 +114,6 @@ _ALLOWLIST = {}
 # Shrink-only: the staleness check fails the moment a dump lands (auto-map then takes over) or the
 # class goes.
 _UNMAPPED_OK = {
-    "FakeInfiniteLine3D": "InfiniteLine3D has no SHAPES dump; every member the fake carries "
-                          "(create/origin/direction/isColinearTo) is exercised live by the shipped "
-                          "Add Holder command code that _holder.py keeps verbatim",
     "_MeshBodies": "MeshBodies has no SHAPES dump; the one member the fake takes a position on is "
                    "itemByName, which it DROPS off the measured meshbodies-no-itembyname row "
                    "(BEHAVIOR['meshbodies_has_itembyname']) rather than asserting a surface",

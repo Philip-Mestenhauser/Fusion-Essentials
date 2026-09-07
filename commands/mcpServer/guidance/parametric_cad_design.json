@@ -456,15 +456,15 @@
           "section": "surface",
           "title": "A swept and surfaced bottle",
           "scenarios": ["surfaced_product"],
-          "use_when": "a container or housing whose section changes along a curved spine",
+          "use_when": "a container whose section changes along a curved spine, its neck narrower than the body",
           "steps": [
             {"tool": "sketch_create", "do": "'Bottle_Bottom' on XY: an ellipse dimensioned by its radii", "read_back": "fully constrained"},
             {"tool": "sketch_create", "do": "'Bottle_Profiles' on XZ: spine arc, offset rail, cv_spline neck", "read_back": "the arc and offset dimensions"},
             {"tool": "model_loft", "do": "loft the ellipse to the neck section with the rails, as_surface true", "read_back": "is_solid false"},
-            {"tool": "sketch_project", "do": "on a plane rotated 90 deg, project the skin edges and draw the crown arc", "read_back": "fixed_spline entities"},
-            {"tool": "surface_extrude", "do": "extrude the crown arc into a surface past the skin", "read_back": "a second surface body"},
-            {"tool": "surface_extend", "do": "extend it 5 mm", "read_back": "the distance"},
-            {"tool": "surface_trim", "do": "trim skin with crown, then crown with skin, naming the kept cell", "read_back": "the cells removed"},
+            {"tool": "sketch_create", "do": "'Bottle_Crown' on XZ: the shoulder profile, body radius to neck", "read_back": "fully constrained"},
+            {"tool": "surface_revolve", "do": "revolve the profile about the bottle axis", "read_back": "a second surface body"},
+            {"tool": "surface_extend", "do": "extend the NECK until it crosses the crown", "read_back": "the distance"},
+            {"tool": "surface_trim", "do": "trim ONLY where the crown crosses the body, keeping that cell", "read_back": "the cells removed"},
             {"tool": "model_stitch", "do": "stitch the two at 0.1 mm", "read_back": "became_solid true"},
             {"tool": "model_shell", "do": "shell to the wall, opening the mouth", "read_back": "volume dropped"},
             {"tool": "model_fillet", "do": "chord-length fillets on the shoulder", "read_back": "face count grew"},
@@ -569,7 +569,7 @@
           "when": "library fasteners are inserted",
           "do": "expect a set of adsk_ parameters per fastener and read only the authored set; name each fastener instance by its spec",
           "except": "a design with no library parts",
-          "prove": [{"tool": "param_get", "observe": "the user parameters with include_model_parameters left false; the adsk_ names are the fasteners', the rest are yours"}]
+          "prove": [{"tool": "param_get", "observe": "the authored user parameters are what comes back and generated_skipped counts the adsk_ ones the fasteners minted; include_generated=true lists those"}]
         }
       ],
       "recipes": [
@@ -736,9 +736,21 @@
           "section": "manufacture",
           "scenarios": ["machining_job"],
           "when": "a turning profile finishing cycle generates carrying a warning",
-          "do": "read the warning text before treating the cycle as clean: 'Lead-Out has been modified due to a gouge with the remaining stock' says the exit move ran into stock the cycle leaves behind, and Fusion moved it rather than refusing. Setting doLeadOut false on that operation with cam_edit_operation cleared it - measured on a turned flange, where the four cycles then read no warning at all and every one cut",
+          "do": "'Lead-Out has been modified due to a gouge with the remaining stock' says the exit move ran into stock the cycle leaves behind, and Fusion moved it rather than refusing. Measured on a turned flange, each remedy cleared it: doLeadOut false, or useStockToLeave true with xStockToLeave and zStockToLeave at 0.5mm. Take the allowance on a cycle a later pass follows; turn the lead-out off on the last one",
           "except": "a cycle whose exit move has to clear a face, where the lead-out is the point",
           "prove": [{"tool": "cam_get_status", "observe": "operations_with_warnings is empty for that setup and none of its operations is in empty_toolpaths"}]
+        },
+        {
+          "id": "rest-stock-is-what-the-setup-before-left",
+          "section": "manufacture",
+          "scenarios": ["machining_job"],
+          "when": "a milling setup takes stock_mode 'previous_setup' after a turning setup",
+          "do": "MEASURED on a turned flange, one whole-model adaptive with its parameters untouched: it generated EMPTY on that setup under previous_setup stock in both the 'rest' and 'setupStockSilhouette' modes, and the same operation cut 347 s the moment the setup alone was switched to a relative box. These stock extents keep the relative-box numbers and describe nothing this setup cuts, so size a clearing strategy from the preceding setup's own operations, not from these extents. An operation's OWN rest is a separate knob: defineStockBy 'rest' reads restMaterialSource 'previousOperations' - the operations before it in THIS setup, not the setup's stock mode - and with every sibling valid it computes, no 'Failed to generate rest material.' among the warnings",
+          "except": "the first setup of a job, whose stock is the billet",
+          "prove": [
+            {"tool": "cam_get", "observe": "the setup row reads stock_mode 'previous_setup' and stock_extents_describe says the box is not the stock"},
+            {"tool": "cam_get_status", "observe": "whether the clearing operation is named in empty_toolpaths - the list reports membership, never why"}
+          ]
         }
       ],
       "recipes": [
@@ -750,22 +762,22 @@
           "use_when": "a face, pocket, wall, hole or free-form surface needs an operation",
           "steps": [
             {"tool": "cam_get", "do": "read the setup's allowed strategies", "read_back": "allowed true for the candidates; a false one cannot be created"},
-            {"tool": "find_geometry", "do": "classify the feature: flat top (face), pocket floor (adaptive or pocket), wall (2D contour), hole (drill, bore, thread), curved surface (parallel, contour, scallop), edge (chamfer)", "read_back": "the face kinds and normals"},
+            {"tool": "find_geometry", "do": "classify the feature: flat top (face), pocket floor, wall (2D contour), hole (drill, bore, thread), curved surface (parallel, contour, scallop), edge (chamfer)", "read_back": "the face kinds and normals"},
             {"tool": "cam_create_operation", "do": "create the candidate with a named tool", "read_back": "its name and state"},
-            {"tool": "cam_select_geometry", "do": "give it the chains or faces; set the chain extension where the cut must run past the wall", "read_back": "the selection read back"},
+            {"tool": "cam_select_geometry", "do": "give it the chains or faces, with the chain extension where the cut runs past the wall", "read_back": "the selection count"},
             {"tool": "cam_generate", "do": "generate", "read_back": "a handle, then cam_get_status until completed"},
-            {"tool": "cam_inspect_toolpaths", "do": "inspect the result", "read_back": "the operation is not among empty_toolpaths; an empty one means the wrong strategy or selection"},
-            {"tool": "cam_get", "do": "read the time slice", "read_back": "machining time above zero for the operation"},
-            {"tool": "cam_compare_operations", "do": "when unsure between two strategies, create both and compare", "read_back": "the handful of parameters that differ name the trade-off"}
+            {"tool": "cam_inspect_toolpaths", "do": "inspect the result", "read_back": "the operation is not among empty_toolpaths; an empty one is the wrong strategy or selection"},
+            {"tool": "cam_get", "do": "read the time slice", "read_back": "machining time above zero"},
+            {"tool": "cam_compare_operations", "do": "when unsure between two strategies, compare the pair: pocket and adaptive differ in 114 parameters, optimalLoad and stepdown among them", "read_back": "the parameters that differ name the trade-off"}
           ],
           "bar": {
-            "measure": "cam_inspect_toolpaths lists no empty toolpath, cam_get's time slice reads above zero, and the operation is valid with no warning",
+            "measure": "cam_inspect_toolpaths lists no empty toolpath, the time slice reads above zero, and the operation is valid with no warning",
             "eyes": "the toolpath covers the feature and nothing else"
           },
           "exemplar": {
             "document": "2D - Overview of toolpaths",
             "urn": "urn:adsk.wipprod:dm.lineage:VJJsAJVXQmiDOFFl6-xErw",
-            "look_at": "22 operations named for their variant; compare '2D Contour2' with its 'multiple passes', 'Trimmed' and 'Rest machining' siblings",
+            "look_at": "22 operations named for their variant, '2D Contour2' beside its multiple-passes, Trimmed and Rest siblings",
             "access": "Autodesk Design Samples; needs hub access, read only"
           }
         },
@@ -786,6 +798,28 @@
           "bar": {
             "measure": "the time slice reads above zero, the census lists the operation as not empty, and the posted file exists with a size",
             "eyes": "the shown toolpath stays on the feature, inside the stock and clear of the fixture"
+          }
+        },
+        {
+          "id": "manufacture-radial-hole-across-the-axis",
+          "section": "manufacture",
+          "title": "Drilling across the turned axis",
+          "scenarios": ["machining_job"],
+          "use_when": "a hole whose axis runs across the part axis - a cross-drilling, or a hole through a boss on a turned part",
+          "steps": [
+            {"tool": "find_geometry", "do": "find the hole's own cylindrical face", "read_back": "its 'axis', which is not the milling setup's Z"},
+            {"tool": "cam_create_setup", "do": "give that axis a setup of its own: one per hole axis, so opposed holes are two setups, never one bore through both", "read_back": "the setup name and zero operations"},
+            {"tool": "cam_edit_setup", "do": "bind the setup's Z to that face: wcs={'z_axis': <the handle>}", "read_back": "wcs_set.z_axis.bound_entities reads 1"},
+            {"tool": "cam_create_operation", "do": "create the drilling cycle", "read_back": "the name it landed under"},
+            {"tool": "cam_select_geometry", "do": "aim it with selection='holes' and the same face", "read_back": "selection_param 'holeFaces' and the face count"},
+            {"tool": "cam_generate", "do": "generate, then read the status", "read_back": "on world Z it errors 'Cylindrical face not in tool orientation!'; bound to the face it errors 'Selected face may not be safe for cutting at current tool orientation!' - the bound axis points into the material"},
+            {"tool": "cam_edit_setup", "do": "turn the axis round: parameters={'wcs_orientation_flipZ': 'true'}", "read_back": "the parameter reads back true"},
+            {"tool": "cam_generate", "do": "regenerate", "read_back": "operations_with_errors is empty"},
+            {"tool": "cam_get", "do": "read the time slice", "read_back": "machining time above zero for the drill"}
+          ],
+          "bar": {
+            "measure": "the operation carries no error and its machining time reads above zero",
+            "eyes": "the drill enters square to its face and stops in the material, not through to the far side"
           }
         }
       ]

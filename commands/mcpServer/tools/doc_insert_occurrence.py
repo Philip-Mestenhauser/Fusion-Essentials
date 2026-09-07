@@ -15,6 +15,7 @@ from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
+from . import _doc_common
 from . import _inputs
 from . import _data_common
 from ._data_common import _b64url_decode, _resolve_data_file
@@ -27,6 +28,26 @@ _INTO_COMPONENT = _inputs.OccurrenceRef("into_component",
 _REMOVE_EXISTING = _inputs.OccurrenceRef("remove_existing",
         description="Existing occurrence to delete first: its joints go with it, and a feature that "
                     "referenced its geometry stays in the timeline carrying reference failures.")
+
+
+def _bound_version(design, lineage):
+    """The source version this host's reference(s) to `lineage` hold - None when the source id did
+    not read, when no reference matched, when a matched row's own version did not read, or when two
+    rows disagree (one source can be referenced several times, at two versions)."""
+    # Matched on the LINEAGE key, the way every other reference walk here matches: a reference id
+    # carrying a '?version=' suffix would otherwise miss the source it addresses. An UNREAD id keys
+    # to '' and would match every other unread one, so it answers nothing instead.
+    want = _doc_common._lineage_key(lineage)
+    if not want:
+        return None
+    doc = safe(lambda: design.parentDocument)
+    held = [safe(lambda r=ref: r.version)
+            for ref in _common.iter_collection(safe(lambda: doc.documentReferences))
+            if _doc_common._lineage_key(safe(lambda r=ref: r.dataFile.id)) == want]
+    # A row whose version did not read is UNKNOWN, never agreement: {2, None} is not "bound at 2".
+    if not held or any(v is None for v in held):
+        return None
+    return held[0] if len(set(held)) == 1 else None
 
 
 def handler(document_id: str = "", into_component: str = "",
@@ -120,6 +141,11 @@ def handler(document_id: str = "", into_component: str = "",
                      "(isReferencedComponent=false) - the associative link did not form. Confirm "
                      "the source and host share a project, then retry." + gone)
 
+    # WHICH version the reference bound, read off the reference itself rather than assumed from the
+    # insert: a source whose stream moved on binds a version the source's own tip is already past.
+    lineage = safe(lambda: data_file.id)
+    bound = _bound_version(design, lineage)
+    latest = safe(lambda: data_file.latestVersionNumber)
     return ok({
         "inserted": True,
         "document_name": safe(lambda: data_file.name),
@@ -127,14 +153,18 @@ def handler(document_id: str = "", into_component: str = "",
         "into_component": comp_desc,
         "new_occurrence_name": safe(lambda: new_occ.name),
         "is_reference": is_ref,
+        "bound_version": bound,
+        "source_latest_version": latest,
+        # null, never false, when either number did not read - an unread pair is not a stale one.
+        "bound_is_tip": (bound == latest) if (bound is not None and latest is not None) else None,
         "removed_occurrence": removed,
         "placed_at": ({"x": x, "y": y, "z": z, "units": units} if (x or y or z) else "origin"),
         "rotate_deg": float(rotate_deg or 0.0),
-        "note": ("Inserted at the requested placement, from the source's last SAVED cloud version - "
-            "unsaved source edits are not here (save the source, then doc_update_xref). Refine with "
-            "joint_create to mate it to specific geometry. If an occurrence was removed, any feature "
-            "that referenced its geometry REMAINS in the timeline carrying reference failures - "
-            "re-point or delete those features."),
+        "note": ("Inserted at the requested placement, from the source's last SAVED cloud version. "
+            "bound_version is the version this reference holds - null where none read it or two "
+            "disagree; bound_is_tip whether it is the source's latest - null if either is unknown, "
+            "false is brought current with doc_update_xref. A removed occurrence leaves features "
+            "that referenced its geometry carrying reference failures."),
     })
 
 

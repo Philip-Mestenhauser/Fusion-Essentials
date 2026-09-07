@@ -787,9 +787,8 @@ TOOL_DESCRIPTION = (
     "are exclusive). "
     "Only VALID toolpaths post (out-of-date/errored "
     "ops are omitted) - run cam_generate first. Success is gated on the file actually landing on disk. "
-    "If 'program_name' names an EXISTING program and scope/setups/post/output_folder are all omitted, "
-    "it posts AS-IS from the program's own stored configuration; passing any of those against a stored "
-    "configuration that resolves differently is refused unless 'overwrite' is set. "
+    "Naming an EXISTING program with scope/setups/post/output_folder all omitted posts it AS-IS from "
+    "its own stored configuration. "
     "WRITES a persistent NC Program and a file.\n"
     + _outputs.produces_block(RETURNS)
 )

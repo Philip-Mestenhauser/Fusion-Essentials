@@ -119,13 +119,19 @@ class FakeFittedSpline:
 
 
 class FakeCVSpline:
+    """Local double - SketchControlPointSpline has no live_api_facts.SHAPES entry; controlPoints is
+    a plain sequence (len/iteration, no .count/.item) of SketchPoints."""
+
     def __init__(self, is_construction=False, is_closed=False, degree=3, control_point_count=4,
-                 tok=None):
+                 tok=None, control_points=None):
         self.isConstruction = is_construction
         self.isClosed = is_closed
         self.degree = degree
         self.entityToken = tok or f"tok-cv-{id(self)}"
-        self.controlPoints = _Coll(list(range(control_point_count)))
+        pts = (control_points if control_points is not None
+               else [(float(i), float(i)) for i in range(control_point_count)])
+        self.controlPoints = [FakeSketchPoint(f"tok-cp-{i}", x, y)
+                              for i, (x, y) in enumerate(pts)]
 
 
 class FakeFixedSpline:
@@ -402,6 +408,125 @@ class TestEllipseAndPolygon:
         out = _payload(sd.handler(sketch_name="E", include_entities=True))
         tan = next(c for c in out["constraints"] if c["type"] == "tangent")
         assert "ellipse:0" in tan["entities"]
+
+
+# ── the constraint families whose referenced entities were unlisted ─────────
+#
+# offset / the two patterns / the two point-alignment constraints each answered entities [], so a
+# reader could not tell what the offset or pattern was OF. The attribute names come from the
+# generated bindings surface (tests/api_surface.py).
+
+class OffsetConstraint:
+    def __init__(self, parents, children):
+        self.parentCurves = _NamedCollection(list(parents))
+        self.childCurves = _NamedCollection(list(children))
+
+
+class HorizontalPointsConstraint:
+    def __init__(self, a, b):
+        self.pointOne, self.pointTwo = a, b
+
+
+class CircularPatternConstraint:
+    def __init__(self, center, entities):
+        self.centerPoint = center
+        self.entities = _Vec(list(entities))
+
+
+class TestReferencedEntitiesListed:
+    def test_offset_lists_the_curves_it_was_taken_from(self):
+        src = FakeLine("o0", 0, 0, 10, 0)
+        copy = FakeLine("o1", 0, 1, 10, 1)
+        s = FakeSketch("Off", lines=[src, copy],
+                       constraints=[OffsetConstraint([src], [copy])])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="Off", include_entities=True))
+        off = next(c for c in out["constraints"] if c["type"] == "offset")
+        assert off["entities"] == ["line:0", "line:1"]
+
+    def test_horizontal_points_links_its_two_points_under_the_write_spelling(self):
+        p0, p1 = FakeSketchPoint("hp0", 0, 0), FakeSketchPoint("hp1", 5, 0)
+        s = FakeSketch("HP", points=[p0, p1],
+                       constraints=[HorizontalPointsConstraint(p0, p1)])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="HP", include_entities=True))
+        hp = out["constraints"][0]
+        assert hp["type"] == "horizontal_points"
+        assert hp["entities"] == ["point:0", "point:1"]
+
+    def test_circular_pattern_names_its_centre_and_its_seed(self):
+        centre = FakeSketchPoint("cp", 0, 0)
+        seed = FakeCircle("cs", 2, 0, 1)
+        s = FakeSketch("CP", circles=[seed], points=[centre],
+                       constraints=[CircularPatternConstraint(centre, [seed])])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="CP", include_entities=True))
+        cp = out["constraints"][0]
+        assert cp["type"] == "circular_pattern"
+        assert cp["entities"] == ["point:0", "circle:0"]
+
+    def test_a_partner_with_no_id_is_explained_once_in_the_note(self):
+        # A partner whose token is not in this sketch's map resolves to '?'; the row still lists it
+        # positionally, and the note says what '?' means. Why the token is missing is not something
+        # this walk establishes, so neither the note nor this test claims a reason.
+        foreign = FakeLine("not-in-this-sketch", 0, 0, 1, 1)
+        mine = FakeLine("t0", 0, 0, 5, 0)
+        s = FakeSketch("Q", lines=[mine], constraints=[PerpendicularConstraint(mine, foreign)])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="Q", include_entities=True))
+        assert out["constraints"][0]["entities"] == ["line:0", "?"]
+        assert "'?' has no id in this payload" in out["note"]
+
+    def test_a_sketch_whose_partners_all_resolve_is_not_told_about_one(self):
+        _install(_rich_sketch())
+        out = _payload(sd.handler(sketch_name="S4", include_entities=True))
+        assert "no id in this payload" not in out["note"]
+
+    def test_every_published_type_is_a_spelling_sketch_constrain_accepts(self):
+        # the read's type is what an agent passes back as sketch_constrain(constraint=...); a name
+        # only this file spells ('horizontalpoints') is a dead end at the write side.
+        from conftest import load_tool
+        sc = load_tool("sketch_constrain")
+        published = {friendly for friendly, _attrs in sd._CONSTRAINT_REFS.values()}
+        assert published <= set(sc._CONSTRAINTS)
+
+
+# ── a PROJECTED curve reads as an ordinary one without this flag ────────────
+#
+# MEASURED on a sketch created on a face (which auto-projects the face's edges): the four projected
+# lines read isReference True and four drawn lines read False. Nothing else in the row tells a
+# projected copy of a line from a line somebody drew.
+
+class _RefLine(FakeLine):
+    def __init__(self, tok, is_reference):
+        super().__init__(tok, 0, 0, 10, 0)
+        self.isReference = is_reference
+
+
+class TestProjectedCurves:
+    def test_a_projected_curve_is_flagged_and_a_drawn_one_is_not(self):
+        s = FakeSketch("Pr", lines=[_RefLine("p", True), _RefLine("d", False)])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="Pr", include_entities=True))
+        by = {e["id"]: e for e in out["entities"] if e["type"] == "line"}
+        assert by["line:0"]["reference"] is True
+        assert "reference" not in by["line:1"]
+        assert "reference:true marks a curve PROJECTED in from model geometry" in out["note"]
+
+    def test_a_sketch_of_drawn_curves_carries_neither_the_flag_nor_its_sentence(self):
+        s = FakeSketch("Dr", lines=[_RefLine("d", False)])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="Dr", include_entities=True))
+        assert all("reference" not in e for e in out["entities"])
+        assert "PROJECTED" not in out["note"]
+
+    def test_an_unreadable_reference_flag_publishes_nothing(self):
+        # read_flag answers None when the property raises; None is not True, so no key is emitted -
+        # a coerced False would claim the curve was drawn here.
+        s = FakeSketch("Un", lines=[FakeLine("t", 0, 0, 1, 0)])
+        _install(s)
+        out = _payload(sd.handler(sketch_name="Un", include_entities=True))
+        assert "reference" not in out["entities"][0]
 
 
 # ── arc + point geometry records ────────────────────────────────────────────
@@ -861,6 +986,42 @@ class TestSplineEntities:
         assert recs[0]["control_point_count"] == 6
         # SketchControlPointSpline has no isClosed in the live API - the record must not carry one.
         assert "is_closed" not in recs[0]
+
+    def test_the_control_points_themselves_are_listed(self):
+        # A cv_spline's SHAPE is its control polygon; degree + a count says nothing about where the
+        # curve runs, so a builder reading it back had no way to see or re-place a control point.
+        s = FakeSketch("S", cv_splines=[FakeCVSpline(control_points=[(0.0, 0.0), (1.0, 2.5)])])
+        rec = [e for e in sd._entities(s, 1.0)[0] if e["type"] == "cv_spline"][0]
+        assert rec["control_point_count"] == 2
+        assert rec["control_points"] == [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 2.5}]
+        assert "control_points_truncated" not in rec
+
+    def test_a_dense_splines_control_points_are_capped_but_the_count_is_the_true_total(self):
+        # The points ride INSIDE one row of an already-capped list, so a traced spline would blow
+        # past that bound - the array is cut and the COUNT still answers how many there are.
+        n = sd._CV_POINT_CAP + 5
+        s = FakeSketch("S", cv_splines=[FakeCVSpline(control_point_count=n)])
+        rec = [e for e in sd._entities(s, 1.0)[0] if e["type"] == "cv_spline"][0]
+        assert rec["control_point_count"] == n                  # the true total, uncut
+        assert len(rec["control_points"]) == sd._CV_POINT_CAP
+        assert rec["control_points_truncated"] is True
+
+    def test_a_spline_whose_control_points_read_EMPTY_publishes_unknown_not_zero(self):
+        # MEASURED on all 60 splines an SVG import traced: controlPoints reads EMPTY while .degree
+        # RAISES. No spline is describable by zero control points, so 0 would be a false answer a
+        # caller compares against - the count publishes null and the array is absent.
+        s = FakeSketch("S", cv_splines=[FakeCVSpline(control_points=[])])
+        rec = [e for e in sd._entities(s, 1.0)[0] if e["type"] == "cv_spline"][0]
+        assert rec["control_point_count"] is None
+        assert rec["control_points"] is None
+        assert "control_points_truncated" not in rec
+
+    def test_a_spline_exactly_at_the_cap_is_not_marked_truncated(self):
+        # The exact boundary: > the cap truncates, == does not.
+        s = FakeSketch("S", cv_splines=[FakeCVSpline(control_point_count=sd._CV_POINT_CAP)])
+        rec = [e for e in sd._entities(s, 1.0)[0] if e["type"] == "cv_spline"][0]
+        assert len(rec["control_points"]) == sd._CV_POINT_CAP
+        assert "control_points_truncated" not in rec
 
     def test_fixed_spline_listed(self):
         s = FakeSketch("S", fixed_splines=[FakeFixedSpline(is_closed=True)])

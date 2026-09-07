@@ -118,16 +118,48 @@ def all_bodies(design):
     return out
 
 
+_UNREAD = object()
+
+
+def _instance_path(body):
+    """The assembly path a body wrapper is reached through: its placing occurrence's fullPathName,
+    '' for a native body in no context, or None when neither read answered."""
+    occ = _common.safe(lambda: body.assemblyContext, _UNREAD)
+    if occ is _UNREAD:
+        return None
+    if occ is None:
+        return ""
+    return _common.safe(lambda: occ.fullPathName)
+
+
 def same_body(a, b):
-    """Whether two body reads are the SAME body - the API mints a fresh proxy per access, so `is`
-    alone misses one reached through a second walk."""
+    """Whether two body reads are the SAME body in the SAME instance - the API mints a fresh proxy
+    per access, so `is` alone misses one reached through a second walk."""
     # native_identity, never a bare entityToken: that token is document-local, so two bodies out of
     # two x-refs read the same one. An unread identity answers False rather than matching another
     # unread one, which keeps a body VISIBLE rather than hiding the subject by mistake.
     if a is b:
         return True
     ia = _common.native_identity(a)
-    return ia is not None and ia == _common.native_identity(b)
+    if ia is None or ia != _common.native_identity(b):
+        return False
+    # One native body placed twice hands BOTH proxies that one identity, so the identity alone
+    # answers True for every instance. Two PLACEMENT paths separate them; a native body reads no
+    # path at all and is the same body as its own proxy, so only two read paths split the match.
+    pa, pb = _instance_path(a), _instance_path(b)
+    return not (pa and pb) or pa == pb
+
+
+def _relight(entities):
+    """Turn each bulb back on and answer the names whose read-back did NOT come back True - the one
+    restore both isolate_for_fit's early exit and its restore() report their stuck bulbs from."""
+    stuck = []
+    for o in entities:
+        _common.safe(lambda o=o: setattr(o, "isLightBulbOn", True))
+        if _common.safe(lambda o=o: o.isLightBulbOn) is not True:
+            stuck.append(_common.safe(lambda o=o: o.fullPathName)
+                         or _common.safe(lambda o=o: o.name) or "?")
+    return stuck
 
 
 def isolate_for_fit(name, ref):
@@ -137,20 +169,43 @@ def isolate_for_fit(name, ref):
     design = _common.design()
     root = _common.safe(lambda: design.rootComponent) if design else None
     if not root:
-        return None, None, f"{ref.name}: no active design to resolve '{name}' against."
+        return None, None, f"{ref.name}: no active design to resolve '{_common.short_ref(name)}' against."
     resolved, err = ref.resolve(name)
     if resolved is None:
-        return None, None, err
+        # The kind quotes the caller's whole value back, so the echo is substituted into its message.
+        return None, None, err.replace(name, _common.short_ref(name)) if err and name else err
     target, kind = resolved
     prev = []
     if kind in ("body", "mesh"):
         # A single-body root design places no occurrence at all, so the subject is the BODY and the
         # other BODIES' bulbs are what a fit has to clear.
+        was_lit = _common.read_flag(lambda: target.isLightBulbOn)
         for b in all_bodies(design):
             if same_body(b, target) or not _common.safe(lambda b=b: b.isLightBulbOn):
                 continue
             prev.append(b)
             _common.safe(lambda b=b: setattr(b, "isLightBulbOn", False))
+        # The subject's OWN bulb, re-read: this walk never writes it, so a bulb that read on before
+        # and off after went off with another placement's. Capturing now would return a picture of
+        # nothing as a success. A bulb that did not read either time is no evidence and stands.
+        if was_lit is True and _common.read_flag(lambda: target.isLightBulbOn) is False:
+            # WHY it went dark, read rather than assumed: another body this walk hid is the SAME
+            # physical body in a second placement. Without that reading the message states only
+            # what it saw - a bulb this call never wrote going off.
+            ident = _common.native_identity(target)
+            shared = ident is not None and any(
+                _common.native_identity(b) == ident for b in prev)
+            stuck = _relight(prev)
+            msg = (f"{ref.name}: hiding the other bodies turned the SUBJECT's own bulb off, which "
+                   f"this call never wrote"
+                   + (f" - another placement of the same body was hidden, so '{_common.short_ref(name)}' "
+                      "shares one bulb with it and cannot be lit alone." if shared else ".")
+                   + " Frame the occurrence by its fullPathName instead. Nothing was captured.")
+            if stuck:
+                msg += (f" {len(stuck)} bulb(s) did NOT come back on: "
+                        f"{', '.join(str(s) for s in stuck[:5])} - the document is left with those "
+                        "hidden; view_set(action='show', target=...) restores them.")
+            return None, None, msg
     else:
         target_path = _common.safe(lambda: target.fullPathName)
         for o in _common.all_occurrences(design):
@@ -171,12 +226,7 @@ def isolate_for_fit(name, ref):
                 _common.safe(lambda comp=comp, attr=attr: setattr(comp, attr, False))
 
     def restore():
-        stuck = []
-        for o in prev:
-            _common.safe(lambda o=o: setattr(o, "isLightBulbOn", True))
-            if _common.safe(lambda o=o: o.isLightBulbOn) is not True:
-                stuck.append(_common.safe(lambda o=o: o.fullPathName)
-                             or _common.safe(lambda o=o: o.name) or "?")
+        stuck = _relight(prev)
         for comp, attr in folder_prev:
             _common.safe(lambda comp=comp, attr=attr: setattr(comp, attr, True))
             if _common.read_flag(lambda comp=comp, attr=attr: getattr(comp, attr)) is not True:

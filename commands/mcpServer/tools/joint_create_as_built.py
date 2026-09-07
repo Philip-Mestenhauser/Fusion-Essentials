@@ -3,8 +3,6 @@
 
 """Joint two occurrences WHERE THEY ALREADY ARE - an as-built joint moves neither part. WRITES."""
 
-import re
-
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
@@ -12,8 +10,10 @@ from ._common import error, ok, safe
 from . import _common
 from . import _inputs
 from . import _assert
-from ._joints import (AXES as _AXES, DRIVES_ANY as _DRIVES_ANY, apply_motion as _apply_motion,
+from ._joints import (AXES as _AXES, DRIVES_ANY as _DRIVES_ANY,
+                      PAIR_USED_ANCHOR_NOTE as _PAIR_USED_ANCHOR_NOTE, apply_motion as _apply_motion,
                       current_joint_type as _current_joint_type, is_joint_origin as _is_joint_origin,
+                      pair_used_clause as _pair_used_clause,
                       pending_move_guard as _pending_move_guard)
 from ._joint_inputs import _JOINT_TYPES, _MOTIONS, _resolve_input, _slide_index, _slide_name
 
@@ -37,21 +37,6 @@ _BALL_AXIS_NOTE = "ball motion (pitch Z / yaw X - the API accepts no other pair)
 # pointer splits on (_joints.DRIVES_ANY), so the two can never disagree about which result is posable.
 _POSE_HINT_OTHER = ("joint_drive does not drive this motion type (only revolute/slider/cylindrical "
                     "take a value) - pose the part with assembly_move.")
-
-# The words Fusion refuses a SECOND as-built joint on an already-jointed PAIR with. Measured: the
-# same refusal comes back whichever anchor geometry is passed, so the offending input is the pair.
-_PAIR_USED = re.compile(r"joint in system exists|over ?constrain", re.IGNORECASE)
-
-
-def _pair_used_clause(platform_text, id1, id2):
-    """The clause naming the PAIR as what was refused, or '' - gated on Fusion's own words, so a
-    different add() failure never gets this diagnosis."""
-    if not _PAIR_USED.search(platform_text or ""):
-        return ""
-    return (f" Fusion names an existing joint, not the geometry: '{id1}' and '{id2}' are already "
-            "jointed to each other, and the same refusal comes back whichever anchor is passed. "
-            "Change the existing joint with joint_edit, or joint a different pair.")
-
 
 def handler(occurrence_one: str = "", occurrence_two: str = "", geometry: str = "",
             joint_type: str = "rigid", axis: str = "z",
@@ -137,7 +122,8 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", geometry: str = 
     try:
         joint = design.rootComponent.asBuiltJoints.add(abj_input)
     except Exception as e:
-        return error(f"As-built joint failed: {e}." + _pair_used_clause(str(e), id1, id2))
+        return error(f"As-built joint failed: {e}."
+                     + _pair_used_clause(str(e), id1, id2, _PAIR_USED_ANCHOR_NOTE))
     if not joint:
         return error("As-built joint creation returned nothing.")
 

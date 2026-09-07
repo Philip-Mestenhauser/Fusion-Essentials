@@ -59,7 +59,8 @@ siblings, and a step is edited in the one it belongs to:
 
   verify_core.py      the wire, the step kinds, the value predicates, the scratch fixtures
   verify_layout.py    the sketch hoist, the slot packer, the framing pass
-  verify_acts_doc.py / _sketch / _model / _motion / _mesh / _cam / _hub   the step rows, per domain
+  verify_acts_doc.py / _sketch / _model / _motion / _mesh / _cam / _hub / _cloud   the step rows
+  cloud_config.py     the OPT-IN cloud tier's local config (gitignored); absent, the tier is skipped
   verify_program.py   the ordered acts, run through those passes, plus STEPS/STORY/EXCLUDED
   verify_runner.py    run/run_steps/judged_steps and the receipt (source_hash, --check)
 """
@@ -83,9 +84,10 @@ from verify_core import (  # noqa: F401
     VERIFIED, _post, call, health_gate, registered_tools, _ctx_get, _Refusal, _refused, Parked,
     Needs, _needs, step_capability, parked_reason, CAPABILITY_PROBES, probe_capabilities,
     capability_met, capability_skip_reason, _machining_extension_probe,
+    CLOUD_TIER, OPT_IN_TIERS, CAPABILITY_DETAIL, _cloud_tier_probe,
     _unparked, _PUSH_OPS, _INSPECT_OPS, _is_inspect, _ARG_LOAD_OPS, _arg_load_sites,
     _TRUTHY_ONLY_CALLS, _callee_name, _inspects_argument, _inspects_payload, predicate_kind,
-    EXPORT_DIR, SVG_PATH, SVG96_PATH, _fg, _fgn, _prof, _matched, _face_up_at,
+    EXPORT_DIR, SVG_PATH, SVG96_PATH, write_png, MARKER_PNG, _fg, _fgn, _prof, _matched, _face_up_at,
     _PATH_LABEL, _path_count, _measured,
     _RECALL, _recall, _SVG96_MM, _SVG96_TOL, _svg96_extent, _repair_no_op, _made_component,
     _made_component_inactive, _PLANE_NORMAL_AXIS, _datum_plane, _dim_measures, _datum,
@@ -108,7 +110,9 @@ from verify_layout import (  # noqa: F401
     _SKETCH_MAKERS, _BODY_MAKERS, _FRAME_MARGIN, _FRAME_CONTEXT, _FRAME_MIN_SPAN, _FRAME_STRETCH,
     _FRAME_FALLBACK_NEIGHBOURS, _FRAME_MAX_SUBJECTS, _FRAME_SKETCH_GROUP, _FRAME_SKETCH_SPAN,
     _FRAME_RELATION_WIDEN, _ORIGIN_PLANES, _SKETCH_ORDER_BOUND, _sketches_first,
-    _sketch_reading_order, _RELATION_TOOLS, _PLACED_BOX, _CHUNK_OF, _COMPONENTS, _PATTERNED,
+    _sketch_reading_order, _RELATION_TOOLS, _PLACED_BOX, _MEASURED_BOX, _CHUNK_OF, _COMPONENTS,
+    _PATTERNED, measured_boxes, _chunk_box, _union,
+    _DRIFT_CHUNKS, _DRIFT_TOL_MM, layout_drift_mm, layout_placed_as_measured, drift_row,
     _FRAME_PATTERN_WIDEN, _framed, _frame_box, _frame_cluster, _expand, _inside,
     _frame_neighbourhood, _PLACE_PAIRS, _PLACE_DELTA_TOOLS, _PLACE_XYZ, _PLACE_POINTS,
     _PLACE_NAMES, _PLACE_FRAMES, _PLACE_WITH, _JOINT_GROUPS, _JOINT_FAMILY, _PLACE_ANCHORED,
@@ -135,6 +139,10 @@ from verify_acts_cam import (  # noqa: F401
     PART_COMP, PART_DRIVER, STOCK_COMP, VISE_BASE, JAW_FIXED, JAW_MOVING, CAM_SETUP,
     _op_created, _toolpath_shown, _CAM_STORY, _tmpl_names, _CAM_DELIVER,
     poll_generation, _CAM, _CAM_FB_DELIVER)
+
+from verify_acts_cloud import (  # noqa: F401
+    RUN_FOLDER, MOVED_FOLDER, SOURCE_DOC, COPY_DOC, HOST_DOC, RUN_PATH, MOVED_PATH,
+    RESTORE_VERSION, _CLOUD_DATA, _CLOUD_DOC, _CLOUD_DRAWING, _lit, _files_gone, _xrefs)
 
 from verify_acts_hub import (  # noqa: F401
     HUB_COMP, HUB_MILL_SETUP, HUB_TURN_SETUP, _HUB, _HUB_JOB, _fully_constrained, _hub_box,

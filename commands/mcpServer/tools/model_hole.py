@@ -872,7 +872,7 @@ tool = (
                            "OWNS 'face' (never the frame 'points_space' names)."})
     .add_input_property(*_OFFSET_EDGE_ONE.as_property())
     .add_input_property("offset_one", {"type": "string", "description": "Distance from 'offset_edge_one', e.g. '10 mm'."})
-    .add_input_property(*_OFFSET_EDGE_TWO.as_property())
+    .add_input_property(*_OFFSET_EDGE_TWO.as_property(brief=True))
     .add_input_property("offset_two", {"type": "string", "description": "Distance from 'offset_edge_two', e.g. '10 mm'."})
     .strict_schema()
 )

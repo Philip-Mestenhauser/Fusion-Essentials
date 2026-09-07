@@ -11,8 +11,8 @@ eyes on the staged drawings (never-reviewed drawings open headless fine on curre
 measured on 2705.0.87 - so the pause is a review checkpoint, not a technical requirement):
 
   py -3 tests/live/drawing_verify.py --stage
-      Builds a parametric plate, saves it to MCP Test Project, and creates TWO drawings from it
-      (default ISO, and full-option ASME) - the create beats. Prints the drawing to open.
+      Builds a parametric plate, saves it into the project cloud_config.local.json names, and
+      creates TWO drawings from it (default ISO, full-option ASME) - the create beats.
   <the owner opens the ISO drawing in the Fusion UI and leaves it the active document>
   py -3 tests/live/drawing_verify.py --run
       Drives every user-present drawing beat against the open drawing, round-trips a source-design
@@ -25,35 +25,30 @@ touches VERIFIED_TOOLS.md - the blind sweep's receipt stays its own.
 import argparse
 import json
 import os
-import struct
 import sys
 import time
-import zlib
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
-# the one HTTP driver AND the one step engine, reused - the status vocabulary cannot fork
-from tool_verify import NOTE_MAX, call, health_gate, run_steps, _refused  # noqa: E402
+# the one HTTP driver, the one step engine and the one raster fixture, reused - the status
+# vocabulary cannot fork, and neither can the PNG two harnesses place on a sheet
+from tool_verify import NOTE_MAX, call, health_gate, run_steps, write_png, _refused  # noqa: E402
+# the destination comes from the operator's own gitignored config - no hub or project name is
+# written in the repo, and the cloud tier's probe reads the same file
+import cloud_config  # noqa: E402
 
 RESULTS_DIR = os.path.join(_HERE, "results")
 OUT_DIR = os.path.join(RESULTS_DIR, "drawing_verify")
 STAGE_FILE = os.path.join(RESULTS_DIR, "drawing_verify_stage.json")
-PROJECT = "MCP Test Project"
 URN_PREFIX = "urn:adsk.wipprod:dm.lineage:"
 
 
-def _write_png(path, size=64, rgb=(255, 140, 0)):
-    """A solid-colour PNG written from scratch - the local image drawing_insert_image places."""
-    def chunk(tag, data):
-        body = tag + data
-        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
-    ihdr = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)
-    row = b"\x00" + bytes(rgb) * size
-    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
-           + chunk(b"IDAT", zlib.compress(row * size)) + chunk(b"IEND", b""))
-    with open(path, "wb") as fh:
-        fh.write(png)
-    return path
+def _project():
+    """The project this script stages into, or exit with the sentence the operator acts on."""
+    config, problem = cloud_config.load_config()
+    if problem:
+        sys.exit(problem)
+    return config["project"]
 
 
 def _run_steps(steps, ctx):
@@ -94,6 +89,7 @@ def _create_drawing_with_retry(args, tries=6, wait_s=15):
 
 
 def stage():
+    project = _project()
     health_gate()
     stamp = time.strftime("%Y%m%d-%H%M%S")
     design_name = f"SweepDrawingSource {stamp}"
@@ -106,7 +102,7 @@ def stage():
                                  "sketch_name": "PlateSketch"}, "ok", None),
         ("model_extrude", {"sketch_name": "PlateSketch", "profile_index": 0,
                            "distance": "PlateH"}, "ok", None),
-        ("doc_save_as", {"name": design_name, "project": PROJECT}, "ok",
+        ("doc_save_as", {"name": design_name, "project": project}, "ok",
          ("design_urn", lambda p: p.get("document_id"))),
     ]
     print("-- STAGE: source design + the two drawing_create beats --")
@@ -162,12 +158,13 @@ def stage():
         iso_name = state["drawing_iso"][0] if state["drawing_iso"] else "?"
         print(f"\nstage state -> {STAGE_FILE}")
         print(f"\nNEXT (one human step): every staged drawing carries the name '{iso_name}'. In the")
-        print(f"Fusion UI ({PROJECT}) open EACH of them once (review + close is fine), then run:")
+        print(f"Fusion UI ({project}) open EACH of them once (review + close is fine), then run:")
         print("  py -3 tests/live/drawing_verify.py --run")
     return rc
 
 
 def run():
+    project = _project()
     health_gate()
     if not os.path.isfile(STAGE_FILE):
         sys.exit(f"No stage state at {STAGE_FILE} - run --stage first.")
@@ -183,16 +180,16 @@ def run():
         is_error, payload = call("doc_open", {"file_id": iso_urn, "force_api_open": True})
         if is_error:
             sys.exit(f"Could not reach the staged ISO drawing by URN ({iso_urn}): {payload}\n"
-                     f"Open '{iso_name}' in the Fusion UI ({PROJECT}) once, then rerun.")
+                     f"Open '{iso_name}' in the Fusion UI ({project}) once, then rerun.")
         time.sleep(3)
     is_error, orient = call("workspace_orient", {})
     active = "" if is_error else ((orient.get("document") or {}).get("name") or "")
     if iso_name not in active:
         sys.exit(f"The active document is '{active or '?'}', not the staged drawing '{iso_name}'.\n"
-                 f"Open '{iso_name}' in the Fusion UI ({PROJECT}) and make it active, then rerun.")
+                 f"Open '{iso_name}' in the Fusion UI ({project}) and make it active, then rerun.")
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    png = _write_png(os.path.join(OUT_DIR, "sweep_marker.png"))
+    png = write_png(os.path.join(OUT_DIR, "sweep_marker.png"))
     stamp = time.strftime("%H%M%S")
     pdf1 = os.path.join(OUT_DIR, f"sweep_drawing_{stamp}.pdf")
     pdf2 = os.path.join(OUT_DIR, f"sweep_drawing_updated_{stamp}.pdf")

@@ -16,7 +16,7 @@ import tokenize
 import pytest
 
 import _corpus
-from conftest import TOOLS_DIR
+from conftest import TOOLS_DIR, register_all_tools
 
 NOTE_BUDGET_CHARS = 400
 TOOL_DESCRIPTION_BUDGET_CHARS = 900
@@ -244,6 +244,17 @@ def test_no_note_or_error_exceeds_its_budget():
 def test_no_description_exceeds_its_budget():
     offenders = _scan("descriptions")
     assert not offenders, _report("descriptions", offenders)
+
+
+def test_no_shipped_tool_description_exceeds_its_budget():
+    # The REGISTERED description, not the source literal: a description assembled from a generated
+    # tail (_outputs.produces_block) or held under a name the AST rule's *DESCRIPTION pattern does
+    # not match ships bytes that rule never measures.
+    offenders = [f"{name} ships {len(text)} chars (cap {TOOL_DESCRIPTION_BUDGET_CHARS})"
+                 for name, text in ((i.primitive.name, i.primitive.description or "")
+                                    for i in register_all_tools())
+                 if len(text) > TOOL_DESCRIPTION_BUDGET_CHARS]
+    assert not offenders, _report("shipped descriptions", sorted(offenders))
 
 
 def test_no_docstring_exceeds_its_line_cap():

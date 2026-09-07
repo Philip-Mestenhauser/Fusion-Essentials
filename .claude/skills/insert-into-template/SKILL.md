@@ -294,8 +294,11 @@ never by picking one silently.
    `PLACEHOLDER` among its child occurrences (blank: the one child occurrence with bodies
    whose name is not WCS/zero-like - a lone cube named like "WCS"/"zero" is the setup's WCS
    cube, never delete it; several candidates = AskUserQuestion, one option per child plus "No
-   placeholder - insert alongside" and "Cancel"). Bodies sitting directly in the model
-   component itself (no occurrence to remove) = STOP and report the listing.
+   placeholder - insert alongside" and "Cancel"). `children_truncated` true on the model
+   component's node means the children listed are a SUBSET (the level was cut by
+   `max_results`), so re-read it with `max_results` above that node's `child_count` before
+   naming a placeholder - picking one out of a partial level guesses. Bodies sitting directly
+   in the model component itself (no occurrence to remove) = STOP and report the listing.
 3. `assembly_get(include=['joint_origins'])` - EXPECT `ATTACH_JO` among the joint origins
    whose `component` is the root component (blank: the root JO matching Attach / Center of
    Model / Workpiece; several = AskUserQuestion with the read names; none = record none and

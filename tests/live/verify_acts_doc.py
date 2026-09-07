@@ -14,9 +14,67 @@ import time
 import urllib.request
 
 from verify_core import (
-    BASE, EXPORT_DIR, NOTE_MAX, SERVER_NAME, SVG_PATH, _ctx_get, _document_closed, _document_read,
-    _exported_bytes, _extruded, _fg, _imported_curves, _imported_sketches, _made_component,
-    _new_document, _refused, _watch, facade)
+    BASE, EXPORT_DIR, NOTE_MAX, SERVER_NAME, SVG_PATH, _RECALL, _activated, _ctx_get,
+    _document_closed, _document_read, _exported_bytes, _extruded, _fg, _home_address,
+    _home_document, _imported_curves, _imported_sketches, _made_component, _measured,
+    _new_document, _num, _recall, _refused, _watch, facade)
+from verify_layout import _DRIFT_CHUNKS, drift_row
+
+
+# --- the SECOND document: what puts doc_activate in the always-on receipt -----------------------
+# doc_new mints an UNSAVED document, which carries no lineage URN and answers to 'Untitled' beside
+# any other - so the 'open:N' index doc_get publishes is the only address that reaches either one.
+
+def _story_address(p):
+    """The story document's 'open:N' address, with it and the session's document COUNT parked for
+    the rows below, which measure the scratch against both."""
+    _RECALL["open_before"] = p.get("open_count")
+    return _home_address(p)
+
+
+def _scratch_opened_beside_it(p):
+    """doc_get after the scratch doc_new: the session holds one MORE document than it did, and the
+    ACTIVE one is the scratch - a new document that replaced the story one would read the same
+    count and the same address."""
+    rows = [r for r in (p.get("open_documents") or []) if r.get("is_active")]
+    here = _home_address(p) if len(rows) == 1 and _num(rows[0].get("open_index")) else None
+    return _measured("the scratch document opened BESIDE the story document",
+                     {"open_count": p.get("open_count"), "open_before": _RECALL["open_before"],
+                      "scratch": here, "story": _RECALL["story_doc"]},
+                     _num(p.get("open_count"))
+                     and p["open_count"] == _RECALL["open_before"] + 1
+                     and here is not None and here != _RECALL["story_doc"])
+
+
+def _scratch_gone_story_active(p):
+    """doc_get after the scratch is closed: the session is back to the count it opened with, and
+    the story document is active at the address it answered to all along."""
+    rows = [r for r in (p.get("open_documents") or []) if r.get("is_active")]
+    here = _home_address(p) if len(rows) == 1 and _num(rows[0].get("open_index")) else None
+    return _measured("the scratch is closed and the session is back on the story document",
+                     {"open_count": p.get("open_count"), "open_before": _RECALL["open_before"],
+                      "active": here, "story": _RECALL["story_doc"]},
+                     p.get("open_count") == _RECALL["open_before"]
+                     and here == _RECALL["story_doc"])
+
+
+# The scratch beat, in the order that leaves nothing behind: read the address, open the second
+# document, switch BOTH ways by index, come home, and close the scratch BY ITS OWN ADDRESS - never
+# whatever is in front, which is what a bare doc_close would take.
+_SCRATCH_DOCUMENT = [
+    ("doc_get", {}, _home_document, ("story_doc", _recall("story_doc", _story_address))),
+    ("doc_new", {}, _new_document, None),
+    ("doc_get", {}, _scratch_opened_beside_it, ("scratch_doc", _home_address)),
+    ("doc_activate", lambda c: {"name": _ctx_get(c, "story_doc", "the story document")},
+     _activated(), None),
+    ("doc_activate", lambda c: {"name": _ctx_get(c, "scratch_doc", "the scratch document")},
+     _activated(), None),
+    ("doc_activate", lambda c: {"name": _ctx_get(c, "story_doc", "the story document")},
+     _activated(), None),
+    ("doc_close", lambda c: {"name": _ctx_get(c, "scratch_doc", "the scratch document"),
+                             "save_changes": False}, _document_closed, None),
+    ("doc_get", {}, _scratch_gone_story_active, None),
+]
 
 
 # --- ACT 0: OVERTURE - orient, then open the one document the whole story lives in -------------
@@ -119,7 +177,7 @@ _OVERTURE = [
      "refused", None),
     # a tier-R member names the member and the reason, with nothing written.
     ("sys_set_preferences", {"member": "network.proxyHost", "value": "127.0.0.1"}, "refused", None),
-]
+] + _SCRATCH_DOCUMENT
 
 # --- THE SHOWCASE: the finished fixture photographed, renamed, exported and read back -----------
 # It runs BEFORE the machining acts so the sweep ends on the CAM job and its post, which is the
@@ -361,6 +419,11 @@ _SHOWCASE = [
     # the API silently IGNORES a sheet size from the other standard, so the pairing is guarded here.
     ("drawing_create", {"standard": "asme", "sheet_size": "a2"}, "refused", None),
 ]
+
+# THE LAYOUT DRIFT GATE, on the field ACT 9 has finished dressing. verify_layout._MEASURED_BOX
+# records where the chunks really are and the framing pass widens every frame from it, so a layout
+# move that outdates the table fails HERE rather than ageing it silently.
+_SHOWCASE += [drift_row(chunk) for chunk in _DRIFT_CHUNKS]
 
 
 # --- FINALE: put the workspace and the browser back, then DISCARD the document on camera --------

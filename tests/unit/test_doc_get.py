@@ -6,6 +6,7 @@ no-active-doc guard. The adsk Document fakes capture the read so a regression to
 """
 
 import json
+import time
 
 import pytest
 
@@ -501,8 +502,43 @@ class TestVersionMilestones:
         df = _DFileVers(open_num=1, latest=1, others=[], milestones=_MStones([]))
         _install(_Doc("Bracket", data_file=df))
         note = dg._slice_versions()["note"]
-        assert "LAGS" in note and "re-read" in note
+        assert "numbers_may_lag" in note and "re-read" in note
         assert "UNKNOWN" in note and "never 'not a milestone'" in note
+
+    def test_a_tip_that_landed_seconds_ago_flags_the_numbers_as_possibly_lagging(self, _install):
+        # the measured state a caller has to act on: a read taken right after a save answered
+        # latest 2 while the lineage had already reached 3, so a fresh tip is published as such.
+        now = int(time.time())
+        df = _DFileVers(open_num=1, latest=2, others=[_Ver(2, date=now - 3)])
+        _install(_Doc("Bracket", data_file=df))
+        out = dg._slice_versions()
+        assert out["numbers_may_lag"] is True
+        assert out["tip_age_seconds"] == 3
+
+    def test_the_lag_window_ends_exactly_at_twenty_seconds(self, _install):
+        # the boundary: a tip AT the window is outside it, one second inside is within.
+        window = dg._doc_common.VERSION_LAG_WINDOW_S
+        now = int(time.time())
+        for age, flagged in ((window, False), (window - 1, True)):
+            df = _DFileVers(open_num=1, latest=2, others=[_Ver(2, date=now - age)])
+            _install(_Doc("Bracket", data_file=df))
+            assert dg._slice_versions()["numbers_may_lag"] is flagged, age
+
+    def test_an_unreadable_tip_date_claims_neither_lag_nor_settled(self, _install):
+        # no date is UNKNOWN, so BOTH keys are null - false would call these numbers settled on a
+        # read that never established it.
+        df = _DFileVers(open_num=1, latest=1, others=[])
+        df.dateCreated = None
+        _install(_Doc("Bracket", data_file=df))
+        out = dg._slice_versions()
+        assert out["tip_age_seconds"] is None
+        assert out["numbers_may_lag"] is None
+
+    def test_the_lag_window_is_the_one_the_restore_tool_waits_on(self):
+        # one measured fact, one home: doc_restore_version pays its re-fetch against this window,
+        # so a change here must not leave the two tools describing different clouds.
+        drv = load_tool("doc_restore_version")
+        assert drv._TIP_RECHECK_S == float(dg._doc_common.VERSION_LAG_WINDOW_S)
 
     def test_milestone_walk_is_bounded_by_the_row_cap(self, _install):
         # each entry's .version hop is a cloud read - the walk may not outrun the cap that bounds

@@ -10,7 +10,8 @@ URL), so it gets thorough coverage. No live Fusion needed.
 The encoded URN below is real: base64url(urn:adsk.wipprod:dm.lineage:abc123XYZ).
 """
 
-from conftest import FakeApplication, FakeDataFile, FakeFusionDocument, load_tool
+from conftest import (FakeApplication, FakeDataFile, FakeDocuments, FakeFusionDocument,
+                      load_tool)
 
 od = load_tool("doc_open")
 
@@ -141,6 +142,19 @@ class TestAsyncLoadHandoff:
     tool - and that handoff sentence is itself a reading, not a fixture: an open that already
     reads active carries none."""
 
+    def test_the_documents_this_one_REFERENCES_are_counted(self, monkeypatch):
+        # MEASURED: an assembly whose documentReferences read 9 had loaded 27 documents, so this
+        # is the document's own DIRECT reference count, not what the open walked - the payload key
+        # matches workspace_orient's, and doc_get's open_count is the loaded total.
+        opened = FakeFusionDocument(name="Plain", references=[object(), object(), object()])
+        monkeypatch.setattr(od, "_resolve_data_file",
+                            lambda raw: (FakeDataFile("Plain"), raw, [raw]))
+        monkeypatch.setattr(od, "_open_document", lambda d: (opened, "openUsingContext", None))
+        monkeypatch.setattr(od, "app", FakeApplication(active_document=opened))
+        payload = json.loads(od.handler(file_id="urn:plain",
+                                        force_api_open=True)["content"][0]["text"])
+        assert payload["referenced_documents"] == 3
+
     def _open(self, monkeypatch, active):
         opened = FakeFusionDocument(name="Plain")
         elsewhere = FakeFusionDocument(name="Other")
@@ -163,6 +177,50 @@ class TestAsyncLoadHandoff:
         # shipped either way would be prose rather than the state this call measured.
         landed = self._open(monkeypatch, active=True)
         assert landed["is_active"] is True and landed["note"] is None
+
+
+class TestTheOpenReportsItsOwnCost:
+    """A large assembly's open pulls its whole reference family into the session and can run past
+    the server's call timeout - which is why this tool is exempt from it. The payload is what makes
+    that wait legible: the seconds the open ran, and how many documents the session GAINED, which
+    is a different number from the document's own direct reference count."""
+
+    def _open(self, monkeypatch, family):
+        opened = FakeFusionDocument(name="Assembly", references=[object()])
+        app = FakeApplication(active_document=opened,
+                              documents=FakeDocuments(documents=[FakeFusionDocument(name="Home")]))
+
+        def _load(_data_file):
+            app.documents._items.extend(FakeFusionDocument(name=f"Ref{i}") for i in range(family))
+            app.documents._items.append(opened)
+            return opened, "openUsingContext", None
+
+        monkeypatch.setattr(od, "_resolve_data_file",
+                            lambda raw: (FakeDataFile("Assembly"), raw, [raw]))
+        monkeypatch.setattr(od, "_open_document", _load)
+        monkeypatch.setattr(od, "app", app)
+        res = od.handler(file_id="urn:asm", force_api_open=True)
+        assert res["isError"] is False, res
+        return json.loads(res["content"][0]["text"])
+
+    def test_the_documents_the_open_LOADED_are_counted_and_named(self, monkeypatch):
+        out = self._open(monkeypatch, family=26)
+        # 26 referenced documents plus the assembly itself - the session census DIFFERENCE, which
+        # is not documentReferences (1 here, and 9 on the assembly that loaded 27 live).
+        assert out["documents_loaded"] == 27 and out["referenced_documents"] == 1
+        assert isinstance(out["open_seconds"], float)
+        assert "27 documents" in out["note"] and "open_count" in out["note"]
+
+    def test_an_open_that_loaded_only_itself_makes_no_cost_claim(self, monkeypatch):
+        # The exact boundary: one document loaded is an ordinary open, and the cost sentence exists
+        # to explain a slow one - shipping it either way would make it prose, not a reading.
+        out = self._open(monkeypatch, family=0)
+        assert out["documents_loaded"] == 1 and out["note"] is None
+
+    def test_the_open_is_exempt_from_the_servers_call_timeout(self):
+        # The open COMMITS whether or not the server is still waiting on it, so a timeout could
+        # only replace the payload above with a false failure for a document that IS open.
+        assert od.item.enforce_timeout is False
 
 
 class TestConfiguredDesign:

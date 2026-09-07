@@ -802,6 +802,24 @@ class TestCreateHandler:
         res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")
         assert res["isError"] is True
         assert "assembly context" not in res["message"]
+        assert "already jointed" not in res["message"]
+
+    def test_a_pair_that_already_holds_a_joint_is_named_as_the_pair(self, monkeypatch):
+        # Fusion answers a second joint on one PAIR with the same words whichever inputs are
+        # passed, so relaying it bare sends the caller looking for a bad joint origin.
+        _, coll = _install_create(monkeypatch)
+        def boom(ji):
+            raise RuntimeError("3 : A joint in system exists for the provided input. "
+                               "System will be over constrained")
+        coll.add = boom
+        res = joint.handler(occurrence_one="JO_A", occurrence_two="JO_B")
+        assert res["isError"] is True
+        assert "'JO_A' and 'JO_B' are already jointed to each other" in res["message"]
+        assert "joint_edit" in res["message"]
+        # the platform text ends mid-sentence, so the clause is terminated onto it
+        assert "over constrained. Fusion names" in res["message"]
+        # measured on this tool: a second anchor pair on the same pair returns the identical text
+        assert "whichever anchor is passed" in res["message"]
 
 
 class TestAxisIsAdvertisedFrameRelative:

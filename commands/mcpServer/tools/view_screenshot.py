@@ -140,8 +140,8 @@ def handler(view: str = "current", width: int = _WIDTH_DEFAULT, height: int = _H
     if want_fit:
         restore_fit_to, _fit_target, fit_err = _isolate_for_fit(want_fit)
         if restore_fit_to is None:
-            return error(fit_err or f"fit_to: nothing matched '{want_fit}'. Use "
-                         "design_get(include=['tree']) for occurrences, find_geometry for a body.")
+            return error(fit_err or f"fit_to: nothing matched '{_common.short_ref(want_fit)}'. "
+                         "Use design_get(include=['tree']) for occurrences, find_geometry for a body.")
 
     # Reorient the camera if a specific view was requested, saving the user's current
     # camera so we can restore it afterward (a read tool shouldn't permanently change

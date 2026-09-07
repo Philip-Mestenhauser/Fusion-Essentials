@@ -79,7 +79,9 @@ def _base_appearance(appearances):
         if copied is not None:
             return copied, True, None
         return None, False, (f"Could not copy '{_BASE_SOURCE}' into this document as "
-                             f"'{_BASE_NAME}' (addByCopy returned nothing).")
+                             f"'{_BASE_NAME}' - addByCopy declined and no appearance of that name "
+                             "is in the document. A name already taken RAISES 'appearance name "
+                             "already exists in document', so the name is not the obstacle.")
     return copied, False, None
 
 
@@ -148,8 +150,10 @@ def _make_colored_appearance(design, rgb, opacity, name):
             appr = safe(lambda: appearances.itemByName(name))
             reused = appr is not None
         if not appr:
-            return None, False, None, [], ("Could not create an appearance copy (addByCopy "
-                                           "returned nothing).")
+            return None, False, None, [], (
+                f"Could not create the appearance copy '{name}' - addByCopy declined and no "
+                "appearance of that name is in the document. A name already taken RAISES "
+                "'appearance name already exists in document', so the name is not the obstacle.")
     color = adsk.core.Color.create(rgb[0], rgb[1], rgb[2], opacity)
     written, seen, unchanged, unread = _write_albedo(appr, color)
     if not written:
@@ -204,6 +208,10 @@ def _opacity_note(kind, asked, seen):
                     "- every instance of that component renders with it.")
     if seen is None:
         bits.append("The rendered opacity could not be read back, so it is UNCONFIRMED.")
+        if kind == "body":
+            # MEASURED: BRepBody.visibleOpacity RAISES on a native body before AND after the write.
+            bits.append("A NATIVE body does not answer visibleOpacity - the rendered value reads "
+                        "through its occurrence PROXY only, so target the occurrence to confirm it.")
     elif abs(seen - asked) > 1:
         bits.append(f"It RENDERS at {seen}%, not the {asked}% set here - the read-back did not "
                     "match what was written.")

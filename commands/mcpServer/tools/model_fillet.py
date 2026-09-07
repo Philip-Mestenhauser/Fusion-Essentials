@@ -261,7 +261,7 @@ tool = (
         "description": "Chord-length fillet: the straight-line distance across the rounded corner, "
                        "in 'units'."})
     .add_input_property(*_RULE_FACES.as_property())
-    .add_input_property(*_RULE_FACES_TWO.as_property())
+    .add_input_property(*_RULE_FACES_TWO.as_property(brief=True))
     .add_input_property(*_TOPOLOGY.as_property())
     .strict_schema()
 )

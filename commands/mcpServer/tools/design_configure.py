@@ -87,25 +87,27 @@ def _resolve_material(design, name):
 
 
 def _resolve_datafile(design, name_or_id):
-    """A configured-design DataFile by lineage id (a urn, or a Fusion web/share URL) or by name within
-    the active project. Patched in tests. The part MUST be in the same project as the assembly for a
-    referenced insert."""
+    """(DataFile, problem): a configured-design DataFile by lineage id (a urn, or a Fusion web/share
+    URL), else by name in the ACTIVE DOCUMENT's own project - the project a referenced insert
+    requires the part to share. Patched in tests."""
     # A urn or a pasted Fusion web URL: route through the shared candidate decoder, which also
     # base64url-decodes the lineage segment a share link carries (a raw startswith('urn:') check
     # silently failed on a pasted URL).
     df, _resolved, _tried = _data_common._resolve_data_file(name_or_id)
     if df:
-        return df
-    # otherwise search the active project's files by name
-    proj = safe(lambda: app.data.activeProject)
-    folder = safe(lambda: proj.rootFolder) if proj else None
-    if folder:
-        files = safe(lambda: folder.dataFiles)
-        for i in range(safe(lambda: files.count, 0) or 0):
-            f = safe(lambda i=i: files.item(i))
-            if f is not None and safe(lambda f=f: f.name) == name_or_id:
-                return f
-    return None
+        return df, None
+    proj, problem = _data_common.active_project()
+    if not proj:
+        return None, problem
+    folder = safe(lambda: proj.rootFolder)
+    if folder is None:
+        return None, f"the root folder of project '{safe(lambda: proj.name)}' does not read."
+    # A folder can hold several files of one name (distinct lineages), so the shared resolver
+    # refuses that rather than handing back whichever comes first.
+    hit, shared = _data_common._file_in_folder_by_name(folder, name_or_id)
+    if shared:
+        return None, shared
+    return hit, None
 
 
 def _part_config_rows(datafile):
@@ -182,12 +184,11 @@ def _do_create(design):
         return error("createConfiguredDesign() returned no table.")
     return ok({"configured": True, "created": True,
                "configurations": _row_names(table),
-               "note": "Design converted to a configured design (one configuration so far). Add columns "
-                       "(add_parameter/add_suppress/add_visibility/set_appearance/add_material) and "
-                       "configurations (add_configuration). To see it in the UI: SAVE, then REOPEN by "
-                       "the URN that save's own result reports - the first save after this conversion "
-                       "moves the document to a NEW lineage URN, and an older URN opens the "
-                       "pre-conversion file."})
+               "note": "Design converted to a configured design (one configuration so far). Add "
+                       "configurations and columns with the other actions. To see it in the UI: SAVE, "
+                       "then REOPEN by the URN that save reports - the first save moves this document "
+                       "to a NEW lineage, and the pre-conversion one is relocated to a Fusion-managed "
+                       "project ('System Project - CONFIG') that deleting this design leaves behind."})
 
 
 def _do_activate(design, table, name):
@@ -412,8 +413,19 @@ def _do_set_appearance(design, table, body, appearances):
     if not col:
         return error(f"appearanceTable.columns.add for '{body}' returned null.")
     needed = len(resolved)
-    while safe(lambda: appt.rows.count, 0) < needed:
-        appt.rows.add("Theme %d" % (safe(lambda: appt.rows.count, 0) + 1))   # MUTATION
+    # The adds go through the shared minting rule, which owns the fact that rows.add of a taken name
+    # adds NOTHING and hands that row back. Bounded by the number wanted - a census that will not
+    # read counts as no rows - and the count REACHED is asserted below rather than trusted.
+    for _ in range(needed):
+        rows = _theme_rows(appt)
+        if len(rows) >= needed:
+            break
+        _mint_theme_row(appt, rows, prefix="Theme")      # MUTATION
+    reached = _common.counted(lambda: appt.rows.count)
+    if reached is None or reached < needed:
+        return error(f"The appearance table holds {reached} theme rows after adding, not the "
+                     f"{needed} this call needs - one per configuration named in 'appearances'. "
+                     "Name fewer configurations, or add the theme rows in the UI first.")
 
     # Assign each named appearance to a distinct theme row, and link config row -> theme row.
     theme_col = safe(lambda: appt.parentTableColumn)
@@ -488,16 +500,16 @@ def _carry_theme_materials(mtbl, from_index, to_index):
     return None
 
 
-def _mint_theme_row(mtbl, rows):
-    """Add a theme row under a name no existing row carries. Returns (row, name) or (None, name).
+def _mint_theme_row(mtbl, rows, prefix="Material"):
+    """Add a theme row named '<prefix> N' under a name no existing row carries: (row, name).
     The name search is load-bearing: rows.add(<a name an existing row carries>) adds NOTHING and
     returns THAT row, so a colliding name would hand this configuration a row another configuration
     already references."""
     taken = {n for (_i, _r, n) in rows}
     n = len(rows) + 1
-    while ("Material %d" % n) in taken:
+    while ("%s %d" % (prefix, n)) in taken:
         n += 1
-    name = "Material %d" % n
+    name = "%s %d" % (prefix, n)
     return mtbl.rows.add(name), name                  # MUTATION
 
 
@@ -619,10 +631,12 @@ def _do_add_insert(design, table, insert_part, insert_config, insert_map):
         return error("Provide 'insert_part' - the configured part to insert (lineage urn or its name "
                      "in the active project).")
     insert_map = insert_map or {}
-    df = _resolve_datafile(design, insert_part)
+    df, problem = _resolve_datafile(design, insert_part)
     if not df:
-        return error(f"Could not find a configured part '{insert_part}' (by urn or name in the active "
-                     "project). It must be saved in the SAME project as this assembly.")
+        why = problem or ("it resolves as no lineage urn or Fusion URL, and the project's root "
+                          "folder holds no file of that name.")
+        return error(f"Could not find a configured part '{insert_part}': {why} It must be saved in "
+                     "the SAME project as this assembly.")
     if not safe(lambda: df.isConfiguredDesign, False):
         return error(f"'{insert_part}' is not a configured design - use a normal insert for a "
                      "non-configured part. (Only configured parts get an insert column.)")
@@ -673,7 +687,9 @@ def _do_add_insert(design, table, insert_part, insert_config, insert_map):
                "occurrence": safe(lambda: occ.name),
                "note": "Configured part inserted and an insert column added: each listed assembly "
                        "configuration now selects the mapped part configuration (nested config). Switch "
-                       "with design_configure(action='activate', name=...) + computeAll to see it follow."})
+                       "with design_configure(action='activate', name=...) + computeAll to see it follow. "
+                       "This insert can run for minutes; the read that proves it landed without this "
+                       "payload is design_get(include=['configurations']) showing the insert column."})
 
 
 def _as_map(val, field):
@@ -780,8 +796,12 @@ tool = (
             "description": "{assembly_config: part_config} - nested config mapping (add_insert)."})
     .strict_schema()
 )
+# enforce_timeout=False: add_insert's addFromConfiguration is a blocking, uninterruptible
+# main-thread call that COMMITS - one ran past the server's cap with the occurrence, the column and
+# both cell mappings landed. The flag covers all ten actions, so each one's loops are bounded.
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    enforce_timeout=False,
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_design_configure.py::TestAddParameterRefusals"

@@ -531,6 +531,16 @@ def named_with_remainder(items, cap=_MAX_NAMED_CANDIDATES):
     return head
 
 
+# A find_geometry handle is an entityToken plus a locator, so it runs past 200 characters.
+_ECHO_CHARS = 60
+
+
+def short_ref(value):
+    """A caller's value as a message echoes it: the head, a cut marked with the full length."""
+    s = "" if value is None else str(value)
+    return s if len(s) <= _ECHO_CHARS else s[:_ECHO_CHARS] + f"... ({len(s)} chars)"
+
+
 def told_apart(rows):
     """One rendered label per ``(name, discriminator)`` row - the ONE place a listing replaces a
     REPEATED name with its discriminator. A unique name, or an empty discriminator, keeps it."""

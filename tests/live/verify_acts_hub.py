@@ -12,9 +12,11 @@ sketch is left exactly where it was written - see verify_layout._place_slots.
 
 import time
 
+import _dump_reader
 from verify_acts_cam import (
-    _TURNING_TYPE, _TURN_MACHINE, _all_cut, _launched_on, _offers, _op_named, _param_landed,
-    _posted_turning, _reveal, _setup_ready, _setup_row, _turning_stock, _types_offered)
+    _TURNING_TYPE, _TURN_MACHINE, _all_cut, _landed_in_one_call, _launched_on, _offers, _op_named,
+    _param_landed, _posted_turning, _reveal, _setup_ready, _setup_row, _turning_stock,
+    _types_offered)
 from verify_core import (
     EXPORT_DIR, _RECALL, _ctx_get, _datum, _drilled, _extruded, _face_up_at, _fg, _filleted,
     _joint_origin_computed, _made_component, _matched, _measured, _near, _num, _prof, _recall,
@@ -37,8 +39,17 @@ HUB_ROT_WCS = "HubRotaryWCS"     # that setup's origin, a Joint Origin at the hu
 # The lathe cycles the hub is roughed with, in the order a shop turns them. Named here because the
 # reveal, the non-empty oracle and the no-warning read all address the same four.
 HUB_TURN_CYCLES = ("TurnFace", "TurnRough", "TurnFinish", "TurnPart")
+# What the roughing cycle leaves for the finishing pass, sent and read back through one spelling.
+_ROUGH_ALLOWANCE = {"useStockToLeave": "true", "xStockToLeave": "0.5mm", "zStockToLeave": "0.5mm"}
 # The rotary families, each wrapped about the hub axis.
 HUB_ROT_OPS = ("RotContour", "RotPocket", "RotFinish")
+
+# The dump post the rotary program is read back through, and the tool axis a wrap writes: MEASURED
+# over 47011 5D rows of the hub's three rotary operations, every one reads 90 deg off +Z - the
+# cutter stands square to the axis its passes turn about, and no 3-axis row is written at all.
+_DUMP_POST = "dump.cps"
+_ROT_PROGRAM = "4003"
+_ROT_AXIS_DEG, _ROT_AXIS_TOL = 90.0, 0.5
 
 # The 4-axis machine the rotary wrap turns about, run-stamped so two overlapping runs never collide
 # on one Local-library name. The act takes it back out once the setup holds its own copy.
@@ -432,6 +443,27 @@ def _rotary_contract(operation):
     return check
 
 
+def _dumped_rotary(setup, program):
+    """cam_post of the rotary wrap through the dump post: every motion row is a 5D one carrying a
+    tool axis, and every one of those axes stands SQUARE to the axis the passes wrap about. A wrap
+    that had collapsed onto a 3-axis job reads axis_rows 0 here, and one turning about the wrong
+    axis reads angles away from 90 - neither of which the machining-time oracle can see."""
+    def check(p):
+        files = p.get("files") or []
+        dump = _dump_reader.read_dump(files[0]["file_path"]) if files else None
+        square, band = (_dump_reader.axis_band(dump, _ROT_AXIS_DEG, _ROT_AXIS_TOL) if dump
+                        else (False, {}))
+        return _measured(
+            f"'{setup}' posted through {_DUMP_POST}, every tool axis square to the wrap axis",
+            {"posted": p.get("posted"), "post_config": p.get("post_config"), "files": files,
+             "strategy": dump and dump.strategy, "band": band},
+            p.get("posted") is True and p.get("program_name") == program
+            and p.get("file_count") == len(files) and len(files) == 1
+            and _num(files[0].get("size_bytes")) and files[0]["size_bytes"] > 0
+            and square)
+    return check
+
+
 def _setup_created(name, operation_type):
     """cam_create_setup: the name read back off the created Setup, its operation type, and a count
     of zero operations - a setup that arrives holding some is not the one this row made."""
@@ -784,9 +816,14 @@ _HUB_JOB = [
                 "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _TURN_AT,
                 "generate": False},
      _op_named(HUB_TURN_SETUP, "turning_profile_finishing", HUB_TURN_CYCLES[2]), None),
-    # MEASURED on this hub: the finishing pass generates with "Lead-Out has been modified due to a
-    # gouge with the remaining stock" while its exit move is on, and with no warning at all once it
-    # is off - which is the reading ACT 10c4b's no-warning row stands on.
+    # THE ALLOWANCE THE FINISHING PASS TAKES, on the cycle that pass follows, all three in ONE call.
+    # MEASURED: TurnRough ships useStockToLeave true, so nothing here is gated; TurnFinish ships it
+    # false with its two allowance rows behind it - the unlocked_here shape, pinned on the deburr.
+    ("cam_edit_operation", {"operation": HUB_TURN_CYCLES[1], "parameters": _ROUGH_ALLOWANCE},
+     _landed_in_one_call(_ROUGH_ALLOWANCE), None),
+    # MEASURED on this hub: the finishing pass generates carrying "Lead-Out has been modified due to
+    # a gouge with the remaining stock" while its exit move is on, and no warning once it is off -
+    # which is the reading ACT 10c4b's no-warning row stands on. It is the last cycle on that face.
     ("cam_edit_operation", {"operation": HUB_TURN_CYCLES[2], "parameters": {"doLeadOut": "false"}},
      _param_landed("doLeadOut", "false"), None),
     ("cam_create_operation",
@@ -882,11 +919,17 @@ _HUB_ROTARY = [
 ]
 
 
-# ACT 10c14: the rotary families read, behind their own boundary poll - the same reveal, then the
-# non-empty oracle over the three.
+# ACT 10c14: the rotary families read, behind their own boundary poll - the same reveal, the
+# non-empty oracle over the three, then WHERE the wrap put the tool axis.
 _HUB_ROTARY_READ = [
     _watch(HUB_COMP + ":1"),
 ] + _reveal(list(HUB_ROT_OPS)) + [
     ("cam_get", {"include": ["time"], "setup": HUB_ROT_SETUP},
      _all_cut(HUB_ROT_SETUP, len(HUB_ROT_OPS), names=list(HUB_ROT_OPS)), None),
+    # THE ROTARY PROGRAM. Measured, 'brother speedio' and 'brother' both refuse it - "requires a
+    # machine configuration for 5-axis simultaneous toolpath" - so the dump post is what carries the
+    # axis rows this beat judges.
+    ("cam_post", {"scope": HUB_ROT_SETUP, "post": _DUMP_POST, "post_scope": "fusion",
+                  "output_folder": EXPORT_DIR + "/dump", "program_name": _ROT_PROGRAM},
+     _dumped_rotary(HUB_ROT_SETUP, _ROT_PROGRAM), None),
 ]

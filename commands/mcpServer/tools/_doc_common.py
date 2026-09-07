@@ -14,7 +14,11 @@ app = adsk.core.Application.get()
 MAP_BLURB = (
     "_resolve_open_document - the open-document resolve doc_activate and doc_close share: one "
     "document from an 'open:N' index, a lineage URN / web URL matched by LINEAGE EQUALITY, or an "
-    "exact display name, REFUSING more than one distinct match with the address each row reaches by")
+    "exact display name, REFUSING more than one distinct match with the address each row reaches by; "
+    "VERSION_LAG_WINDOW_S - the measured window a version read can still trail the cloud tip in")
+
+# MEASURED: a version read taken inside this window can still trail the tip the lineage carries.
+VERSION_LAG_WINDOW_S = 20
 
 
 def _lineage_key(urn):

@@ -581,7 +581,7 @@ class TestDeleteMachineGuards:
         e = env(local=[m], assets=[("OtherMachine.mch", _mach()), ("ThirdMachine.mch", _mach())])
         res = cdm.handler(name="SweepMach", confirm_name="SweepMach")
         assert res["isError"] is True
-        assert "No asset in the Local machine library is named 'SweepMach'" in res["message"]
+        assert "holds a machine named 'SweepMach'" in res["message"]
         # the listing renders each asset AS STORED, extension included - the string a caller has to
         # match against what Fusion's own library shows them
         assert "OtherMachine.mch" in res["message"] and "ThirdMachine.mch" in res["message"]
@@ -625,8 +625,59 @@ class TestDeleteMachineGuards:
         e = env(local=[m], assets=[("SweepMach Mk2.mch", _mach(description="SweepMach Mk2"))])
         res = cdm.handler(name="SweepMach", confirm_name="SweepMach")
         assert res["isError"] is True
-        assert "No asset in the Local machine library is named 'SweepMach'" in res["message"]
+        assert "holds a machine named 'SweepMach'" in res["message"]
         assert e.lib.deleted == []
+
+    def test_an_asset_filed_under_another_name_is_reached_by_the_machine_name(self, env):
+        # The name every read reports is the machine's, and an asset's FILE name need not carry it -
+        # so the asset it HOLDS is what addresses the delete, and matched_by says so.
+        m = _local()
+        e = env(local=[m], assets=[("mach-8f21c0.mch", m)])
+        out = _payload(cdm.handler(name="SweepMach", confirm_name="SweepMach"))
+        assert out["deleted"] is True and out["asset_name"] == "mach-8f21c0.mch"
+        assert out["matched_by"] == cdm._BY_MACHINE_NAME
+        assert e.lib.deleted == ["machine://local/mach-8f21c0.mch"]
+
+    def test_the_asset_is_addressed_by_the_RESOLVED_label_not_the_requested_name(self, env):
+        # 'VF-2' is only the address the machine resolves BY; another machine's label may read it.
+        # Addressing on the request as well as the label would call these two a tie and refuse.
+        m = _label_not_model()
+        e = env(local=[m], assets=[("mach-a.mch", m),
+                                   ("mach-b.mch", _mach(description="VF-2"))])
+        out = _payload(cdm.handler(name="VF-2", confirm_name="Shop Mill #3"))
+        assert out["asset_name"] == "mach-a.mch" and out["matched_by"] == cdm._BY_MACHINE_NAME
+        assert e.lib.deleted == ["machine://local/mach-a.mch"]
+
+    def test_a_decoy_filed_under_the_label_is_never_the_one_deleted(self, env):
+        # The ORDER is what this pins: 'SweepMach.mch' is FILED under the resolved label but HOLDS
+        # someone else, while the real machine sits under an unrelated file name. Addressing by file
+        # name first reaches the decoy; addressing by what the asset HOLDS reaches the machine.
+        m = _local()
+        e = env(local=[m], assets=[("SweepMach.mch", _mach(description="Someone Else")),
+                                   ("unrelated-7c31.mch", m)])
+        out = _payload(cdm.handler(name="SweepMach", confirm_name="SweepMach"))
+        assert out["asset_name"] == "unrelated-7c31.mch"
+        assert out["matched_by"] == cdm._BY_MACHINE_NAME
+        assert e.lib.deleted == ["machine://local/unrelated-7c31.mch"]
+
+    def test_an_unloadable_asset_before_the_target_does_not_stop_the_walk(self, env):
+        # machineAtURL answering nothing on one asset says nothing about the ones after it, so the
+        # walk skips that asset and keeps going rather than abandoning the search at it.
+        m = _local()
+        e = env(local=[m], assets=[("broken.mch", None), ("SweepMach.mch", m)])
+        out = _payload(cdm.handler(name="SweepMach", confirm_name="SweepMach"))
+        assert out["deleted"] is True and out["asset_name"] == "SweepMach.mch"
+        assert e.lib.deleted == ["machine://local/SweepMach.mch"]   # the broken one is untouched
+
+    def test_the_file_name_narrows_two_assets_holding_the_same_machine(self, env):
+        # The one thing the label cannot separate: two assets holding ONE machine. Exactly one is
+        # filed under the name the caller used, so the file name picks it and matched_by says so.
+        m = _local()
+        e = env(local=[m], assets=[("SweepMach.mch", m), ("a-copy-3d90.mch", m)])
+        out = _payload(cdm.handler(name="SweepMach", confirm_name="SweepMach"))
+        assert out["asset_name"] == "SweepMach.mch"
+        assert out["matched_by"] == cdm._BY_MACHINE_NAME_AND_FILE
+        assert e.lib.deleted == ["machine://local/SweepMach.mch"]
 
     def test_two_assets_sharing_the_name_are_refused_not_guessed(self, env):
         m = _local()
@@ -634,18 +685,18 @@ class TestDeleteMachineGuards:
         e = env(local=[m], assets=[("SweepMach.mch", m), ("SweepMach.mch", m, "Mills/")])
         res = cdm.handler(name="SweepMach", confirm_name="SweepMach")
         assert res["isError"] is True
-        assert "names 2 assets" in res["message"] and "refusing to guess" in res["message"]
+        assert "2 assets" in res["message"] and "refusing to guess" in res["message"]
         assert "machine://local/Mills/SweepMach.mch" in res["message"]
         assert e.lib.deleted == []
 
-    def test_an_asset_holding_a_different_machine_is_refused(self, env):
-        # The leaf NAME matched but the asset loads another machine - deleting it would remove a
-        # machine the caller never confirmed.
+    def test_an_asset_holding_a_different_machine_is_never_addressed(self, env):
+        # The leaf NAME matched but the asset loads another machine - it never enters the hit set,
+        # and the refusal names it so the caller is not left reading 'the name is simply absent'.
         m = _local()
         e = env(local=[m], assets=[("SweepMach.mch", _mach(description="Someone Else"))])
         res = cdm.handler(name="SweepMach", confirm_name="SweepMach")
         assert res["isError"] is True
-        assert "holds the machine 'Someone Else'" in res["message"]
+        assert "FILED under that name but holds 'Someone Else'" in res["message"]
         assert e.lib.deleted == []
 
     def test_an_incomplete_library_walk_refuses_the_delete(self, env):
@@ -663,11 +714,13 @@ class TestDeleteMachineGuards:
         e = env(local=[m], assets=[("OtherMachine.mch", _mach())], folder_depth=8)
         res = cdm.handler(name="SweepMach", confirm_name="SweepMach")
         assert res["isError"] is True
-        assert "No asset in the Local machine library is named" in res["message"]
+        assert "No asset in the Local machine library holds a machine named" in res["message"]
         assert "incomplete" in res["message"]
         assert e.lib.deleted == []
 
     def test_an_asset_that_loads_nothing_is_refused(self, env):
+        # It cannot be shown to HOLD the machine, so it is never addressed - and the refusal says
+        # the asset loads nothing rather than claiming it holds some other machine.
         m = _local()
         e = env(local=[m], assets=[("SweepMach.mch", None)])
         res = cdm.handler(name="SweepMach", confirm_name="SweepMach")
@@ -688,6 +741,9 @@ class TestDeleteMachineEffect:
         assert out["location"] == "local" and out["asset_name"] == "SweepMach.mch"
         assert out["url"] == "machine://local/SweepMach.mch"
         assert out["resolves_after_delete"] is False
+        # the ONLY copy: the name answers nothing now, so the library it would be reached from is
+        # null - not 'local', which would read as the machine still being there
+        assert out["resolves_from"] is None
         assert out["local_assets_remaining"] == 0
         assert e.lib.deleted == ["machine://local/SweepMach.mch"]
         assert e.lib.local == []
@@ -737,7 +793,7 @@ class TestDeleteMachineEffect:
         env(local=[m], assets=[("SweepMach.mch", m)], delete_mode="keeps_machine")
         res = cdm.handler(name="SweepMach", confirm_name="SweepMach")
         assert res["isError"] is True
-        assert "still resolves to the same machine" in res["message"]
+        assert "still resolves to the same LOCAL machine" in res["message"]
 
     def test_a_label_that_is_not_the_model_still_reads_its_own_asset_back(self, env):
         # THE FALSE OK: name 'VF-2', label 'Shop Mill #3', asset leaf 'VF-2'. A read-back searching
@@ -757,7 +813,19 @@ class TestDeleteMachineEffect:
         env(local=[m], assets=[("VF-2.mch", m)], delete_mode="keeps_machine")
         res = cdm.handler(name="VF-2", confirm_name="Shop Mill #3")
         assert res["isError"] is True
-        assert "still resolves to the same machine" in res["message"]
+        assert "still resolves to the same LOCAL machine" in res["message"]
+
+    def test_a_shipped_copy_of_the_SAME_name_is_not_a_failed_delete(self, env):
+        # MEASURED live: Machine.id is the DESCRIPTION, so a shipped copy sharing the name reads the
+        # deleted local one's id exactly. The library the re-resolve reaches is the only thing that
+        # separates the two copies, so an id match alone is not a delete that failed.
+        local, shipped = _local("Haas CM-1"), _local("Haas CM-1")
+        e = env(local=[local], f360=[shipped], assets=[("Haas CM-1.mch", local)])
+        out = _payload(cdm.handler(name="Haas CM-1", confirm_name="Haas CM-1"))
+        assert out["deleted"] is True and out["resolves_after_delete"] is False
+        assert out["resolves_from"] == "fusion360"
+        assert "now reaches the fusion360 library's 'Haas CM-1'" in out["note"]
+        assert e.lib.deleted == ["machine://local/Haas CM-1.mch"]
 
     def test_a_read_back_walk_that_cannot_answer_leaves_the_delete_unconfirmed(self, env):
         # The library location stops resolving between the delete and the read-back: an empty match
@@ -797,5 +865,8 @@ class TestDeleteMachineEffect:
         e = env(local=[m], f360=[other], assets=[("SweepMach.mch", m)])
         out = _payload(cdm.handler(name="SweepMach", confirm_name="SweepMach"))
         assert out["deleted"] is True and out["resolves_after_delete"] is False
-        assert "resolves to a DIFFERENT machine" in out["note"]
+        # the note names the LIBRARY the survivor is reached from, which is what tells a caller
+        # whether the name now gets a bundled copy or another local machine
+        assert "now reaches the fusion360 library's 'SweepMach'" in out["note"]
+        assert out["resolves_from"] == "fusion360"
         assert e.lib.deleted == ["machine://local/SweepMach.mch"]

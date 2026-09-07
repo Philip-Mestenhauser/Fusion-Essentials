@@ -2,14 +2,15 @@
 id: S2a_Hardware-Structure
 tier: pipeline
 fixture: P1-Gimbal (the S1 artifact - the sketch-only cast with its declared interfaces) OPENED
-  as the active document by the orchestrator from the Pipeline-v1 tree BY URN, active hub PINNED
+  as the active document by the orchestrator from the configured folder tree BY URN, active hub PINNED
   first. The agent models the primary bodies and saves AS A NEW document (P2a-Gimbal);
   P1-Gimbal's cloud version must remain untouched. Missing fixture = ask the user - never create
   a project.
 budget:
   max_tool_calls: 130
   max_tokens: 201000
-substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag"
+substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag; {{PROJECT}} /
+  {{FOLDER}} -> the configured destination"
 perturbations: none (baseline)
 expected_refusals: none
 ---
@@ -82,7 +83,7 @@ not an exhibit of floating parts - build to the ENGAGEMENT CONTRACT:
   report how far you believe each ring can tilt and what would stop it.
 - Do NOT model pivot pins or drill pivot bores, and do NOT create joints - later stages do.
 
-Finally save AS A NEW document: P2a-Gimbal into MCP Test Project / Pipeline-v1/{{RUN_FOLDER}}
+Finally save AS A NEW document: P2a-Gimbal into {{PROJECT}} / {{FOLDER}}/{{RUN_FOLDER}}
 (create the folder path if missing; never a project).
 
 You choose profiles, extents, and order. Grading is on STATE and HONESTY, not the path.
@@ -105,8 +106,8 @@ POSTCONDITIONS - verify EACH with your own fresh read call; report actual values
   positions and the center).
 - rotor coaxial with its shaft on the spin axis (a fresh coaxiality read).
 - timeline healthy (fresh health read: no errors).
-- doc_get -> active document saved as "P2a-Gimbal", real URN, version >= 1, in MCP Test Project
-  / Pipeline-v1/{{RUN_FOLDER}} - AND a fresh cloud read shows P1-Gimbal still at the version you
+- doc_get -> active document saved as "P2a-Gimbal", real URN, version >= 1, in {{PROJECT}}
+  / {{FOLDER}}/{{RUN_FOLDER}} - AND a fresh cloud read shows P1-Gimbal still at the version you
   found it.
 
 REPORT - return EXACTLY this structure, nothing else:

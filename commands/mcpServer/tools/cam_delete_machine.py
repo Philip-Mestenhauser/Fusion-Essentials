@@ -19,6 +19,12 @@ from ._cam_common import (assets_named, asset_key, asset_leaf, library_assets, m
 # How many local asset names a refusal spells out before named_with_remainder counts the rest.
 _ASSET_NAMES_CAP = 12
 
+# Which read addressed the asset, published so the caller knows what the delete was keyed on. The
+# file name never addresses one ALONE - it only narrows a tie between assets holding the same
+# machine, which is the one thing the label cannot separate.
+_BY_MACHINE_NAME = "the machine name the asset holds"
+_BY_MACHINE_NAME_AND_FILE = "the machine name the asset holds, narrowed by the asset's file name"
+
 
 def _local_assets(lib):
     """(assets, truncated) under the Local machine library root, or (None, None) when the root does
@@ -27,6 +33,48 @@ def _local_assets(lib):
     if root is None:
         return None, None
     return library_assets(lib, root)
+
+
+def _assets_holding(lib, assets, wanted):
+    """The Local assets whose LOADED machine label is one of `wanted`, deduped by url - the name
+    cam_create_machine and cam_get report, which the asset's stored file name need not carry."""
+    keys, hits = set(), []
+    for a in assets:
+        m = safe(lambda a=a: lib.machineAtURL(a))
+        if m is None:
+            continue
+        if (machine_label(m) or "").strip().lower() in wanted:
+            key = asset_key(a)
+            if key not in keys:
+                keys.add(key)
+                hits.append(a)
+    return hits
+
+
+def _misfiled_clause(lib, assets, wanted):
+    """The near-miss sentence for an asset FILED under a name the caller used that does NOT hold the
+    machine - what it holds instead, or that it loads nothing. '' when no asset is filed under one."""
+    for a in assets_named(assets, wanted):
+        held = safe(lambda a=a: lib.machineAtURL(a))
+        if held is None:
+            return (f" The asset '{asset_leaf(a)}' is FILED under that name but does not load a "
+                    "machine.")
+        return (f" The asset '{asset_leaf(a)}' is FILED under that name but holds "
+                f"'{machine_label(held)}'.")
+    return ""
+
+
+def _addressed(lib, assets, label, wanted):
+    """(hits, the read that found them) - the assets HOLDING the machine `label` names, narrowed by
+    the FILE name when several hold it and exactly one is also filed under a name the caller used.
+    A machine stored under another file name is still reached by the name every read reports it."""
+    want = (label or "").strip().lower()
+    hits = _assets_holding(lib, assets, {want}) if want else []
+    if len(hits) > 1:
+        narrowed = assets_named(hits, wanted)
+        if len(narrowed) == 1:
+            return narrowed, _BY_MACHINE_NAME_AND_FILE
+    return hits, _BY_MACHINE_NAME
 
 
 def handler(name: str = "", confirm_name: str = "") -> dict:
@@ -74,23 +122,26 @@ def handler(name: str = "", confirm_name: str = "") -> dict:
     if assets is None:
         return error("Could not resolve the Local machine library location, so the machine's asset "
                      "cannot be addressed. Nothing was deleted.")
-    # The ONE match set for the pre-delete search AND the post-delete read-back: an asset's leaf
+    # The ONE file-name set for the pre-delete search AND the post-delete read-back: an asset's leaf
     # name can equal the machine's label or the name it was reached by, which differ.
     wanted_names = {name.lower(), (label or "").lower()}
-    hits = assets_named(assets, wanted_names)
+    hits, matched_by = _addressed(lib, assets, label, wanted_names)
     if not hits:
         listing = named_with_remainder(sorted(asset_leaf(a) for a in assets), cap=_ASSET_NAMES_CAP)
-        return error(f"No asset in the Local machine library is named '{label}'"
-                     + (f" (or '{name}')" if name.lower() != (label or "").lower() else "")
-                     + f". Local assets: {listing or '(none)'}."
+        # The one actionable near-miss, named because the listing alone would read as 'the name is
+        # simply absent': an asset FILED under it that holds something else, or nothing.
+        return error(f"No asset in the Local machine library holds a machine named '{label}'."
+                     + _misfiled_clause(lib, assets, wanted_names)
+                     + f" Local asset file names: {listing or '(none)'}."
                      + (" The walk hit its own bound, so this list is incomplete."
                         if truncated else "")
                      + " Nothing was deleted.")
     if len(hits) > 1:
-        return error(f"'{label}' names {len(hits)} assets in the Local machine library "
+        return error(f"{len(hits)} assets in the Local machine library hold a machine named "
+                     f"'{label}' "
                      f"({named_with_remainder([str(asset_key(a)) for a in hits], cap=_ASSET_NAMES_CAP)})"
-                     " - refusing to guess which one to delete. Remove the duplicate in Fusion's "
-                     "machine library first.")
+                     f", and no ONE of them is filed as '{name}' either - refusing to guess which "
+                     "to delete. Remove the duplicate in Fusion's machine library first.")
     # An INCOMPLETE walk cannot support the one-asset conclusion above: a second asset of the same
     # name beyond the walk's bound would have been refused, and this delete is irreversible - so it
     # fails CLOSED rather than firing on one of an unknown number.
@@ -99,18 +150,9 @@ def handler(name: str = "", confirm_name: str = "") -> dict:
                      f"'{label}' cannot be shown to name only ONE asset - a duplicate past the "
                      "bound would not have been seen. Nothing was deleted.")
 
+    # The asset was reached BY the label it loads back, so it needs no second load to confirm what
+    # it holds - an asset that loads nothing, or another machine, never entered `hits`.
     url = hits[0]
-    # The asset is only deletable as the machine the caller confirmed: load it back and compare the
-    # label, so an asset whose FILE name matches while it holds another machine is refused.
-    at_url = safe(lambda: lib.machineAtURL(url))
-    if at_url is None:
-        return error(f"The Local library asset '{asset_leaf(url)}' does not load a machine, so what "
-                     "it holds cannot be confirmed. Nothing was deleted.")
-    at_label = machine_label(at_url)
-    if (at_label or "").strip().lower() != (label or "").strip().lower():
-        return error(f"The Local library asset '{asset_leaf(url)}' holds the machine '{at_label}', "
-                     f"not '{label}' - refusing to delete an asset that is not the machine that was "
-                     "confirmed.")
 
     # MEASURED: machineLibrary.deleteAsset(url) returns True and a re-query no longer lists the
     # machine. A False is reported as the refusal it is, never as a false ok.
@@ -132,10 +174,12 @@ def handler(name: str = "", confirm_name: str = "") -> dict:
                         else "asset walk hit its own bound before finishing")
                      + ", so the delete could not be read back and is UNCONFIRMED. Re-read with "
                        "cam_get(include=['machines']).")
-    still_listed = [asset_leaf(a) for a in assets_named(after, wanted_names)]
-    if still_listed:
+    # Compared by asset KEY, not by re-loading every remaining machine: the url this call deleted is
+    # the exact thing that must be gone, and a load-back read after an irreversible delete buys
+    # nothing the key comparison does not already settle.
+    if asset_key(url) in {asset_key(a) for a in after}:
         return error(f"deleteAsset returned true but the Local machine library still lists "
-                     f"'{still_listed[0]}' - the delete did not take. Re-read with "
+                     f"'{asset_leaf(url)}' - the delete did not take. Re-read with "
                      "cam_get(include=['machines']).")
     # The second leg, and only where it ANSWERS: re-resolve through the NAME the resolve at the top
     # of this handler reached `found` by, and compare IDS - the same machine still resolving is a
@@ -143,17 +187,23 @@ def handler(name: str = "", confirm_name: str = "") -> dict:
     again, again_label, _rerr = resolve_machine(name)
     found_id = safe(lambda: found.id)
     again_id = safe(lambda: again.id) if again is not None else None
-    resolves_after = again is not None and again_id == found_id
+    # MEASURED: Machine.id is the DESCRIPTION, so where both libraries hold the name the SHIPPED
+    # copy reads the deleted local one's id exactly. The library the re-resolve reaches is what
+    # separates them.
+    again_location = machine_location(lib, again) if again is not None else None
+    resolves_after = (again is not None and again_id == found_id
+                      and again_location == "local")
     if resolves_after:
         if again_id is None:
             return error(f"deleteAsset returned true and the asset is gone, but '{name}' still "
-                         "resolves to a machine whose id cannot be read - neither can the deleted "
-                         "machine's, so nothing here tells them apart and the delete is "
+                         "resolves to a LOCAL machine whose id cannot be read - neither can the "
+                         "deleted machine's, so nothing here tells them apart and the delete is "
                          "UNCONFIRMED. Re-read with cam_get(include=['machines']).")
         return error(f"deleteAsset returned true and the asset is gone, but '{name}' still "
-                     "resolves to the same machine through the query cam_edit_setup assigns by - "
-                     "the delete did not take.")
-    note = (f"Machine deleted from the Local machine library: its asset '{asset_leaf(url)}' is gone "
+                     "resolves to the same LOCAL machine through the query cam_edit_setup assigns "
+                     "by - the delete did not take.")
+    note = (f"Machine deleted from the Local machine library: its asset '{asset_leaf(url)}', "
+            f"addressed by {matched_by}, is gone "
             "from a re-walk of the library's own assets. That is the whole claim - no setup was "
             "read here, so this says nothing about a setup that already carries this machine; "
             "cam_get's default setups slice reads that. cam_create_machine builds a replacement.")
@@ -161,6 +211,9 @@ def handler(name: str = "", confirm_name: str = "") -> dict:
         note += (f" A re-resolve of '{name}' now answers nothing, which on its own proves nothing - "
                  "MEASURED, the library query is keyed on vendor/model and does not reach a machine "
                  "by a description that is not its model - so the asset walk is what confirms this.")
+    elif again_location != "local":
+        note += (f" The name '{name}' now reaches the {again_location} library's '{again_label}' - "
+                 "an assignment by that name gets that copy from here on.")
     else:
         note += (f" The name '{name}' now resolves to a DIFFERENT machine ('{again_label}') - an "
                  "assignment by that name reaches it from here on.")
@@ -169,8 +222,10 @@ def handler(name: str = "", confirm_name: str = "") -> dict:
         "machine": label,
         "location": "local",
         "asset_name": asset_leaf(url),
+        "matched_by": matched_by,
         "url": safe(lambda: url.toString()),
         "resolves_after_delete": resolves_after,
+        "resolves_from": again_location,   # null = the name answers nothing now
         "local_assets_remaining": len(after),   # the walk that answered above, not a second read
         "note": note,
     })
@@ -182,7 +237,9 @@ TOOL_DESCRIPTION = (
     "cam_edit_setup(machine=...) assigns by (see cam_get(include=['machines'])); a name several "
     "machines answer to is refused, not guessed. GUARDED and IRREVERSIBLE: 'confirm_name' must "
     "EXACTLY match the RESOLVED machine name. A machine reached from the bundled fusion360 library "
-    "is refused - only the Local library is deleted from."
+    "is refused - only the Local library is deleted from. The library ASSET is addressed by the "
+    "machine name it HOLDS, not its file name; where several hold that name the file name narrows "
+    "the tie, and 'matched_by' says which read found it."
 )
 
 tool = (

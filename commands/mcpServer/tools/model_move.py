@@ -385,7 +385,7 @@ move_tool = (
     .add_input_property("angle_deg", {"type": "number",
             "description": "Rotation in DEGREES about 'axis' (non-zero)."})
     .add_input_property(*_FROM.as_property())
-    .add_input_property(*_TO.as_property())
+    .add_input_property(*_TO.as_property(brief=True))
     .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )

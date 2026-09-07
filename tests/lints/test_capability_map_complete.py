@@ -4,9 +4,11 @@
 """Lint: sys_capability_map's authored _FAMILY rows cover EXACTLY the registry's families, and
 every entry tool they name is a registered tool.
 
-Red three ways: a family with no row, a row outliving its family, a row naming no registered tool."""
+Red five ways: a family with no row, a row outliving its family, a row naming no registered tool,
+a published capability name the live sweep's own probe registry does not carry, and a capability
+pointing at a tool the registry no longer has."""
 
-from conftest import load_tool, register_all_tools
+from conftest import load_tool, load_tool_verify, register_all_tools
 
 cm = load_tool("sys_capability_map")
 
@@ -41,3 +43,25 @@ class TestCapabilityMapComplete:
         assert not bad, (
             "these _FAMILY rows point at an entry tool the registry does not carry (renamed or "
             "deleted) - re-point the row:\n  " + "\n  ".join(bad))
+
+    def test_every_published_capability_name_is_one_the_sweep_knows(self):
+        # ONE vocabulary. A name the map publishes that no sweep probe answers to is a second
+        # spelling of the same entitlement, and an agent planning against it can never be told
+        # which steps it gates. The sweep may hold names of its own (an environment the tool
+        # cannot see), so the rule runs one way.
+        known = set(load_tool_verify().CAPABILITY_PROBES)
+        stray = sorted(set(cm._CAPABILITIES) - known)
+        assert not stray, (
+            "sys_capability_map publishes these capability names, which the live sweep's probe "
+            "registry (tests/live/verify_core.py CAPABILITY_PROBES) does not carry - spell them "
+            "the way the sweep does, or add the sweep's probe:\n  " + "\n  ".join(stray))
+
+    def test_every_capability_points_at_a_registered_tool(self):
+        # The map takes no verdict of its own - it names the tool whose read does. A read_with
+        # naming a renamed or unregistered tool sends a cold agent at a 'No such tool available'.
+        names, _ = _registry()
+        bad = sorted(f"{cap} -> {tool}" for cap, tool in cm._CAPABILITIES.items()
+                     if tool not in names)
+        assert not bad, (
+            "these capability rows point at a tool the registry does not carry - re-point the "
+            "row:\n  " + "\n  ".join(bad))

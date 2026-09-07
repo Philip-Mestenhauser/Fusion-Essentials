@@ -21,6 +21,16 @@ _SLICES = ("hubs", "folders")
 _MAX_DEPTH_DEFAULT = 4
 
 
+def _walk_limits():
+    """The folder walk's default and maximum budgets, read off the core that enforces them."""
+    from . import _data_read as data_read
+    return (data_read._LF_FOLDER_BUDGET, data_read._LF_FOLDER_BUDGET_MAX,
+            int(data_read._TIME_BUDGET_S), int(data_read._TIME_BUDGET_MAX_S))
+
+
+_FOLDER_BUDGET_DEFAULT, _FOLDER_BUDGET_MAX, _TIME_BUDGET_DEFAULT, _TIME_BUDGET_MAX = _walk_limits()
+
+
 def _unwrap(result):
     """(payload, None) on ok; (None, error_result) on error - so a cloud failure propagates verbatim."""
     if result.get("isError"):
@@ -40,7 +50,8 @@ def _normalize_include(include):
 
 
 def handler(project: str = "", project_id: str = "", folder: str = "", recursive: bool = True,
-            include=None, max_depth: int = _MAX_DEPTH_DEFAULT, file: str = "") -> dict:
+            include=None, max_depth: int = _MAX_DEPTH_DEFAULT, file: str = "",
+            folder_budget=None, time_budget_s=None) -> dict:
     """See TOOL_DESCRIPTION."""
     inc = _normalize_include(include)
     bad = [s for s in inc if s not in _SLICES]
@@ -82,25 +93,36 @@ def handler(project: str = "", project_id: str = "", folder: str = "", recursive
     if have_project:
         from . import _data_read as data_read
         if "folders" in inc:
-            out, e = _unwrap(data_read.list_folders_handler(project=project, project_id=project_id,
-                                                            max_depth=max_depth))
+            out, e = _unwrap(data_read.list_folders_handler(
+                project=project, project_id=project_id, max_depth=max_depth, folder=folder,
+                folder_budget=folder_budget, time_budget_s=time_budget_s))
             if e:
                 return e
             out["scope"] = "folders"
-            out["note"] = ("Folder tree of the project. Pass a 'folder' path + drop include=['folders'] "
-                           "to list that folder's FILES. (Cloud read - see 'truncated'.)")
+            out["note"] = ("Folder tree under 'folder' (the whole project when none is given). Drop "
+                           "include=['folders'] to list a folder's FILES instead.")
             if out.get("truncated"):
                 out["note"] += (" The walk hit its folder budget (each folder is a slow cloud fetch "
                                 "on Fusion's main thread): nodes flagged folders_truncated were not "
-                                "descended. Lower max_depth, or list one subtree's files directly "
-                                "with 'folder'=<path>.")
+                                "descended. Scope with 'folder'=<path>, lower max_depth, or raise "
+                                "folder_budget.")
             if out.get("time_truncated"):
-                out["note"] += (f" The walk stopped after its {int(data_read._TIME_BUDGET_S)}s time "
-                                "budget (a network stall, not the fetch-count cap) - results are "
-                                "PARTIAL. Retry, or list one subtree with 'folder'=<path>.")
+                spent = out.get("time_budget_s")
+                out["note"] += ((f" The walk stopped after its {int(spent)}s time budget" if spent
+                                 else " The walk stopped after its time budget")
+                                + " (a network stall, not the fetch-count cap) - results are "
+                                  "PARTIAL. Retry, scope with 'folder'=<path>, or raise "
+                                  "time_budget_s.")
+            if out.get("folders_unreadable"):
+                out["note"] += (f" {out['folders_unreadable']} folder(s) would not enumerate at all "
+                                "- the first of them named in folders_unreadable_at, and flagged "
+                                "children_unreadable wherever the tree holds their node: what is "
+                                "under them was never read, so this tree does not show that a "
+                                "folder is absent.")
             return ok(out)
         out, e = _unwrap(data_read.list_project_files_handler(project=project, project_id=project_id,
-                                                              folder=folder, recursive=recursive))
+                                                              folder=folder, recursive=recursive,
+                                                              time_budget_s=time_budget_s))
         if e:
             return e
         out["scope"] = "files"
@@ -110,9 +132,12 @@ def handler(project: str = "", project_id: str = "", folder: str = "", recursive
                        "version and link state). (Cloud read - see 'truncated'.)")
         if out.get("time_truncated"):
             at = out.get("time_truncated_at") or "(project root)"
-            out["note"] += (f" The walk stopped after its {int(data_read._TIME_BUDGET_S)}s time "
-                            f"budget at folder '{at}' (a network stall, not the file/folder cap) - "
-                            "results are PARTIAL. Narrow with 'folder'=<path>, or retry.")
+            spent = out.get("time_budget_s")
+            out["note"] += ((f" The walk stopped after its {int(spent)}s time budget" if spent
+                             else " The walk stopped after its time budget")
+                            + f" at folder '{at}' (a network stall, not the file/folder cap) - "
+                              "results are PARTIAL. Narrow with 'folder'=<path>, raise "
+                              "time_budget_s, or retry.")
         # a file listing's dominant next action is to OPEN one - name doc_open so the breadcrumb from
         # 'here are the files' to 'open this one by id' is explicit (present-only: only when files exist).
         if out.get("files"):
@@ -149,9 +174,10 @@ TOOL_DESCRIPTION = (
     "Read the CLOUD data model (Autodesk/Fusion Team) by scope. No 'project': the active hub + its "
     "projects. project=<name|id>: that project's FILES (name, lineage URN, version, openable "
     "fusionWebURL), 'folder'=<path> scoping to one. include=['folders'] with a project: the folder "
-    "TREE instead; include=['hubs']: all hubs. 'file'=<lineage URN, or a name plus its project>: ONE "
-    "file's full record, including its read-only link state. Every call is a NETWORK read; results "
-    "are capped ('truncated'). For the open-document SESSION use doc_get."
+    "TREE instead, rooted at 'folder' when one is given; include=['hubs']: all hubs. 'file'=<lineage "
+    "URN, or a name plus its project>: ONE file's full record, including its read-only link state. "
+    "Every call is a NETWORK read; results are capped ('truncated', 'time_truncated'), and "
+    "folder_budget / time_budget_s size the walk. For the open-document SESSION use doc_get."
 )
 
 tool = (
@@ -159,13 +185,20 @@ tool = (
     .add_input_property("project", {"type": "string", "description": "Project name (case-insensitive) to scope to."})
     .add_input_property("project_id", {"type": "string", "description": "Project id (alternative to name)."})
     .add_input_property("folder", {"type": "string",
-            "description": "Folder PATH scoping the file listing, e.g. 'Parts/Fixtures'."})
+            "description": "Folder PATH to scope to, e.g. 'Parts/Fixtures' - the file listing, or "
+                           "the root of the tree with include=['folders']."})
     .add_input_property("recursive", {"type": "boolean",
             "description": "Descend into subfolders (default true)."})
     .add_input_property("include", {"type": ["array", "string"],
             "description": "'hubs' or 'folders'; a list or comma-string."})
     .add_input_property("max_depth", {"type": "integer",
             "description": f"With include=['folders']: depth cap (default {_MAX_DEPTH_DEFAULT})."})
+    .add_input_property("folder_budget", {"type": "integer",
+            "description": "With include=['folders']: how many folder fetches the walk may spend "
+                           f"(default {_FOLDER_BUDGET_DEFAULT}, max {_FOLDER_BUDGET_MAX})."})
+    .add_input_property("time_budget_s", {"type": "number",
+            "description": "Seconds the walk may spend before it reports time_truncated (default "
+                           f"{_TIME_BUDGET_DEFAULT}, max {_TIME_BUDGET_MAX})."})
     .add_input_property("file", {"type": "string",
             "description": "ONE file: its lineage URN (or web URL), or its name - a name needs 'project'."})
     .strict_schema()

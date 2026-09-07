@@ -11,7 +11,8 @@ from types import SimpleNamespace
 import pytest
 
 import live_api_facts
-from conftest import Camera, FakePoint, MakeComp, Viewport, load_tool, make_source_document
+from conftest import (BRepBody, Camera, FakePoint, MakeComp, Viewport, body_proxy, camera_state,
+                      load_tool, make_occurrence, make_source_document)
 
 vc = load_tool("_view_common")
 
@@ -169,12 +170,29 @@ def _refusing_point(x, y, z):
     return type("RefusingPoint", (FakePoint,), {"distanceTo": _no_read})(x, y, z)
 
 
+class TestViewportHandsBackACopy:
+    def test_a_read_camera_moves_nothing_until_it_is_assigned_back(self):
+        # BEHAVIOR['viewport_camera_returns_copy'] (measure row camera-returns-copy): every
+        # assigning site in this family writes its camera back because a mutation of the read one
+        # reaches no viewport. A fake sharing one mutable camera hides a site that forgot.
+        assert live_api_facts.BEHAVIOR["viewport_camera_returns_copy"] is True
+        vp = _viewport()
+        read = vp.camera
+        read.viewExtents = 999.0
+        assert vp.camera.viewExtents != 999.0
+        vp.camera = read
+        assert vp.camera.viewExtents == 999.0
+
+
 class TestApplyNamedView:
     def test_named_view_assigns_camera_and_fits(self):
         vp = _viewport()
+        before = camera_state(vp._original_camera)
         vc.apply_named_view(vp, "front")
-        # the orient assigned back the very camera it read, then framed
-        assert vp._assigned[-1] is vp._original_camera
+        # a viewport read hands back a copy, so the orient is judged on the camera it PUT BACK
+        # carrying the state it read, not on getting the same object returned.
+        assert vp._assigned and vp._cam is vp._assigned[-1]
+        assert camera_state(vp._cam) != before
         assert vp._fit_calls == 1
 
     def test_true_face_forces_orthographic_camera(self):
@@ -481,6 +499,52 @@ class TestAllDisplayComponents:
             "origins": "isOriginFolderLightBulbOn",
             "joints": "isJointsFolderLightBulbOn",
         }
+
+
+class TestSameBody:
+    """The key an isolate keeps ONE body lit by. A component placed twice hands both proxies of its
+    single native body ONE native_identity, so that half alone answers "same body" for every
+    instance; the placing occurrence's path is the half that separates them."""
+
+    def _placed(self, native, path):
+        return body_proxy(native, make_occurrence(path=path, component=MakeComp(name="Wing")))
+
+    def test_two_instances_of_one_native_body_are_not_the_same_body(self):
+        native = BRepBody(name="skin", entity_token="SKIN")
+        assert vc.same_body(self._placed(native, "Wing:1"),
+                            self._placed(native, "Wing:2")) is False
+
+    def test_two_fresh_reads_of_ONE_instance_are_the_same_body(self):
+        # findEntityByToken mints a FRESH proxy, so the subject reached through a second walk still
+        # has to match - matched by object identity it would be hidden by its own framing call.
+        native = BRepBody(name="skin", entity_token="SKIN")
+        a, b = self._placed(native, "Wing:1"), self._placed(native, "Wing:1")
+        assert a is not b and vc.same_body(a, b) is True
+
+    def test_two_reads_of_one_body_in_NO_context_are_the_same_body(self):
+        native = BRepBody(name="skin", entity_token="SKIN")
+        twin = BRepBody(name="skin", entity_token="SKIN")
+        assert vc.same_body(native, twin) is True
+
+    def test_a_native_body_and_its_OWN_proxy_are_the_same_body(self):
+        # A native body reads NO placement path and its proxy reads one, but they are one body -
+        # split here and an isolate hides a wrapper of its own subject, whose bulb the placement
+        # shares, and the shot is refused on a design with a single placement.
+        native = BRepBody(name="skin", entity_token="SKIN")
+        assert vc.same_body(native, self._placed(native, "Wing:1")) is True
+        assert vc.same_body(self._placed(native, "Wing:1"), native) is True
+
+    def test_a_path_that_will_not_read_leaves_the_identity_match_standing(self):
+        # Hiding the subject is the worse failure, so a path that declines never splits an identity
+        # match into two bodies.
+        native = BRepBody(name="skin", entity_token="SKIN")
+        blind = make_occurrence(path="Wing:1", component=MakeComp(name="Wing"),
+                                raises_on={"fullPathName": "3 : InternalValidationError : path"})
+        assert vc.same_body(body_proxy(native, blind), self._placed(native, "Wing:2")) is True
+
+    def test_two_different_bodies_are_never_the_same_body(self):
+        assert vc.same_body(BRepBody(name="skin", entity_token="SKIN"),
+                            BRepBody(name="rib", entity_token="RIB")) is False
 
 
 class TestIsolateForFit:

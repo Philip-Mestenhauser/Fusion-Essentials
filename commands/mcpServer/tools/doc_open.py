@@ -7,12 +7,14 @@ rejects a configured design); the is_cam_template flag guards the crash-prone AP
 multi-reference CAM template.
 """
 
+import time
+
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import counted, ok, error, safe
 from ._data_common import _b64url_decode, _urn_candidates, _resolve_data_file
 
 app = adsk.core.Application.get()
@@ -86,9 +88,17 @@ def handler(file_id: str = "", is_cam_template: bool = False,
 
     is_configured = bool(safe(lambda: data_file.isConfiguredDesign, False))
 
+    # An assembly's open pulls its whole reference family in, so the cost is counted rather than
+    # guessed at: the open documents before and after, and the seconds the call itself took.
+    open_before = counted(lambda: app.documents.count)
+    started = time.monotonic()
     doc, method, err = _open_document(data_file)
+    elapsed = round(time.monotonic() - started, 1)
     if not doc:
         return error(f"Failed to open '{safe(lambda: data_file.name) or raw}': {err}")
+    open_after = counted(lambda: app.documents.count)
+    loaded = (open_after - open_before
+              if open_before is not None and open_after is not None else None)
 
     info = {
     "opened": True,
@@ -99,6 +109,14 @@ def handler(file_id: str = "", is_cam_template: bool = False,
     "is_configured_design": is_configured,
     "open_method": method,
     "resolved_id": resolved,
+    # This document's OWN direct references, the same read workspace_orient publishes - null when
+    # the collection did not read. MEASURED: an assembly reading 9 here loaded 27 documents, so
+    # this is not the count the open walked; doc_get's open_count is that one.
+    "referenced_documents": counted(lambda: doc.documentReferences.count),
+    # What the open actually COST: the seconds it ran, and how many more documents are open now
+    # than were before it. null where either census did not read - never a coerced 0.
+    "open_seconds": elapsed,
+    "documents_loaded": loaded,
     "note": None,
     }
     if resolved and resolved != raw:
@@ -109,17 +127,25 @@ def handler(file_id: str = "", is_cam_template: bool = False,
         info["configured_design_note"] = (
     "This is a Configured Design. It is now open at its active configuration; read its "
     "configurations from the open design's configurationTopTable, and switch the active "
-    "one with ConfigurationRow.activate()."
+    "one with ConfigurationRow.activate(). OBSERVED ONCE: opening a doc_copy of a "
+    "configured design ended with the Fusion process gone."
         )
 
     # Opening a cloud document is asynchronous, and this handler runs on the same main thread that
     # loads it - blocking here would stall the load AND freeze the UI, so the status is reported as
     # read and the caller is told how to confirm.
+    parts = []
+    if loaded is not None and loaded > 1:
+        parts.append(f"This open put {loaded} documents in the session in {elapsed}s - "
+                     "'referenced_documents' counts only the DIRECT ones, so it is not that number. "
+                     "doc_get reports the session census as open_count.")
     if info["is_active"] is False:
-        info["note"] = (
+        parts.append(
         "Document is still loading (open is asynchronous). Call workspace_orient after a "
         "moment to confirm it has become the active document before operating on it."
         )
+    if parts:
+        info["note"] = " ".join(parts)
 
     return ok(info)
 
@@ -147,8 +173,12 @@ tool = (
     .strict_schema()
 )
 
+# enforce_timeout=False: the open is a blocking, uninterruptible main-thread call that COMMITS - a
+# large assembly's ran past the server's cap and the document was open regardless, so the timeout
+# only replaced this payload with a false failure.
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    enforce_timeout=False,
     verification=Verification(
         kind="deferred", poller="workspace_orient",
         evidence_test="tests/unit/test_doc_open.py::TestAsyncLoadHandoff"

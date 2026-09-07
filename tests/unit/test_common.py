@@ -17,6 +17,22 @@ from conftest import (BRepBody, MakeComp, _NamedCollection, body_proxy, entity_p
 common = load_tool("_common")
 
 
+class TestShortRef:
+    """The head a wire message quotes a caller's own value back as."""
+
+    def test_a_value_at_the_cap_is_echoed_whole_and_one_over_is_cut(self):
+        at = "h" * common._ECHO_CHARS
+        assert common.short_ref(at) == at
+        assert common.short_ref(at + "h") == at + f"... ({common._ECHO_CHARS + 1} chars)"
+
+    def test_a_geometry_handle_keeps_a_head_that_identifies_it_and_no_value_is_empty(self):
+        handle = "TOKEN" + "z" * 205 + "|@face:1.5,2.5,3.5"
+        out = common.short_ref(handle)
+        assert out.startswith("TOKEN") and handle not in out
+        assert f"({len(handle)} chars)" in out
+        assert common.short_ref(None) == ""
+
+
 class TestResponseBuilders:
     def test_ok_wraps_payload_as_json_text(self):
         res = common.ok({"a": 1, "b": "x"})

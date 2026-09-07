@@ -12,7 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import (BRepBody, FakeApplication, FakeOccurrence, MakeComp, MakeDesign, Viewport,
-                      _NamedCollection, install, load_tool, make_design, make_occurrence)
+                      _NamedCollection, body_proxy, install, load_tool, make_design,
+                      make_occurrence)
 
 gs = load_tool("view_screenshot")
 
@@ -137,6 +138,102 @@ class TestIsolateForFit:
 class TestFitToOnABody:
     """A single-body ROOT design places no occurrence at all, so an occurrence-only fit_to has
     nothing to frame there - the subject is the body."""
+
+    def test_a_bulb_SHARED_across_placements_is_a_refusal_not_a_dark_picture(self):
+        # MEASURED: a body's bulb is SHARED across its placements - clearing instance 2's turned
+        # instance 1's and the native's off too - which body_proxy models by routing every read to
+        # the one native. Capturing then returns a picture of nothing as a success (the cardinal
+        # sin), so the isolate reads the subject back and refuses.
+        native = BRepBody(name="skin", entity_token="SKIN")
+        wing1 = make_occurrence(path="Wing:1", component=MakeComp(name="Wing"))
+        wing2 = make_occurrence(path="Wing:2", component=MakeComp(name="Wing"))
+        one, two = body_proxy(native, wing1), body_proxy(native, wing2)
+        wing1.bRepBodies = _NamedCollection([one])
+        wing2.bRepBodies = _NamedCollection([two])
+        comp = MakeComp(name="Root", all_occurrences=[wing1, wing2])
+        comp.bRepBodies = _NamedCollection([])
+        install(gs, make_design(comp=comp, tokens={"HANDLE": one}))
+        import adsk.fusion
+        adsk.fusion.BRepBody = BRepBody
+        restore, _target, err = gs._isolate_for_fit("HANDLE")
+        assert restore is None and err is not None
+        # the cause is READ off prev, not assumed: another hidden body is that same native body
+        assert "another placement of the same body was hidden" in err
+        assert "fullPathName" in err                  # the route that CAN frame one instance
+        assert native.isLightBulbOn is True           # the bulbs went back before returning
+        assert "did NOT come back on" not in err      # ...so nothing is reported stuck
+
+    def test_the_refusal_echoes_a_long_handle_as_a_head_not_in_full(self):
+        # find_geometry mints a handle of an entityToken plus a locator, and this refusal quotes the
+        # value it was given - echoed whole it buries the sentence naming the route that works.
+        handle = "TOKEN" + "z" * 205 + "|@face:1.5,2.5,3.5"
+        native = BRepBody(name="skin", entity_token="SKIN")
+        wing1 = make_occurrence(path="Wing:1", component=MakeComp(name="Wing"))
+        wing2 = make_occurrence(path="Wing:2", component=MakeComp(name="Wing"))
+        one, two = body_proxy(native, wing1), body_proxy(native, wing2)
+        wing1.bRepBodies = _NamedCollection([one])
+        wing2.bRepBodies = _NamedCollection([two])
+        comp = MakeComp(name="Root", all_occurrences=[wing1, wing2])
+        comp.bRepBodies = _NamedCollection([])
+        install(gs, make_design(comp=comp, tokens={handle.split("|@")[0]: one}))
+        import adsk.fusion
+        adsk.fusion.BRepBody = BRepBody
+        # the shared-bulb refusal, reached by registering the composite handle's token half
+        _restore, _target, shared_err = gs._isolate_for_fit(handle)
+        assert "another placement of the same body was hidden" in shared_err
+        assert handle not in shared_err                # the whole value never reaches the wire
+        assert handle[:20] in shared_err               # ...its head still says which one it was
+        assert f"({len(handle)} chars)" in shared_err   # and the cut is disclosed, not silent
+        assert "fullPathName" in shared_err            # the route that CAN frame one instance
+        # ...and the resolve MISS, the commonest way a stale handle comes back
+        stale = "STALE" + "q" * 205 + "|@face:0,0,0"
+        _r, _t, miss_err = gs._isolate_for_fit(stale)
+        assert stale not in miss_err and f"({len(stale)} chars)" in miss_err
+
+    def test_a_SINGLY_placed_body_reached_natively_is_framed_not_refused(self):
+        # The ordinary single-placement shot: the walk reaches the body through its one occurrence
+        # while the target resolved NATIVELY. Treating those two wrappers as different bodies hides
+        # the subject's own proxy, the shared bulb goes dark, and the guard refuses a working shot.
+        native = BRepBody(name="skin", entity_token="SKIN")
+        wing = make_occurrence(path="Wing:1", component=MakeComp(name="Wing"))
+        wing.bRepBodies = _NamedCollection([body_proxy(native, wing)])
+        comp = MakeComp(name="Root", all_occurrences=[wing])
+        comp.bRepBodies = _NamedCollection([])
+        install(gs, make_design(comp=comp, tokens={"SKIN": native}))
+        import adsk.fusion
+        adsk.fusion.BRepBody = BRepBody
+        restore, target, err = gs._isolate_for_fit("SKIN")
+        assert err is None and target is native
+        assert native.isLightBulbOn is True          # the subject stayed lit
+        assert restore() == []
+
+    def test_a_bulb_that_will_not_relight_on_that_refusal_is_NAMED(self):
+        # The refusal puts the bulbs back with a bare assignment, and that assignment can fail -
+        # the same failure restore() collects a stuck list for. Claiming the restore without
+        # reading it back is how a READ tool leaves the document changed and says it did not.
+        class OneWayBody(BRepBody):
+            """A body bulb that switches OFF and then refuses to come back ON."""
+            def __setattr__(self, key, value):
+                if key == "isLightBulbOn" and value is True and getattr(self, "_armed", False):
+                    return
+                object.__setattr__(self, key, value)
+
+        native = OneWayBody(name="skin", entity_token="SKIN")
+        wing1 = make_occurrence(path="Wing:1", component=MakeComp(name="Wing"))
+        wing2 = make_occurrence(path="Wing:2", component=MakeComp(name="Wing"))
+        one, two = body_proxy(native, wing1), body_proxy(native, wing2)
+        wing1.bRepBodies = _NamedCollection([one])
+        wing2.bRepBodies = _NamedCollection([two])
+        comp = MakeComp(name="Root", all_occurrences=[wing1, wing2])
+        comp.bRepBodies = _NamedCollection([])
+        install(gs, make_design(comp=comp, tokens={"HANDLE": one}))
+        import adsk.fusion
+        adsk.fusion.BRepBody = BRepBody
+        object.__setattr__(native, "_armed", True)     # armed AFTER the hide is allowed to land
+        restore, _target, err = gs._isolate_for_fit("HANDLE")
+        assert restore is None and native.isLightBulbOn is False   # the relight really did fail
+        assert "1 bulb(s) did NOT come back on: skin" in err
+        assert "view_set(action='show'" in err
 
     def _install_bodies(self, bodies):
         comp = MakeComp(name="Root", all_occurrences=[])

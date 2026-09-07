@@ -18,16 +18,17 @@ from . import _relations
 # The "what to reuse from here" catalog line for the generated CLAUDE.md helper map.
 MAP_BLURB = (
     "the row SERIALIZERS behind assembly_get, one per array in its payload - reach for one only "
-    "from there. _occ_record/_all_occurrence_rows - occurrence identity and placement; "
+    "from there. _occ_record/_all_occurrence_rows - occurrence identity, placement behind "
+    "with_pose; "
     "_health_fields - the compute-state verdict; _joint_frame/_limit_facts/_value_now/_motion_axes "
     "- a joint's world frame, limits, value and heading; _joint_origin_rows/_relation_rows/"
     "_contact_rows - the rest")
 
 
-def _occ_record(occ, inv_k, occ_joints, include_joints, full_path=False):
-    """ONE occurrence row: identity + ground flags + body count + its world placement
-    (_geom.occ_world_frame) + the joints it takes part in. full_path adds the occurrence's
-    fullPathName, which is what distinguishes two nested instances carrying the same leaf name."""
+def _occ_record(occ, inv_k, occ_joints, include_joints, full_path=False, with_pose=False):
+    """ONE occurrence row: identity + ground flags + body count + the joints it takes part in.
+    with_pose adds its world placement (_geom.occ_world_frame - origin, basis axes, bbox), the
+    ~40-line half of the row; full_path adds the fullPathName two same-named instances differ by."""
     name = safe(lambda: occ.name)
     rec = {
     "name": name,
@@ -38,7 +39,8 @@ def _occ_record(occ, inv_k, occ_joints, include_joints, full_path=False):
     }
     if full_path:
         rec["full_path"] = safe(lambda: occ.fullPathName)
-    rec.update(_geom.occ_world_frame(occ, inv_k))
+    if with_pose:
+        rec.update(_geom.occ_world_frame(occ, inv_k))
     if include_joints:
         rec["joints"] = occ_joints.get(name, [])
     return rec
@@ -51,10 +53,10 @@ def _unresolved_row(broken):
             "detail": broken["detail"]}
 
 
-def _all_occurrence_rows(walk, inv_k, cap, occ_joints, include_joints):
+def _all_occurrence_rows(walk, inv_k, cap, occ_joints, include_joints, with_pose=False):
     """The all_occurrences slice: rows for the usable occurrences, then one flagged row per
     unresolved reference, bounded by cap. Returns (rows, walk)."""
-    rows = [_occ_record(o, inv_k, occ_joints, include_joints, full_path=True)
+    rows = [_occ_record(o, inv_k, occ_joints, include_joints, full_path=True, with_pose=with_pose)
             for o in walk.occurrences[:cap]]
     for b in walk.broken[:max(0, cap - len(rows))]:
         rows.append(_unresolved_row(b))

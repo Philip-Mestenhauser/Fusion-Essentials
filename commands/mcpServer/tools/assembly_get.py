@@ -47,7 +47,12 @@ _MAX_RELATIONS_DEFAULT = 50
 _MAX_CONTACTS_DEFAULT = 50
 _MAX_ALL_OCCURRENCES_DEFAULT = 100
 
-_SLICES = ("all_occurrences", "joint_origins", "relations", "contacts")
+_SLICES = ("all_occurrences", "joint_origins", "relations", "contacts", "poses")
+
+# What the default occurrence row withholds, and the reads that answer the same question narrowly.
+_POSES_NOTE = ("Occurrence rows carry identity, ground flags, body_count and joints. "
+               "include=['poses'] adds each one's world origin, x/y/z basis axes and bodies-only "
+               "bbox; model_inspect(target='<occurrence>') measures ONE without listing the rest.")
 
 
 # ONE joint row. The payload's 'frame' key is minted here and its value built in _assembly_detail -
@@ -116,6 +121,7 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     if not design:
         return error("No active design. Open or create a document first (see doc_new).")
     root = design.rootComponent
+    with_poses = "poses" in inc
 
     # The FULL joint walk: root AND every sub-component, joints AND asBuiltJoints. ALWAYS walked -
     # include_joints gates only what is EMITTED, so joint_count and broken_joints stay honest with
@@ -150,7 +156,7 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
                                                 "parent_path": safe(lambda: root.name),
                                                 "detail": detail}))
             continue
-        rec = _occ_record(occ, inv_k, occ_joints, include_joints)
+        rec = _occ_record(occ, inv_k, occ_joints, include_joints, with_pose=with_poses)
         if rec["grounded"]:
             grounded_names.append(rec["name"])
         occurrences.append(rec)
@@ -229,9 +235,11 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     "note": "Structured kinematic state. CHECK is_healthy FIRST - false means a joint, relation or "
     "feature FAILED TO COMPUTE, or the design holds an occurrence whose external reference does "
     "not resolve; broken_joints / broken_relations / timeline_problems / unresolved_references "
-    "name them. Then reason about grounding/positions/joint-wiring from these NUMBERS; pair with "
+    "name them. Then reason about grounding and joint-wiring from these NUMBERS; pair with "
     "view_set(isolate).",
     }
+    if not with_poses:
+        out["note"] += " " + _POSES_NOTE
     if unresolved_references:
         # The reference's own source document/project/hub is NOT readable: occ.component and
         # occ.documentReference both raise and the ref is absent from Document.documentReferences,
@@ -249,7 +257,8 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     # sub-assembly appears nowhere in it, and its position (drifted or not) is unreadable here.
     if "all_occurrences" in inc:
         cap_ao = max(1, int(max_all_occurrences))
-        ao_rows, ao_walk = _all_occurrence_rows(occ_walk, inv_k, cap_ao, occ_joints, include_joints)
+        ao_rows, ao_walk = _all_occurrence_rows(occ_walk, inv_k, cap_ao, occ_joints, include_joints,
+                                                with_poses)
         ao_total = ao_walk.total
         out["all_occurrences"] = ao_rows
         # null, never 0: a census nothing could be read from is UNKNOWN, and publishing 0 beside
@@ -396,20 +405,21 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
 
 
 TOOL_DESCRIPTION = (
-    "Read the active assembly's kinematic state as JSON. Per top-level occurrence: world position "
-    "(origin + bodies-only bbox center/size in 'units'), rotation as x_axis/y_axis/z_axis basis "
-    "vectors, ground flags, and its joints. Plus a design-level joint list: type, degrees of "
-    "freedom, the two occurrences each connects, value_now (angle_deg / slide_mm) and frame (WORLD "
-    "origin + axes, whose z_axis is the direction a joint OFFSET drives along). Check is_healthy "
-    "first. Each include= slice the call omits is described in the returned note. Every list is "
-    "capped, and *_truncated marks one that hit its cap."
+    "Read the active assembly's kinematic state as JSON. Per top-level occurrence: name, "
+    "component, ground flags, body count and its joints - include=['poses'] adds world position "
+    "(origin + bodies-only bbox center/size in 'units') and the x_axis/y_axis/z_axis basis. Plus a "
+    "design-level joint list: type, degrees of freedom, the two occurrences each connects, "
+    "value_now (angle_deg / slide_mm) and frame (WORLD origin + axes, whose z_axis is the "
+    "direction a joint OFFSET drives along). Check is_healthy first. Each include= slice the call "
+    "omits is described in the returned note. Every list is capped, and *_truncated marks one that "
+    "hit its cap."
 )
 
 tool = (
     Tool.create_simple(name="assembly_get", description=TOOL_DESCRIPTION)
     .add_input_property(*_inputs.units_property(description="Display units for positions/sizes."))
     .add_input_property("include", {"type": ["array", "string"],
-            "description": "Deeper slices: all_occurrences, joint_origins, relations, contacts. Omit for kinematic state only."})
+            "description": "Deeper slices: poses, all_occurrences, joint_origins, relations, contacts. Omit for the light kinematic state."})
     .add_input_property("include_joints", {"type": "boolean", "description": "List joints + annotate occurrences with their joints (default true)."})
     .add_input_property("max_occurrences", {"type": "integer", "description": f"Cap on the 'occurrences' array (default {_MAX_OCCURRENCES_DEFAULT})."})
     .add_input_property("max_joints", {"type": "integer", "description": f"Cap on the 'joints' array (default {_MAX_JOINTS_DEFAULT})."})
