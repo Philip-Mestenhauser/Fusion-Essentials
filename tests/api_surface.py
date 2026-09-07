@@ -9,7 +9,7 @@ lists, which is the only place that mistake is catchable."""
 
 # The Fusion build the surface was read from. NOT an absolute path - that would differ per user
 # and make the staleness check fail on every machine but the one that generated it.
-BINDINGS_BUILD = "8a194dd5c08ff06b661291836acad71b5f7126d0"
+BINDINGS_BUILD = "a40f190f24413dd1bb4f1434f056c1379a3b5224"
 
 # 'module.Class' -> every real member name (properties and methods).
 PROPERTIES = {

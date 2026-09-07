@@ -221,11 +221,16 @@ def _prose(src):
 @lru_cache(maxsize=None)
 def _modules():
     """module basename -> the modules answering to it, over the two trees a citation points into.
-    Two files can share a stem, so a symbol defined in ANY of them answers the citation."""
+    Two files can share a stem, so a symbol defined in ANY of them answers the citation. The shared
+    fakes answer to `conftest`, which re-exports them: their own stems are the words prose spells an
+    API instance with (`design.rootComponent`, `sketch.profiles`), so keying them by stem would read
+    every such sentence as a citation of a fake module."""
     mods = {}
+    fakes = REPO / "tests" / "fakes"
     for root in (MCP, REPO / "tests"):
         for path in _corpus.py_files(root):
-            mods.setdefault(path.stem, []).append(path)
+            stem = "conftest" if fakes in path.parents else path.stem
+            mods.setdefault(stem, []).append(path)
     return {stem: tuple(paths) for stem, paths in mods.items()}
 
 

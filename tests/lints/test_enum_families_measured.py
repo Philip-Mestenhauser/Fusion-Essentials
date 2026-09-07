@@ -45,33 +45,35 @@ class TestEnumFamiliesMeasured:
 
     def test_every_flag_a_shared_fake_stands_on_is_read_by_it(self):
         # The other direction, for the rows that name a SHARED fake as what encodes them: the
-        # flag they measured must be READ by conftest, or the fake still hard-codes the belief
-        # the row exists to check and a changed answer on a new build changes nothing.
-        unread = sorted(_shared_fake_flags() - _consumed_behavior_keys(conftest_only=True)
+        # flag they measured must be READ by the shared fakes, or the fake still hard-codes the
+        # belief the row exists to check and a changed answer on a new build changes nothing.
+        unread = sorted(_shared_fake_flags() - _consumed_behavior_keys(shared_fakes_only=True)
                         - set(_UNCONSUMED_OK))
         assert not unread, (
-            "measurement rows that name a tests/conftest.py fake as their encoding emit flags the "
+            "measurement rows that name a shared fake as their encoding emit flags the "
             "shared fakes never read - make the fake read BEHAVIOR[\"<key>\"] instead of "
             "hard-coding the behaviour, or add a reasoned _UNCONSUMED_OK entry: "
             + ", ".join(unread))
 
     def test_unconsumed_ok_entries_still_trip(self):
-        consumed = _consumed_behavior_keys(conftest_only=True)
+        consumed = _consumed_behavior_keys(shared_fakes_only=True)
         stale = []
         for key, reason in _UNCONSUMED_OK.items():
             assert reason.strip(), f"{key} _UNCONSUMED_OK entry needs a plain-English reason"
             if key not in _shared_fake_flags():
                 stale.append(f"{key}: no row naming a shared fake emits it - remove the entry")
             elif key in consumed:
-                stale.append(f"{key}: conftest reads it now - remove the entry")
+                stale.append(f"{key}: a shared fake reads it now - remove the entry")
         assert not stale, "stale _UNCONSUMED_OK entries:\n  " + "\n  ".join(stale)
 
 
 def _shared_fake_flags():
-    """Behavior keys emitted by rows whose encoded_in names tests/conftest.py."""
+    """Behavior keys emitted by rows whose encoded_in names a shared-fake file - tests/conftest.py
+    or a module of tests/fakes/."""
     keys = set()
     for row in measure_api.ROWS:
-        if "conftest" not in row.get("encoded_in", ""):
+        encoded_in = row.get("encoded_in", "")
+        if "conftest" not in encoded_in and "tests/fakes" not in encoded_in:
             continue
         for key in (row.get("facts_on_pass") or {}):
             if key.startswith("behavior."):
@@ -81,14 +83,16 @@ def _shared_fake_flags():
     return keys
 
 
-def _consumed_behavior_keys(conftest_only=False):
-    """Every BEHAVIOR["<key>"] read in the harness - all of tests/ (minus live/), or conftest.py
-    alone, the shared fakes' home."""
+def _consumed_behavior_keys(shared_fakes_only=False):
+    """Every BEHAVIOR["<key>"] read in the harness - all of tests/ (minus live/), or the shared
+    fakes alone: the fakes package plus conftest.py, which keeps the harness's own factories."""
     consumed = set()
     for root, dirs, files in os.walk(TESTS_DIR):
-        dirs[:] = [] if conftest_only else [d for d in dirs if d not in ("__pycache__", "live")]
+        keep = ["fakes"] if shared_fakes_only else [d for d in dirs
+                                                    if d not in ("__pycache__", "live")]
+        dirs[:] = [d for d in dirs if d in keep]
         for fn in files:
-            if conftest_only and fn != "conftest.py":
+            if shared_fakes_only and fn != "conftest.py" and os.path.basename(root) != "fakes":
                 continue
             if fn.endswith(".py") and fn != "live_api_facts.py":
                 with open(os.path.join(root, fn), encoding="utf-8") as fh:

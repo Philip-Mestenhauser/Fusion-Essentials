@@ -24,13 +24,13 @@ Pick the shape that matches what you're testing:
   note advertises the rest) — not the underlying Fusion calls, which are covered by live validation,
   not re-mocked here. `test_cam_get.py` is the same shape.
 - **A tool that needs a fuller fake object model** (bodies, occurrences, components) → copy
-  **`test_model_mirror.py`**. It builds a design with conftest's shared `make_design(...)` /
+  **`test_model_mirror.py`**. It builds a design with the shared `make_design(...)` /
   `MakeComp` / `MakeDesign` fakes and wires it into the tool module with `install(mod, design)`,
   inside a fixture. `install` patches BOTH seams a tool can read `design()` through — its own
   `_common` and, when the tool also imports `_inputs`, `_inputs._common` too (see "the dual-seam
   trap" below) — plus `adsk.fusion.Design.cast` and `adsk.core.ObjectCollection.create`. If
-  `MakeComp`/`MakeDesign` lack a surface your tool needs, extend them in `conftest.py` — don't fork a
-  bespoke `Fake*` hierarchy into your test file.
+  `MakeComp`/`MakeDesign` lack a surface your tool needs, extend them in the design family module
+  under `tests/fakes/` — don't fork a bespoke `Fake*` hierarchy into your test file.
 - **A pure function** (parse/encode/convert, no Fusion at all) → copy **`test_quoting.py`**. No
   `adsk` surface to fake; call the function and round-trip the result.
 
@@ -59,11 +59,14 @@ substring hit) locks the defect in place, so when a handler's behavior is correc
 asserted the wrong behavior SHOULD go red — that red is the signal to update the assertion to the
 correct value, not evidence the change was wrong.
 
-Every unit test stands on the shared fakes in `conftest.py`. A type whose shape live Fusion was
-measured for (a key of `live_api_facts.SHAPES`) uses its shared fake - import it, or subclass it
-and add only the extra the test needs; `test_fake_shapes_exist.py` refuses a free-standing local
-double of such a type, because the shape sweep never reaches a local copy. A type with no shape
-dump has no shared fake to stand on and keeps a local double, whose one-line docstring says that.
+Every unit test stands on the shared fakes, which live one module per Fusion family under
+`tests/fakes/`, over one scaffold module the families share. `conftest.py` re-exports every one of
+them, so a test imports its fakes from conftest and a new fake joins its family's module. A type
+whose shape live Fusion was measured for (a key of `live_api_facts.SHAPES`) uses its shared fake -
+import it, or subclass it and add only the extra the test needs; `test_fake_shapes_exist.py` refuses
+a free-standing local double of such a type, because the shape sweep never reaches a local copy. A
+type with no shape dump has no shared fake to stand on and keeps a local double, whose one-line
+docstring says that.
 
 ## The dual-seam trap
 

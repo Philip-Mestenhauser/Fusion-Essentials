@@ -61,25 +61,20 @@ def _document_ops():
 def _incomplete_note(live: dict) -> str:
     """The note for a still-generating status read over a live_readiness-shaped `live`: an errored
     op/setup/program never finishes, so that reads as a BLOCKER rather than as progress."""
-    readiness = live.get("readiness", "")
-    samples = live.get("samples") or {}
+    # The verdict sentence and the errored sample already ride as 'readiness' and
+    # live_states.samples, each carrying an operation name and its error text - inlining either one
+    # here is what leaves this note unbounded, so it POINTS at them the way the completed note does.
     blocked = bool(live.get("errored") or live.get("setups_errored") or live.get("programs_errored"))
     if blocked:
-        note = (readiness + " Waiting will NOT complete the errored items - fix them, "
-                "then re-run cam_generate. ")
-        samp = samples.get("op") or samples.get("setup") or samples.get("program") or {}
-        if samp.get("name"):
-            note += f"e.g. '{samp['name']}': {samp.get('error', '')}. "
-        note += "cam_get(include=['operations']) for every errored item + full text."
-    elif live.get("generating", 0) == 0 and live.get("out_of_date", 0) > 0:
-        # The readiness line rides along here because it is what NAMES an out-of-date op this
-        # installation will not generate at all - the case a re-run cannot finish.
-        note = ("Not complete. WARNING: nothing is actively generating yet out-of-date ops remain."
-                + (f" {readiness}" if readiness else "")
-                + " cam_get(include=['operations']) shows why.")
-    else:
-        note = "Still generating in the background - check again later."
-    return note
+        return ("Not complete, and BLOCKED - 'readiness' carries the verdict and "
+                "live_states.samples the first errored item. Waiting will NOT complete an errored "
+                "item: fix it, then re-run cam_generate. cam_get(include=['operations']) lists "
+                "every errored item with its full text.")
+    if live.get("generating", 0) == 0 and live.get("out_of_date", 0) > 0:
+        return ("Not complete. WARNING: nothing is actively generating yet out-of-date ops remain "
+                "- 'readiness' names what this installation will not generate at all. "
+                "cam_get(include=['operations']) shows why.")
+    return "Still generating in the background - check again later."
 
 
 # `completed` is a GENERATION-lifecycle flag: a document reading "0 of 34 active ops valid" still
@@ -439,8 +434,8 @@ TOOL_DESCRIPTION = (
     "a plain status read at whatever cadence you need. 'handle' is OPTIONAL: pass the cam_generate "
     "id (or 'latest') to scope to that launched generation, OR omit it and pass 'target' (a "
     "setup/operation NAME, or nothing for the whole document) to read a generation launched inline "
-    "or in the UI. The note carries the readiness verdict beside the tally, and reports an errored "
-    "item as a blocker rather than as progress."
+    "or in the UI. The 'readiness' key carries the verdict and live_states.samples the first "
+    "errored item; the note reports an errored item as a blocker rather than as progress."
 )
 
 tool = (

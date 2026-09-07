@@ -58,6 +58,7 @@ class _Setup(FakeSetup):
         self._stock = _make_object_collection()
         self._machine = None
         self.machine_sticks = machine_sticks   # False models an assignment that silently doesn't take
+        self.models_stick = True               # False models a body collection the setup drops
         # Fusion refuses stockSolids unless stockMode==SolidStock, and fixtures unless fixtureEnabled.
         self.require_enable = require_enable
         self.stockMode = _STOCK_MODES["RelativeBoxStock"]      # the live default
@@ -76,7 +77,8 @@ class _Setup(FakeSetup):
         return self._models
     @models.setter
     def models(self, coll):
-        self._models = coll
+        if self.models_stick:
+            self._models = coll
     @property
     def fixtures(self):
         return self._fixtures
@@ -509,11 +511,63 @@ class TestBodies:
         _payload(ces.handler(setup="Setup1", fixtures=["Vise"]))
         assert cam.setups.item(0).fixtureEnabled is True
 
+    def test_a_dropped_collection_is_an_error_not_a_count_of_zero(self, monkeypatch):
+        # The setter can take the collection and leave the setup holding its old one. Reporting
+        # models_set 0 would call an empty setup machined, so the read-back count is the gate.
+        cam = _install(monkeypatch)
+        cam.setups.item(0).models_stick = False
+        res = ces.handler(setup="Setup1", models=["Stock", "Plate"])
+        assert res["isError"] is True
+        assert "reads back 0 bodies, not 2" in res["message"]
+
     def test_params_and_bodies_together(self, monkeypatch):
         cam = _install(monkeypatch)
         out = _payload(ces.handler(setup="Setup1",
                                    parameters={"stockZHigh": "1"}, models=["Stock"]))
         assert out["updated_count"] == 1 and out["models_set"] == 1
+
+
+# ── the stock the setup machines from (Setup.stockMode) ─────────────────────
+
+class _DeafStockSetup(_Setup):
+    """A setup whose stockMode assignment is swallowed - the platform's own no-op-reports-success
+    shape, which only a read-back catches."""
+    @property
+    def stockMode(self):
+        return _STOCK_MODES["RelativeBoxStock"]
+    @stockMode.setter
+    def stockMode(self, value):
+        pass
+
+
+class TestStockMode:
+    def test_previous_setup_mode_lands_and_reads_back(self, monkeypatch):
+        cam = _install(monkeypatch)
+        out = _payload(ces.handler(setup="Setup1", stock_mode="previous_setup"))
+        assert cam.setups.item(0).stockMode == _STOCK_MODES["PreviousSetupStock"]
+        assert out["stock_mode_set"] == "previous_setup"
+        assert out["was_stock_mode"] == "relative_box"
+
+    def test_a_swallowed_assignment_is_an_error(self, monkeypatch):
+        cam = make_cam(_DeafStockSetup("Setup1", dict(_DEFAULT_PARAMS)))
+        monkeypatch.setattr(ces, "get_cam", lambda: (cam, None))
+        result = ces.handler(setup="Setup1", stock_mode="from_solid")
+        assert result["isError"] is True
+        assert "reads 'relative_box'" in result["content"][0]["text"]
+
+    def test_mode_outside_the_choice_is_refused(self, monkeypatch):
+        _install(monkeypatch)
+        result = ces.handler(setup="Setup1", stock_mode="rest_material")
+        assert result["isError"] is True
+        assert "previous_setup" in result["content"][0]["text"]
+
+    def test_stock_bodies_and_a_mode_in_one_call_are_refused(self, monkeypatch):
+        cam = _install(monkeypatch)
+        result = ces.handler(setup="Setup1", stock=["Plate"], stock_mode="previous_setup")
+        assert result["isError"] is True
+        assert "two ways" in result["content"][0]["text"]
+        # refused BEFORE anything was applied: the mode is still the setup's own default
+        assert cam.setups.item(0).stockMode == _STOCK_MODES["RelativeBoxStock"]
 
 
 # ── assign a machine (the setup-level prerequisite for posting) ─────────────

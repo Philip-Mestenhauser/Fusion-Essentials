@@ -1586,7 +1586,11 @@ class TestJointMotionAxes:
         kin_design(joints=[_joint("Hinge", _REVOLUTE, "A:1", "B:1", motion_values=dict(self._BOTH))])
         note = _payload(ap.handler())["note"]
         assert "rotation_axis (revolute/cylindrical)" in note
-        assert "slide_direction (slider/cylindrical)" in note
+        # A cylindrical joint SLIDES, so a reader told the key belongs to that kind reads its
+        # absence as a failed read; the measured motion carries no such member at all. The scope
+        # rides in the heading list itself, where the kinds carrying each heading are named.
+        assert ("slide_direction (SLIDER ONLY - a cylindrical motion exposes no slide direction)"
+                in note)
         # the clause that gives a MISSING key its meaning. Drop it and the two vectors still cross
         # the wire, with nothing saying whether a row without one was asked and answered nothing.
         assert "an absent key is a read that answered nothing" in note

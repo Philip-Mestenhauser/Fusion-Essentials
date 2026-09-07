@@ -472,7 +472,8 @@ class TestEntitlementPreflight:
 
     def test_a_stalled_poll_carries_the_readiness_that_names_them(self, monkeypatch):
         # the stall warning fires exactly where a blocked op parks: nothing generating, out-of-date
-        # ops left. Without the verdict beside it the note only guesses at broken geometry.
+        # ops left. The verdict naming the blocked ops rides as its own key (an op name and its
+        # reason are unbounded), and the note that warns points the reader at it.
         _GENERATIONS.clear()
         _GENERATIONS["gen1"] = {
             "future": SimpleNamespace(isGenerationCompleted=False, numberOfOperations=2,
@@ -487,5 +488,6 @@ class TestEntitlementPreflight:
                                                    "isGenerationAllowed false"}, None))
         out = _payload(st.handler(handle="gen1"))
         assert out["completed"] is False and "WARNING" in out["note"]
-        assert "isGenerationAllowed false" in out["note"]
+        assert "isGenerationAllowed false" in out["readiness"]
+        assert "'readiness' names what this installation will not generate" in out["note"]
         _GENERATIONS.clear()

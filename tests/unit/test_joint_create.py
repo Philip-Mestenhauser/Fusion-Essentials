@@ -574,9 +574,12 @@ class TestFaceExtentAndPlanar:
         # a face whose own AABB does not read at all
         assert ji._face_extent(BRepFace(Plane(None)), 2) == (0.0, 0.0)
 
-    def test_is_planar_true_only_for_surface_type_zero(self):
+    def test_is_planar_admits_the_plane_member_and_no_other_surface(self):
+        # Each fake surface carries its own MEASURED SurfaceTypes member, so a gate comparing
+        # against the wrong one lets a curved face through to createByPlanarFace, which rejects it.
         assert ji._is_planar(BRepFace(Plane(None))) is True
         assert ji._is_planar(BRepFace(Cylinder(None))) is False
+        assert ji._is_planar(BRepFace(Cone(None))) is False
 
 
 # ── create handler: end-to-end logic (motion dispatch, axis field, offset/angle scaling) ──

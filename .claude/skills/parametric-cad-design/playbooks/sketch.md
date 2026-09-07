@@ -1,23 +1,17 @@
 ## Sketch
 
-**construction-carries-symmetry-and-spacing**
-When a profile has symmetry, equal spacing or a family of equal features: draw the construction line, then constrain: symmetry about it, midpoint on it, equal between the members; dimensions pin only what remains. Except a one-off reference sketch. Prove `sketch_get`: more constraints than dimensions, and is_fully_constrained true.
+**construction-carries-symmetry-and-spacing** - Draw the construction line, then constrain: symmetry about it, midpoint on it, equal between the members; dimensions pin only what remains when a profile has symmetry, equal spacing or a family of equal features; not for a one-off reference sketch. Prove: `sketch_get`: more constraints than dimensions, and is_fully_constrained true.
 Example: a knife layout: 43 constraints, 5 dimensions; a handle profile: ten symmetry constraints, six expressions.
 
-**anchor-to-the-origin-by-relation**
-When a profile is placed: put the origin on a midpoint or at the crossing of two construction diagonals, never at a typed coordinate. Except geometry projected from a body, which is already placed. Prove `sketch_get`: a midpoint or coincident constraint naming the origin point.
+**anchor-to-the-origin-by-relation** - Put the origin on a midpoint or at the crossing of two construction diagonals, never at a typed coordinate when a profile is placed; not for geometry projected from a body, which is already placed. Prove: `sketch_get`: a midpoint or coincident constraint naming the origin point.
 
-**one-literal-per-wall**
-When the same size appears twice: type it once and write the other dimensions as that dimension's name (d239) or a named parameter. Except two sizes that only happen to match today. Prove `sketch_get`: dimension expressions referencing a name, not a repeated number.
+**one-literal-per-wall** - Type it once and write the other dimensions as that dimension's name (d239) or a named parameter when the same size appears twice; not for two sizes that only happen to match today. Prove: `sketch_get`: dimension expressions referencing a name, not a repeated number.
 
-**organic-outlines-are-control-point-splines**
-When an outline is a free curve: draw a control-point spline and make its ends smooth to construction lines whose angles and lengths are dimensioned; the control polygon, not the curve, carries the intent. Except a one-off path nothing else references, where a fit-point spline is enough. Prove `sketch_get`: a cv_spline with 'smooth' constraints to lines that carry angle dimensions.
+**organic-outlines-are-control-point-splines** - Draw a control-point spline and make its ends smooth to construction lines whose angles and lengths are dimensioned; the control polygon, not the curve, carries the intent when an outline is a free curve; not for a one-off path nothing else references, where a fit-point spline is enough. Prove: `sketch_get`: a cv_spline with 'smooth' constraints to lines that carry angle dimensions.
 
-**detail-on-projected-edges**
-When a clip, rib or pocket must follow an existing wall: project the wall's edges into the sketch and dimension the detail by offset from them; projected geometry has no freedom, so few constraints fully constrain the sketch. Except detail on a plane no body touches. Prove `sketch_get`: fixed_spline or projected entities plus offset dimensions, is_fully_constrained true.
+**detail-on-projected-edges** - Project the wall's edges into the sketch and dimension the detail by offset from them; projected geometry has no freedom, so few constraints fully constrain the sketch when a clip, rib or pocket must follow an existing wall; not for detail on a plane no body touches. Prove: `sketch_get`: fixed_spline or projected entities plus offset dimensions, is_fully_constrained true.
 
-**driven-dimensions-are-checks**
-When a derived length or angle matters to the brief: add it as a driven dimension and read it back; a master sketch may stay not fully constrained only where its free entities are the splines. Except a sketch nobody will edit. Prove `sketch_get`: dimensions with driving=false carrying the value the brief asked for.
+**driven-dimensions-are-checks** - Add it as a driven dimension and read it back; a master sketch may stay not fully constrained only where its free entities are the splines when a derived length or angle matters to the brief; not for a sketch nobody will edit. Prove: `sketch_get`: dimensions with driving=false carrying the value the brief asked for.
 
 ### Recipes
 

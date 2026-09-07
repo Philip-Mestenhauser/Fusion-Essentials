@@ -9,8 +9,11 @@ with its rows. `run` probes each declared capability once - at the first act or 
 walks the acts, takes each one's narrative or fallback lane - or holds it back where its capability
 is unmet - fires the reload beat once every act has run, and turns the rows into the per-tool
 ledger.
-`source_hash`/`write_verified`/`check` are the receipt: a green run stamps VERIFIED_TOOLS.md with
-a hash of the tool source AND this harness, and `--check` recomputes it offline.
+`source_hash`/`write_verified`/`check` are the receipt: a run whose every act has passed stamps
+VERIFIED_TOOLS.md with a hash of the tool source AND this harness, and `--check` recomputes it
+offline. A run is not capped by wall clock - it is RESUMABLE: `--run <id>` saves the ctx, the ledger
+so far and the act cursor after every act, and `--resume` continues that id against the document the
+last chunk left open, so the receipt is stamped from the union of the chunks that walked the program.
 
 Orchestration only - no step rows, no domain knowledge. The names a consumer patches (`call`,
 `ACTS`, `STORY`, `source_hash`, ...) are read off the FACADE namespace through `verify_core.facade`
@@ -18,6 +21,7 @@ when a run starts, never bound here at import.
 """
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -29,8 +33,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from verify_core import (
-    NOTE_MAX, REFUSAL_NOTE_MAX, SRC_ROOT, STEP_SLEEP_S, VERIFIED, _HERE,
-    _RUNTIME_BUDGET_S, _Refusal, _SHELL_TIMEOUT_S, _leaves_no_row, _unparked, capability_met,
+    NOTE_MAX, REFUSAL_NOTE_MAX, SRC_ROOT, STEP_SLEEP_S, VERIFIED, _HERE, _RECALL,
+    _Refusal, _leaves_no_row, _unparked, capability_met,
     capability_skip_reason, facade, parked_reason, predicate_kind, probe_capabilities,
     step_capability)
 
@@ -164,6 +168,111 @@ def check(root=None, verified_path=None):
     print("live verification current: source matches the green run of {0} (Fusion {1})"
           .format(stamped_date, stamped_version))
     return 0
+
+
+RESULTS_DIR = os.path.join(_HERE, "results")
+
+
+def run_state_path(run_id):
+    """Where one run id's chunk state lives - the file a --resume reads."""
+    return os.path.join(RESULTS_DIR, "run-{0}.json".format(run_id))
+
+
+def _jsonable(mapping, what):
+    """`mapping` as it will be written, refusing a value that cannot cross a chunk boundary by
+    NAMING its key - a stringified handle would resume into a step that fails on a bad reference."""
+    bad = []
+    for key, value in mapping.items():
+        try:
+            json.dump({key: value}, io.StringIO())
+        except (TypeError, ValueError):
+            bad.append(key)
+    if bad:
+        raise TypeError("{0} cannot be saved across a chunk boundary: {1} - the run id carries "
+                        "what a later act reads, so a value that will not serialize has to be "
+                        "stored as one that does".format(what, ", ".join(sorted(bad))))
+    return mapping
+
+
+def save_run_state(run_id, state):
+    """Write one chunk's state after an act. The whole file is rewritten each time: a partial file
+    is what a --resume would read."""
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    body = dict(state)
+    body["ctx"] = _jsonable(body.get("ctx") or {}, "the run's ctx")
+    body["recall"] = _jsonable(body.get("recall") or {}, "the run's recalled values")
+    with open(run_state_path(run_id), "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(body, fh, indent=2)
+    return run_state_path(run_id)
+
+
+def load_run_state(run_id):
+    """The saved state for a run id, or None when that id has never run."""
+    path = run_state_path(run_id)
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _document_now():
+    """The active document as a resume compares it: its name, its lineage id, and how much design it
+    holds. Two wire reads, taken once at a chunk boundary."""
+    call = facade("call")
+    is_error, doc = call("doc_get", {})
+    if is_error or not isinstance(doc, dict):
+        return {"name": None, "document_id": None, "feature_count": None}
+    active = doc.get("active") or {}
+    is_error, design = call("design_get", {})
+    features = None if is_error or not isinstance(design, dict) else design.get("feature_count")
+    return {"name": active.get("name"), "document_id": active.get("document_id"),
+            "feature_count": features}
+
+
+def resume_refusal(state, run_id, current_hash, document):
+    """Why this resume cannot be joined to the chunks before it, or None: no such run id, an id that
+    already walked the program (a resume would stamp from its saved ledger without driving a step),
+    a SOURCE that moved (the receipt binds one hash), or a DOCUMENT that is not the one the last
+    chunk left open (the remaining acts would run against a world that was never built)."""
+    if state is None:
+        return ("no run state for {0!r} - {1} does not exist, so there is nothing to resume; start "
+                "the run with --run {0}".format(run_id, run_state_path(run_id)))
+    if state.get("complete"):
+        return ("run {0!r} has already walked the whole program - resuming it would stamp a receipt "
+                "from its saved ledger without driving anything. Start a new run id.".format(run_id))
+    if state.get("source_hash") != current_hash:
+        return ("the tool source changed since this run's first chunk ({0}...) - the receipt binds "
+                "ONE hash, so a resume under {1}... would stamp a run no chunk was judged under. "
+                "Start a new run id.".format(str(state.get("source_hash"))[:12], current_hash[:12]))
+    return _document_refusal(state, run_id, document)
+
+
+def develop_refusal(state, run_id, document):
+    """Why a DEVELOPMENT walk (--resume with --acts) cannot use this run's saved world, or None: no
+    such run id, or a document that is not the one it left open. The source hash is not held - a
+    walk that stamps nothing may run edited acts, which is what it is for."""
+    if state is None:
+        return ("no run state for {0!r} - {1} does not exist, so there is no saved world to walk; "
+                "start the run with --run {0}".format(run_id, run_state_path(run_id)))
+    return _document_refusal(state, run_id, document)
+
+
+def _document_refusal(state, run_id, document):
+    """Why the active document is not the one this run left open, or None."""
+    was = state.get("document") or {}
+    if not was.get("name"):
+        return ("run {0!r} saved no document identity - it stopped before its first act boundary, so "
+                "there is nothing to check the active document against and a resume could run the "
+                "remaining acts anywhere. Start a new run id.".format(run_id))
+    if document.get("name") != was.get("name") or document.get("document_id") != was.get("document_id"):
+        return ("the document this run left open is not the active one: it was {0!r} and {1!r} is "
+                "active now. Re-open nothing - start a new run id.".format(
+                    was.get("name"), document.get("name")))
+    then, now = was.get("feature_count"), document.get("feature_count")
+    if isinstance(then, int) and isinstance(now, int) and now < then:
+        return ("the active document holds {0} features and this run left {1} - it is not the world "
+                "the earlier acts built. Start a new run id.".format(now, then))
+    return None
 
 
 def _shoot(label, out_dir, seq):
@@ -308,7 +417,14 @@ def select_acts(acts, spec):
     return [name for name in names if name in chosen]
 
 
-def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None):
+def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None,
+        run_id=None, resume=False):
+    """Walk the act program and stamp the receipt when the whole of it has run.
+
+    'run_id' makes the walk RESUMABLE: the ctx, the ledger so far and the acts already done are
+    saved after every act, and a later invocation with resume=True carries on from there against the
+    document this chunk leaves open. The receipt is written from the UNION of a run id's chunks, and
+    only when every act of the program has run under it."""
     # The wire reads, the act program and the ledger tables as the FACADE holds them at the moment
     # the run starts - see verify_core.facade for why they are not this module's own globals.
     health_gate, registered_tools = facade("health_gate"), facade("registered_tools")
@@ -328,11 +444,32 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
             print(str(e))
             return 1
         skipped = [act[0] for act in ACTS if act[0] not in set(selected)]
-        print("partial run (--acts {0}): {1} act(s) not run - {2}. The ctx values they save are "
-              "absent, so a step whose arguments need one lands blocked.".format(
-                  acts_spec, len(skipped), ", ".join(skipped) or "(none)"))
+        print("partial run (--acts {0}): {1} act(s) not run - {2}.{3}".format(
+            acts_spec, len(skipped), ", ".join(skipped) or "(none)",
+            "" if run_id else " The ctx values they save are absent, so a step whose arguments "
+            "need one lands blocked."))
+    # THE RESUME: the state a prior chunk of this run id saved. Both refusals are settled before the
+    # first act runs - a chunk that cannot be joined to the ones before it must change nothing.
+    # With --acts it is a DEVELOPMENT walk instead: the named acts run again against the saved
+    # world with its ctx, nothing is stamped and the state is not advanced.
+    develop = bool(run_id and resume and acts_spec is not None)
+    state = load_run_state(run_id) if (run_id and resume) else None
     health = health_gate()
     print(f"server ok: {health.get('server')} v{health.get('version', '?')}")
+    if run_id and resume:
+        refusal = (develop_refusal(state, run_id, _document_now()) if develop
+                   else resume_refusal(state, run_id, source_hash(), _document_now()))
+        if refusal:
+            print("resume refused: " + refusal)
+            return 1
+        if develop:
+            print("development walk of run {0}: the named acts run again against its world with "
+                  "its saved ctx - no receipt, state not advanced{1}".format(
+                      run_id, "" if state.get("source_hash") == source_hash()
+                      else " (the source moved since the run's first chunk)"))
+        else:
+            print("resuming run {0}: {1} act(s) already done".format(
+                run_id, len(state.get("acts_done") or [])))
     all_tools = registered_tools()
 
     # THE CAPABILITY TIER: every capability an act or a step declares, answered True/False/None by
@@ -351,16 +488,35 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
                 else ("NOT entitled" if state is False else "unreadable (routed as not entitled)")))
         return capability_met(entitlements, capability)
 
-    ctx, rows, notes, act_modes = {}, [], {}, []
+    # Everything a later chunk needs is seeded from the saved state, so the acts below cannot tell
+    # whether the ones before them ran in this process or the last one.
+    prior = state or {}
+    ctx = dict(prior.get("ctx") or {})
+    rows = [tuple(r) for r in (prior.get("rows") or [])]
+    notes = dict(prior.get("notes") or {})
+    act_modes = [tuple(m) for m in (prior.get("act_modes") or [])]
+    acts_done = list(prior.get("acts_done") or [])
     # tool -> the capability reason the tier held its every step back with, for the ledger.
-    gated = {}
-    timings, act_seconds, run_started = {}, [], time.time()
+    gated = dict(prior.get("gated") or {})
+    timings = {t: tuple(v) for t, v in (prior.get("timings") or {}).items()}
+    act_seconds = [tuple(a) for a in (prior.get("act_seconds") or [])]
+    run_started = time.time()
+    chunk_started = prior.get("elapsed_s") or 0.0
     # the tools whose PASSING step read a value off the payload - run_steps returns exactly one row
     # per step, in order, so a row is paired back with the expectation that judged it.
-    valued = set()
+    valued = set(prior.get("valued") or [])
     # tool -> the reason a Parked step held it at a bare "ok", for the ledger's status column.
-    parked = {}
+    parked = dict(prior.get("parked") or {})
+    # the values predicates recall by name across acts, which live in verify_core rather than in ctx.
+    _RECALL.update(prior.get("recall") or {})
+    entitlements.update(prior.get("entitlements") or {})
+    # the document this chunk works in, and how many acts it drove itself - a chunk that drove none
+    # produced no evidence of its own, whatever the saved ledger says.
+    document = prior.get("document")
+    walked = 0
     for name, pre, narrative, fallback in ACTS:
+        if name in acts_done and not develop:
+            continue
         if selected is not None and name not in selected:
             continue
         # An act the tier holds back runs NOTHING - not even its precondition read, which would
@@ -374,6 +530,10 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
             # capability bucket too - left out, it reads as PENDING, which is a different claim.
             for step in judged_steps(list(narrative) + list(fallback or [])):
                 gated.setdefault(step[0], reason)
+            # a held-back act is DONE - it has its outcome, and a resume must not run it again
+            if name not in acts_done:
+                acts_done.append(name)
+            walked += 1
             continue
         mode, steps = "narrative", narrative
         if pre is not None and fallback is not None and not _precondition_holds(pre):
@@ -405,15 +565,45 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
                 notes[tool] = (story + " (fallback fixture)").strip() if mode == "fallback" else story
         if name in POLL_AFTER:
             # one act can leave SEVERAL setups generating, so the boundary poll takes a list as
-            # readily as a name and certifies each in turn.
+            # readily as a name and certifies each in turn. 'max_polls' sizes that act's own budget
+            # to the families it launched, and is passed only where the act states one.
             targets = POLL_AFTER[name][mode]
+            budget = {k: v for k, v in POLL_AFTER[name].items() if k == "max_polls"}
             for setup in ([targets] if isinstance(targets, str) else targets):
-                poll_generation(rows, notes, setup, valued=valued)
+                poll_generation(rows, notes, setup, valued=valued, **budget)
         act_seconds.append((name, time.time() - act_started))
+        if name not in acts_done:
+            acts_done.append(name)
+        walked += 1
+        # THE CHUNK BOUNDARY: an act is the unit a resume restarts from, so the state is saved here
+        # - after the act's own boundary poll, with everything a later act reads.
+        if run_id and not develop:
+            # The document goes into EVERY boundary save, read once per chunk at the first of them:
+            # a chunk killed later still leaves the identity its resume is refused against, and the
+            # read is taken here rather than before the first act, which is where the opening act
+            # creates the document.
+            document = document or _document_now()
+            save_run_state(run_id, {
+                "run": run_id, "source_hash": source_hash(), "acts_done": acts_done,
+                "rows": [list(r) for r in rows], "notes": notes,
+                "act_modes": [list(m) for m in act_modes], "valued": sorted(valued),
+                "parked": parked, "gated": gated, "entitlements": entitlements,
+                "ctx": ctx, "recall": dict(_RECALL),
+                "timings": {t: list(v) for t, v in timings.items()},
+                "act_seconds": [list(a) for a in act_seconds],
+                "elapsed_s": chunk_started + (time.time() - run_started),
+                "document": document})
+
+    # A run is COMPLETE when every act of the program has run under this id - in this chunk or an
+    # earlier one. Only a complete run stamps, and only a complete run fires the reload beat.
+    program = [act[0] for act in ACTS]
+    complete = not develop and set(program) <= set(acts_done)
+
     # THE RELOAD BEAT, after every act: it restarts the server, so no step can be dispatched
     # afterwards and no act can hold it. It appends its own row rather than running through the
     # step engine, because what it has to judge is a reconnect, not one wire call (reload_smoke).
-    reload_smoke(rows, notes, valued=valued)
+    if complete:
+        reload_smoke(rows, notes, valued=valued)
     if keep_open:
         print("\n--keep-open: the story document is left open for inspection.")
 
@@ -458,27 +648,21 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
         if s != "covered":
             print(f"  {tool:32} {s}")
 
-    # WHERE THE SECONDS WENT. The sweep has to finish inside a 600 s shell call, so the run
-    # publishes its own budget rather than leaving the next person to guess: the total, the slowest
-    # acts, and the tools that spent the most wire time - with a per-call average, which is what
-    # separates a tool that is CALLED a lot from a tool that is SLOW.
-    elapsed = time.time() - run_started
-    print(f"\n== elapsed: {elapsed:.0f}s for {len(rows)} steps "
-          f"({STEP_SLEEP_S * len(rows):.0f}s of it the inter-step sleep)")
+    # WHERE THE SECONDS WENT. Time is what the sweep is OPTIMIZED from, never what it is capped by:
+    # the run publishes the total, the slowest acts and the tools that spent the most wire time -
+    # with a per-call average, which is what separates a tool that is CALLED a lot from a slow one.
+    # A run that outgrows one 600 s shell call is walked in chunks (--run <id> / --resume), so a
+    # long run still stamps its receipt instead of refusing one.
+    chunk_elapsed = time.time() - run_started
+    elapsed = chunk_started + chunk_elapsed
+    print(f"\n== elapsed: {chunk_elapsed:.0f}s for {len(rows)} steps "
+          f"({STEP_SLEEP_S * len(rows):.0f}s of it the inter-step sleep)"
+          + (f"; {elapsed:.0f}s over this run's chunks" if chunk_started else ""))
     for nm, secs in sorted(act_seconds, key=lambda r: -r[1])[:5]:
         print(f"  {secs:7.1f}s  {nm}")
     print("  slowest tools (total / calls / per call):")
     for tool, (secs, count) in sorted(timings.items(), key=lambda kv: -kv[1][0])[:8]:
         print(f"  {secs:7.1f}s  {count:4} x {secs / max(count, 1):5.2f}s  {tool}")
-    # THE BUDGET IS PART OF THE RESULT, not a note for the next person. Every agent runs this through
-    # a shell tool that is killed at 600 s, so a sweep that creeps past the budget is one nobody can
-    # run - and a timeout kills the process without a receipt, which reads as a broken tool rather
-    # than a slow sweep. Failing here turns that into a named result with the act breakdown above it.
-    over_budget = elapsed > _RUNTIME_BUDGET_S
-    if over_budget:
-        print(f"\nOVER BUDGET: {elapsed:.0f}s exceeds the {_RUNTIME_BUDGET_S:.0f}s ceiling "
-              f"({_SHELL_TIMEOUT_S:.0f}s is where the shell tool kills it). The act and tool "
-              f"breakdowns above name where it went - cut there, or drop a dwell.")
 
     n_narr = sum(1 for _, m in act_modes if m == "narrative")
     n_fb = sum(1 for _, m in act_modes if m == "fallback")
@@ -489,29 +673,54 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
     # pass* blocks the receipt: the payload did not carry a key the step contract expected - a
     # payload-shape mismatch is a real signal, not a pass.
     fails = [r for r in rows if r[1] in ("FAIL", "blocked", "pass*")]
-    # A partial run judges the SLICE it walked: its ledger reads PENDING for every tool the unrun
-    # acts drive, and the receipt would publish that as the tool surface's coverage.
-    if selected is None:
-        if fails or over_budget:
+    # A run that walked only PART of the program judges the slice it walked: its ledger reads PENDING
+    # for every tool the unrun acts drive, and the receipt would publish that as the tool surface's
+    # coverage. The union of a run id's chunks is what makes the program whole again.
+    if complete:
+        if fails:
             print("\nVERIFIED_TOOLS.md NOT rewritten - resolve the FAIL/blocked/pass* steps first.")
         else:
             src_hash = source_hash()
             stamp_date = time.strftime("%Y-%m-%d")
             fusion_version = ctx.get("fusion_version", "?")
-            print("\nwrote {0} (stamp: source {1}..., Fusion {2}, {3})".format(
-                write_verified(ledger, fusion_version, stamp_date, src_hash, notes=notes,
-                               act_modes=act_modes),
-                src_hash[:12], fusion_version, stamp_date))
+            # WHAT THIS INVOCATION CONTRIBUTED, beside the stamp: a chunk can complete a run without
+            # driving an act of its own (the last chunk died after its final boundary save), and a
+            # receipt written from a saved ledger has to say that on the line that announces it.
+            drove = (" - {0} acts over this run's chunks".format(len(acts_done))
+                     if chunk_started else "")
+            if run_id and walked == 0:
+                drove += " - 0 acts driven this chunk - the reload beat only"
+            print("\nwrote {0} (stamp: source {1}..., Fusion {2}, {3}){4}".format(
+                write_verified(ledger, fusion_version, stamp_date, src_hash,
+                               notes=notes, act_modes=act_modes),
+                src_hash[:12], fusion_version, stamp_date, drove))
     if write_json:
-        results_dir = os.path.join(_HERE, "results")
-        os.makedirs(results_dir, exist_ok=True)
-        path = os.path.join(results_dir, f"verify-{time.strftime('%Y%m%d-%H%M%S')}.json")
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        path = os.path.join(RESULTS_DIR, f"verify-{time.strftime('%Y%m%d-%H%M%S')}.json")
         with open(path, "w", encoding="utf-8") as fh:
             json.dump({"steps": rows, "ledger": ledger, "acts": act_modes, "server": health}, fh, indent=2)
         print(f"\nwrote {path}")
-    if selected is not None:
-        # nothing closes the document unless the FINALE was selected AND allowed to close it.
-        print("\npartial run (--acts {0}): receipt not written{1}".format(
-            acts_spec, "" if ("FINALE" in selected and not keep_open)
-            else "; the story document is left open"))
-    return 1 if (fails or over_budget) else 0
+    if complete and run_id:
+        # the id is spent: its acts have all run, so a later --resume of it would stamp from the
+        # saved ledger without driving a step.
+        save_run_state(run_id, dict(load_run_state(run_id) or {}, complete=True))
+    if not complete:
+        if develop:
+            print("\ndevelopment walk of run {0}: {1} act(s) re-run against its world, receipt not "
+                  "written, state not advanced; the document stays open".format(run_id, walked))
+        elif run_id:
+            # the document stays open for the chunk that carries on, and its identity is saved with
+            # the state: a resume against a different one is refused rather than run.
+            state_file = save_run_state(run_id, dict(load_run_state(run_id) or {},
+                                                     document=_document_now()))
+            print("\nrun {0}: {1} of {2} acts done, receipt not written - carry on with "
+                  "'--run {0} --resume' against the document left open ({3})".format(
+                      run_id, len(acts_done), len(program), state_file))
+        elif selected is not None:
+            # nothing closes the document unless the FINALE was selected AND allowed to close it.
+            print("\npartial run (--acts {0}): receipt not written{1}".format(
+                acts_spec, "" if ("FINALE" in selected and not keep_open)
+                else "; the story document is left open"))
+        else:
+            print("\nreceipt not written: {0} of {1} acts ran".format(len(acts_done), len(program)))
+    return 1 if fails else 0

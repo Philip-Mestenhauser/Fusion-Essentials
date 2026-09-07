@@ -127,6 +127,21 @@ def link_pair(j1, j2, blind=False, name="MotionLink1", **kw):
     return ml
 
 
+def _motionless_joint(name):
+    """A joint whose jointMotion READ RAISES, so its kind reads as nothing at all - the state the
+    type gate's last branch answers, and the one a joint with a known-but-undrivable kind cannot
+    stand in for."""
+    class _Motionless(FakeJoint):
+        @property
+        def jointMotion(self):
+            raise RuntimeError("2 : InternalValidationError : motion")
+
+        @jointMotion.setter
+        def jointMotion(self, value):
+            pass
+    return _Motionless(name)
+
+
 def _blind_link_joint(name, motion):
     """A joint whose motionLinks membership RAISES. 'Could not be asked' is not the same answer as
     'in no motion link', and only one of the two lets a receipt reason about grounding."""
@@ -182,6 +197,13 @@ class TestGuards:
         _install(FakeJoint("J", RigidJointMotion()))
         res = jd.handler(joint_name="J", angle_deg=10)
         assert res["isError"] is True and "revolute" in res["message"].lower()
+
+    def test_a_joint_whose_motion_does_not_read_is_refused_without_a_kind(self, monkeypatch):
+        # The kind reads as '' here, and a refusal naming no kind at all would read as a joint whose
+        # type the caller could look up - it has to say the type is what did not answer.
+        _install(_motionless_joint("J"))
+        res = jd.handler(joint_name="J", angle_deg=10)
+        assert res["isError"] is True and "is an unknown type" in res["message"]
 
     def test_slider_rejects_angle(self, monkeypatch):
         _install(FakeJoint("J", SliderJointMotion()))
@@ -1258,18 +1280,25 @@ class TestTheAngleBandIsHalfTheStoreGrid:
 
     def test_a_residual_just_inside_the_half_step_still_lands(self, monkeypatch):
         # just inside the widest a 0.1 deg store grid can miss by - the boundary the band is set at.
-        # A command exactly ON the half-step is NOT covered: the store grid sends it to the further
-        # multiple, and the residual reads 0.05000000000000071, which the band's own comparison
-        # rejects (the tie direction is unmeasured - DRIVE-BAND-1).
         j = FakeJoint("Vane", RevoluteJointMotion())
         _install(j)
         out = payload(jd.handler(joint_name="Vane", angle_deg=-20.149))
         assert abs(out["value_now"]["angle_deg"] + 20.149) <= jd._ANGLE_BAND_DEG
 
+    def test_a_command_exactly_on_the_half_step_lands(self, monkeypatch):
+        # The worst a 0.1 deg store can do: the command sits between two multiples, and whichever
+        # one it takes is half a step away - as close as this grid gets. Which side it takes is not
+        # asserted, only the distance, so this pins the band and not a rounding direction.
+        j = FakeJoint("Vane", RevoluteJointMotion())
+        _install(j)
+        out = payload(jd.handler(joint_name="Vane", angle_deg=-20.15))
+        assert out["driven"] is True
+        assert abs(out["value_now"]["angle_deg"] + 20.15) == pytest.approx(jd._ANGLE_GRID_DEG / 2)
+
     def test_a_residual_past_the_band_is_still_a_failed_drive(self, monkeypatch):
-        # just past the half-step: the receipt must still refuse, or the wider band swallows a
-        # genuine no-take.
-        j = FakeJoint("Vane", _revolute_offset_by(0.06))
+        # 0.0501 deg is the first residual PAST the half-step: the receipt must still refuse, or the
+        # float slack the tie case needs has become a wider band that swallows a genuine no-take.
+        j = FakeJoint("Vane", _revolute_offset_by(0.0501))
         _install(j)
         res = jd.handler(joint_name="Vane", angle_deg=25)
         assert res["isError"] is True and "did NOT land the command" in res["message"]

@@ -2167,10 +2167,19 @@ ROWS = [
     },
     {
         "id": "shape-dump-data-world",
-        "claim": "The cloud data model dumps three types from a READ-ONLY, bounded look: app.data.activeProject is a DataProject, its rootFolder a DataFolder, and the DataFile dumped is the root folder's first file - or, when the root holds no file, the first file of the root's FIRST subfolder. At most those two folders are opened and only item(0) of each is touched: no recursive walk, which has been measured killing the add-in. When neither folder holds a file, DataFile is dumped from the class object under the same class-dir-equals-instance-dir-minus-'this' reading, taken here on DataFolder; the detail names which of the three sources supplied it",
+        "claim": "The cloud data model dumps three types from a READ-ONLY, bounded look: the project named 'MCP Test Project' found in app.data.dataProjects is a DataProject (app.data.activeProject RAISES '2 : InternalValidationError : group' on 2705.1.11 in every context tried - a fresh session, an unsaved scratch document, and a cloud document open and active - so no row and no tool can lean on it), its rootFolder a DataFolder, and the DataFile dumped is the root folder's first file - or, when the root holds no file, the first file of the root's FIRST subfolder. At most those two folders are opened and only item(0) of each is touched: no recursive walk, which has been measured killing the add-in. When neither folder holds a file, DataFile is dumped from the class object under the same class-dir-equals-instance-dir-minus-'this' reading, taken here on DataFolder; the detail names which of the three sources supplied it",
         "encoded_in": "tests/conftest.py - the shared fakes DEGRANDFATHER-B step 3 writes for these types",
         "body": """
-    proj = app.data.activeProject
+    # Data.activeProject raises on 2705.1.11 in every context, so the project is found by name.
+    projects = app.data.dataProjects
+    proj = None
+    for i in range(projects.count):
+        if projects.item(i).name == "MCP Test Project":
+            proj = projects.item(i)
+            break
+    if proj is None:
+        emit(False, "shape-dump-data-world: no project named 'MCP Test Project' in the active hub")
+        return
     folder = proj.rootFolder
     dfile = None
     source = "no file in the root or its first subfolder - the class object"
@@ -2199,13 +2208,20 @@ ROWS = [
     },
     {
         "id": "shape-dump-data-cloud-collections",
-        "claim": "The cloud COLLECTION types dump from the same READ-ONLY, bounded look as shape-dump-data-world: DataFiles and DataFolders off the active project's root folder, DataProjects and DataHubs off app.data - at most the root folder plus its FIRST subfolder are opened and only item(0) of each is touched, no recursive walk. All four carry asArray, and so does the parentReferences of the one DataFile reached (parentReferences answers a DataFiles). DataFileFuture is dumped from the class object under the class-dir-equals-instance-dir-minus-'this' reading, re-measured in this row on the live DataProjects, and carries both uploadState and dataFile. Data.activeHub carries a SETTER function, so 'no public setter' is not what stops a programmatic hub switch. MEASURED BY HAND and deliberately NOT re-measured by any row: assigning it LANDS - data_switch_hub reported switched:true both ways between 'Mechio' and 'Philip Mestenhauser' on 2705.1.4 - and the switch CLOSES every open document, which would destroy the sweep's own scratch",
+        "claim": "The cloud COLLECTION types dump from the same READ-ONLY, bounded look as shape-dump-data-world: DataFiles and DataFolders off the root folder of the project named 'MCP Test Project' in app.data.dataProjects (activeProject raises on 2705.1.11), DataProjects and DataHubs off app.data - at most the root folder plus its FIRST subfolder are opened and only item(0) of each is touched, no recursive walk. All four carry asArray, and so does the parentReferences of the one DataFile reached (parentReferences answers a DataFiles). DataFileFuture is dumped from the class object under the class-dir-equals-instance-dir-minus-'this' reading, re-measured in this row on the live DataProjects, and carries both uploadState and dataFile. Data.activeHub carries a SETTER function, so 'no public setter' is not what stops a programmatic hub switch. MEASURED BY HAND and deliberately NOT re-measured by any row: assigning it LANDS - data_switch_hub reported switched:true both ways between 'Mechio' and 'Philip Mestenhauser' on 2705.1.4 - and the switch CLOSES every open document, which would destroy the sweep's own scratch",
         "encoded_in": ("tests/conftest.py FakeData, FakeDataFolder, FakeDataFile and the _CloudArray "
                        "collection fakes (_CloudProjects among them); data_delete_file.py's "
                        "parentReferences.asArray() read"),
         "body": """
     data = app.data
-    proj = data.activeProject
+    proj = None
+    for i in range(data.dataProjects.count):
+        if data.dataProjects.item(i).name == "MCP Test Project":
+            proj = data.dataProjects.item(i)
+            break
+    if proj is None:
+        emit(False, "shape-dump-data-cloud-collections: no project named 'MCP Test Project'")
+        return
     folder = proj.rootFolder
     dfile = None
     source = "no file in the root or its first subfolder"

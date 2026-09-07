@@ -1,25 +1,18 @@
 ## Model
 
-**form-fillets-shell-then-detail**
-When a moulded or cast part is built: build the outer form, fillet its edges, shell it LAST among the form features, then add bosses, ribs, drafts and holes, then cosmetic split faces. Except a machined block, where holes may precede fillets. Prove `design_get`: Shell after the fillets and before the bosses in the timeline.
+**form-fillets-shell-then-detail** - Build the outer form, fillet its edges, shell it LAST among the form features, then add bosses, ribs, drafts and holes, then cosmetic split faces when a moulded or cast part is built; not for a machined block, where holes may precede fillets. Prove: `design_get`: Shell after the fillets and before the bosses in the timeline.
 
-**carve-do-not-accrete**
-When the form is a block with a curved face or a tapered body: extrude the block, loft or extrude the cutting form, split the block by it and remove the waste - the kept piece carries clean faces. Except a form that is itself one extrude or revolve. Prove `model_inspect`: one body left with the volume you expect after the split.
+**carve-do-not-accrete** - Extrude the block, loft or extrude the cutting form, split the block by it and remove the waste - the kept piece carries clean faces when the form is a block with a curved face or a tapered body; not for a form that is itself one extrude or revolve. Prove: `model_inspect`: one body left with the volume you expect after the split.
 
-**one-half-mirror-combine**
-When the part is symmetric: model one half against the symmetry plane, mirror it, combine into one body. Except asymmetric detail added after the mirror. Prove `design_get`: a Mirror row followed by a Combine row.
+**one-half-mirror-combine** - Model one half against the symmetry plane, mirror it, combine into one body when the part is symmetric; not for asymmetric detail added after the mirror. Prove: `design_get`: a Mirror row followed by a Combine row.
 
-**pattern-only-identical-intent**
-When the same feature repeats: build one and pattern it; copies answering different requirements are modelled apart. Except copies that merely share a shape. Prove `design_get`: the pattern feature in the timeline with the count you asked for.
+**pattern-only-identical-intent** - Build one and pattern it; copies answering different requirements are modelled apart when the same feature repeats; not for copies that merely share a shape. Prove: `design_get`: the pattern feature in the timeline with the count you asked for.
 
-**let-the-process-shape-the-part**
-When the part will be manufactured: take draft, wall thickness, minimum internal radius and hole sizes from the process; a 0.05 mm face offset is a fit clearance, a chord-length fillet is a cosmetic edge. Except an unsettled process, which is stated rather than assumed. Prove `find_geometry`: face normals show the draft; fillet radii meet the minimum.
+**let-the-process-shape-the-part** - Take draft, wall thickness, minimum internal radius and hole sizes from the process; a 0.05 mm face offset is a fit clearance, a chord-length fillet is a cosmetic edge when the part will be manufactured; not for an unsettled process, which is stated rather than assumed. Prove: `find_geometry`: face normals show the draft; fillet radii meet the minimum.
 
-**threads-by-intent**
-When a thread is needed: use the thread feature for a standard thread that a drawing or a tap will define; sweep a section along a helix with a pipe only when the ridge itself must be solid geometry. Except a cosmetic thread nothing mates with. Prove `design_get`: a Thread row, or a Sweep plus Pipe pair, not both.
+**threads-by-intent** - Use the thread feature for a standard thread that a drawing or a tap will define; sweep a section along a helix with a pipe only when the ridge itself must be solid geometry when a thread is needed; not for a cosmetic thread nothing mates with. Prove: `design_get`: a Thread row, or a Sweep plus Pipe pair, not both.
 
-**components-when-the-count-is-known**
-When bodies are still being carved out of one another: stay in bodies until the part count settles, then promote each body to a named component before any joint. Except a part known from the brief, which starts as its own component. Prove `design_get`: no unnamed 'Component' rows; every joint follows the component rows.
+**components-when-the-count-is-known** - Stay in bodies until the part count settles, then promote each body to a named component before any joint when bodies are still being carved out of one another; not for a part known from the brief, which starts as its own component. Prove: `design_get`: no unnamed 'Component' rows; every joint follows the component rows.
 
 ### Recipes
 

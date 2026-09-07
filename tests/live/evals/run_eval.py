@@ -88,6 +88,12 @@ HARNESS_UTILITY = {"TodoWrite", "ToolSearch", "Skill", "ScheduleWakeup", "Cron*"
 DISALLOWED = ",".join(sorted(
     SOURCE_ACCESS | HARNESS_UTILITY | CLOUD_DELETES | INTERACTIVE_PROMPTS | SCRIPT_HATCH))
 
+
+def disallowed_for(deny):
+    """The run's --disallowedTools: the standing list plus the fusion tools this run denies (the
+    control arm of an A/B), in the order given."""
+    return ",".join([DISALLOWED] + [d for d in deny if d])
+
 # Appended to EVERY executor prompt (below): the tools live behind an MCP connection that can
 # drop mid-run. Without this the executor waits, retries the dead transport indefinitely, or
 # self-schedules a resume - all of which burn budget on a lost server. The honest move is an
@@ -321,16 +327,17 @@ def stall_reason(idle_s, limit_s, calls, thinking_tokens):
             f"new thinking event after ~{calls} tool calls, {thinking}")
 
 
-def launch(prompt, run_dir, model, max_turns):
+def launch(prompt, run_dir, model, max_turns, deny=()):
     """Spawn the executor and WATCH it: tail the transcript for the init event, kill the
     process within seconds if it spawned tool-less (returns dead_spawn=True), kill it when it stops
-    progressing (returns stalled=True), and print a heartbeat so a live run is visibly alive."""
+    progressing (returns stalled=True), and print a heartbeat so a live run is visibly alive.
+    'deny' adds fusion tool names to the run's --disallowedTools (a control run without one)."""
     cwd, config, mcp_config = make_scratch(run_dir)
     exe = shutil.which("claude")
     if not exe:
         sys.exit("claude CLI not on PATH")
     cmd = [exe, "-p", "--model", model, "--mcp-config", mcp_config, "--strict-mcp-config",
-           "--allowedTools", ALLOWED, "--disallowedTools", DISALLOWED,
+           "--allowedTools", ALLOWED, "--disallowedTools", disallowed_for(deny),
            "--output-format", "stream-json", "--verbose",
            "--max-turns", str(max_turns)]
     env = dict(os.environ)
@@ -550,6 +557,11 @@ def main():
     ap.add_argument("--max-turns", type=int, default=None,
                     help="hard runaway backstop (default: max(120, 2x the scenario's max_tool_calls) - "
                          "so a big-budget scenario is not severed mid-report; pass a value to override)")
+    ap.add_argument("--deny", metavar="TOOL", action="append", default=[],
+                    help="deny the executor one fusion tool for this run (repeatable; the full "
+                         "mcp__fusion-essentials__<name>) - the control arm of an A/B such as a run "
+                         "without sys_get_guidance. Add names one at a time: an unknown name empties "
+                         "the CLI's tool registry")
     args = ap.parse_args()
 
     scenario = os.path.abspath(args.scenario)
@@ -598,8 +610,15 @@ def main():
         os.makedirs(run_dir)
         print(f"run dir: {run_dir}\nmodel: {args.model}  budget: {budget_calls} calls / "
               f"{budget_tokens} output tokens  max_turns: {max_turns}  "
-              f"cloud folder tag: {run_tag}  skill: {skill or 'none'}", flush=True)
-        transcript, stderr, dead_spawn, stalled = launch(prompt, run_dir, args.model, max_turns)
+              f"cloud folder tag: {run_tag}  skill: {skill or 'none'}  "
+              f"denied: {', '.join(args.deny) or 'none'}", flush=True)
+        if args.deny:
+            # the run dir says which arm it was, so a grade never has to infer it from the transcript
+            with open(os.path.join(run_dir, "denied.txt"), "w", encoding="utf-8",
+                      newline="\n") as fh:
+                fh.write("\n".join(args.deny) + "\n")
+        transcript, stderr, dead_spawn, stalled = launch(prompt, run_dir, args.model, max_turns,
+                                                         deny=args.deny)
         report, final = audit(transcript, run_dir, budget_calls, budget_tokens, stderr, skill)
         # Before the retry branches: a stall is OUR kill, and its zero-or-few MCP calls would
         # otherwise read as a spawn flake and replay the prompt over already-mutated live state.

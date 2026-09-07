@@ -252,8 +252,10 @@ class TestRender:
             {"tool": "design_get", "observe": "the timeline"},
         ]
         text = gen_guidance.section_text(doc, "plan")
-        assert "When a case arises: take the action. Except the other case." in text
-        assert "Prove `doc_get`: the save state; `design_get`: the timeline." in text
+        # one line per rule: the instruction leads, scope and boundary ride in the same sentence
+        assert "- Take the action when a case arises; not for the other case. " in text
+        assert "Prove: `doc_get`: the save state; `design_get`: the timeline." in text
+        assert "When a case arises:" not in text and "Except " not in text
 
     def test_an_example_renders_and_its_absence_leaves_no_line(self):
         with_example = _doc()
@@ -299,9 +301,12 @@ class TestRender:
     def test_the_map_points_at_each_playbook_and_recipe_without_carrying_them(self):
         text = gen_guidance.map_text(_doc())
         assert "**kernel-rule**" in text, "the kernel is IN the map, not pointed at"
-        assert "(`kernel`)" not in text, "and so it is never a playbook to go fetch"
-        assert '- **Plan** (`plan`) - this part of the build is next. Read `playbooks/plan.md`' in text
-        assert f'`sys_get_guidance(recipe="{_POINTED_AT}")`' in text
+        assert "- `kernel` -" not in text, "and so it is never a playbook to go fetch"
+        assert "- `plan` - this part of the build is next" in text
+        # the fetch rule is stated ONCE per list, never repeated on every row
+        assert text.count("sys_get_guidance(section=") == 1
+        assert text.count("sys_get_guidance(recipe=") == 1
+        assert f"- `{_POINTED_AT}` -" in text
         assert "Read back:" not in text and "**plan-rule**" not in text
 
 

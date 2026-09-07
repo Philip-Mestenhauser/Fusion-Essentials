@@ -330,6 +330,9 @@ _MESH = [
     # source appear IN shot instead of somewhere off screen.
     _watch("MshS"),
     ("model_extrude", {"sketch_name": "MshS", "profile_index": 0, "distance": 10}, _extruded, None),
+    # THE ONE FRAME THE WHOLE FAMILY PLAYS IN. Every mesh below is cast from a body inside Msh, and
+    # none of those steps makes a sketch or a component, so the framing pass adds no row of its own
+    # and nothing moves the camera off this shot.
     _watch("Msh:1"),
     ("find_geometry", {"target": "Msh", "kind": "planar_face", "nearest_to": [210, 310, 10], "max_results": 1}, "ok", _fg("msh_body")),
     ("model_construction", {"kind": "plane", "plane": "xy", "offset": 5, "name": "MshMid"},
@@ -338,10 +341,6 @@ _MESH = [
     ("sketch_add_geometry", {"kind": "circle", "cx": 260, "cy": 360, "radius": 15, "sketch_name": "MshCyl"}, "ok", None),
     ("model_extrude", {"sketch_name": "MshCyl", "profile_index": 0, "distance": 20}, _extruded, None),
     ("find_geometry", {"target": "Msh", "kind": "cylinder_face", "nearest_to": [260, 360, 10], "max_results": 1}, "ok", _fg("cyl_body")),
-    # Every mesh below is cast from a body inside Msh, so the camera goes there and STAYS there for
-    # the whole family - a mesh is created, reduced, remeshed, cut and smoothed without any step
-    # that makes a sketch or a component, so nothing in the framing pass would otherwise move it.
-    _watch("Msh:1"),
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "cyl_body", "cyl body"), "name": "MRED", "quality": "high"}, "ok", None),
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "MA", "quality": "low"}, "ok", None),
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "MC", "quality": "low"}, "ok", None),
@@ -373,7 +372,6 @@ _MESH = [
      and p.get("changed") is not None, None),
     # the cut's own effect evidence, mirrored into the receipt: the triangle count moved, or (a
     # fill that replaces as many triangles as it removed) the mesh's area/volume did.
-    _watch("Msh:1"),
     ("mesh_plane_cut", {"mesh": "MD", "plane": "MshMid", "cut_type": "trim"},
      lambda p: p.get("fill") == "minimal" and p.get("triangles_before") and p.get("triangles_after")
      and (p["triangles_after"] != p["triangles_before"]

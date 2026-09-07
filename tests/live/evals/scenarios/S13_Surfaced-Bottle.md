@@ -4,8 +4,8 @@ tier: pipeline
 fixture: fresh empty design (orchestrator stages with doc_new); nothing is saved to the cloud.
   The orchestrator closes the executor's document unsaved afterwards.
 budget:
-  max_tool_calls: 120
-  max_tokens: 110000
+  max_tool_calls: 85
+  max_tokens: 75000
 substitutions: none
 perturbations: none (baseline)
 expected_refusals: none
@@ -13,8 +13,10 @@ expected_refusals: none
 
 # S13 - Surfaced product: a bottle with an elliptical section and a curved spine
 
-Budgets are a first guess (no measured run yet); recalibrate at the first run_eval run of this
-wording. No skill is appended by design: this scenario measures whether the WIRE alone carries a
+Budget = the last measured run (65 calls, 57 k output tokens, opus executor) + 25%. That run read
+the bottle recipe unprompted and built surface-first; it could not use the loft's rails because
+no acquire read hands back a sketch-curve handle (a WIRE finding, ledgered). No skill is
+appended by design: this scenario measures whether the WIRE alone carries a
 cold agent through a surface-first build - skin, trim, stitch, thicken - rather than a stack of
 extrudes. Whether the executor reaches for sys_get_guidance is recorded from BREAKDOWN, not graded.
 

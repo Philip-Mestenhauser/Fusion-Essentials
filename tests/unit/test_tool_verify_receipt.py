@@ -198,6 +198,292 @@ class TestVerifiedReceipt:
         assert "| model_draft | called (effect read unreadable - DR-1) |" in text
 
 
+class _Clock:
+    """The time module as the runner sees it, with one elapsed reading: the first time() read is the
+    run's start and every later one is `elapsed` past it."""
+
+    def __init__(self, elapsed):
+        self.elapsed, self.reads = elapsed, 0
+
+    def time(self):
+        self.reads += 1
+        return 0.0 if self.reads == 1 else self.elapsed
+
+    def sleep(self, seconds):
+        pass
+
+    def strftime(self, fmt):
+        return "2026-07-11"
+
+
+class _Harness:
+    """run() over a stubbed wire, clock and results directory. What each test varies is the act
+    program, the run id and what the wire answers; everything else is held still."""
+
+    ACTS = [("ACT A", None, [("a_get", {}, "ok", ("k", lambda p: p["n"]))], []),
+            # ACT B's ARGUMENTS read a ctx value ACT A saved - the thing a chunk boundary has to
+            # carry, and the one whose loss shows up as a blocked step rather than an exception.
+            ("ACT B", None,
+             [("b_get", lambda ctx: {"x": ctx["k"]}, lambda p: p["n"] == 1, None)], [])]
+
+    def __init__(self, monkeypatch, tmp_path, acts=None, elapsed=1.0, document="Untitled",
+                 features=7, src_hash="0" * 64, answer=None, poll_after=None):
+        self.wrote, self.seen = {}, []
+        self.document, self.features, self.answer = document, features, answer
+        monkeypatch.setattr(tool_verify, "call", self._call)
+        monkeypatch.setattr(verify_runner, "time", _Clock(elapsed))
+        monkeypatch.setattr(verify_runner, "RESULTS_DIR", str(tmp_path))
+        monkeypatch.setattr(tool_verify, "health_gate", lambda: {"server": "ok", "version": "t"})
+        monkeypatch.setattr(tool_verify, "registered_tools", lambda: ["a_get", "b_get"])
+        monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: src_hash)
+        monkeypatch.setattr(tool_verify, "write_verified", self._write)
+        monkeypatch.setattr(tool_verify, "reload_smoke",
+                            lambda rows, notes, valued=None, **kw:
+                            self.seen.append(("reload beat", {})))
+        monkeypatch.setattr(tool_verify, "POLL_AFTER", poll_after or {})
+        monkeypatch.setattr(tool_verify, "EXCLUDED", {})
+        monkeypatch.setattr(tool_verify, "STORY", {})
+        monkeypatch.setattr(tool_verify, "ACT_NEEDS", {})
+        monkeypatch.setattr(tool_verify, "ACTS", acts if acts is not None else self.ACTS)
+        tool_verify._RECALL.clear()
+
+    def _call(self, tool, args):
+        self.seen.append((tool, dict(args)))
+        if tool == "doc_get":
+            return False, {"active": {"name": self.document, "document_id": None}}
+        if tool == "design_get":
+            return False, {"feature_count": self.features}
+        return False, self.answer if self.answer is not None else {"n": 1}
+
+    def _write(self, rows, version, date, src_hash, path=None, notes=None, act_modes=None):
+        self.wrote.update(ledger=dict(rows), src_hash=src_hash)
+        return "VERIFIED_TOOLS.md"
+
+    def tools_called(self):
+        return [tool for tool, _args in self.seen]
+
+    def run(self, **kw):
+        return tool_verify.run(write_json=False, **kw)
+
+
+class TestTheReceiptContract:
+    """What a receipt depends on: the steps, and nothing else. A run is timed and the timing is
+    reported, but a long run is a slow run - not a failed one."""
+
+    def test_a_run_far_longer_than_a_shell_call_still_stamps(self, monkeypatch, tmp_path, capsys):
+        # the sweep grew past 600 s of wall clock; capping it would refuse a receipt for a run whose
+        # every step passed, which is the state this contract exists to end.
+        h = _Harness(monkeypatch, tmp_path, elapsed=4000.0)
+        assert h.run() == 0 and set(h.wrote["ledger"]) == {"a_get", "b_get"}
+        out = capsys.readouterr().out
+        assert "OVER BUDGET" not in out and "4000s" in out
+
+    def test_a_failing_step_is_what_blocks_the_receipt(self, monkeypatch, tmp_path, capsys):
+        acts = [("ACT A", None, [("a_get", {}, lambda p: p["n"] == 99, None)], [])]
+        h = _Harness(monkeypatch, tmp_path, acts=acts)
+        assert h.run() == 1 and not h.wrote
+        assert "NOT rewritten" in capsys.readouterr().out
+
+    def test_an_acts_own_poll_budget_reaches_the_generation_poll(self, monkeypatch, tmp_path):
+        # a census act launches sixteen operations at once; the runner's default budget would end
+        # the poll while the work is still running and fail an act that is only slow.
+        polled = []
+        monkeypatch.setattr(tool_verify, "poll_generation",
+                            lambda rows, notes, setup, valued=None, max_polls=40:
+                            polled.append((setup, max_polls)))
+        acts = [("ACT P", None, [("a_get", {}, "ok", None)], []),
+                ("ACT Q", None, [("a_get", {}, "ok", None)], [])]
+        h = _Harness(monkeypatch, tmp_path, acts=acts, poll_after={
+            "ACT P": {"narrative": "Mill", "fallback": [], "max_polls": 90},
+            "ACT Q": {"narrative": "Turn", "fallback": []}})
+        h.run()
+        assert polled == [("Mill", 90), ("Turn", 40)]
+
+
+class TestResumableRun:
+    """A run walked in CHUNKS, because the shell a chunk is launched from is killed at 600 s. Each
+    chunk saves what the next one reads; the receipt is stamped from the union, once."""
+
+    def test_a_chunk_saves_the_program_it_walked_and_stamps_nothing(self, monkeypatch, tmp_path,
+                                                                    capsys):
+        h = _Harness(monkeypatch, tmp_path)
+        assert h.run(run_id="r1", acts_spec="ACT A") == 0
+        assert not h.wrote, "a chunk that has not walked the program cannot stamp its receipt"
+        state = tool_verify.load_run_state("r1")
+        assert state["acts_done"] == ["ACT A"] and state["ctx"] == {"k": 1}
+        assert state["rows"] == [["a_get", "pass", ""]]
+        # the document is saved as the chunk leaves it, so the next chunk can refuse another one
+        assert state["document"]["name"] == "Untitled"
+        assert "--run r1 --resume" in capsys.readouterr().out
+
+    def test_the_resume_carries_the_ctx_and_stamps_from_the_union(self, monkeypatch, tmp_path):
+        first = _Harness(monkeypatch, tmp_path)
+        first.run(run_id="r1", acts_spec="ACT A")
+        second = _Harness(monkeypatch, tmp_path)
+        assert second.run(run_id="r1", resume=True) == 0
+        # only the act that had not run is walked...
+        assert ("b_get", {"x": 1}) in second.seen and "a_get" not in second.tools_called()
+        # ...and the receipt carries BOTH acts' tools, from the union of the two chunks' ledgers
+        assert second.wrote["ledger"] == {"a_get": "called", "b_get": "covered"}
+        # the reload beat belongs to the whole run: the first chunk must not fire it, the last must
+        assert "reload beat" not in first.tools_called()
+        assert "reload beat" in second.tools_called()
+
+    def test_a_resume_after_the_source_moved_is_refused(self, monkeypatch, tmp_path, capsys):
+        # the receipt binds ONE hash: a chunk judged under different source would ride under a stamp
+        # no chunk was measured against.
+        first = _Harness(monkeypatch, tmp_path)
+        first.run(run_id="r1", acts_spec="ACT A")
+        second = _Harness(monkeypatch, tmp_path, src_hash="f" * 64)
+        assert second.run(run_id="r1", resume=True) == 1
+        assert "b_get" not in second.tools_called() and not second.wrote
+        assert "tool source changed" in capsys.readouterr().out
+
+    def test_a_resume_against_another_document_is_refused(self, monkeypatch, tmp_path, capsys):
+        # the remaining acts stand on the world the earlier ones built; run them against a fresh
+        # document and every read is against geometry that was never made.
+        first = _Harness(monkeypatch, tmp_path)
+        first.run(run_id="r1", acts_spec="ACT A")
+        second = _Harness(monkeypatch, tmp_path, document="Something Else")
+        assert second.run(run_id="r1", resume=True) == 1
+        assert "b_get" not in second.tools_called() and not second.wrote
+        out = capsys.readouterr().out
+        assert "not the active one" in out and "Something Else" in out
+
+    def test_a_resume_of_an_unknown_run_is_refused_naming_the_file(self, monkeypatch, tmp_path,
+                                                                   capsys):
+        h = _Harness(monkeypatch, tmp_path)
+        assert h.run(run_id="nosuch", resume=True) == 1
+        assert "run-nosuch.json" in capsys.readouterr().out and not h.wrote
+
+    @staticmethod
+    def _spy_saves(monkeypatch):
+        """Every state a chunk saves, in order - the first is what a kill after act one leaves."""
+        saved, real = [], verify_runner.save_run_state
+        monkeypatch.setattr(verify_runner, "save_run_state",
+                            lambda run_id, state: (saved.append(dict(state)), real(run_id, state))[1])
+        return saved
+
+    def test_a_first_chunk_saves_the_document_at_its_very_first_boundary(self, monkeypatch,
+                                                                        tmp_path):
+        # The false-receipt path this closes: a --run walk with no --acts is killed by the shell at
+        # 600 s, so it never reaches its own ending. Every boundary save it made in the meantime has
+        # to carry the document, or the resume has nothing to refuse a different one against.
+        saved = self._spy_saves(monkeypatch)
+        h = _Harness(monkeypatch, tmp_path)
+        h.run(run_id="r1")
+        assert saved, "a --run walk saves after every act"
+        assert (saved[0].get("document") or {}).get("name") == "Untitled"
+        assert all((s.get("document") or {}).get("name") == "Untitled" for s in saved)
+
+    def test_that_killed_chunks_state_refuses_a_resume_in_another_document(self, monkeypatch,
+                                                                          tmp_path, capsys):
+        # the same state, resumed where the sweep's document is NOT the active one: the acts that
+        # remain would run against a world nothing built, so the chunk must change nothing.
+        saved = self._spy_saves(monkeypatch)
+        first = _Harness(monkeypatch, tmp_path)
+        first.run(run_id="r1")
+        verify_runner.save_run_state("r1", dict(saved[0], complete=False))   # as a kill left it
+        second = _Harness(monkeypatch, tmp_path, document="A Totally Different Document")
+        assert second.run(run_id="r1", resume=True) == 1
+        assert not second.wrote and "b_get" not in second.tools_called()
+        assert "A Totally Different Document" in capsys.readouterr().out
+
+    def test_a_state_with_no_document_identity_is_refused(self, monkeypatch, tmp_path, capsys):
+        # the belt to that brace: a state saved before any boundary (or by an older run) names no
+        # document, and "nothing to compare" must read as a refusal, not as a pass.
+        first = _Harness(monkeypatch, tmp_path)
+        first.run(run_id="r1", acts_spec="ACT A")
+        verify_runner.save_run_state("r1", dict(tool_verify.load_run_state("r1"), document=None))
+        second = _Harness(monkeypatch, tmp_path)
+        assert second.run(run_id="r1", resume=True) == 1
+        assert not second.wrote and "saved no document identity" in capsys.readouterr().out
+
+    def test_a_chunk_that_drove_no_act_says_so_on_the_stamp_line(self, monkeypatch, tmp_path,
+                                                                capsys):
+        # a chunk killed after its LAST boundary save leaves every act done and no completion flag:
+        # the resume walks nothing, fires the reload beat and stamps from the saved ledger. It may
+        # stamp - the acts did run - but the line that announces the receipt has to say what this
+        # invocation contributed.
+        saved = self._spy_saves(monkeypatch)
+        first = _Harness(monkeypatch, tmp_path)
+        first.run(run_id="r1")
+        verify_runner.save_run_state("r1", dict(saved[-1], complete=False))  # as a kill left it
+        second = _Harness(monkeypatch, tmp_path)
+        assert second.run(run_id="r1", resume=True) == 0 and second.wrote
+        out = capsys.readouterr().out
+        assert "0 acts driven this chunk - the reload beat only" in out
+        assert "a_get" not in second.tools_called() and "b_get" not in second.tools_called()
+
+    def test_a_resume_of_a_finished_run_is_refused(self, monkeypatch, tmp_path, capsys):
+        # every act of a spent id is already done, so a resume would walk nothing and stamp the
+        # receipt from the saved ledger - a receipt for a run that drove nothing this time.
+        first = _Harness(monkeypatch, tmp_path)
+        first.run(run_id="r1")
+        assert first.wrote
+        second = _Harness(monkeypatch, tmp_path)
+        assert second.run(run_id="r1", resume=True) == 1
+        assert not second.wrote and "already walked the whole program" in capsys.readouterr().out
+
+    def test_a_development_walk_reruns_the_named_act_with_the_saved_ctx(self, monkeypatch,
+                                                                       tmp_path, capsys):
+        # iterating on one act: the saved world's ctx feeds ACT B's arguments, only ACT B runs,
+        # nothing stamps, and the state is left exactly as the chunk saved it.
+        first = _Harness(monkeypatch, tmp_path)
+        first.run(run_id="r1", acts_spec="ACT A")
+        before = tool_verify.load_run_state("r1")
+        second = _Harness(monkeypatch, tmp_path)
+        assert second.run(run_id="r1", resume=True, acts_spec="ACT B") == 0
+        assert ("b_get", {"x": 1}) in second.seen and "a_get" not in second.tools_called()
+        assert not second.wrote and "reload beat" not in second.tools_called()
+        assert tool_verify.load_run_state("r1") == before
+        assert "development walk" in capsys.readouterr().out
+
+    def test_a_development_walk_runs_an_act_already_done_and_tolerates_a_moved_source(
+            self, monkeypatch, tmp_path):
+        # the act was edited since the chunk ran it: the hash moved, and that is the point.
+        first = _Harness(monkeypatch, tmp_path)
+        first.run(run_id="r1", acts_spec="ACT A")
+        second = _Harness(monkeypatch, tmp_path, src_hash="f" * 64)
+        assert second.run(run_id="r1", resume=True, acts_spec="ACT A") == 0
+        assert "a_get" in second.tools_called() and not second.wrote
+        assert tool_verify.load_run_state("r1")["acts_done"] == ["ACT A"]
+
+    def test_a_development_walk_in_another_document_is_still_refused(self, monkeypatch, tmp_path,
+                                                                     capsys):
+        first = _Harness(monkeypatch, tmp_path)
+        first.run(run_id="r1", acts_spec="ACT A")
+        second = _Harness(monkeypatch, tmp_path, document="Something Else")
+        assert second.run(run_id="r1", resume=True, acts_spec="ACT B") == 1
+        assert "b_get" not in second.tools_called() and "not the active one" in capsys.readouterr().out
+
+    def test_a_single_invocation_is_unchanged_by_the_run_id_machinery(self, monkeypatch, tmp_path):
+        # the path everyone runs: no run id, no state file, one stamp at the end.
+        h = _Harness(monkeypatch, tmp_path)
+        assert h.run() == 0 and h.wrote["ledger"] == {"a_get": "called", "b_get": "covered"}
+        assert not os.path.exists(tool_verify.run_state_path("r1"))
+
+    def test_a_value_a_predicate_recalls_survives_the_boundary(self, monkeypatch, tmp_path):
+        # _RECALL is module state, not ctx: a predicate that recalls a name saved two acts ago reads
+        # nothing in a fresh process unless the chunk carried it.
+        acts = [("ACT A", None,
+                 [("a_get", {}, "ok", ("k", tool_verify._recall("landed", lambda p: p["n"])))], []),
+                ("ACT B", None, [("b_get", {}, lambda p: p["n"] == 1, None)], [])]
+        first = _Harness(monkeypatch, tmp_path, acts=acts)
+        first.run(run_id="r1", acts_spec="ACT A")
+        assert tool_verify.load_run_state("r1")["recall"] == {"landed": 1}
+        second = _Harness(monkeypatch, tmp_path, acts=acts)      # clears _RECALL, as a new process does
+        second.run(run_id="r1", resume=True)
+        assert tool_verify._RECALL["landed"] == 1
+
+    def test_a_ctx_value_that_cannot_be_saved_is_refused_by_name(self, monkeypatch, tmp_path):
+        # the failure this replaces is silent: a value stringified into the state file resumes into
+        # a step that fails on a bad reference, three acts later.
+        with pytest.raises(TypeError) as refused:
+            tool_verify.save_run_state("r1", {"ctx": {"good": 1, "handle": object()}})
+        assert "handle" in str(refused.value) and "good" not in str(refused.value)
+
+
 class TestPredicateKind:
     """The classifier behind the split: it reads the step's EXPECTATION object, nothing else."""
 
@@ -281,7 +567,7 @@ class TestPredicateKind:
         # the rows decides the ledger, so this is what a revert to zip(steps, ...) has to fail.
         ledger = {}
 
-        def fake_write(rows, version, date, src_hash, notes=None, act_modes=None):
+        def fake_write(rows, version, date, src_hash, path=None, notes=None, act_modes=None):
             ledger.update(rows)
             return "VERIFIED_TOOLS.md"
 
@@ -462,7 +748,7 @@ class TestCapabilityTier:
         out = {}
         seen = []
 
-        def fake_write(rows, version, date, src_hash, notes=None, act_modes=None):
+        def fake_write(rows, version, date, src_hash, path=None, notes=None, act_modes=None):
             out["ledger"] = dict(rows)
             out["act_modes"] = list(act_modes or [])
             return "VERIFIED_TOOLS.md"
@@ -576,7 +862,7 @@ class TestCapabilityTier:
         monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
         ledger = {}
         monkeypatch.setattr(tool_verify, "write_verified",
-                            lambda rows, v, d, h, notes=None, act_modes=None: ledger.update(rows))
+                            lambda rows, v, d, h, **kw: ledger.update(rows))
         monkeypatch.setattr(tool_verify, "POLL_AFTER", {})
         monkeypatch.setattr(tool_verify, "EXCLUDED", {})
         monkeypatch.setattr(tool_verify, "STORY", {})
@@ -814,7 +1100,7 @@ class TestReloadBeat:
         # can follow it) and its covered row reaches the ledger.
         ledger = {}
 
-        def fake_write(rows, version, date, src_hash, notes=None, act_modes=None):
+        def fake_write(rows, version, date, src_hash, path=None, notes=None, act_modes=None):
             ledger.update(rows)
             return "VERIFIED_TOOLS.md"
 
@@ -848,7 +1134,7 @@ class TestReloadBeat:
         # EXCLUDED row, so an unlanded reconnect never reads as coverage.
         ledger = {}
 
-        def fake_write(rows, version, date, src_hash, notes=None, act_modes=None):
+        def fake_write(rows, version, date, src_hash, path=None, notes=None, act_modes=None):
             ledger.update(rows)
             return "VERIFIED_TOOLS.md"
 

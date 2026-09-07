@@ -7,7 +7,7 @@ Every other CAM beat proves a toolpath EXISTS. These post one 2D contour on the 
 through dump.cps, read the .dmp with _dump_reader, and judge the motion rows against the stock box
 the dump states and a floor measured off the model - in the dump's own millimetres. The extension
 act's simultaneous job rides the same post behind the machining_extension tier, where the tool axis
-is what there is to judge."""
+is what there is to judge - `_MX_DUMP`, which runs as ACT 10c6b, behind that act's own poll."""
 
 import _dump_reader
 from verify_acts_cam import MACHINING_EXTENSION, _MX_SETUP, _launched_on, _op_named, _selected
@@ -174,8 +174,13 @@ _HUB_DUMP = [
      _dumped(HUB_MILL_SETUP, _DUMP_PROGRAM),
      ("hub_dump_path", _recall("hub_dump_path", lambda p: p["files"][0]["file_path"]))),
     ("model_inspect", {"target": HUB_COMP + ":1"}, _verdicts, None),
-    # THE SIMULTANEOUS JOB through the same post, where the tool axis is the whole question: the
-    # 3-axis file above states none at all, and this one states one on every 5D row it carries.
+]
+
+
+# THE SIMULTANEOUS JOB through the same post, where the tool axis is the whole question: the 3-axis
+# file above states none at all, and this one states one on every 5D row it carries. It reads the
+# rail act's own setup, so it rides the harness that builds one, behind that act's boundary poll.
+_MX_DUMP = [
     ("cam_post", {"scope": _MX_SETUP, "post": _DUMP_POST, "post_scope": "fusion",
                   "output_folder": _DUMP_DIR, "program_name": _MX_PROGRAM},
      _needs(MACHINING_EXTENSION, _dumped_5d(_MX_SETUP, _MX_PROGRAM, _MX_TILT_LIMIT)), None),

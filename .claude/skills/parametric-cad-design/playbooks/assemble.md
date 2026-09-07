@@ -1,23 +1,17 @@
 ## Assemble
 
-**one-assembly-idiom**
-When the first part is placed: pick one idiom for the document - joints, or assembly constraints plus rigid groups - and keep it; mixing them is why large timelines read as noise. Except a rigid group over an already-joined sub-mechanism. Prove `assembly_get`: joint_count and relations agree with the idiom you chose.
+**one-assembly-idiom** - Pick one idiom for the document - joints, or assembly constraints plus rigid groups - and keep it; mixing them is why large timelines read as noise when the first part is placed; not for a rigid group over an already-joined sub-mechanism. Prove: `assembly_get`: joint_count and relations agree with the idiom you chose.
 
-**connected-reference-path**
-When an assembly has a fixed moving mechanism: establish one intentional reference path from the grounded part; do not ground parts to hide missing joints. Except floating or multiple independent mechanisms. Prove `assembly_get`: one ground_to_parent root and every joint reachable from it.
+**connected-reference-path** - Establish one intentional reference path from the grounded part; do not ground parts to hide missing joints when an assembly has a fixed moving mechanism; not for floating or multiple independent mechanisms. Prove: `assembly_get`: one ground_to_parent root and every joint reachable from it.
 
-**as-built-for-parts-modelled-in-place**
-When a part was modelled against its neighbours where it sits: join it with as-built joints - nothing moves - and let the joint limits carry the stroke. Except a part placed from elsewhere, which takes a joint with joint origins. Prove `assembly_get`: the joint's limits hold the travel the brief named.
+**as-built-for-parts-modelled-in-place** - Join it with as-built joints - nothing moves - and let the joint limits carry the stroke when a part was modelled against its neighbours where it sits; not for a part placed from elsewhere, which takes a joint with joint origins. Prove: `assembly_get`: the joint's limits hold the travel the brief named.
 
-**align-knobs-not-spacers**
-When a joint needs a flip or an offset: use the joint's align angle and align offset; do not add spacer bodies to fix a pose. Except a real spacer part in the bill of materials. Prove `assembly_get`: the joint's frame sits where the offset put it, and the occurrence list holds no spacer that is not a real part.
+**align-knobs-not-spacers** - Use the joint's align angle and align offset; do not add spacer bodies to fix a pose when a joint needs a flip or an offset; not for a real spacer part in the bill of materials. Prove: `assembly_get`: the joint's frame sits where the offset put it, and the occurrence list holds no spacer that is not a real part.
 
-**exercise-the-mechanism**
-When the mechanism has a driven joint: drive it to home and a representative extreme; keep moving joints few, the rest rigid; link two joints with a motion link when one motion implies the other. Except a joint with no travel of interest. Prove `joint_drive`: the value at each pose; `assembly_inspect_interference`: overlaps at each pose, intended fit or defect.
+**exercise-the-mechanism** - Drive it to home and a representative extreme; keep moving joints few, the rest rigid; link two joints with a motion link when one motion implies the other when the mechanism has a driven joint; not for a joint with no travel of interest. Prove: `joint_drive`: the value at each pose; `assembly_inspect_interference`: overlaps at each pose, intended fit or defect.
 Example: a nut overlapping a plain shaft is a thread modelled as a cylinder.
 
-**fasteners-mint-parameters**
-When library fasteners are inserted: expect a set of adsk_ parameters per fastener and read only the authored set; name each fastener instance by its spec. Except a design with no library parts. Prove `param_get`: the user parameters with include_model_parameters left false; the adsk_ names are the fasteners', the rest are yours.
+**fasteners-mint-parameters** - Expect a set of adsk_ parameters per fastener and read only the authored set; name each fastener instance by its spec when library fasteners are inserted; not for a design with no library parts. Prove: `param_get`: the user parameters with include_model_parameters left false; the adsk_ names are the fasteners', the rest are yours.
 
 ### Recipes
 

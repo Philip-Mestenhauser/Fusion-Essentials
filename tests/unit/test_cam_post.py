@@ -1008,6 +1008,21 @@ class TestPostLog:
         monkeypatch.setattr(cp, "_CAM_LOG_ROOT", str(tmp_path / "nothing"))
         assert cp._post_log_errors("1001", 0.0) == []
 
+    def test_the_log_root_climbs_out_of_a_per_session_temp_dir(self, tmp_path):
+        # inside Fusion the process temp dir is <TEMP>/Fusion360CAM/<session>; the logs sit under
+        # the Fusion360CAM tree above it, not under a second Fusion360CAM inside it.
+        temp = tmp_path / "Fusion360CAM" / "20524-65"
+        assert cp._cam_log_root(str(temp)) == str(tmp_path / "Fusion360CAM")
+        assert cp._cam_log_root(str(tmp_path)) == str(tmp_path / "Fusion360CAM")
+
+    def test_a_failed_post_reads_its_log_from_the_climbed_root(self, monkeypatch, tmp_path):
+        root = tmp_path / "Fusion360CAM"
+        self._make_log(root, "1002", "Error: This postprocessor requires a machine configuration "
+                                     "for 5-axis simultaneous toolpath.\n")
+        monkeypatch.setattr(cp, "_CAM_LOG_ROOT", cp._cam_log_root(str(root / "20524-65")))
+        assert any("requires a machine configuration" in e
+                   for e in cp._post_log_errors("1002", 0.0))
+
     def test_a_program_number_refusal_names_the_non_numeric_name_that_was_sent(self, monkeypatch,
                                                                                 tmp_path):
         # the post's own line is the only thing that says a number was wanted here; the clause

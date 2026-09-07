@@ -10,13 +10,14 @@ import tempfile
 import adsk.core
 
 from . import _common
+from . import _geom
 
 MAP_BLURB = (
     "view_direction/look_direction/up_vector/is_ortho_face - camera vectors for a named view; "
     "apply_named_view/capture_png_b64 - orient and grab the viewport; "
     "standoff_distance/STANDOFF_FALLBACK_CM - the eye-target standoff an orient rebuilds from; "
     "DISPLAY_FOLDERS/all_display_components - toggling non-body clutter; "
-    "keep_visible/isolate_for_fit/restore_message - framing on one occurrence")
+    "keep_visible/isolate_for_fit/restore_message/focus_box - framing on one occurrence")
 
 app = adsk.core.Application.get()
 
@@ -55,6 +56,20 @@ def all_display_components(design):
         seen.add(key)
         out.append(c)
     return out
+
+
+def focus_box(entity):
+    """(the box a framing is measured on, 'solids' or 'all_geometry') - the BODIES-ONLY extents of a
+    subject that places bodies, else its whole box."""
+    # An occurrence's plain boundingBox sweeps its sketches and construction geometry, so a part
+    # beside a large sketch in one component frames the sketch. boundingBox2 is the bodies-only read;
+    # a sketch carries none, and a component placing no body answers None through it.
+    box = _geom.body_aabb(entity)
+    if box is not None and callable(_common.safe(lambda: entity.boundingBox2)):
+        return box, "solids"
+    if box is None:
+        box = _common.safe(lambda: entity.boundingBox)
+    return box, "all_geometry"
 
 
 def keep_visible(o_path, target_path):

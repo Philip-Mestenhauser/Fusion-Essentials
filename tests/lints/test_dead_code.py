@@ -44,16 +44,21 @@ def _parse(path):
 
 
 def _test_helpers():
-    """The _*.py helper modules beside the tests (the fakes, the shared corpus reader) - module
-    code like any other."""
+    """The _*.py helper modules beside the tests (the per-file fakes, the shared corpus reader) -
+    module code like any other."""
     return [p for p in sorted(TESTS.rglob("_*.py"))
             if not p.name.startswith("__") and "__pycache__" not in p.parts]
+
+
+def _shared_fakes():
+    """The fakes package's family modules - the shared fakes conftest re-exports."""
+    return [p for p in sorted((TESTS / "fakes").glob("*.py")) if p.name != "__init__.py"]
 
 
 def _definition_files():
     """Every file the module-level definition checks scan."""
     return (_py_files(MCP_ROOT) + sorted(TESTS.glob("gen_*.py")) + [TESTS / "conftest.py"]
-            + _test_helpers())
+            + _shared_fakes() + _test_helpers())
 
 
 @lru_cache(maxsize=None)
@@ -70,13 +75,23 @@ def _mention_counts():
                 tree = _parse(path)
             except SyntaxError:
                 continue
-            _count_into(tree, bump)
+            _count_into(tree, bump, skip=_reexport_aliases(tree))
     return counts
 
 
-def _count_into(tree, bump):
+def _reexport_aliases(tree):
+    """The alias nodes of a `from tests.fakes.<family> import ...` line, by id() - conftest's
+    re-export surface. Such a line NAMES a fake without using it, so counting it would leave a fake
+    nothing imports permanently referenced and unflaggable."""
+    return {id(alias) for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("tests.fakes.")
+            for alias in node.names}
+
+
+def _count_into(tree, bump, skip=()):
     """Feed every mention in one tree to bump(name): Name ids, Attribute attrs, import aliases,
-    argument names (pytest injects fixtures by arg name), and identifier strings in *attr calls."""
+    argument names (pytest injects fixtures by arg name), and identifier strings in *attr calls.
+    `skip` holds alias nodes by id() that do not count as a mention."""
     for node in ast.walk(tree):
         if isinstance(node, ast.Name):
             bump(node.id)
@@ -85,6 +100,8 @@ def _count_into(tree, bump):
         elif isinstance(node, ast.arg):
             bump(node.arg)
         elif isinstance(node, ast.alias):
+            if id(node) in skip:
+                continue
             bump(node.name.split(".")[0])
             if node.asname:
                 bump(node.asname)
@@ -197,7 +214,8 @@ class TestNoUnusedImports:
     def test_every_import_is_used_or_a_named_seam(self):
         offenders = []
         files = _py_files(MCP_ROOT) + sorted(TESTS.rglob("test_*.py")) \
-            + sorted(TESTS.glob("gen_*.py")) + [TESTS / "conftest.py"] + _test_helpers()
+            + sorted(TESTS.glob("gen_*.py")) + [TESTS / "conftest.py"] + _shared_fakes() \
+            + _test_helpers()
         for path in files:
             if path.name == "__init__.py":
                 continue          # a package __init__'s imports are its re-export surface

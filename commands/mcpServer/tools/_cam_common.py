@@ -612,6 +612,32 @@ def _warning_phrase(sample) -> str:
     return f"'{sample['name']}'" + (f" - {text}" if text else " (warning text unreadable).")
 
 
+# The setup's stock mode: the wire key beside the SetupStockModes member that assigns it.
+# 'previous_setup' takes the stock a PRECEDING setup left behind, which is the mill-turn rest flow.
+STOCK_MODES = {
+    "fixed_box": "FixedBoxStock",
+    "relative_box": "RelativeBoxStock",
+    "fixed_cylinder": "FixedCylinderStock",
+    "relative_cylinder": "RelativeCylinderStock",
+    "fixed_tube": "FixedTubeStock",
+    "relative_tube": "RelativeTubeStock",
+    "from_solid": "SolidStock",
+    "previous_setup": "PreviousSetupStock",
+}
+
+
+def stock_mode_member(key):
+    """The SetupStockModes value one STOCK_MODES key assigns, or None where this build lacks it."""
+    return getattr(adsk.cam.SetupStockModes, STOCK_MODES[key], None)
+
+
+def stock_mode_name(value):
+    """The STOCK_MODES key a Setup.stockMode value reads as, or None when it matches no member."""
+    if value is None:
+        return None
+    return next((key for key in STOCK_MODES if stock_mode_member(key) == value), None)
+
+
 # The setup-level blocker vocabulary: each code beside the tool that clears it.
 _SETUP_BLOCKER_REMEDY = {"no_machine_selected": "cam_edit_setup assigns a machine"}
 

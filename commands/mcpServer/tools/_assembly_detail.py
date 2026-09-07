@@ -133,9 +133,9 @@ _MOTION_AXES = (("rotation_axis", "rotationAxisVector", _joints.DRIVES_ANGLE),
 
 
 def _motion_axes(j, kind):
-    """The joint motion's own heading(s) for the DOF `kind` has: {'rotation_axis': [x,y,z]} on a
-    revolute, {'slide_direction': [x,y,z]} on a slider, both on a cylindrical, {} otherwise. A
-    heading that answers nothing leaves its key OFF the row."""
+    """The joint motion's own heading(s) for the DOF `kind` has: rotation_axis on a revolute or
+    cylindrical, slide_direction on a slider, {} otherwise - the measured CylindricalJointMotion
+    exposes no slideDirectionVector. A heading that answers nothing leaves its key OFF the row."""
     # Published exactly as the member answers, with NO placement lift: rotationAxisVector read the
     # WORLD axis on an as-built joint whose component was turned 90 deg, and the space
     # slideDirectionVector answers in is unmeasured - lifting either could turn it a second time.

@@ -34,6 +34,17 @@ _MOVE_BAND_DEG = 0.01
 _ANGLE_GRID_DEG = 0.1
 _ANGLE_BAND_DEG = 0.05
 
+# A command halfway between two grid multiples lands half a step away whichever multiple it takes,
+# and half a step is not a binary fraction, so the subtraction can leave a residue just above the
+# band. The slack keeps the closest landing the grid allows from reading as a failed drive.
+_BAND_SLACK_DEG = 1e-9
+
+
+def _over_angle_band(diff_deg):
+    """Whether an angle difference is further from zero than the half-grid-step band."""
+    return abs(diff_deg) - _ANGLE_BAND_DEG > _BAND_SLACK_DEG
+
+
 # (document identity, joint ENTITY TOKEN) driven this add-in session, keyed by token so a
 # delete+recreate clears the block while a rename does not. The refusal it arms, and the crash that
 # refusal exists for, are at the point of use in handler().
@@ -531,18 +542,18 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
     angle_landed = slide_landed = None      # per-value outcome, for the PARTIAL diagnosis below
     if "angle_deg" in applied and "angle_deg" in read_back:
         angle_landed = True
-        if abs(read_back["angle_deg"] - applied["angle_deg"]) > _ANGLE_BAND_DEG:
+        if _over_angle_band(read_back["angle_deg"] - applied["angle_deg"]):
             # 720 and 0 are the SAME physical pose: a command the read-back matches modulo 360 is
             # an equivalent pose, not a failed drive - the stored value kept a full-turn count the
             # command did not. Only a mismatch that survives the mod-360 test is a genuine no-take.
             d = abs(read_back["angle_deg"] - applied["angle_deg"]) % 360.0
-            if min(d, 360.0 - d) <= _ANGLE_BAND_DEG:
+            if not _over_angle_band(min(d, 360.0 - d)):
                 before_deg = round(math.degrees(rv_before), 4) if rv_before is not None else None
                 acc_txt = (f"value_now reads {read_back['angle_deg']} deg"
                            + (f" (= {read_back['angle_deg_normalized']} deg normalized)"
                               if "angle_deg_normalized" in read_back else ""))
                 if (before_deg is not None
-                        and abs(read_back["angle_deg"] - before_deg) > _ANGLE_BAND_DEG):
+                        and _over_angle_band(read_back["angle_deg"] - before_deg)):
                     # The value CHANGED: the drive moved the mechanism and landed pose-equivalent
                     # to the command. A real move, not a no-op - say so instead of claiming the
                     # pose was already there.

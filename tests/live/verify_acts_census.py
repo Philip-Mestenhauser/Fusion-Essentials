@@ -10,26 +10,19 @@ not created: it is a CENSUS row carrying the message the platform answered with,
 tests/generated/STRATEGY_COMPETENCE.md publishes beside the proven ones.
 """
 
-from verify_acts_cam import _all_cut, _launched_on, _op_deleted, _op_named, _selected
-from verify_acts_hub import HUB_COMP, HUB_MILL_SETUP, HUB_TURN_SETUP, _HUB_TOOLS, _HUB_X
+from verify_acts_cam import (
+    _all_cut, _launched_on, _offers, _op_deleted, _op_named, _reveal, _selected)
+from verify_acts_hub import (
+    HUB_COMP, HUB_MILL_SETUP, HUB_TURN_SETUP, _BALL_AT, _CHAMFER_AT, _FLAT6_AT, _FLAT_AT,
+    _GROOVE_AT, _HUB_X, _SLOT_AT, _THREAD_INSERT_AT, _TURN_AT)
 from verify_core import (
     _RECALL, _ctx_get, _fg, _measured, _near, _num, _recall, _refused, _watch)
 
-# The hub's cutter set is added in one call, so a census row picks its cutter by position off the
-# base index that call published.
-_FLAT_AT = [t for t, _d in _HUB_TOOLS].index("flat end mill")
-_BALL_AT = [t for t, _d in _HUB_TOOLS].index("ball end mill")
-_CHAMFER_AT = [t for t, _d in _HUB_TOOLS].index("chamfer mill")
-_SLOT_AT = [t for t, _d in _HUB_TOOLS].index("slot mill")
-_TURN_AT = [t for t, _d in _HUB_TOOLS].index("turning general")
-_GROOVE_AT = [t for t, _d in _HUB_TOOLS].index("turning grooving")
-_THREAD_INSERT_AT = [t for t, _d in _HUB_TOOLS].index("turning threading")
-
-# The two cutters the hub's shop set does not carry, added by this act at the index the library's own
-# count names: the cutting family refuses a mill by TYPE ("Tool (flat end mill) is not supported for
-# the strategy."), and the hub's 12 mm thread mill in an 11 mm counterbore says "Tool doesn't fit."
-_CENSUS_TOOLS = (("waterjet", None), ("thread mill", 6.0))
-_WATERJET_AT, _THREAD_MILL_AT = 0, 1
+# The three cutters the hub's shop set does not carry: the cutting family refuses a mill by TYPE,
+# the hub's 12 mm thread mill in an 11 mm counterbore says "Tool doesn't fit.", and a probing
+# strategy takes no tool but a probe. Added in ONE call, before anything generates.
+_CENSUS_TOOLS = (("waterjet", None), ("thread mill", 6.0), ("probe", None))
+_WATERJET_AT, _THREAD_MILL_AT, _PROBE_AT = 0, 1, 2
 
 # THE GEOMETRY THE CENSUS AIMS AT, in the hub's own numbers. The flange rim carries a 1.5 mm round,
 # so the circle at the flange TOP is that fillet's upper tangent - r 38.5, not the flange's own 40.
@@ -39,11 +32,13 @@ _POCKET_Z = -4.0                 # the flange pocket floor, 4 mm down from the f
 _POCKET_XY = 21.0                # that arc slot's own centroid, on the 32 mm bolt circle
 _GROOVE_R, _GROOVE_TOP_Z = 22.0, -45.0   # the shaft groove the single-groove cycle drops into
 _SHAFT_R, _SHAFT_MID_Z = 25.0, -32.5     # the shaft wall the turned thread runs on
+# The flange's outer wall, which the swarf family cuts with the side of the cutter. Its centroid
+# sits at half its height: the wall runs from the rim round's lower tangent down to the underside.
+_WALL_R, _WALL_Z = 40.0, -10.75
 
 # The whole-model 3D families: MEASURED, each generates a NON-EMPTY toolpath over the setup's own
 # model with no geometry selection at all, so one create is the whole beat. What decides membership
-# is GENERATION wall clock, not how long the toolpath cuts: the act boundary polls this setup for a
-# bounded 40 x 5 s, and every beat's generation shares that one budget.
+# is GENERATION wall clock, not how long the toolpath cuts.
 _WHOLE_MODEL = (
     ("parallel", "Parallel", _BALL_AT), ("scallop", "Scallop", _BALL_AT),
     ("pencil", "Pencil", _BALL_AT), ("contour3d", "Contour3D", _BALL_AT),
@@ -86,6 +81,10 @@ NUANCE = (
 _MILL_NAMES = ([n for _s, n, _i in _WHOLE_MODEL]
                + ["Slot", "Circular", "ThreadMill", "TraceRim", "ProjectRim", "Adaptive2D",
                   "WaterjetProfile"])
+# The Machining Extension's own families this milling setup can feed, each on the geometry kind it
+# was measured to take. The ROTARY families are not among them: they wrap a model about a rotary
+# axis, and the sibling that drives one builds a setup with a machine and a bound WCS to turn about.
+_EXT_NAMES = ["MxContour", "AdvSwarf", "ProbeGeom"]
 _TURN_NAMES = [n for _s, n, _i in _TURNED] + ["TurnThread", "TurnSingleGroove"]
 
 
@@ -121,6 +120,20 @@ def _cbore_walls(p):
     return _measured(f"four r{_CBORE_R} counterbore walls",
                      {"count": len(ms), "radii": [m.get("radius") for m in ms]},
                      len(ms) == 4 and all(_near(m.get("radius"), _CBORE_R, 0.1) for m in ms))
+
+
+def _flange_top(p):
+    """find_geometry: the flange's own top face, told by its HEIGHT and its normal. Its centroid is
+    off the hub axis - the bolt holes and the two pockets are cut out of it - so a query measured at
+    the axis names the wrong thing here."""
+    ms = p.get("matches") or []
+    m = ms[0] if ms else {}
+    pos, nrm = m.get("position") or [0, 0, 9], m.get("normal") or [0, 0, 0]
+    return _measured("one up-facing face at the flange top, z 0",
+                     {"count": len(ms), "position": pos, "normal": nrm, "area": m.get("area")},
+                     len(ms) == 1 and m.get("kind") == "planar_face"
+                     and _near(pos[2], 0.0, 0.1) and nrm[2] > 0.999
+                     and _num(m.get("area")) and m["area"] > 0)
 
 
 def _round_at(radius, z):
@@ -273,18 +286,21 @@ _CENSUS_MILL = [
      lambda c: {"operation": "ProjectRim", "selection": "chain",
                 "handles": [_ctx_get(c, "census_rim", "the flange-top circle")],
                 "generate": False}, _selected(1), None),
-    # THE SILHOUETTE: the 2D adaptive and the cutting family both machine the part's outline. The
-    # adaptive one is aimed HERE rather than at the arc slot, where a 10 mm cutter inside a 12 mm
-    # slot generated valid and EMPTY.
+    # THE 2D ADAPTIVE, roughing the flange pocket the lathe cannot reach. MEASURED on this setup,
+    # whose stock is the rest the turning setup left: aimed at the SILHOUETTE it generates EMPTY -
+    # nothing stands outside the turned profile - and a 10 mm cutter inside the 12 mm arc slot did
+    # the same, so it is cut with the shop set's 6 mm mill.
     ("cam_create_operation",
      lambda c: {"setup": HUB_MILL_SETUP, "strategy": "adaptive2d", "name": "Adaptive2D",
                 "tool_scope": "document",
-                "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _FLAT_AT,
+                "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _FLAT6_AT,
                 "generate": False},
      _op_named(HUB_MILL_SETUP, "adaptive2d", "Adaptive2D"), None),
-    ("cam_select_geometry", {"operation": "Adaptive2D", "selection": "silhouette",
-                             "generate": False},
-     lambda p: p["setup_models_selected"] is True, None),
+    ("cam_select_geometry",
+     lambda c: {"operation": "Adaptive2D", "selection": "pocket",
+                "handles": [_ctx_get(c, "census_pocket", "the arc-slot pocket floor")],
+                "generate": False}, _selected(1), None),
+    # THE SILHOUETTE, on the cutting family: a waterjet profiles the part's outline.
     ("cam_create_operation",
      lambda c: {"setup": HUB_MILL_SETUP, "strategy": "profile2d", "name": "WaterjetProfile",
                 "tool_scope": "document",
@@ -311,10 +327,91 @@ _CENSUS_MILL = [
 
 
 # ACT 10c8: the milling census read, once the act boundary's poll has certified that generation -
-# the non-empty oracle per strategy, and the neighbour diff the table's nuance column is drawn from.
+# the hub framed once, every strategy shown in that frame, then the non-empty oracle per strategy.
 _CENSUS_MILL_READ = [
+    _watch(HUB_COMP + ":1"),
+] + _reveal(_MILL_NAMES) + [
     ("cam_get", {"include": ["time"], "setup": HUB_MILL_SETUP},
      _all_cut(HUB_MILL_SETUP, len(_MILL_NAMES), names=_MILL_NAMES), None),
+]
+
+
+# ACT 10c11: the extension families, created on the milling setup once the census above has taken
+# its reads. The generate is skip_valid, so only these three compute - the library add that would
+# have invalidated the rest happened at the top of the census act, before anything generated.
+_CENSUS_EXT = [
+    _watch(HUB_COMP + ":1"),
+    # the setup's own vocabulary first: a strategy this installation reads blocked reds HERE, naming
+    # it, rather than inside the create that used it.
+    ("cam_get", {"include": ["strategies"], "setup": HUB_MILL_SETUP},
+     _offers(HUB_MILL_SETUP, "multi_axis_contour", "advanced_swarf", "probe_geometry"), None),
+    # THE FLANGE-TOP CIRCLE, re-found rather than recalled: several generations stand between this
+    # act and the one that first measured it, and a handle is short-lived.
+    ("find_geometry", {"target": HUB_COMP, "kind": "circular_edge", "radius": _RIM_R,
+                       "nearest_to": [_HUB_X, 0, 0], "max_results": 1},
+     _rim_circle, _fg("ext_rim")),
+    ("cam_create_operation",
+     lambda c: {"setup": HUB_MILL_SETUP, "strategy": "multi_axis_contour", "name": "MxContour",
+                "tool_scope": "document",
+                "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _BALL_AT,
+                "generate": False},
+     _op_named(HUB_MILL_SETUP, "multi_axis_contour", "MxContour"), None),
+    ("cam_select_geometry",
+     lambda c: {"operation": "MxContour", "selection": "chain",
+                "handles": [_ctx_get(c, "ext_rim", "the flange-top circle")],
+                "generate": False}, _selected(1), None),
+    # THE FLANGE WALL, cut with the SIDE of the cutter. The swarf family carries no curve parameter
+    # at all - the refusal below names the surface set it carries instead - so the wall is handed to
+    # that set rather than to a rail pair.
+    ("find_geometry", {"target": HUB_COMP, "kind": "cylinder_face", "radius": _WALL_R,
+                       "nearest_to": [_HUB_X, 0, _WALL_Z], "max_results": 1},
+     _round_at(_WALL_R, _WALL_Z), _fg("ext_wall")),
+    ("cam_create_operation",
+     lambda c: {"setup": HUB_MILL_SETUP, "strategy": "advanced_swarf", "name": "AdvSwarf",
+                "tool_scope": "document",
+                "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _FLAT_AT,
+                "generate": False},
+     _op_named(HUB_MILL_SETUP, "advanced_swarf", "AdvSwarf"), None),
+    ("cam_select_geometry",
+     lambda c: {"operation": "AdvSwarf", "selection": "chain",
+                "handles": [_ctx_get(c, "ext_rim", "the flange-top circle")]},
+     _refused("has no curve-selection parameter", "surface set(s) swarf"), None),
+    ("cam_select_geometry",
+     lambda c: {"operation": "AdvSwarf", "selection": "surfaces", "surface_target": "swarf",
+                "handles": [_ctx_get(c, "ext_wall", "the flange wall")],
+                "generate": False}, _selected(1), None),
+    # THE PROBING CYCLE that measures a FACE, on the probe this act's library add cloned: the create
+    # is refused any other tool kind, naming the type it was handed.
+    ("find_geometry", {"target": HUB_COMP, "kind": "planar_face",
+                       "nearest_to": [_HUB_X, 0, 0], "max_results": 1},
+     _flange_top, _fg("ext_top")),
+    ("cam_create_operation",
+     lambda c: {"setup": HUB_MILL_SETUP, "strategy": "probe_geometry", "name": "ProbeGeom",
+                "tool_scope": "document",
+                "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _FLAT_AT},
+     _refused("needs a PROBE", "flat end mill"), None),
+    ("cam_create_operation",
+     lambda c: {"setup": HUB_MILL_SETUP, "strategy": "probe_geometry", "name": "ProbeGeom",
+                "tool_scope": "document",
+                "tool_index": _ctx_get(c, "census_tool", "the census tool base") + _PROBE_AT,
+                "generate": False},
+     _op_named(HUB_MILL_SETUP, "probe_geometry", "ProbeGeom"), None),
+    ("cam_select_geometry",
+     lambda c: {"operation": "ProbeGeom", "selection": "probe",
+                "handles": [_ctx_get(c, "ext_top", "the flange top")],
+                "generate": False}, _selected(1), None),
+    ("cam_generate", {"target": HUB_MILL_SETUP, "skip_valid": True},
+     _launched_on(HUB_MILL_SETUP, skip_valid=True), None),
+]
+
+
+# ACT 10c12: the extension families read, behind their own boundary poll - the same reveal, then the
+# non-empty oracle over the three.
+_CENSUS_EXT_READ = [
+    _watch(HUB_COMP + ":1"),
+] + _reveal(_EXT_NAMES) + [
+    ("cam_get", {"include": ["time"], "setup": HUB_MILL_SETUP},
+     _all_cut(HUB_MILL_SETUP, len(_EXT_NAMES), names=_EXT_NAMES), None),
 ]
 
 
@@ -370,8 +467,11 @@ _CENSUS_TURN = _creates(HUB_TURN_SETUP, _TURNED, "hub_tool_base") + [
 ]
 
 
-# ACT 10c10: the turning census read, behind its own boundary poll.
+# ACT 10c10: the turning census read, behind its own boundary poll - the same reveal, then the
+# non-empty oracle and the neighbour diff the table's nuance column is drawn from.
 _CENSUS_TURN_READ = [
+    _watch(HUB_COMP + ":1"),
+] + _reveal(_TURN_NAMES) + [
     ("cam_get", {"include": ["time"], "setup": HUB_TURN_SETUP},
      _all_cut(HUB_TURN_SETUP, len(_TURN_NAMES), names=_TURN_NAMES), None),
     ("cam_compare_operations", {"operation_a": NUANCE[0][0], "operation_b": NUANCE[0][4],
@@ -410,7 +510,7 @@ CENSUS = _LONG + (
      "ACT 10c7 ThreadMill"),
     ("trace", PROVEN, "chain", "chamfer mill", "ACT 10c7 TraceRim"),
     ("project", PROVEN, "chain", "ball end mill", "ACT 10c7 ProjectRim"),
-    ("adaptive2d", PROVEN, "silhouette", "flat end mill", "ACT 10c7 Adaptive2D"),
+    ("adaptive2d", PROVEN, "pocket", "flat end mill that fits the pocket", "ACT 10c7 Adaptive2D"),
     ("profile2d", PROVEN, "silhouette", "waterjet (a cutting tool)", "ACT 10c7 WaterjetProfile"),
     ("manual", CREATED, "none", "any",
      "ACT 10c7 ManualNC creates it and reads the name back, then deletes it - a generated Manual NC "
@@ -451,14 +551,14 @@ CENSUS = _LONG + (
      "ACT 10c (machining extension)"),
     ("flow2", PROVEN, "surfaces -> driveSurfaces", "ball end mill",
      "ACT 10c (machining extension)"),
-    ("rotary_contour", PROVEN, "none - the setup's model", "ball end mill",
-     "ACT 10c (machining extension)"),
-    ("turning_face", PROVEN, "none - the setup's model", "turning general insert", "ACT 10c2"),
+    ("turning_face", PROVEN, "none - the setup's model", "turning general insert",
+     "ACT 10c4 TurnFace"),
     ("turning_profile_roughing", PROVEN, "none - the setup's model", "turning general insert",
-     "ACT 10c2"),
+     "ACT 10c4 TurnRough"),
     ("turning_profile_finishing", PROVEN, "none - the setup's model", "turning general insert",
-     "ACT 10c2"),
-    ("turning_part", PROVEN, "none - the setup's model", "turning grooving insert", "ACT 10c2"),
+     "ACT 10c4 TurnFinish"),
+    ("turning_part", PROVEN, "none - the setup's model", "turning grooving insert",
+     "ACT 10c4 TurnPart"),
     # --- refused up front, each on a read the create tool takes before it mutates ---------------
     ("chamfer", REFUSED, "-", "-",
      "isGenerationAllowed reads false; refused live by ACT 10c on the cameo setup"),
@@ -505,11 +605,36 @@ CENSUS = _LONG + (
      "generated with 'Toolpath is not supported for the given tool and settings.'"),
     ("subspindle_return", SKIPPED, "-", "turning general insert",
      "generated with 'Toolpath is not supported for the given tool and settings.'"),
-    # --- not probed: no measurement stands behind a claim for these yet -------------------------
-    ("multi_axis_contour", SKIPPED, "unmeasured", "-", "not probed on the hub yet"),
-    ("multi_axis_morph", SKIPPED, "unmeasured", "-", "not probed on the hub yet"),
-    ("advanced_swarf", SKIPPED, "unmeasured", "-", "not probed on the hub yet"),
-    ("rotary_pocket", SKIPPED, "unmeasured", "-", "not probed on the hub yet"),
-    ("rotary_finishing", SKIPPED, "unmeasured", "-", "not probed on the hub yet"),
-    ("probe_geometry", SKIPPED, "probe", "probe", "not probed on the hub yet"),
+    # --- the extension families ACT 10c11 drives, behind the machining_extension tier -----------
+    ("multi_axis_contour", PROVEN, "chain", "ball end mill",
+     "ACT 10c11 MxContour on one edge chain of the hub, machining time read in ACT 10c12 "
+     "(machining extension)"),
+    ("advanced_swarf", PROVEN, "surfaces -> advancedSwarfSurfaces", "flat end mill",
+     "ACT 10c11 AdvSwarf on the hub's flange wall, machining time read in ACT 10c12; the chain "
+     "kind is refused naming the 'swarf' surface set this operation carries instead, and a "
+     "drafted block wall generates EMPTY ('The tool or surface selections may prevent any area "
+     "from being machined.') (machining extension)"),
+    ("probe_geometry", PROVEN, "probe", "probe",
+     "ACT 10c11 ProbeGeom with a cloned probe on one face, machining time read in ACT 10c12; "
+     "a tool that is not a probe is refused naming the type it was handed (machining extension)"),
+    # The rotary trio wraps a model about a rotary AXIS, so it rides the hub - a solid of revolution
+    # about that very axis - in a setup of its own carrying a 4-axis machine and a WCS bound to the
+    # hub's centre. Each row carries the contract the operation was read to hold.
+    ("rotary_contour", PROVEN, "none - the setup's model", "ball end mill",
+     "ACT 10c13 RotContour on the hub's rotary setup, machining time read in ACT 10c14; the "
+     "operation reads axisView_orientation_mode 'axisZ' - the axis its passes wrap about - and "
+     "axisView_origin_mode 'jobOrigin', so it turns about the setup's own WCS (machining extension)"),
+    ("rotary_pocket", PROVEN, "none - the setup's model", "flat end mill",
+     "ACT 10c13 RotPocket on the hub's rotary setup, machining time read in ACT 10c14; the "
+     "operation reads axisView_orientation_mode 'axisZ' - the axis its passes wrap about - and "
+     "axisView_origin_mode 'jobOrigin', so it turns about the setup's own WCS (machining extension)"),
+    ("rotary_finishing", PROVEN, "none - the setup's model", "ball end mill",
+     "ACT 10c13 RotFinish on the hub's rotary setup, machining time read in ACT 10c14; the "
+     "operation reads axisView_orientation_mode 'axisZ' - the axis its passes wrap about - and "
+     "axisView_origin_mode 'jobOrigin', so it turns about the setup's own WCS (machining extension)"),
+    ("multi_axis_morph", MEASURED, "surfaces -> driveSurfaces", "ball end mill",
+     "driven on the hub with the flange wall as its drive surface, reading 123.6 s of machining "
+     "time; it is not a beat because that generation ran past 240 s of polling with the status "
+     "read still answering 'generating'. The chain kind lands on this operation, and it then "
+     "generates with 'Drive Surfaces: No valid drive surfaces selected.'"),
 )

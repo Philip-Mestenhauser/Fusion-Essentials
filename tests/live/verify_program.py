@@ -12,13 +12,16 @@ tools deliberately not driven unattended, `PENDING` the honest todo.
 
 from verify_acts_cam import (
     CAM_SETUP, FLIP_SETUP, MACHINING_EXTENSION, _CAM, _CAM_DELIVER, _CAM_EXTENSION,
-    _CAM_FB_DELIVER, _CAM_MULTI_POST, _CAM_SCOPE, _CAM_SECOND_SETUP, _CAM_STORY, _CAM_TURNING,
-    _CAM_TURNING_POST, _MX_SETUP, _ROT_SETUP, _SW_SETUP, _SW_SETUP2, _SWARF_RIG, _TURN_SETUP)
+    _CAM_FB_DELIVER, _CAM_GREEN, _CAM_MULTI_POST, _CAM_SCOPE, _CAM_SECOND_SETUP, _CAM_STORY,
+    _MX_SETUP, _SW_SETUP, _SW_SETUP2, _SWARF_RIG)
 from verify_acts_census import (
-    _CENSUS_MILL, _CENSUS_MILL_READ, _CENSUS_TURN, _CENSUS_TURN_READ)
+    _CENSUS_EXT, _CENSUS_EXT_READ, _CENSUS_MILL, _CENSUS_MILL_READ, _CENSUS_TURN,
+    _CENSUS_TURN_READ)
 from verify_acts_doc import _FINALE, _OVERTURE, _SHOWCASE
-from verify_acts_dump import _HUB_CONTOUR, _HUB_DUMP
-from verify_acts_hub import HUB_MILL_SETUP, HUB_TURN_SETUP, _HUB, _HUB_JOB
+from verify_acts_dump import _HUB_CONTOUR, _HUB_DUMP, _MX_DUMP
+from verify_acts_hub import (
+    HUB_MILL_SETUP, HUB_ROT_SETUP, HUB_TURN_SETUP, _HUB, _HUB_JOB, _HUB_ROTARY, _HUB_ROTARY_READ,
+    _HUB_TURNED_READ)
 from verify_acts_mesh import _MACHINING, _MESH, _NESTING
 from verify_acts_model import (
     _DETAILS, _DETAILS_FB, _RESIZE, _RESIZE_FB, _SOLIDS, _SOLIDS_FB)
@@ -102,15 +105,14 @@ _ACT_PROGRAM = [
     # document and depend on nothing the story built, so the act runs its narrative always - where
     # the entitlement is there to run it (ACT_NEEDS below).
     ("ACT 10c - CAM: EXTENSION STRATEGIES", None, _CAM_EXTENSION, []),
-    # The turned profile, on the same cameo: the one axis family that needs no extension. It
-    # depends on nothing the story built, so no precondition and no fallback - and its post is an
-    # act of its own: only valid toolpaths post, and the boundary poll that certifies the turning
-    # generation runs BETWEEN acts, not between the steps of one.
-    ("ACT 10c2 - CAM: TURNING", None, _CAM_TURNING, []),
-    ("ACT 10c3 - CAM: TURNING POST", None, _CAM_TURNING_POST, []),
     # The hub's own job, added AFTER the acts above have taken their library reads: this one appends
-    # nine cutters, and every index those acts select by is read off the count before it.
+    # ten cutters, and every index those acts select by is read off the count before it. It is
+    # sequenced the way the part is made - the lathe job first, then the milling setup on the stock
+    # the lathe leaves - so the turning cycles it launches are certified before anything is milled.
     ("ACT 10c4 - CAM: THE HUB JOB", None, _HUB_JOB, []),
+    # The turned part read, once that poll has certified it: only valid toolpaths post, and the
+    # boundary poll that certifies the turning generation runs BETWEEN acts.
+    ("ACT 10c4b - CAM: THE TURNED PART", None, _HUB_TURNED_READ, []),
     # WHERE the toolpath cuts, which no other beat reads: one contour on the hub's flange wall,
     # then the dump post that writes its every motion event to a file the verdicts judge. The two
     # are separate acts because only a generated toolpath posts, and the poll that certifies the
@@ -119,11 +121,13 @@ _ACT_PROGRAM = [
      ("cam_get", {"include": ["operations"], "setup": HUB_MILL_SETUP}), _HUB_CONTOUR, []),
     ("ACT 10c6 - CAM: THE DUMP ORACLE",
      ("cam_get", {"include": ["operations"], "setup": HUB_MILL_SETUP}), _HUB_DUMP, []),
+    # The rail act's own simultaneous job, posted through the same dump post.
+    ("ACT 10c6b - CAM: THE 5-AXIS DUMP", None, _MX_DUMP, []),
     # THE CENSUS: the rest of each hub setup's strategy vocabulary, driven one geometry kind at a
     # time. It runs AFTER the dump post, which writes every operation the milling setup holds. Each
     # census act creates and launches; the read that stands on the generation is the act after it,
-    # because the poll that certifies a generation runs BETWEEN acts - and that poll's bounded
-    # 40 x 5 s is the budget every strategy in one act shares, which is what decides membership.
+    # because the poll that certifies a generation runs BETWEEN acts - and each act's own poll budget
+    # is sized to the families it launched (POLL_AFTER below).
     ("ACT 10c7 - CAM: THE MILLING CENSUS",
      ("cam_get", {"include": ["operations"], "setup": HUB_MILL_SETUP}), _CENSUS_MILL, []),
     ("ACT 10c8 - CAM: THE MILLING CENSUS READ",
@@ -132,6 +136,16 @@ _ACT_PROGRAM = [
      ("cam_get", {"include": ["operations"], "setup": HUB_TURN_SETUP}), _CENSUS_TURN, []),
     ("ACT 10c10 - CAM: THE TURNING CENSUS READ",
      ("cam_get", {"include": ["operations"], "setup": HUB_TURN_SETUP}), _CENSUS_TURN_READ, []),
+    # The Machining Extension's own families on the same hub: three strategies no other act drives,
+    # each on the geometry kind it was measured to take. The tier holds both acts back whole where
+    # the entitlement is not read, and every TOOL they drive is driven by the acts above.
+    ("ACT 10c11 - CAM: THE EXTENSION FAMILIES", None, _CENSUS_EXT, []),
+    ("ACT 10c12 - CAM: THE EXTENSION FAMILIES READ", None, _CENSUS_EXT_READ, []),
+    # THE ROTARY WRAP, in a setup of its own: creating a rotary operation invalidates every
+    # operation in its setup, and the passes wrap about an axis - so they ride the hub, whose shape
+    # IS a revolve about that axis, on a 4-axis machine this act builds and takes back out.
+    ("ACT 10c13 - CAM: THE ROTARY FAMILIES", None, _HUB_ROTARY, []),
+    ("ACT 10c14 - CAM: THE ROTARY FAMILIES READ", None, _HUB_ROTARY_READ, []),
     # The last two acts machine the PART - the flip setup and the program that spans it and the
     # first - so each is gated on the job ACT 10a built, and falls back to nothing rather than to a
     # scratch world: every tool they drive is driven again by the scratch-stock fallbacks above, so
@@ -140,6 +154,10 @@ _ACT_PROGRAM = [
      ("cam_get", {"include": ["operations"], "setup": CAM_SETUP}), _CAM_SECOND_SETUP, []),
     ("ACT 10e - CAM: MULTI-SETUP POST",
      ("cam_get", {"include": ["operations"], "setup": FLIP_SETUP}), _CAM_MULTI_POST, []),
+    # The last CAM step: ACT 10e ends by relaunching what its own edits left stale, its boundary
+    # poll certifies the document, and this act reads the tree a watcher is left with.
+    ("ACT 10f - CAM: THE TREE LEFT BEHIND",
+     ("cam_get", {"include": ["operations"], "setup": CAM_SETUP}), _CAM_GREEN, []),
     ("FINALE", None, _FINALE, None),
 ]
 
@@ -209,6 +227,10 @@ ACTS = [(name, pre, _framed(_placed(narr, _SLOTS)), _framed(fb) if fb is not Non
 # verify_core.CAPABILITY_PROBES.
 ACT_NEEDS = {
     "ACT 10c - CAM: EXTENSION STRATEGIES": MACHINING_EXTENSION,
+    "ACT 10c11 - CAM: THE EXTENSION FAMILIES": MACHINING_EXTENSION,
+    "ACT 10c12 - CAM: THE EXTENSION FAMILIES READ": MACHINING_EXTENSION,
+    "ACT 10c13 - CAM: THE ROTARY FAMILIES": MACHINING_EXTENSION,
+    "ACT 10c14 - CAM: THE ROTARY FAMILIES READ": MACHINING_EXTENSION,
 }
 
 # Post-act hook run() fires after an act completes: the bounded generation poll between a CAM job
@@ -217,22 +239,40 @@ ACT_NEEDS = {
 # nothing, because nothing in it launched.
 POLL_AFTER = {
     "ACT 10a - CAM: JOB + GENERATE": {"narrative": CAM_SETUP, "fallback": "Setup1"},
+    # 10b ends on the Setup2 launch, so its boundary certifies that generation before the next act's
+    # CAM writes start - a write landing while a generation free-runs is what parks the process. The
+    # fallback lane creates a Setup2 of its own and launches nothing, so it polls nothing.
+    "ACT 10b - CAM: DELIVERABLES": {"narrative": "Setup2", "fallback": []},
     # The two cameo acts route to their narrative always (no precondition), so both modes name the
     # same setup - the poll has to answer whichever key run() looks up.
     "ACT 10b2 - CAM: COMPONENT SCOPE": {"narrative": _SW_SETUP2, "fallback": _SW_SETUP2},
-    # the extension act leaves THREE setups generating - the rails, the simultaneous strategies and
-    # the rotary wrap - each certified in turn; the turning act leaves its one.
-    "ACT 10c - CAM: EXTENSION STRATEGIES": {"narrative": [_SW_SETUP, _MX_SETUP, _ROT_SETUP],
-                                            "fallback": [_SW_SETUP, _MX_SETUP, _ROT_SETUP]},
-    "ACT 10c2 - CAM: TURNING": {"narrative": _TURN_SETUP, "fallback": _TURN_SETUP},
+    # the extension act leaves TWO setups generating - the rails and the simultaneous strategies -
+    # each certified in turn.
+    "ACT 10c - CAM: EXTENSION STRATEGIES": {"narrative": [_SW_SETUP, _MX_SETUP],
+                                            "fallback": [_SW_SETUP, _MX_SETUP]},
+    # the hub job's lathe cycles, certified before the act that reads and posts them.
+    "ACT 10c4 - CAM: THE HUB JOB": {"narrative": HUB_TURN_SETUP, "fallback": []},
     # the dump contour's own launch; its fallback lane is empty, so it leaves nothing generating.
     "ACT 10c5 - CAM: THE HUB CONTOUR": {"narrative": HUB_MILL_SETUP, "fallback": []},
     # the census launches one setup per act, each certified before the read act that stands on it.
-    "ACT 10c7 - CAM: THE MILLING CENSUS": {"narrative": HUB_MILL_SETUP, "fallback": []},
+    # The milling act creates sixteen operations at once, so its poll takes more than the default 40.
+    "ACT 10c7 - CAM: THE MILLING CENSUS": {"narrative": HUB_MILL_SETUP, "fallback": [],
+                                           "max_polls": 70},
     "ACT 10c9 - CAM: THE TURNING CENSUS": {"narrative": HUB_TURN_SETUP, "fallback": []},
+    # the extension families launch onto the milling setup whose stock is the lathe's rest, and that
+    # generation ran past the default 40 polls with every operation reading valid behind it.
+    "ACT 10c11 - CAM: THE EXTENSION FAMILIES": {"narrative": HUB_MILL_SETUP, "fallback": [],
+                                                "max_polls": 70},
+    # the rotary setup's own three, wrapped about the hub axis.
+    "ACT 10c13 - CAM: THE ROTARY FAMILIES": {"narrative": HUB_ROT_SETUP, "fallback": [],
+                                             "max_polls": 70},
     # the flip act's fallback is EMPTY, so it launches nothing and there is nothing to certify -
     # an empty target list polls nothing rather than reading a setup that was never created.
     "ACT 10d - CAM: THE SECOND SETUP": {"narrative": FLIP_SETUP, "fallback": []},
+    # the last act relaunches every setup its own edits left stale, and how many of them exist
+    # depends on the capability tier - so the DOCUMENT is the scope certified here, which covers
+    # whichever of them launched.
+    "ACT 10e - CAM: MULTI-SETUP POST": {"narrative": "document", "fallback": [], "max_polls": 70},
 }
 
 # STEPS: the flat union of every act's narrative + fallback steps - the coverage ledger the
@@ -706,8 +746,11 @@ STORY = {
                            "dimension by name before anything is applied. Then the deburr's "
                            "multi-pass, in two writes because the stepover row is settable only "
                            "once the flag above it is true, each read back off the operation; and "
-                           "the TOOL arm on an operation the shipped template landed with none - "
-                           "Operation.tool read back beside a null was_tool"),
+                           "the TOOL arm on EVERY operation the shipped template landed with none - "
+                           "a spot drill, a drill and a mill that fits the counterbore, each with "
+                           "Operation.tool read back beside a null was_tool. The rail operation "
+                           "parked for the 3-axis program is restored at the end, so the tree the "
+                           "run leaves holds nothing suppressed"),
     "cam_create_machine": ("build a run-stamped 3-axis machine into the Local library, find it in "
                            "the catalog, assign it to the setup, and refuse the duplicate name"),
     "cam_delete_machine": ("take the run's own machine back out of the Local library: the "
@@ -724,15 +767,23 @@ STORY = {
     "cam_reorder": "reorder the adaptive before the face op",
     "cam_activate_setup": "activate the setup",
     "cam_compare_operations": "compare the two operations",
-    "cam_show_toolpath": ("hide every path, then reveal one of each family alone long enough to "
-                          "watch, and leave the whole job on camera"),
+    "cam_show_toolpath": ("list the job's own bulbs; then ONE choreography, which every CAM act "
+                          "shows its toolpaths with: the subject framed once, every path off, then "
+                          "each operation alone in that standing frame - shown with fit false, the "
+                          "resolved name read back, hidden again - and every path off at the end. "
+                          "No act refits the camera or leaves the paths on. Then ISOLATE, once, on "
+                          "one operation of the finished job: the action that hides every other "
+                          "path and keeps the read-backs, so an operation whose bulb would not go "
+                          "dark is named in hide_failures - asserted absent"),
     "cam_generate": ("generate the toolpaths against the real part in the real fixture. The tool "
                      "takes no 'pump_seconds': CAM-7 confirms the kernel refuses to be pumped while "
                      "a generation runs, so completion is certified by the bounded cam_get_status "
                      "poll after this act, never by a sleep inside the call. Then one launch per "
                      "cameo setup - each act's launches taken back to back behind its writes, and "
                      "certified one setup at a time by the boundary poll, with the resolved node's "
-                     "KIND read back beside the name asked for"),
+                     "KIND read back beside the name asked for. The last CAM act relaunches every "
+                     "setup the job's later edits left stale, taking either answer the tool gives "
+                     "that scope - a launch, or the skipped one naming what needed none"),
     "cam_inspect_toolpaths": ("verdict false with named ops before generation, scoped check, "
                               "bogus-scope refusal, an over-cap max_results clamped to the tool's "
                               "own row ceiling, verdict true after generation, include_suppressed "
@@ -741,9 +792,11 @@ STORY = {
                               "and the FILTERING measured against a real suppression - the tally "
                               "one operation shorter with the excluded count naming what it left "
                               "out, then the same read widened to count it in its own bucket"),
-    "cam_get_status": ("poll the generation to completion (empty toolpaths fail); and the read "
-                       "taken on the finished extension job, whose per-state tally and health "
-                       "counts describe the scope named beside them"),
+    "cam_get_status": ("poll the generation to completion (empty toolpaths fail); the read taken "
+                       "on the finished extension job, whose per-state tally and health counts "
+                       "describe the scope named beside them; and the LAST CAM step - the tree the "
+                       "run leaves a watcher, read off the document and off the setup whose "
+                       "operations arrived tool-less: nothing out of date, errored or suppressed"),
     "cam_post": ("post the setup's NC program to disk; then the LAST thing the sweep does - ONE "
                  "program over the part's TWO setups, the job and its flip, with the setups asked "
                  "for beside the program's own stored operations re-read after the post and every "
@@ -769,8 +822,9 @@ STORY = {
                            "publish a row per operation the SETUP gained, and the two are asserted "
                            "apart: the run's own template arrives TOOLED (tool_unselected empty, "
                            "'ready' true), while every operation of the shipped bundle arrives "
-                           "tool-less - all of them named in tool_unselected, with 'ready' false "
-                           "and cam_edit_operation assigning one of them a tool"),
+                           "tool-less - all of them named in tool_unselected, with 'ready' false, "
+                           "and cam_edit_operation giving each of them a cutter and "
+                           "cam_select_geometry the bores it cycles, so the setup ends valid"),
     "cam_delete_template": ("take the run's own template back out of the Local library: the "
                             "confirm_name mismatch refused while it still exists, then the delete "
                             "proved by the library's asset walk and by nothing loading from the "

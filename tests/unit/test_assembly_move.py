@@ -152,6 +152,9 @@ class TestMove:
         assert occs[0].transform2 is not None
         assert out["moved"] is True
         assert out["translation"] == {"x": 10, "y": 0, "z": 5}
+        # 'position' is the pose READ BACK, and translation.* answers in Fusion's internal cm: it
+        # has to arrive in the caller's units, or a caller steers the next move off a 10x figure.
+        assert out["position"] == {"x": 10.0, "y": 0.0, "z": 5.0}
 
     def test_writes_transform2_not_transform(self, wire):
         # the move path writes Occurrence.transform2 - the property assembly_get's read path

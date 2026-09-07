@@ -60,6 +60,29 @@ _PROBE_OP = "ProbeStepTop"     # the Probe WCS cycle that touches off the steppe
 # The shipped hole-drilling template one act applies by its folder-position url: a spot drill, a
 # drill and a counterbore in one bundle, which is the counterbored mounting pattern's whole cycle.
 _FUSION_HOLE_TEMPLATE = "Spotdrill, Drill, & Counterbore Hole"
+# The ctx label for that bundle's operations - the platform names them, so every row that addresses
+# one reads the name the apply published rather than a literal.
+_TOOL_LESS = "the shipped bundle's operations by cycle"
+# The three cycles it carries. The platform names each applied operation '<cycle> - <template>', so
+# the cycle word is what pairs a cutter with its operation whatever ORDER the apply lands them in.
+_CYCLES = ("Spotdrill", "Drill", "Counterbore")
+
+
+def _cycle_of(name):
+    """The bundle cycle an applied operation's name begins with, or None."""
+    head = str(name or "").split(" - ")[0].strip()
+    return head if head in _CYCLES else None
+
+
+def _bundle_ops(payload):
+    """{cycle: {name, strategy}} off a cam_apply_template payload - the pairing every later row
+    reaches the bundle's operations through, so none of them is addressed by list position."""
+    found = {}
+    for r in (payload.get("operations") or []):
+        cycle = _cycle_of(r.get("name"))
+        if cycle:
+            found[cycle] = {"name": r.get("name"), "strategy": r.get("strategy")}
+    return found
 
 
 def _op_created(setup, strategy):
@@ -93,6 +116,100 @@ def _toolpath_shown(action, key, fit=False):
                           "fit": p.get("fit")},
                          p.get("action") == action and want is not None
                          and p.get("operation") == want and p.get("fit") is fit)
+    return check
+
+
+def _bulb(action, name, fit=None):
+    """cam_show_toolpath(show|hide): the operation NAME the tool resolved. 'fit' is asserted FALSE on
+    a show - the subject is framed once and the camera holds, so a fit here would be a camera move."""
+    def check(p):
+        return _measured(f"'{name}' {'shown' if action == 'show' else 'hidden'}, "
+                         "the standing frame kept",
+                         {"action": p.get("action"), "operation": p.get("operation"),
+                          "fit": p.get("fit"), "setup": p.get("setup")},
+                         p.get("action") == action and p.get("operation") == name
+                         and p.get("fit") is fit)
+    return check
+
+
+def _hide_all():
+    """Every generated path off: hidden_count counts the bulbs that read back false, and a bulb that
+    did not take is reported as a toggle_failure rather than counted."""
+    return ("cam_show_toolpath", {"action": "hide_all"},
+            lambda p: p["action"] == "hide_all" and p["hidden_count"] >= 1
+            and "toggle_failures" not in p, None)
+
+
+def _isolated(name):
+    """cam_show_toolpath(isolate): the one action that promises nothing ELSE is drawn, so the
+    mass-hide's own read-backs are the assertion - 'hide_failures' names every operation that would
+    not go dark (matched by operationId, so the target's own refused hide is not among them), and
+    its ABSENCE is what says the isolate really isolated."""
+    def check(p):
+        return _measured(f"'{name}' alone on screen, every other path dark",
+                         {"action": p.get("action"), "operation": p.get("operation"),
+                          "fit": p.get("fit"), "setup": p.get("setup"),
+                          "hide_failures": p.get("hide_failures"),
+                          "has_toolpath": p.get("has_toolpath")},
+                         p.get("action") == "isolate" and p.get("operation") == name
+                         and p.get("fit") is False and "hide_failures" not in p
+                         and p.get("has_toolpath") is not False)
+    return check
+
+
+def _one_bulb(entry, action, fit):
+    """(args, predicate) for one bulb of a reveal. An entry is the name the act CHOSE, or a
+    (ctx key, label) pair for a name the PLATFORM picked at create time - a literal for one of
+    those would be a guess."""
+    if isinstance(entry, str):
+        return {"action": action, "operation": entry}, _bulb(action, entry, fit=fit)
+    key, label = entry
+    return ((lambda c, k=key, w=label: {"action": action, "operation": _ctx_get(c, k, w)}),
+            _toolpath_shown(action, key, fit=fit))
+
+
+def _reveal(names):
+    """The choreography EVERY CAM act shows its toolpaths with, inside the frame the act already
+    set: every path off, then each operation alone - on, held, off - and every path off again at the
+    end. A generated toolpath nobody shows is a beat the watcher never sees."""
+    rows = [_hide_all()]
+    for n in names:
+        show_args, show_check = _one_bulb(n, "show", False)
+        hide_args, hide_check = _one_bulb(n, "hide", None)
+        rows += [("cam_show_toolpath", show_args, show_check, None),
+                 _dwell(1.0),
+                 ("cam_show_toolpath", hide_args, hide_check, None)]
+    return rows + [_hide_all()]
+
+
+def _launched_on(setup, skip_valid=False):
+    """cam_generate over one setup: 'target' is the RESOLVED node's kind beside the name asked for,
+    so it says the name reached a setup rather than an operation of the same name, 'skip_valid'
+    echoes the step's own choice, and 'handle' is what the act-boundary poll reads."""
+    def check(p):
+        return _measured(f"generation launched over setup '{setup}' (skip_valid {skip_valid})",
+                         {"launched": p.get("launched"), "target": p.get("target"),
+                          "skip_valid": p.get("skip_valid"), "handle": p.get("handle")},
+                         p.get("launched") is True and p.get("target") == f"setup '{setup}'"
+                         and p.get("skip_valid") is skip_valid and bool(p.get("handle")))
+    return check
+
+
+def _relaunched(setup):
+    """cam_generate(skip_valid=true) over a setup the job's later edits may have left stale: a
+    launch carrying the count it covers, or the ALREADY-VALID skip. The skip's reason has to be that
+    one - a scope holding no operations at all skips too, saying 'nothing to generate', and that
+    answer over a setup this run filled would mean the name reached an empty one."""
+    def check(p):
+        reason = p.get("reason") or ""
+        covered = p.get("operations_to_generate")
+        return _measured(f"'{setup}' relaunched, or already valid throughout",
+                         {"launched": p.get("launched"), "target": p.get("target"),
+                          "skipped": p.get("skipped"), "reason": reason,
+                          "operations_to_generate": covered},
+                         p.get("target") == f"setup '{setup}'"
+                         and ((p.get("launched") is True and _num(covered) and covered >= 1)
+                              or (p.get("skipped") is True and "already valid" in reason)))
     return check
 
 
@@ -219,14 +336,20 @@ def _face_down_at(x, y, z, tol=0.5):
     return check
 
 
-def _selected(count):
+def _selected(count, on=None):
     """cam_select_geometry: 'selections' is the count the OPERATION holds after the selection was
     applied - re-read off the operation, never the number of references handed in (the tool errors
-    on a call that leaves zero)."""
+    on a call that leaves zero). 'on' additionally pins WHICH operation the geometry landed on,
+    against the name the apply published for that bundle cycle."""
     def check(p):
-        return _measured(f"{count} selection(s) held by the operation",
-                         {"selections": p.get("selections"), "resolved": p.get("resolved")},
-                         p.get("selections") == count)
+        want = (_RECALL.get("tmpl_ops") or {}).get(on) or {} if on else {}
+        return _measured(f"{count} selection(s) held by the operation"
+                         + (f" the apply named for {on}" if on else ""),
+                         {"selections": p.get("selections"), "resolved": p.get("resolved"),
+                          "operation": p.get("operation"), "expected": want},
+                         p.get("selections") == count
+                         and (on is None
+                              or (bool(want) and p.get("operation") == want.get("name"))))
     return check
 
 
@@ -797,30 +920,39 @@ def _template_applied_tool_less(name, setup, minimum):
     def check(p):
         rows = p.get("operations") or []
         tool_less = p.get("tool_unselected")
+        cycles = _bundle_ops(p)
         return _measured(f"{name!r} applied to '{setup}' with every operation tool-less",
                          {"applied": p.get("applied"), "operations_added": p.get("operations_added"),
-                          "operations": rows, "tool_unselected": tool_less, "ready": p.get("ready")},
+                          "operations": rows, "tool_unselected": tool_less, "ready": p.get("ready"),
+                          "cycles": sorted(cycles)},
                          p.get("applied") is True and p.get("template") == name
                          and p.get("setup") == setup and (p.get("operations_added") or 0) >= minimum
                          and _applied_rows_account(p, rows, tool_less)
                          and p.get("ready") is False and bool(rows)
                          and len(tool_less) == len(rows)
+                         and set(cycles) == set(_CYCLES)
                          and all(r.get("tool") is None and not r.get("tool_description_unread")
                                  for r in rows))
     return check
 
 
-def _tool_assigned(index):
-    """cam_edit_operation(tool_scope='document', tool_index=...): 'tool' is Operation.tool's own
-    description read back after the assignment, and 'was_tool' is null on an operation that carried
-    none - the state the shipped template's operations arrive in."""
+def _tool_assigned(index, cycle):
+    """cam_edit_operation(tool_scope='document', tool_index=...): the cutter landed on the operation
+    the apply published for THAT cycle. 'operation' and 'strategy' are read back off the edited
+    Operation and both compared with the apply's own row, so a bundle landing in another tree order
+    reddens here instead of pairing a centre drill with a counterbore."""
     def check(p):
-        return _measured(f"document tool {index} assigned to an operation that carried none",
-                         {"tool": p.get("tool"), "was_tool": p.get("was_tool"),
-                          "tool_number": p.get("tool_number"), "tool_index": p.get("tool_index"),
+        want = (_RECALL.get("tmpl_ops") or {}).get(cycle) or {}
+        return _measured(f"document tool {index} on the bundle's {cycle} cycle",
+                         {"operation": p.get("operation"), "strategy": p.get("strategy"),
+                          "expected": want, "tool": p.get("tool"),
+                          "was_tool": p.get("was_tool"), "tool_number": p.get("tool_number"),
+                          "tool_index": p.get("tool_index"),
                           "is_toolpath_valid": p.get("is_toolpath_valid")},
                          p.get("tool_index") == index and bool(p.get("tool"))
-                         and p.get("was_tool") is None)
+                         and p.get("was_tool") is None and bool(want)
+                         and p.get("operation") == want.get("name")
+                         and p.get("strategy") == want.get("strategy"))
     return check
 
 
@@ -925,50 +1057,21 @@ _CAM_DELIVER = [
     ("cam_edit_tools", {"action": "where_used", "scope": "document", "tool": _TURNING},
      lambda p: p.get("operation_count") == 0 and "not used" in (p.get("note") or ""), None),
     ("cam_edit_tools", {"action": "where_used", "scope": "local", "tool": 0}, "refused", None),
-    # THE TOOLPATH REVEAL. Every path off, then one of each family alone and held long enough to
-    # watch - face, adaptive, contour, drill - and finally the whole job together, left ON. Each of
-    # the four is addressed by the name the platform PUBLISHED at create time, through ctx: the
-    # default name of an operation is Fusion's to pick, so a literal for one of those would be a
-    # guess; the finishing passes below carry names this act chose, so they are addressed directly.
-    # Every generated path off first: hidden_count counts the bulbs that read back false, and a
-    # bulb that did not take is reported as a toggle_failure instead of being counted.
-    ("cam_show_toolpath", {"action": "hide_all"},
-     lambda p: p["action"] == "hide_all" and p["hidden_count"] >= 1
-     and "toggle_failures" not in p, None),
-    _dwell(1.0),
-    ("cam_show_toolpath", lambda c: {"action": "isolate", "operation": _ctx_get(c, "face_op", "the face op"),
-                                     "fit": True}, _toolpath_shown("isolate", "face_op", fit=True), None),
+    # THE TOOLPATH REVEAL, in the choreography every CAM act shares: the machining region framed
+    # ONCE, then _reveal's on-held-off pass over each operation. The four names the PLATFORM picked
+    # are addressed through ctx; the passes this act named are addressed directly.
+    _watch([STOCK_COMP + ":1"]),
     ("view_screenshot", {"width": 500, "height": 400}, "ok", None),
-    _dwell(2.5),
-    ("cam_show_toolpath", lambda c: {"action": "isolate", "operation": _ctx_get(c, "adaptive_op", "the adaptive op"),
-                                     "fit": True}, _toolpath_shown("isolate", "adaptive_op", fit=True), None),
-    _dwell(2.5),
-    ("cam_show_toolpath", lambda c: {"action": "isolate", "operation": _ctx_get(c, "contour_op", "the contour op"),
-                                     "fit": True}, _toolpath_shown("isolate", "contour_op", fit=True), None),
-    _dwell(2.5),
-    ("cam_show_toolpath", lambda c: {"action": "isolate", "operation": _ctx_get(c, "drill_op", "the drill op"),
-                                     "fit": True}, _toolpath_shown("isolate", "drill_op", fit=True), None),
-    _dwell(2.5),
-    # the whole job on together - the machined part as the act leaves it.
-    ("cam_show_toolpath", lambda c: {"action": "show", "operation": _ctx_get(c, "face_op", "the face op")},
-     _toolpath_shown("show", "face_op"), None),
-    ("cam_show_toolpath", lambda c: {"action": "show", "operation": _ctx_get(c, "adaptive_op", "the adaptive op")},
-     _toolpath_shown("show", "adaptive_op"), None),
-    ("cam_show_toolpath", lambda c: {"action": "show", "operation": _ctx_get(c, "contour_op", "the contour op")},
-     _toolpath_shown("show", "contour_op"), None),
-    ("cam_show_toolpath", {"action": "show", "operation": _POCKET_OP},
-     lambda p: p["action"] == "show" and p["operation"] == _POCKET_OP, None),
-    ("cam_show_toolpath", {"action": "show", "operation": _BOSS_OP},
-     lambda p: p["action"] == "show" and p["operation"] == _BOSS_OP, None),
-    ("cam_show_toolpath", {"action": "show", "operation": _CHAMFER_OP},
-     lambda p: p["action"] == "show" and p["operation"] == _CHAMFER_OP, None),
-    ("cam_show_toolpath", {"action": "show", "operation": _SPOT_OP},
-     lambda p: p["action"] == "show" and p["operation"] == _SPOT_OP, None),
-    ("cam_show_toolpath", {"action": "show", "operation": _BORE_OP},
-     lambda p: p["action"] == "show" and p["operation"] == _BORE_OP, None),
-    ("cam_show_toolpath", lambda c: {"action": "show", "operation": _ctx_get(c, "drill_op", "the drill op")},
-     _toolpath_shown("show", "drill_op"), None),
-    _dwell(3.0),
+] + _reveal([("face_op", "the face op"), ("adaptive_op", "the adaptive op"),
+             ("contour_op", "the contour op"), _POCKET_OP, _BOSS_OP, _CHAMFER_OP, _ENGRAVE_OP,
+             _SPOT_OP, ("drill_op", "the drill op"), _BORE_OP]) + [
+    # ISOLATE, the third action and the only one that promises nothing else is drawn: it hides every
+    # operation in the document and KEEPS the read-backs, so a bulb that would not go dark is
+    # published as a hide_failure. fit stays false - the frame above it is the one this act set.
+    ("cam_show_toolpath", {"action": "isolate", "operation": _POCKET_OP, "fit": False},
+     _isolated(_POCKET_OP), None),
+    _dwell(1.5),
+    _hide_all(),
     # the deliverable itself: the tool errors unless a non-stub file LANDED, so the payload's file
     # rows are the proof - each one stat'd on disk - and 'scope' is the resolved node's kind.
     ("cam_post", {"scope": CAM_SETUP, "post": "haas", "post_scope": "local",
@@ -1024,14 +1127,47 @@ _CAM_DELIVER = [
                 "template_name": _FUSION_HOLE_TEMPLATE, "location": "fusion",
                 "generate": "skip"},
      _template_applied_tool_less(_FUSION_HOLE_TEMPLATE, "Setup2", 2),
-     ("tool_less_op", _recall("tool_less_op", lambda p: p["tool_unselected"][0]))),
-    # THE REMEDY the apply's note names, run on one of those operations: a document tool by index,
-    # with Operation.tool read back after the assignment and 'was_tool' null - which is what says
-    # the operation reached here carrying none.
-    ("cam_edit_operation", lambda c: {"operation": _ctx_get(c, "tool_less_op",
-                                                            "a tool-less applied operation"),
-                                      "tool_scope": "document", "tool_index": _DRILL},
-     _tool_assigned(_DRILL), None),
+     ("tmpl_ops", _recall("tmpl_ops", _bundle_ops))),
+    # THE REMEDY the apply's note names, run on EVERY one of those operations: a document tool by
+    # index, with Operation.tool read back and 'was_tool' null - which is what says the operation
+    # reached here carrying none. Each row addresses its operation by the bundle CYCLE the apply
+    # filed it under, so the cutter cannot land on a neighbour if the apply orders them differently.
+    ("cam_edit_operation",
+     lambda c: {"operation": _ctx_get(c, "tmpl_ops", _TOOL_LESS)["Spotdrill"]["name"],
+                "tool_scope": "document", "tool_index": _CENTER_DRILL},
+     _tool_assigned(_CENTER_DRILL, "Spotdrill"), None),
+    ("cam_edit_operation",
+     lambda c: {"operation": _ctx_get(c, "tmpl_ops", _TOOL_LESS)["Drill"]["name"],
+                "tool_scope": "document", "tool_index": _DRILL},
+     _tool_assigned(_DRILL, "Drill"), None),
+    ("cam_edit_operation",
+     lambda c: {"operation": _ctx_get(c, "tmpl_ops", _TOOL_LESS)["Counterbore"]["name"],
+                "tool_scope": "document", "tool_index": _FLAT_MILL},
+     _tool_assigned(_FLAT_MILL, "Counterbore"), None),
+    # A template carries no geometry, so the three cycles are aimed at the part's own bores here.
+    # The radius-3 query finds the four mounting bores AND the EdgeBreak fillet on the step
+    # (measured: five faces), so the bores are picked by their Z axis. MountDia * 1.8 is 10.8 mm.
+    ("find_geometry", {"target": PART_COMP, "kind": "cylinder_face", "radius": 3,
+                       "max_results": 8}, _matched(5, "cylinder_face"),
+     ("tmpl_bores", _recall("tmpl_bores", lambda p: [
+         m["handle"] for m in p["matches"] if abs(m["axis"][2]) > 0.99]))),
+    ("find_geometry", {"target": PART_COMP, "kind": "cylinder_face", "radius": 5.4,
+                       "max_results": 8}, _matched(4, "cylinder_face"), _fgn("tmpl_cbores")),
+    ("cam_select_geometry",
+     lambda c: {"operation": _ctx_get(c, "tmpl_ops", _TOOL_LESS)["Spotdrill"]["name"],
+                "selection": "holes",
+                "handles": _ctx_get(c, "tmpl_bores", "the mounting bores"),
+                "generate": False}, _selected(4, on="Spotdrill"), None),
+    ("cam_select_geometry",
+     lambda c: {"operation": _ctx_get(c, "tmpl_ops", _TOOL_LESS)["Drill"]["name"],
+                "selection": "holes",
+                "handles": _ctx_get(c, "tmpl_bores", "the mounting bores"),
+                "generate": False}, _selected(4, on="Drill"), None),
+    ("cam_select_geometry",
+     lambda c: {"operation": _ctx_get(c, "tmpl_ops", _TOOL_LESS)["Counterbore"]["name"],
+                "selection": "holes",
+                "handles": _ctx_get(c, "tmpl_cbores", "the counterbores"),
+                "generate": False}, _selected(4, on="Counterbore"), None),
     ("cam_delete", lambda c: {"entity": _ctx_get(c, "adaptive_op", "the created adaptive op")},
      _op_deleted("adaptive_op"), None),
     # SUPPRESSION, last of the job edits: the flag is a WRITE here, and it is what gives
@@ -1095,6 +1231,9 @@ _CAM_DELIVER = [
      and bool(p.get("files")) and all((f.get("options_applied") or {}).get("stl_binary") is True
                                       for f in p["files"]), None),
     ("doc_insert_import", {"file_path": EXPORT_DIR + "/bracket_export.step"}, _imported, None),
+    # Setup2 launched last, once every operation it holds carries a cutter AND read a selection
+    # back: a generate over an operation Fusion refuses parks the process behind a modal dialog.
+    ("cam_generate", {"target": "Setup2", "skip_valid": False}, _launched_on("Setup2"), None),
 ]
 
 
@@ -1285,18 +1424,12 @@ _SW_TOP_LEN = _SW_BASE_X - 2 * _SW_INSET
 # A run whose swarf toolpath comes back EMPTY is this constant reading the wrong way round.
 _SW_CUT_SIDE = "true"
 
-# The cameo's other three setups, each machining the same drafted block along an axis the bracket's
-# own job never uses. They are kept OUT of the rail program's two setups: the multi-axis strategies
-# are refused by the 3-axis post that program is written with, and neither the rotary nor the turned
-# job is posted at all.
+# The cameo's other setup, machining the same drafted block along an axis the bracket's own job
+# never uses. It is kept OUT of the rail program's two setups: the multi-axis strategies are refused
+# by the 3-axis post that program is written with.
 _MX_SETUP = "MultiAxisSetup"     # the extension's simultaneous strategies
-_ROT_SETUP = "RotarySetup"       # the 4-axis wrap, an extension strategy too
-_TURN_SETUP = "TurnSetup"        # the turned profile, on the mill-turn machine below
-# The layout pass deals the cameo a cell a metre out in the field, so the rotary and turning setups
-# bind their WCS to a Joint Origin at the block's own centre rather than to the world origin. One
-# name per act, so the turning act stands on its own where the extension act does not run.
-_CAMEO_WCS = "CameoWCS"
-_TURN_WCS = "TurnWCS"
+# The mill-turn machine and the enum name a turning setup reads back, both addressed by the hub's
+# own lathe job - the turning families ride a solid of revolution, not a drafted block.
 _TURN_MACHINE = "Brother SPEEDIO M300Xd1"
 # Setup.operationType crosses the wire as the API's own enum NAME, not the create call's key.
 _TURNING_TYPE = "TurningOperation"
@@ -1514,19 +1647,6 @@ def _scoped_body_selected(qualified):
                          p.get("selected") == f"'{qualified}'"
                          and _num(p.get("selections")) and p["selections"] >= 1
                          and p.get("setup_models_selected") is False)
-    return check
-
-
-def _launched_on(setup):
-    """cam_generate over one setup: 'target' is the RESOLVED node's kind beside the name asked for,
-    so it says the name reached a setup rather than an operation of the same name, and 'handle' is
-    what the act-boundary poll reads."""
-    def check(p):
-        return _measured(f"generation launched over setup '{setup}'",
-                         {"launched": p.get("launched"), "target": p.get("target"),
-                          "skip_valid": p.get("skip_valid"), "handle": p.get("handle")},
-                         p.get("launched") is True and p.get("target") == f"setup '{setup}'"
-                         and p.get("skip_valid") is False and bool(p.get("handle")))
     return check
 
 
@@ -1926,38 +2046,12 @@ _CAM_EXTENSION = [
                                        "handles": [_ctx_get(c, "sw_wall", "the drafted wall")],
                                        "surface_target": "drive", "generate": False},
      _surfaces_applied(1, "drive", "driveSurfaces"), None),
-    # THE ROTARY WRAP, in a setup of its own for the same reason - and in this act because
-    # rotary_contour is one of the strategies the measured licence split lists the extension as
-    # unblocking (test_workspace_orient.py, the extension_unblocked set). The layout pass deals the
-    # cameo a cell a metre out in the field, so the setup takes a Joint Origin at the block's own
-    # centre rather than the world origin.
-    ("joint_create_origin", {"anchor": "bbox_center", "bbox_target": _SW_COMP + ":1",
-                             "orient_axis": "z", "name": _CAMEO_WCS},
-     _joint_origin_computed(_CAMEO_WCS), None),
-    ("cam_create_setup", {"models": [_SW_COMP], "name": _ROT_SETUP},
-     lambda p: p["created"] is True and p["setup_name"] == _ROT_SETUP
-     and p["operation_type"] == "milling" and p["operation_count"] == 0, None),
-    ("cam_edit_setup", {"setup": _ROT_SETUP, "wcs": {"origin": _CAMEO_WCS}},
-     lambda p: bool(p["wcs_set"]["origin"]["bound_entities"]), None),
-    ("cam_edit_setup", {"setup": _ROT_SETUP, "machine": "Haas VF-2",
-                        "machine_strip_simulation": True},
-     lambda p: p.get("machine_set") == "Haas VF-2", None),
-    ("cam_get", {"include": ["strategies"], "setup": _ROT_SETUP},
-     _offers(_ROT_SETUP, "rotary_contour"), None),
-    ("cam_create_operation", lambda c: {"setup": _ROT_SETUP, "strategy": "rotary_contour",
-                                        "tool_scope": "document",
-                                        "tool_index": _ctx_get(c, "sw_mill",
-                                                               "the flat mill's index") + 1,
-                                        "generate": False},
-     _op_created(_ROT_SETUP, "rotary_contour"),
-     ("rotary_op", _recall("rotary_op", lambda p: p["operation"]))),
     # the rails' three at once, so the act boundary's bounded poll certifies one generation rather
     # than three. The poll FAILs on an empty toolpath, which is what says the rails cut.
     ("cam_generate", {"target": _SW_SETUP, "skip_valid": False}, _launched_on(_SW_SETUP), None),
-    # then the other two setups, launched straight after: the boundary poll certifies each in turn,
-    # and all three launches sit behind every write this act makes.
+    # then the simultaneous setup, launched straight after: the boundary poll certifies each in
+    # turn, and both launches sit behind every write this act makes.
     ("cam_generate", {"target": _MX_SETUP, "skip_valid": False}, _launched_on(_MX_SETUP), None),
-    ("cam_generate", {"target": _ROT_SETUP, "skip_valid": False}, _launched_on(_ROT_SETUP), None),
 ]
 
 
@@ -2013,92 +2107,6 @@ _CAM_SCOPE = [
 ]
 
 
-# ACT 10c2: the TURNED profile, on the same drafted block and on a mill-turn machine. Turning is
-# not an extension strategy, so this act runs on any licence; it needs only the cameo ACT 8 builds.
-# ACT 10c3 posts it, once the boundary poll below has certified the generation.
-_CAM_TURNING = [
-    _watch(_SW_COMP + ":1"),
-    # its own inserts, at the index the library's own count names: a general one for the profile
-    # cycles, a grooving one for the part-off.
-    ("cam_edit_tools", {"action": "list", "scope": "document"},
-     lambda p: _num(p.get("tool_count")) and p["tool_count"] >= 1,
-     ("rt_tool", _recall("rt_tool", lambda p: p["tool_count"]))),
-    ("cam_edit_tools", {"action": "add", "scope": "document",
-                        "add_tools": [{"from_type": "turning general"},
-                                      {"from_type": "turning grooving"}]},
-     lambda p: p.get("added") == 2 and p.get("tool_count") == _RECALL.get("rt_tool") + 2, None),
-    # the block's own centre, which the setup below turns about: the layout pass deals the cameo a
-    # cell a metre out in the field.
-    ("joint_create_origin", {"anchor": "bbox_center", "bbox_target": _SW_COMP + ":1",
-                             "orient_axis": "z", "name": _TURN_WCS},
-     _joint_origin_computed(_TURN_WCS), None),
-    # THE TURNED PROFILE: a setup of the other operation_type, read back off the Setup itself as the
-    # API's own enum name. It carries no machine yet, which is the blocker the setups slice
-    # publishes for it.
-    ("cam_create_setup", {"operation_type": "turning", "models": [_SW_COMP], "name": _TURN_SETUP},
-     lambda p: p["created"] is True and p["setup_name"] == _TURN_SETUP
-     and p["operation_type"] == "turning" and p["operation_count"] == 0, None),
-    ("cam_get", {},
-     _setup_row(_TURN_SETUP, ["no_machine_selected"], operation_type=_TURNING_TYPE), None),
-    ("cam_edit_setup", {"setup": _TURN_SETUP, "wcs": {"origin": _TURN_WCS}},
-     lambda p: bool(p["wcs_set"]["origin"]["bound_entities"]), None),
-    # the mill-turn machine, assigned through the strip the library machines with a simulation
-    # model need - and the same setups read again, with the blocker gone.
-    ("cam_edit_setup", {"setup": _TURN_SETUP, "machine": _TURN_MACHINE,
-                        "machine_strip_simulation": True},
-     lambda p: p.get("machine_set") == _TURN_MACHINE, None),
-    ("cam_get", {}, _setup_row(_TURN_SETUP, []), None),
-    # the turning setup's OWN parameters: the stock mode a turned job is cut from and the origin
-    # its WCS is measured from, read off the setup rather than off the call that made it.
-    ("cam_get", {"include": ["parameters"], "setup": _TURN_SETUP}, _turning_stock(_TURN_SETUP),
-     None),
-    ("cam_get", {"include": ["strategies"], "setup": _TURN_SETUP},
-     _offers(_TURN_SETUP, "turning_face", "turning_profile_roughing", "turning_profile_finishing",
-             "turning_part"), None),
-    # THE LATHE CYCLE, in the order a shop would turn it: face the end, rough the profile, finish
-    # it, then part the piece off with the grooving insert. None is given a selection - the poll
-    # after this act is what says each of them generated something to cut.
-    ("cam_create_operation", lambda c: {"setup": _TURN_SETUP, "strategy": "turning_face",
-                                        "tool_scope": "document",
-                                        "tool_index": _ctx_get(c, "rt_tool",
-                                                               "the turning insert's index"),
-                                        "generate": False},
-     _op_created(_TURN_SETUP, "turning_face"), None),
-    ("cam_create_operation", lambda c: {"setup": _TURN_SETUP,
-                                        "strategy": "turning_profile_roughing",
-                                        "tool_scope": "document",
-                                        "tool_index": _ctx_get(c, "rt_tool",
-                                                               "the turning insert's index"),
-                                        "generate": False},
-     _op_created(_TURN_SETUP, "turning_profile_roughing"), None),
-    ("cam_create_operation", lambda c: {"setup": _TURN_SETUP,
-                                        "strategy": "turning_profile_finishing",
-                                        "tool_scope": "document",
-                                        "tool_index": _ctx_get(c, "rt_tool",
-                                                               "the turning insert's index"),
-                                        "generate": False},
-     _op_created(_TURN_SETUP, "turning_profile_finishing"), None),
-    ("cam_create_operation", lambda c: {"setup": _TURN_SETUP, "strategy": "turning_part",
-                                        "tool_scope": "document",
-                                        "tool_index": _ctx_get(c, "rt_tool",
-                                                               "the turning insert's index") + 1,
-                                        "generate": False},
-     _op_created(_TURN_SETUP, "turning_part"), None),
-    # launched behind every write this act makes, and certified by the boundary poll.
-    ("cam_generate", {"target": _TURN_SETUP, "skip_valid": False}, _launched_on(_TURN_SETUP), None),
-]
-
-
-# ACT 10c3: the turned job POSTED, from the post library this installation SHIPS - the scope that
-# reaches a lathe post. An act of its own because the post needs the toolpaths ACT 10c2 leaves
-# generating, and the boundary poll that certifies them runs between the two acts.
-_CAM_TURNING_POST = [
-    ("cam_post", {"scope": _TURN_SETUP, "post": "fanuc turning", "post_scope": "fusion",
-                  "output_folder": EXPORT_DIR + "/nc", "program_name": "3001"},
-     _posted_turning(_TURN_SETUP, "3001"), None),
-]
-
-
 # ACT 10d: THE SECOND SETUP ON THE PART - the bracket turned over and machined from underneath,
 # with a WCS of its own. It opens with the two reads taken on the finished rail job, which the
 # extension act's own capability gates: where the extension is not entitled those two rows do not
@@ -2113,10 +2121,6 @@ _CAM_SECOND_SETUP = [
     # machining time above zero, so none of them generated into air.
     ("cam_get", {"include": ["time"], "setup": _MX_SETUP},
      _needs(MACHINING_EXTENSION, _all_cut(_MX_SETUP, 3)), None),
-    # and the turned job, read once its generation is certified: the readiness verdict is what the
-    # machine assignment bought - a setup carrying a blocker is refused that wording.
-    ("cam_get", {"include": ["operations"], "setup": _TURN_SETUP},
-     _setup_ready(_TURN_SETUP, 4), None),
     # back to the real part for the flip: a second setup on the SAME model, cut from the other
     # side, which is how a part with features on two faces is actually run.
     _watch([PART_COMP + ":1"]),
@@ -2208,4 +2212,48 @@ _CAM_MULTI_POST = [
                   "output_folder": EXPORT_DIR + "/nc", "program_name": "2001"},
      _refused("already exists", "Omit 'scope', 'setups', 'post', and 'output_folder'"), None),
     ("cam_post", {"program_name": "2001"}, _posted_as_is("2001"), None),
+    # THE TREE THE RUN LEAVES BEHIND. Both programs are written, so the rail toolpath comes back off
+    # its park and every setup the job's later edits left stale is relaunched. Only setups whose
+    # every operation read a selection back are named: a blocked one parks the process on a modal.
+    ("cam_edit_operation", lambda c: {"operation": _ctx_get(c, "swarf_op", "the swarf op"),
+                                      "suppressed": False},
+     _needs(MACHINING_EXTENSION,
+            lambda p: p["is_suppressed"] is False and p["was_suppressed"] is True), None),
+    ("cam_generate", {"target": CAM_SETUP, "skip_valid": True}, _relaunched(CAM_SETUP), None),
+    ("cam_generate", {"target": "Setup2", "skip_valid": True}, _relaunched("Setup2"), None),
+    ("cam_generate", {"target": _SW_SETUP, "skip_valid": True},
+     _needs(MACHINING_EXTENSION, _relaunched(_SW_SETUP)), None),
+    ("cam_generate", {"target": _MX_SETUP, "skip_valid": True},
+     _needs(MACHINING_EXTENSION, _relaunched(_MX_SETUP)), None),
+]
+
+
+def _all_current(scope, exactly=None):
+    """cam_get_status once the boundary poll certified the relaunch: the CAM browser a watcher is
+    left with, asserted rather than described - nothing out of date, errored or parked, and every
+    operation valid. An EMPTY scope cannot satisfy that by arithmetic (0 stale, 0 errored, 0 valid
+    of 0), so a count is required; 'exactly' pins it where the act knows what the scope must hold."""
+    def check(p):
+        live = p.get("live_states") or {}
+        total = live.get("total")
+        return _measured(f"{scope} holds {exactly or 'at least one'} operation(s), every one valid",
+                         {"completed": p.get("completed"), "live_states": live,
+                          "readiness": p.get("readiness")},
+                         p.get("completed") is True and live.get("out_of_date") == 0
+                         and live.get("errored") == 0 and live.get("suppressed") == 0
+                         and live.get("setups_errored") == 0
+                         and _num(total) and total >= 1
+                         and (exactly is None or total == exactly)
+                         and live.get("valid") == total)
+    return check
+
+
+# ACT 10f: the last CAM step - the state the browser is left in, read off the document itself and
+# off the setup whose operations arrived tool-less.
+_CAM_GREEN = [
+    # Setup2's count is PINNED: the run's own template lands one operation there and the shipped
+    # bundle three, so a bundle that landed fewer reddens here rather than passing on an all-valid
+    # tally of whatever survived.
+    ("cam_get_status", {"target": "Setup2"}, _all_current("setup 'Setup2'", exactly=4), None),
+    ("cam_get_status", {}, _all_current("the document"), None),
 ]

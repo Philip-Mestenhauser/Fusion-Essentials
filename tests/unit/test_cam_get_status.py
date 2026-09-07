@@ -276,6 +276,26 @@ class TestStatusHandler:
         assert "numberOfCompleted at THIS read" in note
         assert len(note) <= 400, len(note)      # test_prose_budget.NOTE_BUDGET_CHARS
 
+    def test_the_worst_composed_incomplete_note_fits_the_wire_budget(self, monkeypatch):
+        # The incomplete note composes too - the BLOCKER branch plus the count caveat - and
+        # test_prose_budget measures neither composition. This is the longest of the three branches.
+        st._GENERATIONS["gen1"] = {
+            "future": SimpleNamespace(isGenerationCompleted=False, numberOfOperations=3,
+                                      numberOfCompleted=0),
+            "target": "all setups", "started_at": 0.0, "total": 3,
+            "doc_name": "Doc", "doc_urn": "urn:doc", "doc_key": "urn:doc"}
+        st._HANDLE_SEQ[0] = 1
+        readiness = st._cam_common.ready_verdict("2 of 3 active ops valid", 0, None, None)
+        monkeypatch.setattr(st._cam_common, "live_readiness",
+                            self._readiness(errored=1, generating=2, total=3, readiness=readiness,
+                                            samples={"op": {"name": "Rough to Model Top",
+                                                            "error": "Top height must not be "
+                                                                     "below the bottom height"},
+                                                     "setup": None, "program": None}))
+        note = _payload(st.handler(handle="gen1"))["note"]
+        assert "numberOfCompleted at THIS read" in note        # the caveat rode along
+        assert len(note) <= 400, len(note)      # test_prose_budget.NOTE_BUDGET_CHARS
+
     def _completed_entry(self):
         # numberOfCompleted is pass-through data, not a completion signal - live it reads 0 even
         # when isGenerationCompleted is True (cam-generate-future in tests/live/VERIFIED_API_FACTS.md).
@@ -427,11 +447,15 @@ class TestStatusHandler:
         out = _payload(st.handler(handle="gen1"))
         assert out["completed"] is False
         assert out["live_states"]["errored"] == 1
-        # the note carries the BLOCKER verdict, the sample op, and points at the deeper read
-        assert "BLOCKER" in out["note"]
-        assert "Rough to Model Top" in out["note"]
+        # The verdict and the sample are KEYS - an op name and its error text are unbounded, and a
+        # note that inlined them could not be budgeted - so the note points at both and stops.
+        assert out["readiness"].startswith("BLOCKER")
+        assert out["live_states"]["samples"]["op"]["name"] == "Rough to Model Top"
+        assert "BLOCKED" in out["note"] and "'readiness'" in out["note"]
+        assert "live_states.samples" in out["note"]
         assert "will NOT complete" in out["note"]
         assert "cam_get(include=['operations'])" in out["note"]
+        assert "Rough to Model Top" not in out["note"]
 
     def test_setup_error_blocks_via_readiness(self, monkeypatch):
         # a faulted SETUP is in the BLOCKER readiness from live_readiness - status surfaces it + stops.
@@ -448,8 +472,9 @@ class TestStatusHandler:
                                             samples={"op": None, "program": None,
                                                      "setup": {"name": "Op1", "error": "WCS orientation is invalid"}}))
         out = _payload(st.handler(handle="gen1"))
-        assert "BLOCKER" in out["note"]
-        assert "Op1" in out["note"]
+        assert out["readiness"].startswith("BLOCKER: 1 setup(s)")
+        assert out["live_states"]["samples"]["setup"]["name"] == "Op1"
+        assert "BLOCKED" in out["note"]
         assert "will NOT complete" in out["note"]
 
     def test_completed_waits_for_live_states_to_settle(self, monkeypatch):
@@ -1495,8 +1520,10 @@ class TestStatusLivePoll:
                                                      "setup": None, "program": None}))
         out = _payload(st.handler())
         assert out["completed"] is False
-        assert "BLOCKER" in out["note"] and "will NOT complete" in out["note"]
-        assert "Bad Op" in out["note"]
+        assert "BLOCKED" in out["note"] and "will NOT complete" in out["note"]
+        # the handle-less live poll publishes the same two keys the note points at
+        assert out["readiness"].startswith("BLOCKER")
+        assert out["live_states"]["samples"]["op"]["name"] == "Bad Op"
 
     def test_target_by_name_reports_that_setups_state(self, monkeypatch):
         import adsk.cam

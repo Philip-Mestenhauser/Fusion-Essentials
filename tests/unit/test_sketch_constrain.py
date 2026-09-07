@@ -1334,10 +1334,20 @@ class TestSurfaceConstraints:
             assert res["isError"] is True and "not PLANAR" in res["message"]
             assert s.geometricConstraints.calls == []
 
-    def test_a_missing_surface_is_named(self, install):
+    @pytest.mark.parametrize("cname,ref,tail", [
+        ("coincident_to_surface", "point:0", "(curved faces allowed)."),
+        ("line_on_surface", "line:0", "(this constraint takes a PLANAR face only)."),
+    ])
+    def test_a_missing_surface_names_the_faces_that_constraint_takes(self, install, cname, ref,
+                                                                     tail):
+        # An omitted 'surface' resolves to nothing with no error of its own (the operand is optional
+        # on the kind, required by these constraints), so this refusal is the handler's own - and it
+        # is where the caller learns which face kinds THIS constraint accepts.
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="coincident_to_surface", sketch_name="S", entity_one="point:0")
-        assert res["isError"] is True and "'surface'" in res["message"]
+        res = sc.handler(constraint=cname, sketch_name="S", entity_one=ref)
+        assert res["isError"] is True
+        assert f"'{cname}' needs 'surface'" in res["message"]
+        assert res["message"].endswith(tail)
         assert s.geometricConstraints.calls == []
 
     def test_an_unresolvable_surface_is_a_clean_error(self, install):

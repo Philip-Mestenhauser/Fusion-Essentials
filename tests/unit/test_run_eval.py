@@ -300,7 +300,7 @@ class TestMainStopsOnAStall:
         monkeypatch.setattr(time, "sleep", lambda _s: None)
         launches = []
 
-        def fake_launch(prompt, run_dir, model, max_turns):
+        def fake_launch(prompt, run_dir, model, max_turns, deny=()):
             launches.append(run_dir)
             transcript = os.path.join(run_dir, "transcript.jsonl")
             with open(transcript, "w", encoding="utf-8") as fh:
@@ -322,7 +322,7 @@ class TestMainStopsOnAStall:
         monkeypatch.setattr(time, "sleep", lambda _s: None)
         launches = []
 
-        def fake_launch(prompt, run_dir, model, max_turns):
+        def fake_launch(prompt, run_dir, model, max_turns, deny=()):
             launches.append(run_dir)
             transcript = os.path.join(run_dir, "transcript.jsonl")
             with open(transcript, "w", encoding="utf-8") as fh:
@@ -332,6 +332,40 @@ class TestMainStopsOnAStall:
         monkeypatch.setattr(run_eval, "launch", fake_launch)
         code = run_eval.main()
         assert code == run_eval.EXIT_AUTH and len(launches) == 2
+
+
+class TestDeniedTools:
+    """The control arm of an A/B: one fusion tool denied for the run, recorded in the run dir."""
+
+    def test_the_standing_list_is_unchanged_when_nothing_is_denied(self):
+        assert run_eval.disallowed_for([]) == run_eval.DISALLOWED
+
+    def test_a_denied_tool_is_appended_after_the_standing_list(self):
+        guidance = "mcp__fusion-essentials__sys_get_guidance"
+        assert run_eval.disallowed_for([guidance]) == run_eval.DISALLOWED + "," + guidance
+
+    def test_the_denied_names_reach_the_launch_and_the_run_dir(self, tmp_path, monkeypatch):
+        scenario = tmp_path / "S0_X.md"
+        scenario.write_text("---\nid: X\n---\n\n## AGENT PROMPT (verbatim)\n\n```\nbuild it\n```\n",
+                            encoding="utf-8")
+        monkeypatch.setattr(run_eval, "_RESULTS", str(tmp_path / "results"))
+        monkeypatch.setattr(run_eval, "preflight_server", lambda: None)
+        guidance = "mcp__fusion-essentials__sys_get_guidance"
+        monkeypatch.setattr(sys, "argv", ["run_eval.py", str(scenario), "--deny", guidance])
+        seen = {}
+
+        def fake_launch(prompt, run_dir, model, max_turns, deny=()):
+            seen.update(run_dir=run_dir, deny=list(deny))
+            transcript = os.path.join(run_dir, "transcript.jsonl")
+            with open(transcript, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"type": "result", "result": "", "usage": {}}) + "\n")
+            return transcript, "", False, True
+
+        monkeypatch.setattr(run_eval, "launch", fake_launch)
+        run_eval.main()
+        assert seen["deny"] == [guidance]
+        with open(os.path.join(seen["run_dir"], "denied.txt"), encoding="utf-8") as fh:
+            assert fh.read().strip() == guidance
 
 
 class TestExitStatus:

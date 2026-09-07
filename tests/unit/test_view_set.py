@@ -901,6 +901,66 @@ class TestFocusFraming:
         assert near.isLightBulbOn is True and far.isLightBulbOn is True
 
 
+class TestFocusExtents:
+    """A focus is framed on the SOLIDS it models. An occurrence's plain boundingBox also counts the
+    sketches and construction geometry its component holds, so a small part beside a large sketch
+    frames the sketch; boundingBox2 is the bodies-only read, and the payload says which box the
+    frame was measured on."""
+
+    def _occ(self, name, solids, all_geometry, parent=None):
+        """One occurrence whose bodies-only box and plain box differ; solids=None places no body."""
+        return FakeOccurrence(bodies_bounding_box=solids,
+                              **_occ_args(name, bbox=all_geometry, parent=parent))
+
+    def test_a_body_holding_occurrence_frames_on_its_solids(self, monkeypatch):
+        # front screen axes: X across a 200-wide frame, Z down a 100-tall one. The solids span
+        # 3 x 2 (Z wins at 0.02); the sketch-swept box spans 50 x 2 (X wins at 0.25).
+        part = self._occ("ShellCap:1", make_bbox((0, 0, 0), (3, 3, 2)),
+                         make_bbox((0, 0, 0), (50, 50, 2)))
+        _install(monkeypatch, [part])
+        out = _payload(iv.handler(action="orient", orientation="front", focus="ShellCap:1"))
+        assert out["applied"]["frame_ratio"] == pytest.approx(0.02 * iv._FRAME_MARGIN)
+        assert out["applied"]["extents"] == "solids"
+
+    def test_a_bodyless_occurrence_falls_back_to_its_full_box(self, monkeypatch):
+        # Measured: an occurrence placing no body answers None through boundingBox2. Refusing there
+        # would leave a sketch-only or construction-only component with nothing that frames it.
+        band = self._occ("Layout:1", None, make_bbox((0, 0, 0), (50, 50, 2)))
+        _install(monkeypatch, [band])
+        out = _payload(iv.handler(action="orient", orientation="front", focus="Layout:1"))
+        assert out["applied"]["frame_ratio"] == pytest.approx(0.25 * iv._FRAME_MARGIN)
+        assert out["applied"]["extents"] == "all_geometry"
+
+    def test_a_mixed_list_unions_the_solids_with_the_bodyless_box_and_says_all_geometry(
+            self, monkeypatch):
+        # The union carries one full box, so the frame is not a solids-only one and does not claim
+        # to be. Spans X 0..14 on the solids box; the part's sketch-swept box would reach 50.
+        part = self._occ("Cap:1", make_bbox((0, 0, 0), (3, 3, 2)),
+                         make_bbox((0, 0, 0), (50, 50, 2)))
+        band = self._occ("Layout:1", None, make_bbox((10, 0, 0), (14, 4, 2)))
+        _install(monkeypatch, [part, band])
+        out = _payload(iv.handler(action="orient", orientation="front",
+                                  focus=["Cap:1", "Layout:1"]))
+        assert out["applied"]["frame_ratio"] == pytest.approx(14 / 200 * iv._FRAME_MARGIN)
+        assert out["applied"]["extents"] == "all_geometry"
+
+    def test_a_nested_occurrence_frames_where_it_is_placed(self, monkeypatch):
+        # The box is read off the placed INSTANCE, whose extents are in root space. The component's
+        # own box sits at the origin, so framing on that aims the camera 100 cm from the part.
+        parent = FakeOcc("Frame:1", bbox=make_bbox((100, 0, 0), (103, 3, 2)))
+        comp = MakeComp(name="Cap")
+        comp.boundingBox = make_bbox((0, 0, 0), (3, 3, 2))
+        cap = FakeOccurrence(path="Frame:1+Cap:1", component=comp, assembly_context=parent,
+                             bounding_box=make_bbox((100, 0, 0), (150, 50, 2)),
+                             bodies_bounding_box=make_bbox((100, 0, 0), (103, 3, 2)))
+        _install(monkeypatch, [parent, cap])
+        out = _payload(iv.handler(action="orient", orientation="front", focus="Frame:1+Cap:1"))
+        cam = iv.app.activeViewport.camera
+        assert (cam.target.x, cam.target.y, cam.target.z) == (101.5, 1.5, 1)
+        assert out["applied"]["frame_ratio"] == pytest.approx(0.02 * iv._FRAME_MARGIN)
+        assert out["applied"]["extents"] == "solids"
+
+
 # ── camera projection ───────────────────────────────────────────────────────
 # 'projection' maps a wire key onto an adsk.core.CameraTypes member and is READ BACK off the
 # viewport camera; 'perspective_angle_deg' is a degrees-in / radians-to-the-API field of view that

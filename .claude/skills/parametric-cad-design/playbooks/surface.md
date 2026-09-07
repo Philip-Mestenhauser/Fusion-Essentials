@@ -1,19 +1,14 @@
 ## Surface
 
-**skin-first-solid-later**
-When the outer form is the product: build the skin as surfaces - sweep, loft, patch - then trim, stitch once with a stated tolerance and thicken once; the solid comes last. Except a form one solid feature already describes. Prove `design_get`: Stitch and Thicken rows after every surface row, not between them.
+**skin-first-solid-later** - Build the skin as surfaces - sweep, loft, patch - then trim, stitch once with a stated tolerance and thicken once; the solid comes last when the outer form is the product; not for a form one solid feature already describes. Prove: `design_get`: Stitch and Thicken rows after every surface row, not between them.
 
-**extend-before-trim**
-When one surface will trim another: extend the cutting surface a few millimetres past the body first, so the trim never lands on an edge. Except a cutter that already overhangs. Prove `design_get`: an Extend row immediately before the Trim row.
+**extend-before-trim** - Extend the cutting surface a few millimetres past the body first, so the trim never lands on an edge when one surface will trim another; not for a cutter that already overhangs. Prove: `design_get`: an Extend row immediately before the Trim row.
 
-**blend-by-split-and-loft**
-When two skins must meet with a smooth transition: split the faces where the blend starts, delete the faces between, and loft between the split edges; a fillet only where the transition is a constant radius. Except a constant-radius corner. Prove `find_geometry`: no crease: adjacent face normals agree along the seam.
+**blend-by-split-and-loft** - Split the faces where the blend starts, delete the faces between, and loft between the split edges; a fillet only where the transition is a constant radius when two skins must meet with a smooth transition; not for a constant-radius corner. Prove: `find_geometry`: no crease: adjacent face normals agree along the seam.
 
-**master-skin-derived-into-parts**
-When several parts share one outer form: keep the skin in a master document with named skeleton sketches; each part derives it and closes it with a boundary fill, then adds its own walls, bosses and clips. Except a single-part shell. Prove `design_get`: each part's timeline starts with a derive row then a BoundaryFill row.
+**master-skin-derived-into-parts** - Keep the skin in a master document with named skeleton sketches; each part derives it and closes it with a boundary fill, then adds its own walls, bosses and clips when several parts share one outer form; not for a single-part shell. Prove: `design_get`: each part's timeline starts with a derive row then a BoundaryFill row.
 
-**peel-a-solid-to-a-skin**
-When the quickest form is a solid but only some faces are wanted: delete the faces you do not want; the remaining skin is the surface to build on. Except a solid you will keep whole. Prove `design_get`: the tree's body row reads is_solid false after the delete.
+**peel-a-solid-to-a-skin** - Delete the faces you do not want; the remaining skin is the surface to build on when the quickest form is a solid but only some faces are wanted; not for a solid you will keep whole. Prove: `design_get`: the tree's body row reads is_solid false after the delete.
 
 ### Recipes
 

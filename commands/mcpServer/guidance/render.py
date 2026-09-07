@@ -18,13 +18,14 @@ SAFETY_INVARIANT = "safety_invariant"
 
 
 def _rule_lines(rule):
-    """One rule's lines - its id, the four clauses in reading order, and its example if it has one."""
+    """One rule as one line: the instruction first, its scope and its boundary in the same
+    sentence, then how it is proved; the example on its own line when there is one."""
     head = f"**{rule['id']}**"
     if rule.get("kind") == SAFETY_INVARIANT:
         head += " (safety invariant)"
     prove = "; ".join(f"`{s['tool']}`: {s['observe']}" for s in rule["prove"])
-    lines = [head,
-             f"When {rule['when']}: {rule['do']}. Except {rule['except']}. Prove {prove}."]
+    do = rule["do"][0].upper() + rule["do"][1:]
+    lines = [f"{head} - {do} when {rule['when']}; not for {rule['except']}. Prove: {prove}."]
     if rule.get("example"):
         lines.append(f"Example: {rule['example']}.")
     return lines
@@ -93,14 +94,16 @@ def map_text(doc):
     for rule in (kernel.get("rules") or []) if kernel else []:
         parts += _rule_lines(rule)
         parts.append("")
-    parts += ["## Playbooks", ""]
+    parts += ["## Playbooks", "",
+              "A playbook `<id>` is the file `playbooks/<id>.md`, or `sys_get_guidance(section=\"<id>\")`.",
+              ""]
     for sec in (doc.get("sections") or []):
         if sec.get("id") == loader.KERNEL:
             continue
-        parts.append(f"- **{sec['title']}** (`{sec['id']}`) - {sec['use_when']}. Read "
-                     f"`playbooks/{sec['id']}.md` or call `sys_get_guidance(section=\"{sec['id']}\")`.")
-    parts += ["", "## Recipes", ""]
+        parts.append(f"- `{sec['id']}` - {sec['use_when']}")
+    parts += ["", "## Recipes", "",
+              "A recipe `<id>` is `sys_get_guidance(recipe=\"<id>\")` - ordered steps, a read-back "
+              "per step, a bar for done. Its prefix names the playbook it belongs to.", ""]
     for rec in loader.recipes(doc):
-        parts.append(f"- `{rec['id']}` ({rec['section']}) - {rec['use_when']}. "
-                     f"`sys_get_guidance(recipe=\"{rec['id']}\")`.")
+        parts.append(f"- `{rec['id']}` - {rec['use_when']}")
     return "\n".join(parts).rstrip() + "\n"

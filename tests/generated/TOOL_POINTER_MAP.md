@@ -468,15 +468,22 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `cam_edit_setup`
 - Setup edited. Existing toolpaths are now OUT OF DATE - regenerate with cam_generate. A WCS bound via 'wcs' is a LIVE reference to the selected geometry or Joint Origin (bound_entities), so the WCS ...
 - Provide 'setup' - the CAM setup name (see cam_get).
-- Nothing to do. Provide 'parameters' {name: expression}, 'models'/'fixtures'/'stock' body lists, a 'machine', a 'wcs' binding, and/or 'rename'.
+- Nothing to do. Provide 'parameters' {name: expression}, 'models'/'fixtures'/'stock' body lists, a 'machine', a 'stock_mode', a 'wcs' binding, and/or 'rename'.
 - ' has no parameter(s):
 - . (Read the setup's parameter names first; only existing ones are settable.)
 - ' does not accept a write to:
 - (isEditable reads False on each). Nothing was applied. A setup exposes many parameters it takes no write to; set one it does - cam_get(include=['parameters'], setup=...) marks each refusing row edi...
 - parameter(s); no change was applied.
+- ' and a 'stock' body list in one call set the setup's stock two ways - 'stock' is the from-solid mode with its bodies. Pass one or the other.
+- This Fusion build's SetupStockModes carries no '
+- ' member, so 'stock_mode=
+- ' cannot be assigned. Pick another mode.
+- Stock mode did not take on setup '
+- ' but Setup.stockMode now reads '
 - - the assignment did not take.
 - Machine assignment did not take on setup '
 - ' but the setup now reports '
+- Could not set stock_mode='
 - Could not assign machine '
 - ' has no WCS mode parameter '
 - bound no geometry - '

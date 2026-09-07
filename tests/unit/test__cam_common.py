@@ -29,8 +29,8 @@ import pytest
 from conftest import (_FakeObjectCollection, _NamedCollection, _Strategy, _make_object_collection,
                       load_tool, make_cam, make_occurrence, strategy_factory, wcs_params)
 from conftest import (FakeApplication, FakeCAMParameter, FakeCAMParameters, FakeDataFile,
-                      FakeDocumentReference, FakeMachine, FakeSetup, FakeCAMFolder, FakeOperation,
-                      FakeTool)
+                      FakeDocumentReference, FakeMachine, FakeMatrix3D, FakeSetup, FakeCAMFolder,
+                      FakeOperation, FakeTool)
 
 cc = load_tool("_cam_common")
 cr = load_tool("_cam_read")
@@ -155,6 +155,47 @@ class _RaisingSetup(FakeSetup):
     @property
     def stockSolids(self):
         return self._read("stockSolids")
+
+
+class _StockSetup(FakeSetup):
+    """A setup carrying the two reads that say HOW it machines: the stock it comes from, and the
+    matrix its own +Z is read off."""
+    def __init__(self, stock_mode=None, matrix=None, name="Setup1"):
+        super().__init__(name)
+        if stock_mode is not None:
+            self.stockMode = stock_mode
+        if matrix is not None:
+            self.workCoordinateSystem = matrix
+
+
+class TestStockModeAndFrame:
+    """The setups slice answers what a second setup machines FROM and which way its tool comes -
+    the pair a mill-turn job is sequenced by."""
+
+    def test_previous_setup_stock_reads_back_by_name(self, install):
+        install(FakeCAM([_StockSetup(
+            stock_mode=adsk.cam.SetupStockModes.PreviousSetupStock)]))
+        rec = _payload(cr.get_cam_setups_handler())["setups"][0]
+        assert rec["stock_mode"] == "previous_setup"
+
+    def test_a_setup_whose_mode_does_not_read_publishes_null(self, install):
+        install(FakeCAM([_StockSetup()]))
+        rec = _payload(cr.get_cam_setups_handler())["setups"][0]
+        assert rec["stock_mode"] is None
+
+    def test_a_flipped_frame_publishes_its_own_z(self, install):
+        # 180 deg about X is the turning frame the hub is chucked in: +Z runs along world -Z, the
+        # end a top milling setup does NOT come at the part from.
+        flipped = FakeMatrix3D()
+        flipped._r = ((1.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, -1.0))
+        install(FakeCAM([_StockSetup(matrix=flipped)]))
+        rec = _payload(cr.get_cam_setups_handler())["setups"][0]
+        assert rec["wcs"]["z_world"] == [0.0, 0.0, -1.0]
+
+    def test_a_setup_with_no_matrix_carries_no_z_key(self, install):
+        install(FakeCAM([_StockSetup()]))
+        rec = _payload(cr.get_cam_setups_handler())["setups"][0]
+        assert "z_world" not in (rec["wcs"] or {})
 
 
 class TestUnreadableModelLists:
@@ -2247,6 +2288,16 @@ class TestWarningOverlayTally:
     def test_an_out_of_date_warned_op_counts_in_both(self, operation_cast_passthrough):
         t = cc.op_state_tally([_tally_op("Adaptive1", state=1, warning=True)])
         assert t["out_of_date"] == 1 and t["warnings"] == 1
+
+    def test_an_op_that_never_generated_is_tallied_as_out_of_date(self,
+                                                                  operation_cast_passthrough):
+        # NoToolpath is a SECOND bucket the poll must count as unfinished work: an op that never
+        # generated is what cam_generate(skip_valid=true) redoes, and counting it anywhere else
+        # leaves a poller reporting a job ready that holds no toolpath.
+        t = cc.op_state_tally([_tally_op(
+            "Rough1", state=adsk.cam.OperationStates.NoToolpathOperationState)])
+        assert t["out_of_date"] == 1 and t["total"] == 1
+        assert t["valid"] == 0 and t["suppressed"] == 0 and t["errored"] == 0
 
 
 _HAAS = FakeMachine(description="Haas VF-2")

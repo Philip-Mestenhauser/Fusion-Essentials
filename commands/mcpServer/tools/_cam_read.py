@@ -15,7 +15,7 @@ from ._cam_common import (_SETUP_BLOCKER_REMEDY, _segment, _setup_node, _walk_ch
                           is_empty_toolpath, machine_label, machine_limits, machine_spindle_max,
                           op_primary_state, op_state_facts, operations_under, ready_verdict,
                           resolve_cam_node, setup_blockers, setups, spindle_check,
-                          toolpath_present_tally, validity_basis)
+                          stock_mode_name, toolpath_present_tally, validity_basis)
 
 MAP_BLURB = (
     "the per-slice READ cores behind cam_get(include=[...]) - get_cam_setups_handler, "
@@ -115,13 +115,29 @@ def _wcs_bound_entities(param) -> list:
     return rows
 
 
+def _wcs_z_world(setup):
+    """The setup's own +Z as a world unit vector, off Setup.workCoordinateSystem - which way the
+    tool comes at the part. A turning setup and a top milling job on one part read opposite Zs."""
+    matrix = safe(lambda: setup.workCoordinateSystem)
+    if matrix is None:
+        return None
+    axes = safe(lambda: matrix.getAsCoordinateSystem())
+    if not axes or len(axes) != 4:
+        return None
+    z = axes[3]
+    return safe(lambda: [round(z.x, 6), round(z.y, 6), round(z.z, 6)])
+
+
 def setup_wcs(setup):
-    """ONE setup's bound WCS {origin_mode, orientation_mode, origin_entities,
+    """ONE setup's bound WCS {origin_mode, orientation_mode, z_world, origin_entities,
     orientation_z_entities}, terse; None where the setup exposes no readable parameters."""
+    wcs = {}
+    z_world = _wcs_z_world(setup)
+    if z_world is not None:
+        wcs["z_world"] = z_world
     params = safe(lambda: setup.parameters)
     if params is None:
-        return None
-    wcs = {}
+        return wcs or None
     for key, pname in _WCS_MODE_PARAMS:
         mode = safe(lambda pname=pname: params.itemByName(pname).value.value)
         if mode is not None:
@@ -156,6 +172,7 @@ def get_cam_setups_handler() -> dict:
         "operation_type": _operation_type_name(safe(lambda: s.operationType)),
         "is_active": safe(lambda: s.isActive),
         "machine": machine_label(safe(lambda: s.machine)),
+            "stock_mode": stock_mode_name(safe(lambda: s.stockMode)),
             "wcs": setup_wcs(s),
             # null (not []) for a list whose collection property RAISED - see _model_names.
             "selected_models": models,

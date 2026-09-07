@@ -14,9 +14,9 @@ from ..mcp_primitives.registry import register
 from ._common import apply_rename, ok, error, read_flag, safe
 # The machine catalog read + the by-name machine resolver are the shared CAM substrate's (one home,
 # so cam_get's catalog, this assignment and cam_create_machine's reachability gate cannot drift).
-from ._cam_common import (get_cam, find_setup, enumeration_remedy, expression_error,
+from ._cam_common import (STOCK_MODES, get_cam, find_setup, enumeration_remedy, expression_error,
                           machine_catalog, machine_label, matched_quoting, parse_parameters,
-                          resolve_machine, unquote_expression)
+                          resolve_machine, stock_mode_member, stock_mode_name, unquote_expression)
 from .cam_create_setup import setup_name_clash
 from . import _inputs
 
@@ -35,6 +35,11 @@ _BODY_COLLECTIONS = {
 _TARGETS = _inputs.TargetRefList("bodies", required=False)
 
 _PARAM_READ = "cam_get(include=['parameters'], setup=...)"
+
+# The stock the setup machines from: Setup.stockMode is the knob this input assigns.
+_STOCK_MODE = _inputs.Choice("stock_mode", options=list(STOCK_MODES), required=False,
+                             description="The stock the setup machines from - 'previous_setup' "
+                                         "takes what the preceding setup left.")
 
 # WCS geometry-binding, {key: (mode_param, mode_value, cad_param, handle-requirement)}: each key
 # drives one CadObjectParameterValue plus the choice-mode it needs. A bound WCS follows that
@@ -140,7 +145,7 @@ def _bind_cad_param(setup, cad_param_name, entity):
 
 def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=None,
             machine: str = "", machine_strip_simulation: bool = False, wcs=None,
-            rename: str = "") -> dict:
+            rename: str = "", stock_mode: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     if not (setup or "").strip():
         return error("Provide 'setup' - the CAM setup name (see cam_get).")
@@ -158,10 +163,22 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
     want_wcs = wcs not in (None, "", {}, [])
     want_rename = (rename or "").strip()
 
-    if not wanted and not body_args and not want_machine and not want_wcs and not want_rename:
+    want_stock_mode = None
+    if (stock_mode or "").strip():
+        want_stock_mode, merr = _STOCK_MODE.resolve(stock_mode)
+        if merr:
+            return error(merr)
+        # The 'stock' arm below switches the setup to SolidStock to hold the bodies it is handed,
+        # so a mode asked for in the same call would decide the setup's stock twice.
+        if "stock" in body_args:
+            return error(f"'stock_mode={want_stock_mode}' and a 'stock' body list in one call set "
+                         "the setup's stock two ways - 'stock' is the from-solid mode with its "
+                         "bodies. Pass one or the other.")
+
+    if not (wanted or body_args or want_machine or want_wcs or want_rename or want_stock_mode):
         return error("Nothing to do. Provide 'parameters' {name: expression}, "
-                     "'models'/'fixtures'/'stock' body lists, a 'machine', a 'wcs' binding, "
-                     "and/or 'rename'.")
+                     "'models'/'fixtures'/'stock' body lists, a 'machine', a 'stock_mode', "
+                     "a 'wcs' binding, and/or 'rename'.")
 
     cam, cerr = get_cam()
     if cerr:
@@ -299,6 +316,24 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
         "changed": changed,
     }
 
+    if want_stock_mode is not None:
+        member = stock_mode_member(want_stock_mode)
+        if member is None:
+            return error(f"This Fusion build's SetupStockModes carries no "
+                         f"'{STOCK_MODES[want_stock_mode]}' member, so 'stock_mode="
+                         f"{want_stock_mode}' cannot be assigned. Pick another mode.")
+        was = stock_mode_name(safe(lambda: target.stockMode))
+        try:
+            target.stockMode = member
+        except Exception as e:
+            return error(f"Could not set stock_mode='{want_stock_mode}' on setup '{setup}': {e}.")
+        applied = stock_mode_name(safe(lambda: target.stockMode))
+        if applied != want_stock_mode:
+            return error(f"Stock mode did not take on setup '{setup}': set '{want_stock_mode}' but "
+                         f"Setup.stockMode now reads '{applied}'.")
+        result["stock_mode_set"] = applied
+        result["was_stock_mode"] = was
+
     for arg, bodies in resolved_bodies.items():
         attr, key = _BODY_COLLECTIONS[arg]
         # Fusion refuses the collection unless its enabling prerequisite is set FIRST: stock solids need
@@ -422,7 +457,8 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
 TOOL_DESCRIPTION = (
     "Edit a CAM SETUP: its machine, its model/fixture/stock selections, its WCS, any other setup "
     "parameter, or its name. 'machine' is the prerequisite a job needs before posting; browse "
-    "names with cam_get(include=['machines']). 'stock' switches the setup to from-solid stock and "
+    "names with cam_get(include=['machines']). 'stock_mode' picks what the setup machines from; "
+    "'stock' switches it to from-solid stock with those bodies and "
     "'fixtures' auto-enables fixtures. Select the COMPONENT occurrence, not the body inside, so a "
     "swapped part keeps the selection. A 'parameters' expression that does not evaluate rolls the "
     "whole call back. Regenerate toolpaths with cam_generate."
@@ -439,6 +475,7 @@ tool = (
             "description": "Fixtures: bodies (handles/names) or a fixture component occurrence name - REPLACES the fixture set."})
     .add_input_property("stock", {"type": "array", "items": {"type": "string"},
             "description": "Solid stock: bodies (handles/names) or a stock component occurrence name - REPLACES the stock set."})
+    .add_input_property(*_STOCK_MODE.as_property())
     .add_input_property("machine", {"type": "string",
             "description": "Machine to assign: 'vendor|model' (or a bare model) from the machine library (browse: cam_get include=['machines'])."})
     .add_input_property("machine_strip_simulation", {"type": "boolean",
@@ -451,9 +488,9 @@ tool = (
 )
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
-    # The body, machine and wcs arms each re-read what they wrote and error on a mismatch. The
-    # parameter arm errors on the parameter's evaluation channel AND on a read-back that is not the
-    # expression written (an unreadable one included), rolling every parameter in the call back.
+    # The body, machine, stock_mode and wcs arms each re-read what they wrote and error on a
+    # mismatch. The parameter arm errors on the parameter's evaluation channel AND on a read-back
+    # that is not the expression written (an unreadable one included), rolling every one back.
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_cam_edit_setup.py::TestMachine"

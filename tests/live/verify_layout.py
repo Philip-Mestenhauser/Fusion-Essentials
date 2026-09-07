@@ -40,9 +40,10 @@ _BODY_MAKERS = ("model_extrude", "model_revolve", "model_loft", "model_sweep", "
                 "model_base_feature", "surface_extrude", "surface_revolve", "surface_patch",
                 "mesh_insert")
 
-# view_set frames a subject at this multiple of its own size. Modelled here so the sweep can tell
-# what the standing frame already shows and leave the camera alone when the answer is "this".
-_FRAME_MARGIN = 5.0
+# view_set frames a subject at this multiple of its own size - the tool's own view_set._FRAME_MARGIN.
+# Modelled here so the sweep can tell what the standing frame already shows and leave the camera
+# alone when the answer is "this"; a larger number here calls an off-screen subject on screen.
+_FRAME_MARGIN = 2.0
 # How much bigger than its subject a frame reaches for context, and the floor under that for a
 # subject with no measurable size. Proportional, not absolute: a constant neighbourhood frames a
 # small sketch at a few percent of the viewport and a large assembly too tight.
@@ -269,18 +270,14 @@ _FRAME_PATTERN_WIDEN = 3.0
 
 
 def _framed(steps):
-    """Insert camera rows: one when the next thing to look at is NOT already on screen, framing it
-    together with the neighbours around it.
+    """Insert the camera rows an act plays in, and settle the ones the act module already wrote.
 
-    Two rules, both learned from watching the run. A camera row per family moved the camera ~126
-    times and bounced between a cameo and the part every time the story alternated, so a
-    subject already inside the standing frame gets no row at all. And a family is one compact cell,
-    so framing it alone fills the screen with a 20 mm sketch; the focus list grows outward through
-    the nearest already-built neighbours until it spans the caller's target, which is what puts the
-    work in context instead of under a microscope.
+    SKIP - a subject already inside the standing frame gets no row, so the camera stops bouncing.
+    GROW - a row's focus reaches out through the nearest built neighbours to the target span.
+    READ - a hand row becomes the standing frame, and a flat one is shot down its own plane normal.
 
-    A component or sketch the narrative already frames by hand keeps its own row, and one that
-    never gets geometry before the next entity starts is skipped - there is nothing to frame yet.
+    A component or sketch that never gets geometry before the next entity starts gets no row at
+    all - there is nothing to frame yet.
     """
     ready = {}                       # group -> (last step index it is ready at, [member names])
     hand_framed = set()
@@ -378,6 +375,20 @@ def _framed(steps):
     out, frame, built = [], None, []
     for i, step in enumerate(steps):
         out.append(step)
+        if step[0] == "view_set" and isinstance(step[1], dict) and step[1].get("focus"):
+            f = step[1]["focus"]
+            # An act module writes its camera rows as it imports, before any sketch plane is known,
+            # so a flat subject falls back to iso and renders edge-on. Rewriting the row here - and
+            # only a row _watch itself wrote - shoots that sketch down its own normal.
+            fresh = _watch(f)
+            if step[2:] == fresh[2:] and step[1] == dict(fresh[1], orientation="iso-top-right"):
+                out[-1] = fresh
+            # A hand-authored row that FITS on its focus IS the standing frame from here on.
+            # Tracking only the rows this pass inserts leaves the frame where the camera no longer
+            # is, and the next subject then tests as already on screen - the act plays off camera.
+            if step[1].get("action") == "orient" and step[1].get("fit") is not False:
+                held = _frame_box(f if isinstance(f, list) else [f])
+                frame = _expand(held, _FRAME_MARGIN) if held else None
         members = inserts.get(i)
         if not members:
             continue

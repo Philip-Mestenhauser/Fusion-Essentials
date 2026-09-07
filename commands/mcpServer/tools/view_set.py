@@ -312,7 +312,7 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
     focus_bb = None
     if focus:
         names = [n.strip() for n in (focus if isinstance(focus, list) else [focus]) if str(n).strip()]
-        boxes, labels = [], []
+        boxes, labels, kinds = [], [], []
         for nm in names:
             # An OCCURRENCE first, then a SKETCH by the same name - sketch work is a whole category
             # of what there is to look at and owns no occurrence to aim at. Both carry a
@@ -332,9 +332,12 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
             if focus_err:
                 return error(focus_err)
             labels.append(safe(lambda o=o: o.name) or nm)
-            bx = safe(lambda o=o: o.boundingBox)
+            # The SOLIDS-ONLY box where the subject places bodies: an occurrence's plain box counts
+            # its sketches and construction geometry too, which frames the sketch instead of the part.
+            bx, kind = _view_common.focus_box(o)
             if bx is not None:
                 boxes.append(bx)
+                kinds.append(kind)
         if not boxes:
             return error(f"'focus': none of {labels} has a readable bounding box, so there is "
                          "nothing to frame on. Re-run with fit=false to re-aim only.")
@@ -348,6 +351,8 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
                                               (bb.minPoint.y + bb.maxPoint.y) / 2,
                                               (bb.minPoint.z + bb.maxPoint.z) / 2)
         applied["focus"] = safe(lambda: o.name)
+        # A union carrying even one full box is framed on more than solids, so it says so.
+        applied["extents"] = "solids" if all(k == "solids" for k in kinds) else "all_geometry"
 
     # Orientation: set eye/target/up EXPLICITLY (camera.viewOrientation does not reliably move the
     # eye/target in this flow). Keep the current eye->target distance so framing is stable; fit

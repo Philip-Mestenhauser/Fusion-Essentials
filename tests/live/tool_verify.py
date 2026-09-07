@@ -15,7 +15,9 @@ link, grip proven by measure), photographed, and finally machined - four operati
 part in the REAL fixture, generated to completion (an empty toolpath fails the run), NC posted.
 Cameo fixtures for families with no home on the part ride the same document.
 
-A run with zero FAIL/blocked steps writes ``tests/live/VERIFIED_TOOLS.md`` - the tracked receipt: the
+The run is not capped by wall clock - what it costs is reported per act and per tool, and a program
+that outgrows one 600 s shell call is walked in CHUNKS that share one receipt (``--run``/``--resume``
+below). A run with zero FAIL/blocked steps writes ``tests/live/VERIFIED_TOOLS.md`` - the tracked receipt: the
 per-tool ledger stamped with a SHA-256 of the ``commands/mcpServer/`` source tree, binding that
 run to the exact tool source it exercised. ``--check`` recomputes the hash offline (no Fusion
 needed) and fails on any difference, so a green suite cannot ride on a live run that never saw
@@ -30,6 +32,15 @@ Run:  py -3 tests/live/tool_verify.py            (requires Fusion running + the 
       py -3 tests/live/tool_verify.py --keep-open  (leave the story document open for inspection)
       py -3 tests/live/tool_verify.py --acts "ACT 10a..ACT 10e"  (walk only those acts against the
                                                   document a --keep-open run left open; no receipt)
+      py -3 tests/live/tool_verify.py --run r1 --acts "ACT 0 - OVERTURE..ACT 9 - THE SHOWCASE"
+      py -3 tests/live/tool_verify.py --run r1 --resume   (the same run, chunk by chunk: each chunk
+                                                  saves ctx/ledger/acts-done and leaves the document
+                                                  open, and the receipt stamps once the whole
+                                                  program has run under that id)
+      py -3 tests/live/tool_verify.py --run r1 --resume --acts "ACT 10c4 - CAM: THE HUB JOB"
+                                                  (a DEVELOPMENT walk: the named acts run again
+                                                  against that run's world with its saved ctx, an
+                                                  edited source is fine, no receipt, state untouched)
 
 Steps are DATA (see STEPS): each row is (tool, args, expect) where args may be a dict or a
 callable(ctx) reading what earlier steps stored, and expect is "ok", "refused" (a deliberate
@@ -68,7 +79,7 @@ import verify_core  # noqa: E402
 
 from verify_core import (  # noqa: F401
     BASE, MCP, SERVER_NAME, DOC_PREFIX, MACHINE_NAME, TEMPLATE_NAME, NOTE_MAX, REFUSAL_NOTE_MAX,
-    STEP_SLEEP_S, _SHELL_TIMEOUT_S, _RUNTIME_BUDGET_S, _DWELL, _HERE, REPO_ROOT, SRC_ROOT,
+    STEP_SLEEP_S, _SHELL_TIMEOUT_S, _DWELL, _HERE, REPO_ROOT, SRC_ROOT,
     VERIFIED, _post, call, health_gate, registered_tools, _ctx_get, _Refusal, _refused, Parked,
     Needs, _needs, step_capability, parked_reason, CAPABILITY_PROBES, probe_capabilities,
     capability_met, capability_skip_reason, _machining_extension_probe,
@@ -135,7 +146,8 @@ from verify_program import (  # noqa: F401
 
 from verify_runner import (  # noqa: F401
     source_hash, _STAMP_RE, write_verified, check, _shoot, run_steps, judged_steps,
-    _precondition_holds, _one_act, select_acts, run)
+    _precondition_holds, _one_act, select_acts, run, RESULTS_DIR, run_state_path,
+    save_run_state, load_run_state, resume_refusal, develop_refusal, _document_now)
 
 # The patchable surface is patched ON THIS MODULE (a consumer stubs tool_verify.call,
 # tool_verify.ACTS, tool_verify.source_hash), so the runner and the post-act hook read
@@ -159,9 +171,23 @@ if __name__ == "__main__":
                          "--keep-open run left open: a comma list of act names as printed in the "
                          "log (\"ACT 10a\", \"FINALE\"), each one act or an \"A..B\" range. Writes "
                          "no receipt")
+    ap.add_argument("--run", metavar="ID", default=None, dest="run_id",
+                    help="walk the program under this RUN ID, saving the ctx, the ledger so far and "
+                         "the acts done to tests/live/results/run-<ID>.json after every act. A "
+                         "chunk that does not finish the program leaves the document open and "
+                         "writes no receipt")
+    ap.add_argument("--resume", action="store_true",
+                    help="carry on the --run ID from where its last chunk stopped, against the "
+                         "document that chunk left open. The receipt is stamped once the whole "
+                         "program has run under that id, from the union of its chunks. With "
+                         "--acts it is a development walk: the named acts run again against that "
+                         "run's world with its saved ctx, no receipt, state untouched")
     args = ap.parse_args()
     shots = args.shots
     if shots:
         os.makedirs(shots, exist_ok=True)
+    if args.resume and not args.run_id:
+        sys.exit("--resume needs the run it continues: --run <id> --resume")
     sys.exit(check() if args.check else run(args.json, keep_open=args.keep_open, trace=args.trace,
-                                            shots_dir=shots, acts_spec=args.acts))
+                                            shots_dir=shots, acts_spec=args.acts,
+                                            run_id=args.run_id, resume=args.resume))

@@ -12,13 +12,13 @@ declines it before mutating anything, and 'skipped' carries the message the plat
 answered with; nothing in either column is a guess about cause. Create with
 cam_create_operation, aim with cam_select_geometry.
 
-Counts: 44 proven, 2 measured, 1 created, 7 refused, 17 skipped, 71 strategies.
+Counts: 49 proven, 3 measured, 1 created, 7 refused, 11 skipped, 71 strategies.
 
 | Strategy | Verdict | Geometry kind (cam_select_geometry) | Tool | Proven on / the measured reason |
 |---|---|---|---|---|
 | adaptive | proven | none - the setup's model | flat end mill | ACT 10a |
-| adaptive2d | proven | silhouette | flat end mill | ACT 10c7 Adaptive2D |
-| advanced_swarf | skipped | unmeasured | - | not probed on the hub yet |
+| adaptive2d | proven | pocket | flat end mill that fits the pocket | ACT 10c7 Adaptive2D |
+| advanced_swarf | proven | surfaces -> advancedSwarfSurfaces | flat end mill | ACT 10c11 AdvSwarf on the hub's flange wall, machining time read in ACT 10c12; the chain kind is refused naming the 'swarf' surface set this operation carries instead, and a drafted block wall generates EMPTY ('The tool or surface selections may prevent any area from being machined.') (machining extension) |
 | bar_pull | skipped | - | turning grooving insert | generated with 'Toolpath is not supported for the given tool and settings.' |
 | blend | skipped | two or more drive curves - no route | ball end mill | 'Drive Curves: Incorrect number of drive curves. Select two or more drive curves.' - and the chain kind lands on this operation's machining BOUNDARY instead |
 | bore | proven | holes -> circularFaces | flat end mill | ACT 10a |
@@ -46,8 +46,8 @@ Counts: 44 proven, 2 measured, 1 created, 7 refused, 17 skipped, 71 strategies.
 | manual | created | none | any | ACT 10c7 ManualNC creates it and reads the name back, then deletes it - a generated Manual NC answers '3 : Machining time could not be calculated.' on its time row and never appears in empty_toolpaths, so neither non-empty oracle can judge it |
 | morph | skipped | chain -> curves | ball end mill | generated EMPTY on one rim chain with 'No passes to link' (ledger MORPH-1); whether a curve PAIR feeds it is unmeasured |
 | morphed_spiral | proven | none - the setup's model | ball end mill | ACT 10c7 MorphedSpiral |
-| multi_axis_contour | skipped | unmeasured | - | not probed on the hub yet |
-| multi_axis_morph | skipped | unmeasured | - | not probed on the hub yet |
+| multi_axis_contour | proven | chain | ball end mill | ACT 10c11 MxContour on one edge chain of the hub, machining time read in ACT 10c12 (machining extension) |
+| multi_axis_morph | measured | surfaces -> driveSurfaces | ball end mill | driven on the hub with the flange wall as its drive surface, reading 123.6 s of machining time; it is not a beat because that generation ran past 240 s of polling with the status read still answering 'generating'. The chain kind lands on this operation, and it then generates with 'Drive Surfaces: No valid drive surfaces selected.' |
 | multiaxis_finishing | proven | surfaces -> floorSurfaces | ball end mill | ACT 10c (machining extension) |
 | multiaxis_roughing | proven | surfaces -> floorSurfaces | flat end mill | ACT 10c (machining extension) |
 | parallel | proven | none - the setup's model | ball end mill | ACT 10c7 Parallel |
@@ -55,14 +55,14 @@ Counts: 44 proven, 2 measured, 1 created, 7 refused, 17 skipped, 71 strategies.
 | pocket2d | proven | pocket | flat end mill | ACT 10a |
 | pocket_clearing | measured | none - the setup's model | flat end mill | driven non-empty on the hub; its generation alone runs 71.4 s, which is most of the act boundary poll's whole budget, so it is not a beat and no receipt row stands behind it |
 | probe | proven | probe | probe | ACT 10a (machining extension) |
-| probe_geometry | skipped | probe | probe | not probed on the hub yet |
+| probe_geometry | proven | probe | probe | ACT 10c11 ProbeGeom with a cloned probe on one face, machining time read in ACT 10c12; a tool that is not a probe is refused naming the type it was handed (machining extension) |
 | profile2d | proven | silhouette | waterjet (a cutting tool) | ACT 10c7 WaterjetProfile |
 | project | proven | chain | ball end mill | ACT 10c7 ProjectRim |
 | radial | proven | none - the setup's model | ball end mill | ACT 10c7 Radial |
 | ramp | measured | none - the setup's model | ball end mill | driven non-empty on the hub; its generation alone runs 105.2 s, which is most of the act boundary poll's whole budget, so it is not a beat and no receipt row stands behind it |
-| rotary_contour | proven | none - the setup's model | ball end mill | ACT 10c (machining extension) |
-| rotary_finishing | skipped | unmeasured | - | not probed on the hub yet |
-| rotary_pocket | skipped | unmeasured | - | not probed on the hub yet |
+| rotary_contour | proven | none - the setup's model | ball end mill | ACT 10c13 RotContour on the hub's rotary setup, machining time read in ACT 10c14; the operation reads axisView_orientation_mode 'axisZ' - the axis its passes wrap about - and axisView_origin_mode 'jobOrigin', so it turns about the setup's own WCS (machining extension) |
+| rotary_finishing | proven | none - the setup's model | ball end mill | ACT 10c13 RotFinish on the hub's rotary setup, machining time read in ACT 10c14; the operation reads axisView_orientation_mode 'axisZ' - the axis its passes wrap about - and axisView_origin_mode 'jobOrigin', so it turns about the setup's own WCS (machining extension) |
+| rotary_pocket | proven | none - the setup's model | flat end mill | ACT 10c13 RotPocket on the hub's rotary setup, machining time read in ACT 10c14; the operation reads axisView_orientation_mode 'axisZ' - the axis its passes wrap about - and axisView_origin_mode 'jobOrigin', so it turns about the setup's own WCS (machining extension) |
 | scallop | proven | none - the setup's model | ball end mill | ACT 10c7 Scallop |
 | slot | proven | pocket (a slot-shaped floor) | slot mill | ACT 10c7 Slot |
 | spiral | proven | none - the setup's model | ball end mill | ACT 10c7 Spiral |
@@ -75,14 +75,14 @@ Counts: 44 proven, 2 measured, 1 created, 7 refused, 17 skipped, 71 strategies.
 | trace | proven | chain | chamfer mill | ACT 10c7 TraceRim |
 | turning_adaptive_roughing | proven | none - the setup's model | turning grooving insert | ACT 10c9 TurnAdaptive |
 | turning_chamfer | refused | chamfer positions - no route | turning general insert | the operation carries no curve-selection parameter this call routes, and it generates empty with 'Chamfers: Invalid chamfer positions selection.'; refused live by ACT 10c9 |
-| turning_face | proven | none - the setup's model | turning general insert | ACT 10c2 |
+| turning_face | proven | none - the setup's model | turning general insert | ACT 10c4 TurnFace |
 | turning_groove_finishing | proven | none - the setup's model | turning grooving insert | ACT 10c9 TurnGrooveFinish |
 | turning_groove_roughing | proven | none - the setup's model | turning grooving insert | ACT 10c9 TurnGrooveRough |
-| turning_part | proven | none - the setup's model | turning grooving insert | ACT 10c2 |
+| turning_part | proven | none - the setup's model | turning grooving insert | ACT 10c4 TurnPart |
 | turning_profile | proven | none - the setup's model | turning general insert | ACT 10c9 TurnProfile |
-| turning_profile_finishing | proven | none - the setup's model | turning general insert | ACT 10c2 |
+| turning_profile_finishing | proven | none - the setup's model | turning general insert | ACT 10c4 TurnFinish |
 | turning_profile_groove | proven | none - the setup's model | turning grooving insert | ACT 10c9 TurnProfileGroove |
-| turning_profile_roughing | proven | none - the setup's model | turning general insert | ACT 10c2 |
+| turning_profile_roughing | proven | none - the setup's model | turning general insert | ACT 10c4 TurnRough |
 | turning_single_groove | proven | groove -> grooves (an edge) | turning grooving insert | ACT 10c9 TurnSingleGroove |
 | turning_stock_transfer | skipped | - | turning general insert | generated with 'Toolpath is not supported for the given tool and settings.' |
 | turning_thread | proven | thread -> threadFaces | turning threading insert | ACT 10c9 TurnThread |

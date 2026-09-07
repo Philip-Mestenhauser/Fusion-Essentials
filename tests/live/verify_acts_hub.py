@@ -10,26 +10,43 @@ beat addresses. The hub is authored a metre out along X on the XZ plane, and a c
 sketch is left exactly where it was written - see verify_layout._place_slots.
 """
 
-from verify_acts_cam import _TURN_MACHINE, _types_offered
+import time
+
+from verify_acts_cam import (
+    _TURNING_TYPE, _TURN_MACHINE, _all_cut, _launched_on, _offers, _op_named, _param_landed,
+    _posted_turning, _reveal, _setup_ready, _setup_row, _turning_stock, _types_offered)
 from verify_core import (
-    _RECALL, _ctx_get, _datum, _drilled, _extruded, _face_up_at, _fg, _filleted, _made_component,
-    _matched, _measured, _near, _num, _prof, _recall, _revolved, _watch)
+    EXPORT_DIR, _RECALL, _ctx_get, _datum, _drilled, _extruded, _face_up_at, _fg, _filleted,
+    _joint_origin_computed, _made_component, _matched, _measured, _near, _num, _prof, _recall,
+    _revolved, _watch)
 
 # THE NAMES THE HUB BUILDS UNDER, in one place for the beats that address it.
 HUB_COMP = "Hub"                 # the turned flange - the model both setups machine
 HUB_PROFILE = "HubProfile"       # the revolved outline, on the axis plane
 HUB_HOLES = "HubHoles"           # the bolt-circle reference sketch on the flange top
 HUB_KEYWAY = "HubKeyway"         # the keyway cut into the shaft
-HUB_WEDGE = "HubWedge"           # the inclined flat, on the 30 deg datum
+HUB_WEDGE = "HubWedge"           # the inclined flat on the shaft, on the 30 deg datum
 HUB_TILT = "TiltPlane"
 HUB_FLANGE_TOP = "HubFlangeTop"  # the pocket outline plus its drawn label
 HUB_FLANGE_POCKET = "HubFlangePocket"
 HUB_MILL_SETUP = "MillTop"       # the milling job, on the flange top
 HUB_TURN_SETUP = "HubTurn"       # the turned job, on the mill-turn machine
+HUB_ROT_SETUP = "HubRotary"      # the 4-axis wrap, about the hub's own axis
+HUB_ROT_WCS = "HubRotaryWCS"     # that setup's origin, a Joint Origin at the hub's centre
 
-# The hub's axis in world X. The field the layout pass packs ends at x 1100, so a chunk pinned out
-# here shares ground with nothing - which is what a chunk holding an XZ sketch needs, since it
-# cannot be carried in Y at all.
+# The lathe cycles the hub is roughed with, in the order a shop turns them. Named here because the
+# reveal, the non-empty oracle and the no-warning read all address the same four.
+HUB_TURN_CYCLES = ("TurnFace", "TurnRough", "TurnFinish", "TurnPart")
+# The rotary families, each wrapped about the hub axis.
+HUB_ROT_OPS = ("RotContour", "RotPocket", "RotFinish")
+
+# The 4-axis machine the rotary wrap turns about, run-stamped so two overlapping runs never collide
+# on one Local-library name. The act takes it back out once the setup holds its own copy.
+_ROT_MACHINE = "SweepMach4Axis " + time.strftime("%Y%m%d-%H%M%S")
+
+# The hub's axis in world X, clear of the band the other pinned chunks occupy: FeatureCameo's
+# pattern alone reaches x 390 and the scale beats end at x 1347, both far past the coordinates
+# their steps are written with. A chunk holding an XZ sketch stays exactly where it is authored.
 _HUB_X = 1200.0
 
 # The profile, as the ledger measured it: a flange, a shaft with a groove, a stub with a chamfer.
@@ -65,21 +82,56 @@ _HUB_DEPTHS = (("line:2:end", _FLANGE_T), ("line:4:end", _GROOVE_TOP),
                ("line:6:end", _GROOVE_BOT), ("line:8:end", _SHAFT_END),
                ("line:10:end", _STUB_END), ("line:12:start", _PART_END))
 
-# The keyway rectangle, on the same axis plane: it starts 3 mm inside the shaft wall and runs 16 mm
-# down, cut 3 mm either side of that plane - so the slot lands 6 mm wide and 3 mm deep.
+# The keyway, on the same axis plane: an OBROUND 6 mm wide and 16 mm tip to tip, its centre line on
+# the shaft wall so the cut reaches 3 mm in, and extruded 3 mm either side of that plane. Drawn as a
+# slot, its two ends are half-round at the cutter's own radius rather than square inside corners.
 _KEY_R, _KEY_TOP, _KEY_WIDE, _KEY_LONG, _KEY_HALF = 22.0, 52.0, 6.0, 16.0, 3.0
+# kind='slot' takes the two CAP CENTRES, so the centre-to-centre span is the tip-to-tip length less
+# one full width, and the radius is half of it.
+_KEY_CX, _KEY_CY = _HUB_X + _KEY_R + _KEY_WIDE / 2, _KEY_TOP + _KEY_WIDE / 2
+_KEY_SPAN = _KEY_LONG - _KEY_WIDE
 
-# The inclined flat's triangle, in the tilted sketch's own coordinates: +X there is world Z, so the
-# first number is a depth down the shaft, and the second is measured out from the hub axis, whose
-# place in that sketch is read off its frame (see _tilt_v).
-_WEDGE_NEAR, _WEDGE_FAR = 10.0, 25.0
-_WEDGE_CUT = 12.0
+# The round pocket beside the flange's arc slot, on the same bolt circle: a circle a cutter can
+# enter, where a square region leaves inside corners no end mill reaches.
+_ROUND_X, _ROUND_Y, _ROUND_R = _HUB_X - 17.0, 27.0, 4.0
+
+# The inclined flat, on the shaft's plain stretch between _FLANGE_T and _GROOVE_TOP - the one run
+# carrying neither, and away from the threaded stub. Its outline is drawn in the tilted sketch's own
+# coordinates: +X is world Z, so the first number is a depth and the second a radius (see _tilt_v).
+_WEDGE_TOP, _WEDGE_BOT = 25.0, 41.0      # where the flat meets the wall, and where it bottoms out
+_WEDGE_DEPTH = 7.0                       # how far under the wall the bottom end sits
+_WEDGE_OVER = 21.0                       # the outline's top edge, a millimetre clear of the flange
+_WEDGE_OUT = 40.0                        # its outboard edge, well clear of the shaft wall
+# Half the cut's width, wider than the shaft's own chord at that depth (sqrt(25^2 - 18^2) = 17.4),
+# so the flat is bounded by the round wall on both sides rather than by two walls of its own.
+_WEDGE_CUT = 20.0
+# The outline's two points ON the ramp: the bottom end sits _WEDGE_DEPTH under the wall, and the top
+# one runs the same ramp out past the wall, so the flat starts exactly at _WEDGE_TOP.
+_WEDGE_R_BOT = _SHAFT_R - _WEDGE_DEPTH
+_WEDGE_R_TOP = _SHAFT_R + _WEDGE_DEPTH * (_WEDGE_TOP - _WEDGE_OVER) / (_WEDGE_BOT - _WEDGE_TOP)
+# Where the shaft wall the datum is swung about reads its centroid: the groove splits the shaft into
+# two walls of one radius, and this is the upper one's middle.
+_SHAFT_UPPER_Z = -(_FLANGE_T + _GROOVE_TOP) / 2
 
 # The shop set the hub's job is cut with, in the order the adds land - the order a create row picks
 # a cutter by. (from_type, diameter in mm, or None to keep the sample's own).
 _HUB_TOOLS = (("face mill", 50.0), ("flat end mill", 10.0), ("ball end mill", 6.0),
               ("chamfer mill", 10.0), ("thread mill", 12.0), ("slot mill", 10.0),
-              ("turning general", None), ("turning grooving", None), ("turning threading", None))
+              ("turning general", None), ("turning grooving", None), ("turning threading", None),
+              ("flat end mill", 6.0))
+
+# That set is added in ONE call, so every create row picks its cutter by position off the base index
+# the add published. One index per cutter, read off the order above rather than typed twice.
+_FLAT_AT = [t for t, _d in _HUB_TOOLS].index("flat end mill")
+_BALL_AT = [t for t, _d in _HUB_TOOLS].index("ball end mill")
+_CHAMFER_AT = [t for t, _d in _HUB_TOOLS].index("chamfer mill")
+_SLOT_AT = [t for t, _d in _HUB_TOOLS].index("slot mill")
+_TURN_AT = [t for t, _d in _HUB_TOOLS].index("turning general")
+_GROOVE_AT = [t for t, _d in _HUB_TOOLS].index("turning grooving")
+_THREAD_INSERT_AT = [t for t, _d in _HUB_TOOLS].index("turning threading")
+# The small mill, indexed from the END: it is the SECOND flat end mill in the set, and the first is
+# what .index() answers with.
+_FLAT6_AT = len(_HUB_TOOLS) - 1 - [t for t, _d in reversed(_HUB_TOOLS)].index("flat end mill")
 
 
 def _fully_constrained(name, constraints, dimensions):
@@ -140,11 +192,48 @@ def _rim_edge(x, y, z, radius, tol=0.1):
     return check
 
 
+def _slot_spine(p):
+    """sketch_get(include_entities) on a slot: three lines of which exactly ONE is construction -
+    the centre-to-centre spine the caps sit on, and the only line whose ends ARE the cap centres.
+    Which index it landed at is read here rather than assumed: a solid side line is vertical too and
+    spans the same length, so a dimension addressed at one lands the slot half a width off."""
+    ents = p.get("entities") or []
+    lines = [e for e in ents if e.get("type") == "line"]
+    spine = [e for e in lines if e.get("construction")]
+    return _measured("one construction line of three - the slot's own spine",
+                     {"line_count": len(lines), "spine": [e.get("id") for e in spine],
+                      "arc_count": len([e for e in ents if e.get("type") == "arc"])},
+                     len(lines) == 3 and len(spine) == 1
+                     and len([e for e in ents if e.get("type") == "arc"]) == 2)
+
+
+def _spine_ref(p):
+    """That construction line's own id off the same read - the 'line:<n>' the rows below address."""
+    return next(e["id"] for e in p["entities"]
+                if e.get("type") == "line" and e.get("construction"))
+
+
+def _wall_at(radius, z, tol=0.5):
+    """find_geometry(kind='cylinder_face'): the ONE wall of that radius, told apart by where its
+    centroid sits down the hub's axis - the groove splits the shaft into two walls of one radius,
+    so a query that landed on the lower one reads a different height here."""
+    def check(p):
+        ms = p.get("matches") or []
+        m = ms[0] if ms else {}
+        pos = m.get("position") or [0, 0, 999]
+        return _measured(f"one r{radius} cylinder wall centred at z {z:g} mm",
+                         {"count": len(ms), "kind": m.get("kind"), "radius": m.get("radius"),
+                          "position": m.get("position")},
+                         len(ms) == 1 and m.get("kind") == "cylinder_face"
+                         and _near(m.get("radius"), radius, tol) and _near(pos[2], z, tol))
+    return check
+
+
 def _tilt_frame(p):
     """sketch_create on the 30 deg datum: the frame it landed with, judged on the three readings the
     wedge's own coordinates stand on. Its +X runs along world Z while the origin and +Y contribute
     NOTHING to Z, so a wedge point's first coordinate IS its world z - which is why those are
-    written as depths; and the normal is the XZ plane's own, swung 30 degrees about the stub axis."""
+    written as depths; and the normal is the XZ plane's own, swung 30 degrees about the shaft axis."""
     f = p.get("frame") or {}
     o, x, y, n = f.get("origin_mm"), f.get("x_world"), f.get("y_world"), f.get("normal")
     triple = [v for v in (o, x, y, n) if isinstance(v, list) and len(v) == 3]
@@ -165,9 +254,9 @@ def _tilt_v(p):
 
 
 def _hub_box(p):
-    """model_inspect on the finished hub: the flange's own diameter across both axes and the whole
-    part's length down Z - the one read that says the revolve, the cuts and the chamfer all landed
-    where the profile put them."""
+    """model_inspect on the hub: the turned envelope the revolve left - the flange's own diameter
+    across both axes and the part's length down Z. Every cut below it takes material from INSIDE
+    that envelope, so this reads the same after each one."""
     return _measured(f"hub bbox {2 * _FLANGE_R} x {2 * _FLANGE_R} x {_PART_END} mm",
                      {"x": p.get("x"), "y": p.get("y"), "z": p.get("z"),
                       "center": p.get("center"), "units": p.get("units")},
@@ -205,9 +294,9 @@ def _labelled(text, height):
 
 def _pocket_cut(p):
     """model_extrude(profile_index='all') on the flange top: BOTH regions cut, and neither one
-    inside the other - an 'enclosed_profile_indices' key would mean the square landed in the
+    inside the other - an 'enclosed_profile_indices' key would mean the circle landed in the
     sector's own band, where its cut leaves nothing to see."""
-    return _measured("the sector and the square cut as two separate regions",
+    return _measured("the sector and the round pocket cut as two separate regions",
                      {"profiles_extruded": p.get("profiles_extruded"),
                       "profile_index": p.get("profile_index"),
                       "enclosed_profile_indices": p.get("enclosed_profile_indices"),
@@ -231,27 +320,116 @@ def _hub_tools_landed(p):
                      {"tool_count": p.get("tool_count"), "base": base, "landed": got}, ok_)
 
 
+def _z_down(wcs, down):
+    """One setup's own +Z, off the row's wcs block: 'down' asks for a frame whose Z runs along world
+    -Z, which on this part is the end opposite the flange top."""
+    z = (wcs or {}).get("z_world") or []
+    return len(z) == 3 and _near(z[2], -1.0 if down else 1.0, 1e-3)
+
+
 def _hub_setups(p):
-    """cam_get's setups slice: the hub's two setups, read off the Setups themselves. The milling one
-    carries no machine (its blocker names that) on the stock-point WCS a top job is set from; the
-    turning one carries the mill-turn machine on the turning WCS, which is the pair the competence
-    beats address."""
-    rows = {s.get("name"): s for s in (p.get("setups") or [])}
-    mill, turn = rows.get(HUB_MILL_SETUP) or {}, rows.get(HUB_TURN_SETUP) or {}
+    """cam_get's setups slice: the hub's job in the order a machinist runs it. The LATHE setup comes
+    first, on the mill-turn machine and the turning WCS, with its own +Z running along world -Z -
+    the flange in the chuck, the shaft and stub toward the tool. The milling setup comes second, its
+    +Z the other way and its stock the shape the lathe left, carrying no machine (its blocker names
+    that) on the stock-point WCS a top job is set from."""
+    rows = [s for s in (p.get("setups") or [])
+            if s.get("name") in (HUB_MILL_SETUP, HUB_TURN_SETUP)]
+    by = {s.get("name"): s for s in rows}
+    mill, turn = by.get(HUB_MILL_SETUP) or {}, by.get(HUB_TURN_SETUP) or {}
     mwcs, twcs = mill.get("wcs") or {}, turn.get("wcs") or {}
-    return _measured(f"'{HUB_MILL_SETUP}' milling and '{HUB_TURN_SETUP}' turning, both on the hub",
-                     {"mill": mill, "turn": turn},
-                     mill.get("operation_type") == "MillingOperation"
-                     and mill.get("machine") is None
-                     and mill.get("blocked_by") == ["no_machine_selected"]
-                     and mwcs.get("origin_mode") == "stockPoint"
-                     and mwcs.get("orientation_mode") == "modelOrientation"
+    return _measured(f"'{HUB_TURN_SETUP}' turns first, then '{HUB_MILL_SETUP}' mills its rest stock",
+                     {"order": [s.get("name") for s in rows], "mill": mill, "turn": turn},
+                     [s.get("name") for s in rows] == [HUB_TURN_SETUP, HUB_MILL_SETUP]
                      and turn.get("operation_type") == "TurningOperation"
                      and turn.get("machine") == _TURN_MACHINE
+                     and turn.get("stock_mode") == "fixed_cylinder"
                      and twcs.get("origin_mode") == "turningOrigin"
                      and twcs.get("orientation_mode") == "axesXZ"
+                     and _z_down(twcs, True)
+                     and mill.get("operation_type") == "MillingOperation"
+                     and mill.get("machine") is None
+                     and mill.get("blocked_by") == ["no_machine_selected"]
+                     and mill.get("stock_mode") == "previous_setup"
+                     and mwcs.get("origin_mode") == "stockPoint"
+                     and mwcs.get("orientation_mode") == "modelOrientation"
+                     and _z_down(mwcs, False)
                      and mill.get("selected_models") == [HUB_COMP + ":1"]
                      and turn.get("selected_models") == [HUB_COMP + ":1"])
+
+
+def _stock_mode_set(mode, was):
+    """cam_edit_setup(stock_mode=...): the mode read BACK off Setup.stockMode after the write,
+    beside the one the setup carried before it - a swallowed assignment errors in the tool."""
+    def check(p):
+        return _measured(f"stock mode '{mode}' (was '{was}')",
+                         {"stock_mode_set": p.get("stock_mode_set"),
+                          "was_stock_mode": p.get("was_stock_mode")},
+                         p.get("stock_mode_set") == mode and p.get("was_stock_mode") == was)
+    return check
+
+
+def _turned_clean(setup):
+    """cam_get_status once the act boundary has certified the lathe job: every cycle finished with NO
+    warning and none of them cutting air. A solid of revolution turned from a cylinder of stock is
+    the geometry these cycles are for, so a warning row here is a beat to fix, not a state to
+    report."""
+    def check(p):
+        counts = p.get("counts") or {}
+        return _measured(f"'{setup}' turned clean - no warning, no empty toolpath",
+                         {"completed": p.get("completed"),
+                          "operations_with_warnings": p.get("operations_with_warnings"),
+                          "counts": counts, "empty_toolpaths": p.get("empty_toolpaths")},
+                         p.get("completed") is True
+                         and p.get("operations_with_warnings") == []
+                         and counts.get("with_warnings") == 0
+                         and p.get("empty_toolpaths") == [])
+    return check
+
+
+def _machine_built(name, template):
+    """cam_create_machine: the machine re-resolved through the query cam_edit_setup assigns from,
+    with the template it was built from and the library it landed in read back."""
+    def check(p):
+        return _measured(f"'{name}' built from the {template} template in the Local library",
+                         {"created": p.get("created"), "name": p.get("name"),
+                          "template": p.get("template"), "location": p.get("location"),
+                          "model": p.get("model")},
+                         p.get("created") is True and p.get("name") == name
+                         and p.get("template") == template and p.get("location") == "local")
+    return check
+
+
+def _machine_deleted(name):
+    """cam_delete_machine: the asset gone from a re-walk of the Local library's own assets, which is
+    the whole claim - the setup keeps the copy Setup.machine took, and reads it after this."""
+    def check(p):
+        return _measured(f"'{name}' taken back out of the Local library",
+                         {"deleted": p.get("deleted"), "machine": p.get("machine"),
+                          "resolves_after_delete": p.get("resolves_after_delete"),
+                          "local_assets_remaining": p.get("local_assets_remaining")},
+                         p.get("deleted") is True and p.get("machine") == name
+                         and p.get("resolves_after_delete") is False)
+    return check
+
+
+def _rotary_contract(operation):
+    """cam_get(include=['parameters'], operation=...) on a rotary family: the 4-axis contract the
+    operation carries. 'axisView_orientation_mode' is the axis the passes wrap about - axisZ is the
+    hub's own axis, the line its profile was revolved around - and 'axisView_origin_mode' says the
+    wrap turns about the SETUP's WCS, which this act bound to a Joint Origin at the hub's centre."""
+    def check(p):
+        params = p.get("parameters") or {}
+        rows = [r for section in (params.get("sections") or {}).values() for r in section]
+        by = {r.get("name"): r.get("expression") for r in rows}
+        got = {k: by.get(k) for k in ("axisView_orientation_mode", "axisView_origin_mode",
+                                      "useCone", "boundaryMode")}
+        return _measured(f"'{operation}' wraps about the setup's own Z axis",
+                         dict(got, parameter_count=params.get("parameter_count")),
+                         params.get("operation") == operation
+                         and "axisz" in str(got["axisView_orientation_mode"] or "").lower()
+                         and "joborigin" in str(got["axisView_origin_mode"] or "").lower())
+    return check
 
 
 def _setup_created(name, operation_type):
@@ -432,52 +610,70 @@ _HUB = (
          _rim_edge(_HUB_X, 0, 0, _FLANGE_R), _fg("hub_rim")),
         ("model_fillet", lambda c: {"edges": [_ctx_get(c, "hub_rim", "the flange rim")],
                                     "radius": 1.5}, _filleted, None),
-        # THE KEYWAY, on the same axis plane the outline is drawn on. A rectangle arrives with no
-        # constraints at all here, so its four sides are squared up before the four dimensions.
+        # THE KEYWAY, on the same axis plane the outline is drawn on. A slot arrives carrying the
+        # four tangents and the parallel that hold its shape, so what is left to close is where its
+        # centre line stands, how long it runs and how wide the caps are.
         ("sketch_create", {"plane": "xz", "name": HUB_KEYWAY}, "ok", None),
-        ("sketch_add_geometry", {"kind": "rectangle", "x1": _HUB_X + _KEY_R, "y1": _KEY_TOP,
-                                 "x2": _HUB_X + _KEY_R + _KEY_WIDE, "y2": _KEY_TOP + _KEY_LONG,
-                                 "sketch_name": HUB_KEYWAY}, _drew(4), None),
-    ]
-    + _one_line(HUB_KEYWAY, "horizontal", (0, 2))
-    + _one_line(HUB_KEYWAY, "vertical", (1, 3))
-    + [
-        ("sketch_dimension", {"dim_type": "horizontal_distance", "sketch_name": HUB_KEYWAY,
-                              "entity_one": "point:0", "entity_two": "line:0:start",
-                              "value": f"{_HUB_X + _KEY_R:g} mm"}, "ok", None),
-        ("sketch_dimension", {"dim_type": "vertical_distance", "sketch_name": HUB_KEYWAY,
-                              "entity_one": "point:0", "entity_two": "line:0:start",
-                              "value": f"{_KEY_TOP:g} mm"}, "ok", None),
-        ("sketch_dimension", {"dim_type": "horizontal_distance", "sketch_name": HUB_KEYWAY,
-                              "entity_one": "line:0:start", "entity_two": "line:0:end",
-                              "value": f"{_KEY_WIDE:g} mm"}, "ok", None),
-        ("sketch_dimension", {"dim_type": "vertical_distance", "sketch_name": HUB_KEYWAY,
-                              "entity_one": "line:1:start", "entity_two": "line:1:end",
-                              "value": f"{_KEY_LONG:g} mm"}, "ok", None),
-        ("sketch_get", {"sketch_name": HUB_KEYWAY}, _fully_constrained(HUB_KEYWAY, 4, 4), None),
+        ("sketch_add_geometry", {"kind": "slot", "x1": _KEY_CX, "y1": _KEY_CY, "x2": _KEY_CX,
+                                 "y2": _KEY_CY + _KEY_SPAN, "radius": _KEY_WIDE / 2,
+                                 "sketch_name": HUB_KEYWAY}, _drew(3), None),
+        # WHICH line is the spine, read off the sketch rather than counted on: every row below
+        # addresses the index this read hands back.
+        ("sketch_get", {"sketch_name": HUB_KEYWAY, "include_entities": True}, _slot_spine,
+         ("key_spine", _recall("key_spine", _spine_ref))),
+        ("sketch_constrain",
+         lambda c: {"constraint": "vertical", "sketch_name": HUB_KEYWAY,
+                    "entity_one": _ctx_get(c, "key_spine", "the slot's spine")}, "ok", None),
+        ("sketch_dimension",
+         lambda c: {"dim_type": "horizontal_distance", "sketch_name": HUB_KEYWAY,
+                    "entity_one": "point:0",
+                    "entity_two": _ctx_get(c, "key_spine", "the slot's spine") + ":start",
+                    "value": f"{_KEY_CX:g} mm"}, "ok", None),
+        ("sketch_dimension",
+         lambda c: {"dim_type": "vertical_distance", "sketch_name": HUB_KEYWAY,
+                    "entity_one": "point:0",
+                    "entity_two": _ctx_get(c, "key_spine", "the slot's spine") + ":start",
+                    "value": f"{_KEY_CY:g} mm"}, "ok", None),
+        ("sketch_dimension",
+         lambda c: {"dim_type": "vertical_distance", "sketch_name": HUB_KEYWAY,
+                    "entity_one": _ctx_get(c, "key_spine", "the slot's spine") + ":start",
+                    "entity_two": _ctx_get(c, "key_spine", "the slot's spine") + ":end",
+                    "value": f"{_KEY_SPAN:g} mm"}, "ok", None),
+        ("sketch_dimension", {"dim_type": "radius", "sketch_name": HUB_KEYWAY,
+                              "entity_one": "arc:0",
+                              "value": f"{_KEY_WIDE / 2:g} mm"}, "ok", None),
+        ("sketch_get", {"sketch_name": HUB_KEYWAY}, _fully_constrained(HUB_KEYWAY, 6, 4), None),
         ("model_extrude", {"sketch_name": HUB_KEYWAY, "profile_index": 0, "distance": _KEY_HALF,
                            "symmetric": True, "operation": "cut"}, _extruded, None),
-        # THE INCLINED FLAT. The datum swings the axis plane 30 degrees about the stub's OWN axis,
-        # which is what puts a wedge on the stub rather than beside it.
-        ("find_geometry", {"target": HUB_COMP, "kind": "cylinder_face", "radius": _STUB_R,
-                           "max_results": 4}, _matched(1, "cylinder_face"), _fg("hub_stub")),
+        # the cut stayed inside the turned envelope: a keyway takes material out of the shaft, so
+        # the part's own extent is what it was before the slot was cut.
+        ("model_inspect", {"target": HUB_COMP + ":1"}, _hub_box, None),
+        # THE INCLINED FLAT, on the SHAFT. The datum swings the axis plane 30 degrees about the
+        # shaft's OWN axis, and the wedge sits in the band between the flange underside and the
+        # groove - the stub is left a clean threaded cylinder, which the r15 read below states.
+        ("find_geometry", {"target": HUB_COMP, "kind": "cylinder_face", "radius": _SHAFT_R,
+                           "nearest_to": [_HUB_X, 0, _SHAFT_UPPER_Z], "max_results": 1},
+         _wall_at(_SHAFT_R, _SHAFT_UPPER_Z), _fg("hub_shaft")),
         ("model_construction", lambda c: {"kind": "plane", "mode": "at_angle_on_face",
-                                          "face": _ctx_get(c, "hub_stub", "the stub wall"),
+                                          "face": _ctx_get(c, "hub_shaft", "the shaft wall"),
                                           "plane": "xz", "angle": 30, "name": HUB_TILT},
          _datum("plane"), None),
         ("sketch_create", {"plane": HUB_TILT, "name": HUB_WEDGE}, _tilt_frame,
          ("hub_tilt_v", _recall("hub_tilt_v", _tilt_v))),
         ("sketch_add_geometry",
          lambda c: {"kind": "closed_path", "sketch_name": HUB_WEDGE,
-                    "points": [[-_STUB_END,
-                                _ctx_get(c, "hub_tilt_v", "the axis in tilt coords") + _WEDGE_NEAR],
-                               [-_STUB_END,
-                                _ctx_get(c, "hub_tilt_v", "the axis in tilt coords") + _WEDGE_FAR],
-                               [-_SHAFT_END,
-                                _ctx_get(c, "hub_tilt_v", "the axis in tilt coords") + _WEDGE_FAR]]},
-         _drew(3), None),
+                    "points": [[-_WEDGE_OVER,
+                                _ctx_get(c, "hub_tilt_v", "the axis in tilt coords") + _WEDGE_R_TOP],
+                               [-_WEDGE_BOT,
+                                _ctx_get(c, "hub_tilt_v", "the axis in tilt coords") + _WEDGE_R_BOT],
+                               [-_WEDGE_BOT,
+                                _ctx_get(c, "hub_tilt_v", "the axis in tilt coords") + _WEDGE_OUT],
+                               [-_WEDGE_OVER,
+                                _ctx_get(c, "hub_tilt_v", "the axis in tilt coords") + _WEDGE_OUT]]},
+         _drew(4), None),
         ("model_extrude", {"sketch_name": HUB_WEDGE, "profile_index": 0, "distance": _WEDGE_CUT,
                            "symmetric": True, "operation": "cut"}, _extruded, None),
+        ("model_inspect", {"target": HUB_COMP + ":1"}, _hub_box, None),
         # THE FLANGE POCKET, drawn twice over as the shop drawing has it: the outline plus its
         # label, then the sketch that is actually cut.
         ("sketch_create", {"plane": "xy", "name": HUB_FLANGE_TOP}, "ok", None),
@@ -493,13 +689,16 @@ _HUB = (
                                  "cx": _HUB_X, "cy": 0.0, "x1": _HUB_X + _BOLT_R, "y1": 0.0,
                                  "x2": _HUB_X, "y2": _BOLT_R, "radius": _SECTOR_HALF},
          _drew(5), None),
-        # the square pocket sits in the quadrant the sector does NOT sweep, so both regions cut
+        # the round pocket sits in the quadrant the sector does NOT sweep, so both regions cut
         # something a viewer can see.
-        ("sketch_add_geometry", {"kind": "rectangle", "sketch_name": HUB_FLANGE_POCKET,
-                                 "x1": _HUB_X - 20, "y1": 24, "x2": _HUB_X - 14, "y2": 30},
-         _drew(4), None),
+        ("sketch_add_geometry", {"kind": "circle", "sketch_name": HUB_FLANGE_POCKET,
+                                 "cx": _ROUND_X, "cy": _ROUND_Y, "radius": _ROUND_R},
+         _drew(1), None),
         ("model_extrude", {"sketch_name": HUB_FLANGE_POCKET, "profile_index": "all",
                            "distance": -4, "operation": "cut"}, _pocket_cut, None),
+        ("model_inspect", {"target": HUB_COMP + ":1"}, _hub_box, None),
+        # THE STUB, read across the WHOLE hub: exactly one cylinder face of its radius, which is
+        # what says nothing has been cut across it - a notch would split that wall into two.
         ("find_geometry", {"target": HUB_COMP, "kind": "cylinder_face", "radius": _STUB_R,
                            "max_results": 4}, _matched(1, "cylinder_face"), _fg("hub_thread_face")),
         ("model_thread", lambda c: {"faces": [_ctx_get(c, "hub_thread_face", "the stub wall")],
@@ -522,6 +721,8 @@ _HUB_JOB = [
     # reds HERE, naming it, instead of inside the add that used it.
     ("cam_edit_tools", {"action": "list_types", "scope": "document"},
      _types_offered(*[t for t, _d in _HUB_TOOLS]), None),
+    # the base index the adds below land at: the count of the cutters the earlier CAM acts left in
+    # this document's library, which is what every create row below selects its tool against.
     ("cam_edit_tools", {"action": "list", "scope": "document"},
      lambda p: _num(p.get("tool_count")) and p["tool_count"] >= 1,
      ("hub_tool_base", _recall("hub_tool_base", lambda p: p["tool_count"]))),
@@ -532,13 +733,163 @@ _HUB_JOB = [
      lambda p: p.get("added") == len(_HUB_TOOLS)
      and p.get("tool_count") == _RECALL.get("hub_tool_base") + len(_HUB_TOOLS), None),
     ("cam_edit_tools", {"action": "list", "scope": "document"}, _hub_tools_landed, None),
-    ("cam_create_setup", {"models": [HUB_COMP + ":1"], "name": HUB_MILL_SETUP},
-     _setup_created(HUB_MILL_SETUP, "milling"), None),
+    # THE LATHE JOB FIRST, because that is the order the part is made in: the hub is turned from a
+    # cylinder of stock before anything is milled into it. A turning setup of the other
+    # operation_type, read back off the Setup itself as the API's own enum name, and carrying no
+    # machine yet - which is the blocker the setups slice publishes for it.
     ("cam_create_setup", {"models": [HUB_COMP + ":1"], "name": HUB_TURN_SETUP,
                           "operation_type": "turning"},
      _setup_created(HUB_TURN_SETUP, "turning"), None),
+    ("cam_get", {},
+     _setup_row(HUB_TURN_SETUP, ["no_machine_selected"], operation_type=_TURNING_TYPE), None),
+    # the mill-turn machine, assigned through the strip the library machines with a simulation model
+    # need - and the same setups read again, with the blocker gone.
     ("cam_edit_setup", {"setup": HUB_TURN_SETUP, "machine": _TURN_MACHINE,
                         "machine_strip_simulation": True},
      lambda p: p.get("machine_set") == _TURN_MACHINE, None),
+    ("cam_get", {}, _setup_row(HUB_TURN_SETUP, []), None),
+    # WHICH END THE TOOL COMES AT. Created plain, this setup's own +Z runs along world +Z - the
+    # same end the milling job works from, with the stub in the chuck. Flipping it swings the frame
+    # onto world -Z, so the flange sits in the chuck and the shaft and stub face the tool.
+    ("cam_edit_setup", {"setup": HUB_TURN_SETUP,
+                        "parameters": {"wcs_orientation_flipZ": "true"}},
+     _param_landed("wcs_orientation_flipZ", "true"), None),
+    # and the zero a turner sets: the MODEL's own front face rather than the stock's, which in that
+    # flipped frame is the stub end.
+    ("cam_edit_setup", {"setup": HUB_TURN_SETUP,
+                        "parameters": {"wcs_origin_turning": "'model front'"}},
+     _param_landed("wcs_origin_turning", "model front"), None),
+    # the turning setup's OWN parameters: the stock mode a turned job is cut from and the origin its
+    # WCS is measured from, read off the setup rather than off the call that made it.
+    ("cam_get", {"include": ["parameters"], "setup": HUB_TURN_SETUP},
+     _turning_stock(HUB_TURN_SETUP), None),
+    ("cam_get", {"include": ["strategies"], "setup": HUB_TURN_SETUP},
+     _offers(HUB_TURN_SETUP, "turning_face", "turning_profile_roughing",
+             "turning_profile_finishing", "turning_part"), None),
+    # THE ROUGHING CYCLES, in the order a shop turns them: face the end, rough the profile, finish
+    # it, then part the piece off with the grooving insert. None is given a selection - the poll
+    # after this act is what says each of them generated something to cut.
+    ("cam_create_operation",
+     lambda c: {"setup": HUB_TURN_SETUP, "strategy": "turning_face", "name": HUB_TURN_CYCLES[0],
+                "tool_scope": "document",
+                "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _TURN_AT,
+                "generate": False},
+     _op_named(HUB_TURN_SETUP, "turning_face", HUB_TURN_CYCLES[0]), None),
+    ("cam_create_operation",
+     lambda c: {"setup": HUB_TURN_SETUP, "strategy": "turning_profile_roughing",
+                "name": HUB_TURN_CYCLES[1], "tool_scope": "document",
+                "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _TURN_AT,
+                "generate": False},
+     _op_named(HUB_TURN_SETUP, "turning_profile_roughing", HUB_TURN_CYCLES[1]), None),
+    ("cam_create_operation",
+     lambda c: {"setup": HUB_TURN_SETUP, "strategy": "turning_profile_finishing",
+                "name": HUB_TURN_CYCLES[2], "tool_scope": "document",
+                "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _TURN_AT,
+                "generate": False},
+     _op_named(HUB_TURN_SETUP, "turning_profile_finishing", HUB_TURN_CYCLES[2]), None),
+    # MEASURED on this hub: the finishing pass generates with "Lead-Out has been modified due to a
+    # gouge with the remaining stock" while its exit move is on, and with no warning at all once it
+    # is off - which is the reading ACT 10c4b's no-warning row stands on.
+    ("cam_edit_operation", {"operation": HUB_TURN_CYCLES[2], "parameters": {"doLeadOut": "false"}},
+     _param_landed("doLeadOut", "false"), None),
+    ("cam_create_operation",
+     lambda c: {"setup": HUB_TURN_SETUP, "strategy": "turning_part", "name": HUB_TURN_CYCLES[3],
+                "tool_scope": "document",
+                "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _GROOVE_AT,
+                "generate": False},
+     _op_named(HUB_TURN_SETUP, "turning_part", HUB_TURN_CYCLES[3]), None),
+    # THE MILLING JOB SECOND, on what the lathe leaves: its stock is the preceding setup's rest,
+    # which is what makes the two one process rather than two jobs on one model.
+    ("cam_create_setup", {"models": [HUB_COMP + ":1"], "name": HUB_MILL_SETUP},
+     _setup_created(HUB_MILL_SETUP, "milling"), None),
+    ("cam_edit_setup", {"setup": HUB_MILL_SETUP, "stock_mode": "previous_setup"},
+     _stock_mode_set("previous_setup", "relative_box"), None),
     ("cam_get", {}, _hub_setups, None),
+    # launched behind every write this act makes, and certified by the act boundary's poll.
+    ("cam_generate", {"target": HUB_TURN_SETUP, "skip_valid": False},
+     _launched_on(HUB_TURN_SETUP), None),
+]
+
+
+# ACT 10c4b: the turned part read, once the boundary poll has certified that generation - the hub
+# framed once, each cycle shown alone in that frame, then the reads the lathe job stands on and the
+# NC the shipped turning post writes from it.
+_HUB_TURNED_READ = [
+    _watch(HUB_COMP + ":1"),
+] + _reveal(list(HUB_TURN_CYCLES)) + [
+    ("cam_get_status", {"target": HUB_TURN_SETUP}, _turned_clean(HUB_TURN_SETUP), None),
+    ("cam_get", {"include": ["time"], "setup": HUB_TURN_SETUP},
+     _all_cut(HUB_TURN_SETUP, len(HUB_TURN_CYCLES), names=list(HUB_TURN_CYCLES)), None),
+    # the readiness verdict is what the machine assignment bought - a setup carrying a blocker is
+    # refused that wording.
+    ("cam_get", {"include": ["operations"], "setup": HUB_TURN_SETUP},
+     _setup_ready(HUB_TURN_SETUP, len(HUB_TURN_CYCLES)), None),
+    # THE LATHE PROGRAM, posted from the post library this installation SHIPS - the scope that
+    # reaches a turning post.
+    ("cam_post", {"scope": HUB_TURN_SETUP, "post": "fanuc turning", "post_scope": "fusion",
+                  "output_folder": EXPORT_DIR + "/nc", "program_name": "3001"},
+     _posted_turning(HUB_TURN_SETUP, "3001"), None),
+]
+
+
+# ACT 10c13: THE ROTARY WRAP, on the hub's own axis. A 4-axis machine and a setup whose WCS sits on
+# the hub's centre are what a rotary claim stands on: the passes wrap about that axis, so a part
+# whose shape IS a revolve about it is the geometry these three families are for.
+_HUB_ROTARY = [
+    _watch(HUB_COMP + ":1"),
+    ("cam_create_machine", {"name": _ROT_MACHINE, "template": "generic_4_axis",
+                            "vendor": "Fusion-Essentials"},
+     _machine_built(_ROT_MACHINE, "generic_4_axis"), None),
+    # the hub's own centre: the layout pass deals the hub a cell a metre out in the field, so the
+    # rotary axis runs through a Joint Origin there rather than through the world origin.
+    ("joint_create_origin", {"anchor": "bbox_center", "bbox_target": HUB_COMP + ":1",
+                             "orient_axis": "z", "name": HUB_ROT_WCS},
+     _joint_origin_computed(HUB_ROT_WCS), None),
+    ("cam_create_setup", {"models": [HUB_COMP + ":1"], "name": HUB_ROT_SETUP},
+     _setup_created(HUB_ROT_SETUP, "milling"), None),
+    ("cam_edit_setup", {"setup": HUB_ROT_SETUP, "wcs": {"origin": HUB_ROT_WCS}},
+     lambda p: bool(p["wcs_set"]["origin"]["bound_entities"]), None),
+    ("cam_edit_setup", {"setup": HUB_ROT_SETUP, "machine": _ROT_MACHINE},
+     lambda p: p.get("machine_set") == _ROT_MACHINE, None),
+    # Setup.machine takes a COPY, so the library asset has done its job - the run leaves the Local
+    # library as it found it, and the setup below still reads the machine.
+    ("cam_delete_machine", {"name": _ROT_MACHINE, "confirm_name": _ROT_MACHINE},
+     _machine_deleted(_ROT_MACHINE), None),
+    ("cam_get", {}, _setup_row(HUB_ROT_SETUP, []), None),
+    ("cam_get", {"include": ["strategies"], "setup": HUB_ROT_SETUP},
+     _offers(HUB_ROT_SETUP, "rotary_contour", "rotary_pocket", "rotary_finishing"), None),
+    ("cam_create_operation",
+     lambda c: {"setup": HUB_ROT_SETUP, "strategy": "rotary_contour", "name": HUB_ROT_OPS[0],
+                "tool_scope": "document",
+                "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _BALL_AT,
+                "generate": False},
+     _op_named(HUB_ROT_SETUP, "rotary_contour", HUB_ROT_OPS[0]), None),
+    ("cam_create_operation",
+     lambda c: {"setup": HUB_ROT_SETUP, "strategy": "rotary_pocket", "name": HUB_ROT_OPS[1],
+                "tool_scope": "document",
+                "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _FLAT_AT,
+                "generate": False},
+     _op_named(HUB_ROT_SETUP, "rotary_pocket", HUB_ROT_OPS[1]), None),
+    ("cam_create_operation",
+     lambda c: {"setup": HUB_ROT_SETUP, "strategy": "rotary_finishing", "name": HUB_ROT_OPS[2],
+                "tool_scope": "document",
+                "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _BALL_AT,
+                "generate": False},
+     _op_named(HUB_ROT_SETUP, "rotary_finishing", HUB_ROT_OPS[2]), None),
+    # THE 4-AXIS CONTRACT, read off the operation itself: which axis the passes wrap about and what
+    # they turn around. Nothing here writes it - the read is the record.
+    ("cam_get", {"include": ["parameters"], "setup": HUB_ROT_SETUP, "operation": HUB_ROT_OPS[0]},
+     _rotary_contract(HUB_ROT_OPS[0]), None),
+    ("cam_generate", {"target": HUB_ROT_SETUP, "skip_valid": False},
+     _launched_on(HUB_ROT_SETUP), None),
+]
+
+
+# ACT 10c14: the rotary families read, behind their own boundary poll - the same reveal, then the
+# non-empty oracle over the three.
+_HUB_ROTARY_READ = [
+    _watch(HUB_COMP + ":1"),
+] + _reveal(list(HUB_ROT_OPS)) + [
+    ("cam_get", {"include": ["time"], "setup": HUB_ROT_SETUP},
+     _all_cut(HUB_ROT_SETUP, len(HUB_ROT_OPS), names=list(HUB_ROT_OPS)), None),
 ]

@@ -108,8 +108,8 @@ def main():
 
     verify = os.path.join(TESTS, "live", "tool_verify.py")
     if not _run("tool_verify --check", [sys.executable, verify, "--check"],
-                "py -3 tests/live/tool_verify.py   (Fusion up, ~2 min - a green run rewrites "
-                "VERIFIED_TOOLS.md)"):
+                "py -3 tests/live/tool_verify.py   (Fusion up - a green run rewrites "
+                "VERIFIED_TOOLS.md; --run <id> / --resume walks it in chunks)"):
         return 1
 
     if args.offline:

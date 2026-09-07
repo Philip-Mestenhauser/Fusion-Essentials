@@ -1105,6 +1105,14 @@ class TestActivate:
         assert out["previous"] == "Default"
         assert "timeline_warning" not in out
 
+    def test_a_row_resolves_by_id_when_no_name_matches(self, monkeypatch):
+        # add_configuration publishes the row's id beside its name, so an agent can hold that id;
+        # a target matching no NAME has to reach the row whose id it is.
+        d = _ActDesign(_ActTable(["Default", "Large"]))
+        monkeypatch.setattr(dc._common, "design", lambda: d)
+        out = _payload(dc.handler(action="activate", name="row-Large"))
+        assert out["activated"] is True and out["now_active"] == "Large"
+
     def test_unknown_configuration_errors(self, monkeypatch):
         d = _ActDesign(_ActTable(["Default", "Large"]))
         monkeypatch.setattr(dc._common, "design", lambda: d)

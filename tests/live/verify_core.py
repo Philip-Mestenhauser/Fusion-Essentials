@@ -55,12 +55,10 @@ REFUSAL_NOTE_MAX = 80
 # flaked gets its own bounded poll rather than a blanket pause.
 STEP_SLEEP_S = 0.0
 
-# The wall-clock the sweep has to finish inside, and the shell ceiling it is drawn from. Every agent
-# runs this file through a shell tool that is killed at 600 s, and a kill leaves no receipt at all -
-# so the run fails ITSELF at the lower number, with its act and tool breakdowns printed, while there
-# is still room to say so.
+# The shell ceiling a run is launched from: a call is killed at 600 s, and a kill leaves no receipt.
+# The sweep is not capped to fit it - it is RESUMABLE instead (tool_verify --run <id> / --resume),
+# so a program that outgrows one shell call is walked in chunks that share one receipt.
 _SHELL_TIMEOUT_S = 600.0
-_RUNTIME_BUDGET_S = 540.0
 
 # The pseudo-tool a showcase beat uses to hold a view on screen. Never dispatched to the server and
 # never counted as coverage - STEPS filters it out.

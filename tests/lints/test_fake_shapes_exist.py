@@ -3,11 +3,13 @@
 
 """Lint: every public attribute a SHARED fake exposes exists on its live adsk counterpart, and
 every shared fake declares the live type it stands for plus the MEASURED rows behind it.
-A fake-shaped conftest class maps to a SHAPES key (by name or by its own @fusion_fake declaration)
-or fails; a mapped fake cites row ids that resolve against measure_api.ROWS; and a tests/unit class
-named for a measured type stands on the shared fake instead of doubling it."""
+A fake-shaped class in the shared-fake modules maps to a SHAPES key (by name or by its own
+@fusion_fake declaration) or fails; a mapped fake cites row ids that resolve against
+measure_api.ROWS; and a tests/unit class named for a measured type stands on the shared fake
+instead of doubling it."""
 
 import ast
+import importlib
 import os
 import sys
 
@@ -17,23 +19,59 @@ import live_api_facts
 
 TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _CONFTEST = os.path.join(TESTS_DIR, "conftest.py")
+_FAKES_DIR = os.path.join(TESTS_DIR, "fakes")
 _UNIT_DIR = os.path.join(TESTS_DIR, "unit")
 
 sys.path.insert(0, os.path.join(TESTS_DIR, "live"))
 import measure_api  # noqa: E402  the claim-id registry - ROWS, one dict per row, keyed 'id'
 
 
+def _fake_files():
+    """Every file the shared fakes live in: the fakes package's family modules plus conftest.py,
+    which keeps the harness's own factories. A fake in any of them is in scope here."""
+    return [_CONFTEST] + [str(p) for p in sorted(_corpus.py_files(_FAKES_DIR))
+                          if os.path.basename(str(p)) != "__init__.py"]
+
+
+def _fake_module_objects():
+    """The imported module behind each file above - the object a declaration is read OFF. Read from
+    the defining module, not through conftest's re-export, so a fake reachable only from its own
+    family module is still swept."""
+    mods = [conftest]
+    for path in _fake_files():
+        if path != _CONFTEST:
+            mods.append(importlib.import_module("tests.fakes." + os.path.basename(path)[:-3]))
+    return mods
+
+
+def _collected(kinds, label):
+    """{name: node} over every shared-fake file, REFUSING a name two of them both bind: conftest
+    re-exports one object per name, so the other definition drops out of every check here with
+    nothing to report."""
+    found, owner = {}, {}
+    for path in _fake_files():
+        for node in _corpus.tree(path).body:
+            if not isinstance(node, kinds):
+                continue
+            assert node.name not in found, (
+                f"two shared-fake modules define the {label} '{node.name}' - "
+                f"{os.path.basename(owner[node.name])} and {os.path.basename(path)}. Only one "
+                "object answers that name through conftest, so the other is invisible to the shape "
+                "sweep: rename one, or merge them into the family module that owns the type.")
+            found[node.name], owner[node.name] = node, path
+    return found
+
+
 def _conftest_classes():
-    """class name -> its ClassDef, for every class at conftest.py's module scope. Every check here
-    starts from this map, and _corpus parses that (large) file once for the whole run."""
-    return {n.name: n for n in _corpus.tree(_CONFTEST).body if isinstance(n, ast.ClassDef)}
+    """class name -> its ClassDef, for every class at a shared-fake module's scope. Every check here
+    starts from this map, and _corpus parses each file once for the whole run."""
+    return _collected(ast.ClassDef, "class")
 
 
 def _conftest_functions():
-    """function name -> its FunctionDef, for every def at conftest.py's module scope - the defs
+    """function name -> its FunctionDef, for every def at a shared-fake module's scope - the defs
     that construct the fakes above."""
-    return {n.name: n for n in _corpus.tree(_CONFTEST).body
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    return _collected((ast.FunctionDef, ast.AsyncFunctionDef), "def")
 
 
 def _own_declaration(obj):
@@ -47,17 +85,19 @@ def _own_declaration(obj):
 
 
 def declarations():
-    """{name: its @fusion_fake declaration} for every conftest class/def carrying one of its OWN.
+    """{name: its @fusion_fake declaration} for every shared-fake class/def carrying one of its OWN.
 
     Read off the objects, not the source: the decorator records structured data, so there is
     nothing to parse.
     """
     found = {}
-    for name in list(_conftest_classes()) + list(_conftest_functions()):
-        obj = getattr(conftest, name, None)
-        declaration = _own_declaration(obj) if obj is not None else None
-        if declaration is not None:
-            found[name] = declaration
+    names = list(_conftest_classes()) + list(_conftest_functions())
+    for module in _fake_module_objects():
+        for name in names:
+            obj = getattr(module, name, None)
+            declaration = _own_declaration(obj) if obj is not None else None
+            if declaration is not None:
+                found[name] = declaration
     return found
 
 
@@ -70,8 +110,9 @@ def _declared_map(decls=None):
 # fake.attr -> one-line reason a live-absent attribute is tolerated. Shrink-only.
 _ALLOWLIST = {}
 
-# Fake-shaped conftest classes with NO live SHAPES dump to sweep against yet. Shrink-only: the
-# staleness check fails the moment a dump lands (auto-map then takes over) or the class goes.
+# Fake-shaped classes in the shared-fake modules with NO live SHAPES dump to sweep against yet.
+# Shrink-only: the staleness check fails the moment a dump lands (auto-map then takes over) or the
+# class goes.
 _UNMAPPED_OK = {
     "FakeInfiniteLine3D": "InfiniteLine3D has no SHAPES dump; every member the fake carries "
                           "(create/origin/direction/isColinearTo) is exercised live by the shipped "
@@ -177,7 +218,7 @@ class TestSharedFakeShapesExist:
         classes = _conftest_classes()
         offenders = []
         for fake, live in sorted(_effective_map(classes).items()):
-            assert fake in classes, f"mapped fake {fake} not found in conftest.py"
+            assert fake in classes, f"mapped fake {fake} not found in the shared-fake modules"
             shape = live_api_facts.SHAPES.get(live)
             assert shape, (
                 f"SHAPES has no '{live}' - add it to a shape-dump measurement row and regenerate "
@@ -193,7 +234,7 @@ class TestSharedFakeShapesExist:
             + "\n  ".join(offenders))
 
     def test_every_fake_shaped_class_is_mapped(self):
-        # The completeness gate: a NEW conftest fake that maps to nothing is a silently-unswept
+        # The completeness gate: a NEW shared fake that maps to nothing is a silently-unswept
         # mock - it must map (rename it so the stripped name hits a SHAPES key, declare its live
         # type, or measure the missing live type), never just be left out.
         classes = _conftest_classes()
@@ -204,7 +245,7 @@ class TestSharedFakeShapesExist:
         unmapped = _unmapped_fakes(classes, live_api_facts.SHAPES, _declared_map(), _UNMAPPED_OK,
                                    live_names=live)
         assert not unmapped, (
-            "fake-shaped conftest classes the shape sweep would silently skip - map each to a "
+            "fake-shaped shared classes the shape sweep would silently skip - map each to a "
             "SHAPES key (auto: name it after the live type; or declare @fusion_fake(live_type=...) "
             "on it; or shape-dump the live type), or add a reasoned _UNMAPPED_OK entry:\n  "
             + "\n  ".join(unmapped))
@@ -230,7 +271,7 @@ class TestSharedFakeShapesExist:
         for name, reason in _UNMAPPED_OK.items():
             assert reason.strip(), f"{name} _UNMAPPED_OK entry needs a plain-English reason"
             if name not in classes:
-                stale.append(f"{name}: no such conftest class - remove the entry")
+                stale.append(f"{name}: no such shared-fake class - remove the entry")
             elif _stripped(name) in live_api_facts.SHAPES:
                 stale.append(f"{name}: '{_stripped(name)}' now has a SHAPES dump - the auto-map "
                              "sweeps it; remove the entry")
@@ -330,13 +371,13 @@ class TestApiFactProvenance:
     def test_every_declaration_is_well_formed(self):
         bad = _kind_problems(declarations())
         assert not bad, (
-            "@fusion_fake declarations in conftest.py that state no single classification:\n  "
+            "@fusion_fake declarations on a shared fake that state no single classification:\n  "
             + "\n  ".join(bad))
 
     def test_every_declared_fact_resolves_against_the_registry(self):
         bad = _unresolved_facts(declarations(), claim_ids())
         assert not bad, (
-            "conftest.py fakes cite claim ids measure_api.py does not carry, so nothing fails when "
+            "shared fakes cite claim ids measure_api.py does not carry, so nothing fails when "
             "the claim outlives the measurement. Cite the row that backs it "
             "(VERIFIED_API_FACTS.md's 'encoded in' column usually names the fake) - or, when no row "
             "carries the claim, add a measurement row and measure it live (py -3 "
@@ -354,14 +395,14 @@ class TestApiFactProvenance:
     def test_every_factory_of_a_declared_fake_is_declared(self):
         bad = _undeclared_factories(_conftest_functions(), declarations())
         assert not bad, (
-            "conftest.py defs construct a declared fake without naming it, so they sit outside the "
+            "shared-fake defs construct a declared fake without naming it, so they sit outside the "
             "inventory the shape sweep and the rules above run on:\n  " + "\n  ".join(bad))
 
     def test_the_declarations_read_the_real_conftest_fakes(self):
         # a reader that found nothing, or read some other attribute, would pass every rule above
-        # green over any conftest at all.
+        # green over any set of fake modules at all.
         decls = declarations()
-        assert decls, "no conftest.py fake carries a @fusion_fake declaration - the reader is dead"
+        assert decls, "no shared fake carries a @fusion_fake declaration - the reader is dead"
         assert decls["FakeOccurrence"]["live_type"] == "Occurrence"
         assert "shape-dump-design-world" in decls["FakeOccurrence"]["facts"]
         assert decls["body_proxy"]["factory_for"] == "_OccurrenceProxy"
@@ -398,17 +439,20 @@ def _base_refs(cls_node):
 
 
 def _conftest_bindings(tree, conftest, shared):
-    """The names this file BINDS to a shared fake: `from conftest import X [as Y]`, `_Y = X` over
-    one of those, `_Y = conftest.X`, and an import of a tests/unit/_*.py fake that itself stands on
-    one. A name any OTHER import, def or assignment binds is dropped, so a base is judged by what
-    the file bound it to and never by the conftest class it happens to be SPELLED like."""
+    """The names this file BINDS to a shared fake: `from conftest import X [as Y]`, the same import
+    straight from `tests.fakes.<family>`, `_Y = X` over one of those, `_Y = conftest.X`, and an
+    import of a tests/unit/_*.py fake that itself stands on one. A name any OTHER import, def or
+    assignment binds is dropped, so a base is judged by what the file bound it to and never by the
+    shared class it happens to be SPELLED like."""
     bound, taken = {}, set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             for imported in node.names:
                 name = imported.asname or imported.name
-                if ((node.module == "conftest" and imported.name in conftest)
-                        or (node.module or "").startswith("_") and imported.name in shared):
+                module = node.module or ""
+                if (((module == "conftest" or module.startswith("tests.fakes."))
+                     and imported.name in conftest)
+                        or module.startswith("_") and imported.name in shared):
                     bound[name] = imported.name
                 else:
                     taken.add(name)

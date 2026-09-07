@@ -293,10 +293,23 @@ def _apply_output_params(params, program_name, out_dir, comment, units_key):
     return applied, unresolved, unit_note
 
 
+def _cam_log_root(temp_dir):
+    """The Fusion360CAM tree post logs land in: temp_dir's own 'Fusion360CAM' ancestor when the process
+    temp dir already sits inside one, else <temp_dir>/Fusion360CAM."""
+    path = os.path.normpath(temp_dir)
+    while True:
+        if os.path.basename(path).lower() == "fusion360cam":
+            return path
+        parent = os.path.dirname(path)
+        if parent == path:
+            return os.path.join(os.path.normpath(temp_dir), "Fusion360CAM")
+        path = parent
+
+
 # Fusion writes the DETAILED post error to <TEMP>/Fusion360CAM/<session>/<n>/<program>.log - NOT the
-# output folder (there it leaves only a '.failed' stub that says "See log for details"). So on a failed
-# post, the actionable error ("Program number 'NaN' is out of range...") is only in that log.
-_CAM_LOG_ROOT = os.path.join(tempfile.gettempdir(), "Fusion360CAM")
+# output folder (there it leaves only a '.failed' stub that says "See log for details"). Inside the
+# Fusion process tempfile.gettempdir() is <TEMP>/Fusion360CAM/<session> on 2705.1.11 (measured live).
+_CAM_LOG_ROOT = _cam_log_root(tempfile.gettempdir())
 
 
 def _is_failure_marker(path):

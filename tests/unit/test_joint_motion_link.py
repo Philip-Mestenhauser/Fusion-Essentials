@@ -219,7 +219,9 @@ class TestLinkCreation:
         assert md["reversed"] is False
         # motionOne/Two must be the JointMotionTypes DOF (RevoluteJointRotateMotionType for a
         # revolute), NOT the JointTypes value jointMotion.jointType returns - passing that raises
-        # "BAD_JOINT_DOF - Motion Link joint DOF is wrong type".
+        # "BAD_JOINT_DOF - Motion Link joint DOF is wrong type". The rig stays REVOLUTE because a
+        # revolute reads 1 vs 10 across the two families while a cylindrical reads 3 in BOTH
+        # (measured ENUMS), where the last assertion could not tell right member from wrong.
         assert md["m1"] == REVOLUTE_DOF
         assert md["m2"] == REVOLUTE_DOF
         assert md["m1"] != _joints_of(des)[0].jointMotion.jointType   # the wrong-enum regression

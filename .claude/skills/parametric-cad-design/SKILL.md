@@ -16,43 +16,42 @@ Rules for judgment, recipes for sequence, a bar for done - read out of the desig
 
 ## Kernel
 
-**declare-acceptance-and-interfaces**
-When you take on a brief: write what the design must satisfy and each interface as a checkable number - seating faces, aligned axes, clearance, wall thickness. Except a throwaway probe. Prove `workspace_orient`: the active document, its units and what is already in it.
+**declare-acceptance-and-interfaces** - Write what the design must satisfy and each interface as a checkable number - seating faces, aligned axes, clearance, wall thickness when you take on a brief; not for a throwaway probe. Prove: `workspace_orient`: the active document, its units and what is already in it.
 
-**sequence-is-the-design**
-When the first feature is next: decide the feature order before drawing: form, then fillets, then shell, then bosses and holes, then cosmetics - a timeline built in that order edits cleanly, one built by accretion does not. Except a one-feature part. Prove `design_get`: the timeline reads as the order you planned.
+**sequence-is-the-design** - Decide the feature order before drawing: form, then fillets, then shell, then bosses and holes, then cosmetics - a timeline built in that order edits cleanly, one built by accretion does not when the first feature is next; not for a one-feature part. Prove: `design_get`: the timeline reads as the order you planned.
 
-**encode-intended-changeability**
-When a value carries a decision: type a wall thickness or a pitch ONCE and reference it by name everywhere else; promote it to a named parameter only when a family or a configuration is expected. Except a measured value, held in one parameter saying so. Prove `sketch_get`: dimensions whose expression is another dimension's name, not a repeated literal.
+**encode-intended-changeability** - Type a wall thickness or a pitch ONCE and reference it by name everywhere else; promote it to a named parameter only when a family or a configuration is expected when a value carries a decision; not for a measured value, held in one parameter saying so. Prove: `sketch_get`: dimensions whose expression is another dimension's name, not a repeated literal.
 
-**build-and-observe-in-milestones**
-When a milestone lands: read it back against intent before the next feature: a bounding box, a volume, a screenshot - never only at the end. Except a milestone a write already verified. Prove `model_inspect`: bounding box and volume against the numbers you wrote down.
+**build-and-observe-in-milestones** - Read it back against intent before the next feature: a bounding box, a volume, a screenshot - never only at the end when a milestone lands; not for a milestone a write already verified. Prove: `model_inspect`: bounding box and volume against the numbers you wrote down.
 
-**compare-the-artifact-with-acceptance**
-When the design looks finished: compare it with the acceptance you wrote and say what you could not meet; a screenshot that reads as the object is part of the acceptance. Except acceptance the brief left open. Prove `view_screenshot`: does it read as the object it should be.
+**compare-the-artifact-with-acceptance** - Compare it with the acceptance you wrote and say what you could not meet; a screenshot that reads as the object is part of the acceptance when the design looks finished; not for acceptance the brief left open. Prove: `view_screenshot`: does it read as the object it should be.
 
 ## Playbooks
 
-- **Plan** (`plan`) - before the first component exists - naming, variants, what is bought. Read `playbooks/plan.md` or call `sys_get_guidance(section="plan")`.
-- **Sketch** (`sketch`) - any profile that must survive a size change or drive a feature. Read `playbooks/sketch.md` or call `sys_get_guidance(section="sketch")`.
-- **Model** (`model`) - turning sketches into a part - order, carving, patterns, frozen bodies. Read `playbooks/model.md` or call `sys_get_guidance(section="model")`.
-- **Surface** (`surface`) - a shell, skin or product form that no extrude or revolve describes. Read `playbooks/surface.md` or call `sys_get_guidance(section="surface")`.
-- **Assemble** (`assemble`) - more than one component - how they are held, joined and moved. Read `playbooks/assemble.md` or call `sys_get_guidance(section="assemble")`.
-- **Validate** (`validate`) - the geometry exists and must be proved against the brief. Read `playbooks/validate.md` or call `sys_get_guidance(section="validate")`.
-- **Finish** (`finish`) - handing the work on. Read `playbooks/finish.md` or call `sys_get_guidance(section="finish")`.
-- **Manufacture** (`manufacture`) - a machining job - setups, strategy choice, what a toolpath must prove. Read `playbooks/manufacture.md` or call `sys_get_guidance(section="manufacture")`.
+A playbook `<id>` is the file `playbooks/<id>.md`, or `sys_get_guidance(section="<id>")`.
+
+- `plan` - before the first component exists - naming, variants, what is bought
+- `sketch` - any profile that must survive a size change or drive a feature
+- `model` - turning sketches into a part - order, carving, patterns, frozen bodies
+- `surface` - a shell, skin or product form that no extrude or revolve describes
+- `assemble` - more than one component - how they are held, joined and moved
+- `validate` - the geometry exists and must be proved against the brief
+- `finish` - handing the work on
+- `manufacture` - a machining job - setups, strategy choice, what a toolpath must prove
 
 ## Recipes
 
-- `sketch-anchored-profile` (sketch) - a bracket, plate or revolved profile that must resize by intent. `sys_get_guidance(recipe="sketch-anchored-profile")`.
-- `sketch-link-between-bores` (sketch) - a rocker, lever, connecting link or any web joining round bosses. `sys_get_guidance(recipe="sketch-link-between-bores")`.
-- `sketch-organic-outline` (sketch) - a mouse, handle or shell silhouette that must stay smooth while its proportions change. `sys_get_guidance(recipe="sketch-organic-outline")`.
-- `model-moulded-part` (model) - a basket, cover, drawer front or housing with a wall, bosses and clips. `sys_get_guidance(recipe="model-moulded-part")`.
-- `model-frozen-body-with-interfaces` (model) - a purchased part, an imported STEP or a generative outcome that needs holes and seats. `sys_get_guidance(recipe="model-frozen-body-with-interfaces")`.
-- `model-parametric-family` (model) - one part in several sizes. `sys_get_guidance(recipe="model-parametric-family")`.
-- `surface-swept-bottle` (surface) - a container or housing whose section changes along a curved spine. `sys_get_guidance(recipe="surface-swept-bottle")`.
-- `surface-skin-into-parts` (surface) - a product whose top, base and middle share one outer surface. `sys_get_guidance(recipe="surface-skin-into-parts")`.
-- `assemble-part-modelled-in-place` (assemble) - a rocker, bracket or lever designed between parts that already sit where they belong. `sys_get_guidance(recipe="assemble-part-modelled-in-place")`.
-- `assemble-screw-motion` (assemble) - a threaded cap, lead screw or any turn-to-advance pair. `sys_get_guidance(recipe="assemble-screw-motion")`.
-- `manufacture-choose-a-strategy` (manufacture) - a face, pocket, wall, hole or free-form surface needs an operation. `sys_get_guidance(recipe="manufacture-choose-a-strategy")`.
-- `manufacture-prove-a-toolpath` (manufacture) - an operation generated and must be trusted. `sys_get_guidance(recipe="manufacture-prove-a-toolpath")`.
+A recipe `<id>` is `sys_get_guidance(recipe="<id>")` - ordered steps, a read-back per step, a bar for done. Its prefix names the playbook it belongs to.
+
+- `sketch-anchored-profile` - a bracket, plate or revolved profile that must resize by intent
+- `sketch-link-between-bores` - a rocker, lever, connecting link or any web joining round bosses
+- `sketch-organic-outline` - a mouse, handle or shell silhouette that must stay smooth while its proportions change
+- `model-moulded-part` - a basket, cover, drawer front or housing with a wall, bosses and clips
+- `model-frozen-body-with-interfaces` - a purchased part, an imported STEP or a generative outcome that needs holes and seats
+- `model-parametric-family` - one part in several sizes
+- `surface-swept-bottle` - a container or housing whose section changes along a curved spine
+- `surface-skin-into-parts` - a product whose top, base and middle share one outer surface
+- `assemble-part-modelled-in-place` - a rocker, bracket or lever designed between parts that already sit where they belong
+- `assemble-screw-motion` - a threaded cap, lead screw or any turn-to-advance pair
+- `manufacture-choose-a-strategy` - a face, pocket, wall, hole or free-form surface needs an operation
+- `manufacture-prove-a-toolpath` - an operation generated and must be trusted

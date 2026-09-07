@@ -191,8 +191,9 @@ def _face_extent(face, axis):
 
 
 def _is_planar(face):
-    # adsk.fusion.SurfaceTypes.PlaneSurfaceType == 0; our fake uses 0 for planar too.
-    return safe(lambda: face.geometry.surfaceType, None) == 0
+    """Whether a face's surface is a plane - the only kind createByPlanarFace takes."""
+    return (safe(lambda: face.geometry.surfaceType, None)
+            == adsk.core.SurfaceTypes.PlaneSurfaceType)
 
 
 # Directional snap -> (axis index, want_max). 'right/left' = +X/-X, 'back/front' = +Y/-Y,
