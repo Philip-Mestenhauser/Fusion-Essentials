@@ -1931,6 +1931,52 @@ class TestMovedMember:
         assert out["moved"]["delta_mm"] == [0.002, 0.0, 0.0]
 
 
+class TestBodyCornerEvidence:
+    """The placement rows are the transform's CLAIM; a member's own body corner is the EVIDENCE."""
+
+    @staticmethod
+    def _boxed(occ, corner_x):
+        """Give `occ` a bodies-only box whose min corner sits at corner_x() cm along x."""
+        occ.boundingBox2 = lambda _types: types.SimpleNamespace(
+            minPoint=types.SimpleNamespace(x=corner_x(), y=0.0, z=0.0))
+        return occ
+
+    def test_a_slide_whose_placement_moved_but_body_stayed_is_an_error(self):
+        motion = SliderJointMotion()
+        arm = self._boxed(_DrivenOccurrence("Arm:1", motion, _slides((1.0, 0.0, 0.0))), lambda: 0.0)
+        base = _DrivenOccurrence("Base:1", motion, _fixed)
+        _install(FakeJoint("Rail", motion, occurrence_one=arm, occurrence_two=base))
+        res = jd.handler(joint_name="Rail", distance=50, units="mm")
+        assert res["isError"] is True
+        assert "Arm:1" in res["message"] and "body geometry did not move" in res["message"]
+
+    def test_a_slide_that_carried_its_body_publishes_how_far(self):
+        motion = SliderJointMotion()
+        arm = self._boxed(_DrivenOccurrence("Arm:1", motion, _slides((1.0, 0.0, 0.0))),
+                          lambda: motion.slideValue)
+        base = _DrivenOccurrence("Base:1", motion, _fixed)
+        _install(FakeJoint("Rail", motion, occurrence_one=arm, occurrence_two=base))
+        out = payload(jd.handler(joint_name="Rail", distance=50, units="mm"))
+        assert out["moved"]["geometry_moved_mm"] == 50.0
+
+    def test_a_spin_over_a_still_corner_is_evidence_not_an_error(self):
+        # A body turning about its own axis keeps its box, so a rotation is never convicted on it.
+        motion = RevoluteJointMotion()
+        rotor = self._boxed(_DrivenOccurrence("Rotor:1", motion, _spins), lambda: 0.0)
+        base = _DrivenOccurrence("Base:1", motion, _fixed)
+        _install(FakeJoint("Pivot", motion, occurrence_one=rotor, occurrence_two=base))
+        out = payload(jd.handler(joint_name="Pivot", angle_deg=90))
+        assert out["moved"]["geometry_moved_mm"] == 0.0
+
+    def test_a_member_whose_corner_does_not_read_carries_no_geometry_key(self):
+        motion = SliderJointMotion()
+        arm = _DrivenOccurrence("Arm:1", motion, _slides((1.0, 0.0, 0.0)))
+        base = _DrivenOccurrence("Base:1", motion, _fixed)
+        _install(FakeJoint("Rail", motion, occurrence_one=arm, occurrence_two=base))
+        out = payload(jd.handler(joint_name="Rail", distance=50, units="mm"))
+        assert "geometry_moved_mm" not in out["moved"]
+
+
 class TestMovedBandBoundary:
     """The band gate itself, over crafted samples - a basis rounded the way the placement record
     rounds it cannot express a rotation this small, so the degree edge is exercised directly."""
@@ -1941,7 +1987,7 @@ class TestMovedBandBoundary:
         after = {"origin": [0.0, 0.0, 0.0], "x_axis": [c, s, 0.0],
                  "y_axis": [-s, c, 0.0], "z_axis": [0.0, 0.0, 1.0]}
         monkeypatch.setattr(jd, "_placement", lambda occ: after)
-        return [(make_occurrence("Rotor:1"), before)]
+        return [(make_occurrence("Rotor:1"), before, None)]
 
     def test_a_rotation_exactly_at_the_band_is_not_a_move(self, monkeypatch):
         rows, readable = jd._moved_rows(self._samples(monkeypatch, 0.01))
@@ -1960,7 +2006,7 @@ class TestMovedBandBoundary:
                    "y_axis": [-0.5, 0.866, 0.0], "z_axis": [0.0, 0.0, 1.0]}
         assert jd._delta_deg(rounded, rounded) == 0.0
         monkeypatch.setattr(jd, "_placement", lambda occ: dict(rounded))
-        rows, readable = jd._moved_rows([(make_occurrence("Rotor:1"), rounded)])
+        rows, readable = jd._moved_rows([(make_occurrence("Rotor:1"), rounded, None)])
         assert rows == [] and readable is True
 
 

@@ -284,7 +284,7 @@ item = Item.create_tool_item(
     # an error, and a name that did not take is published as the annotation reports it beside a
     # rename_warning. The format knobs additionally gate inline (_pmi.apply_note_format).
     verification=Verification(
-        kind="effect",
+        kind="effect", rung="value",
         evidence_test="tests/unit/test_pmi_create.py::TestCreate"
                       "::test_rename_that_does_not_take_is_reported"))
 

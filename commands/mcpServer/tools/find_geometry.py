@@ -269,8 +269,7 @@ def handler(target: str = "", kind: str = "", radius: float = None,
         # Always published, so a reader can tell an absent key from a whole search space.
         "occurrences_walk": walk.method if walk is not None else None,
         "matches": matches,
-        "note": _outputs.produces_block(RETURNS) + "\nA match on a body that is not visible carries "
-        "hidden:true.\n"
+        "note": "A match on a body that is not visible carries hidden:true.\n"
         "A planar face's 'frame' is that plane in world space: the point at local (u, v) is "
         "frame.origin + u*frame.x_world + v*frame.y_world, and frame.origin is the plane's "
         "PARAMETRIC origin while 'position' is the centroid. Feed consumers world coordinates "

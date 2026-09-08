@@ -243,6 +243,7 @@ item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
         kind="inline",
+        rung="value",
         evidence_test="tests/unit/test_model_set_material.py::TestPartialSuccess"
                       "::test_a_swallowed_assignment_on_the_only_body_is_an_error"))
 

@@ -208,10 +208,13 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="destructive", handler=handler,
     run_on_main_thread=True,
+    # deleteMe()'s own answer is the whole gate: whether findFolderById stops resolving a just-deleted
+    # folder - and how long the data model takes to show that - is not measured here.
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_data_delete_folder.py::TestDeleteFolderGate"
-                      "::test_a_declined_delete_is_an_error_not_a_reported_delete")
+                      "::test_a_declined_delete_is_an_error_not_a_reported_delete",
+        rung="exists")
 )
 
 

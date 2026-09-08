@@ -48,7 +48,7 @@ tool = Tool.create_simple(name="design_recompute", description=TOOL_DESCRIPTION)
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="effect",
+        kind="effect", rung="exists",
         evidence_test="tests/unit/test_design_recompute.py::TestRecomputeHandler"
                       "::test_errors_surfaced_by_the_recompute_are_named"))
 

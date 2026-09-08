@@ -11,7 +11,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component
 from . import _common
@@ -377,7 +377,11 @@ fill_tool = (
 )
 fill_item = Item.create_tool_item(tool=fill_tool, write="write", handler=handler,
                                   run_on_main_thread=True,
-                                  postconditions=[_assert.FeatureHealthy()])
+                                  postconditions=[_assert.FeatureHealthy()],
+                                  verification=Verification(
+                                      kind="inline", rung="geometry",
+                                      evidence_test="tests/unit/test_surface_fill.py::TestHonesty"
+                                      "::test_landing_nothing_is_an_error_with_a_rollback"))
 
 
 def register_tool():

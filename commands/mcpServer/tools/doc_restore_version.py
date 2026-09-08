@@ -234,10 +234,13 @@ tool = (
 
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    # 'restored' is the lineage's tip re-read until it passes the number held before promote() -
+    # a version number that advanced, never the promote call's own bool.
     verification=Verification(
         kind="effect",
         evidence_test="tests/unit/test_doc_restore_version.py::TestRestoreHonesty"
-                      "::test_a_settled_equal_tip_is_not_restored"))
+                      "::test_the_pump_gives_up_at_the_bound_with_the_reading_it_last_got",
+        rung="value"))
 
 
 def register_tool():

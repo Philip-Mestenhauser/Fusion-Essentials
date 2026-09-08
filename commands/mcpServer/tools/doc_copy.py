@@ -233,6 +233,12 @@ def handler(document_id: str = "", name: str = "",
             copied.name = want_name
         except Exception as e:
             rename_error = f"copy succeeded but rename to '{want_name}' failed: {e}"
+        else:
+            # The setter answering nothing is not the name landing: read it back off the copy.
+            landed = safe(lambda: copied.name)
+            if landed != want_name:
+                rename_error = (f"copy succeeded but the rename to '{want_name}' did not take - the "
+                                f"copy reads its name back as {landed!r}. Address it by 'copied_id'.")
 
     result = {
     "copied": True,
@@ -303,10 +309,13 @@ tool = (
 )
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    # copied_name/copied_id are read off the DataFile copy() handed back, and a requested 'name' is
+    # read back after the set and disclosed when the copy does not carry it.
     verification=Verification(
         kind="effect",
         evidence_test="tests/unit/test_doc_copy.py::TestCopyDocument"
-                      "::test_rename_failure_surfaces_warning_not_error")
+                      "::test_a_rename_that_silently_does_not_take_is_disclosed",
+        rung="value")
 )
 
 

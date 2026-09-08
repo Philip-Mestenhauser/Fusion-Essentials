@@ -746,8 +746,6 @@ class TestComputeDeferredRead:
         note = _payload(sd.handler(sketch_name="Stale"))["note"]
         assert "isComputeDeferred" in note
         assert "sketch_add_geometry" in note and "sys_execute_script" in note
-        # the handle sentence must go with the handles - it would point at a key that is not there
-        assert "profiles[].handle" not in note
 
     def test_the_xray_still_answers_and_leads_with_the_deferral(self):
         # entities/constraints are not profile-derived, so the X-ray is still worth returning - the
@@ -1623,13 +1621,18 @@ class TestWorldFrame:
         out = read_frame(_frame_sketch(origin=(0.0, 0.0, 1.5)), include_entities=True)
         assert out["frame"]["origin_mm"] == [0.0, 0.0, 15.0]
 
-    def test_both_notes_teach_that_entity_coordinates_are_local(self, read_frame):
+    def test_only_the_xray_claims_entity_coordinates_and_neither_restates_the_xz_mapping(
+            self, read_frame):
+        # The sketch-LOCAL sentence belongs where the entity coordinates are: the overview returns
+        # none (its profile centroids are component-local), so it names the frame's space and stops.
+        # The per-plane axis mapping is in the frame block both notes describe.
         sketch = _frame_sketch()
         light = read_frame(sketch)
         xray = read_frame(sketch, include_entities=True)
+        assert "sketch-LOCAL" in xray["note"] and "sketch-LOCAL" not in light["note"]
         for note in (light["note"], xray["note"]):
-            assert "sketch-LOCAL" in note and "'frame'" in note
-            assert "local +Y is world -Z" in note
+            assert "'frame'" in note
+            assert "world -Z" not in note
 
 
 class TestSketchTextRecords:

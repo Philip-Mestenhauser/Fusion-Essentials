@@ -155,6 +155,7 @@ item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
         kind="inline",
+        rung="geometry",
         evidence_test="tests/unit/test_mesh_separate.py::TestVerification"
                       "::test_no_new_bodies_is_an_error_naming_the_census"))
 

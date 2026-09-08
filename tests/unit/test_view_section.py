@@ -156,6 +156,24 @@ class TestGuards:
         assert "no occurrence matching" in res["message"].lower()
 
 
+class TestActionEnum:
+    """The schema's action vocabulary is _ACTIONS itself, and every member reaches a branch."""
+
+    def test_the_action_enum_matches_the_action_tuple(self):
+        # Catches a HAND-EDITED schema drifting from the tuple the handler guards on: a value the
+        # enum offers and the guard refuses is unreachable, and one it omits is unofferable.
+        assert sv.tool.input_schema["properties"]["action"]["enum"] == list(sv._ACTIONS)
+
+    def test_every_advertised_action_dispatches(self):
+        # A member no `if action ==` branch reads would fall through to the cut path, so the schema
+        # would advertise an action that cuts the model instead of doing what it names.
+        extra = {"cut": {"plane": "xy", "auto_view": False}}
+        for name in sv._ACTIONS:
+            _install()
+            out = _payload(sv.handler(action=name, **extra.get(name, {})))
+            assert out["action"] == name, name
+
+
 # ── plain plane cut ─────────────────────────────────────────────────────────
 
 class TestPlaneCut:

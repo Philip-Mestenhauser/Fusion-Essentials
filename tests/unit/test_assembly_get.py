@@ -248,6 +248,24 @@ class TestGuards:
         res = ap.handler(units="furlong")
         assert res["isError"] is True and "Unknown units" in res["message"]
 
+    def test_the_include_enum_matches_the_slice_tuple(self):
+        # Catches a HAND-EDITED schema drifting from the tuple. It cannot catch a name added to the
+        # tuple itself - both sides read it - which is what the dispatch test below covers.
+        enum = ap.tool.input_schema["properties"]["include"]["items"]["enum"]
+        assert sorted(enum) == sorted(ap._SLICES)
+
+    def test_every_advertised_slice_actually_dispatches(self, kin_design):
+        # A name in _SLICES that no `if ... in inc` branch reads returns the default payload
+        # unchanged: the schema offers a slice the router never builds.
+        kin_design(occs=[_occ("A:1", "A", origin=(1.0, 2.0, 3.0))])
+        for name in ap._SLICES:
+            out = _payload(ap.handler(include=[name]))
+            if name == "poses":
+                # poses has no key of its own - it widens each occurrence row instead.
+                assert "origin" in out["occurrences"][0], name
+            else:
+                assert name in out, name
+
 
 class TestRolledBackTimeline:
     """A rolled-back marker (markerPosition < count) means features after it - downstream joints

@@ -13,7 +13,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
@@ -526,7 +526,15 @@ class _FeatureHealthyHere(_assert.FeatureHealthy):
 
 
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
-                             postconditions=[_FeatureHealthyHere()])
+                             postconditions=[_FeatureHealthyHere()],
+                             # Beside the health gate: each arm counts the REQUESTED target's own
+                             # bodies/sketches/occurrences either side of the import, so where the
+                             # geometry landed is read back off the component that was named.
+                             verification=Verification(
+                                 kind="inline",
+                                 evidence_test="tests/unit/test_doc_insert_import.py::TestSolidImport"
+                                               "::test_an_assembly_landing_as_occurrences_counts_as_landed",
+                                 rung="value"))
 
 
 def register_tool():

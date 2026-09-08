@@ -201,9 +201,9 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_save_as_mesh.py::TestSaveAsMesh"
-         "::test_phantom_body_that_never_lands_bites"))
+         "::test_optional_name_renames_the_mesh"))
 
 
 def register_tool():

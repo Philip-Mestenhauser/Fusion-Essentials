@@ -291,10 +291,13 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler,
     run_on_main_thread=True, enforce_timeout=False,
+    # The destination folder is re-listed for the requested NAME and the saved document's lineage URN
+    # is pumped until it settles - those two reads, not saveAs' own answer, decide what is reported.
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_doc_save_as.py::TestSaveDocumentAs"
-                      "::test_saveas_false_return_is_an_error")
+                      "::test_saveas_returns_false_but_file_landed_recovers_as_ok",
+        rung="value")
 )
 
 

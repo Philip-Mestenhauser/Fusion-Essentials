@@ -260,12 +260,10 @@ TOOL_DESCRIPTION = (
 )
 
 tool = (
-    Tool.create_with_string_input(
-        name="cam_show_toolpath",
-        description=TOOL_DESCRIPTION,
-        input_param_name="action",
-        input_param_description="show | hide | isolate | show_folder | hide_all | list.",
-    )
+    Tool.create_simple(name="cam_show_toolpath", description=TOOL_DESCRIPTION)
+    .add_input_property("action", {"type": "string", "enum": list(_ACTIONS),
+            "description": "What to do with the displayed toolpaths."})
+    .add_required_input("action")
     .add_input_property("operation", {"type": "string",
             "description": "Operation name (show/hide/isolate)."})
     .add_input_property("folder", {"type": "string",
@@ -283,7 +281,8 @@ item = Item.create_tool_item(
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_cam_show_toolpath.py::TestBulbReadBack"
-                      "::test_hide_of_a_stuck_bulb_is_an_error"))
+                      "::test_hide_of_a_stuck_bulb_is_an_error",
+        rung="value"))
 
 
 def register_tool():

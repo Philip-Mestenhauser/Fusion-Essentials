@@ -20,11 +20,18 @@ MAP_BLURB = ("POSTCONDITION kinds (VersionAdvanced/ReferencesFresh/FileLanded/..
              "tool's verify-the-effect once; wired via Item.create_tool_item(postconditions=[...])")
 
 
+# How much a verify-the-effect read proves, weakest first: a COUNT of things, that the effect
+# EXISTS, the right VALUE read back, or the right GEOMETRY changed. A kind declares its rung; the
+# declaration lint holds each write verb to a minimum.
+RUNGS = ("count", "exists", "value", "geometry")
+
+
 class Postcondition:
     """One declared 'this must be true after the mutation' - subclasses implement capture()/verify()."""
 
     name = "postcondition"
     severity = "hard"
+    rung = "exists"
     input_keys = ()        # handler PARAMETER names this kind reads; wrap() checks them
     read_tool = None       # the MCP read that re-reads this ground truth, named in a failed verify
 
@@ -45,6 +52,7 @@ class VersionAdvanced(Postcondition):
     """After a save: the active document is no longer modified."""
 
     name = "version_advanced"
+    rung = "value"
     read_tool = "doc_get"
 
     def capture(self, kwargs):
@@ -74,6 +82,7 @@ class ReferencesFresh(Postcondition):
     """After a reference refresh: no DocumentReference is still out of date after a settle wait."""
 
     name = "references_fresh"
+    rung = "value"
     read_tool = "doc_get"
     # DrawingDocument.isUpToDate reads True while a reference is stale, so the per-reference
     # isOutOfDate walk below is the gate instead.
@@ -115,6 +124,7 @@ class FileLanded(Postcondition):
     needs the pre-write state, which only the handler holds)."""
 
     name = "file_landed"
+    rung = "value"
 
     def __init__(self, key="file_path"):
         self.key = key
@@ -139,6 +149,7 @@ class DeliverablesExist(Postcondition):
     'file_path' - exists non-empty on disk; claiming neither key, or an EMPTY list, fails."""
 
     name = "deliverables_exist"
+    rung = "value"
 
     def __init__(self, list_key="files", path_key="file_path", single_key="file_path"):
         self.list_key = list_key
@@ -230,6 +241,7 @@ class FeatureHealthy(Postcondition):
     cleanly. No timeline or no added item is skipped; a WARNING is folded as evidence."""
 
     name = "feature_healthy"
+    rung = "exists"
     read_tool = "design_get"
 
     def _timeline(self):
@@ -304,6 +316,7 @@ class SketchCurvesChanged(Postcondition):
     pairs each POSITIONALLY with the handler's component-scope kwarg for the same reference."""
 
     name = "sketch_curves_changed"
+    rung = "geometry"
     read_tool = "sketch_get"
 
     def __init__(self, keys=("sketch_name",), scope_keys=()):
@@ -369,6 +382,7 @@ class ChildGeometryMoved(Postcondition):
     'repositioned_occurrences' names the parts that did move."""
 
     name = "child_geometry_moved"
+    rung = "geometry"
     read_tool = "find_geometry"
 
     _MOVE_TOL_CM = 0.01                   # 0.1 mm - below this a "move" is joint-solver noise
@@ -480,6 +494,259 @@ class ChildGeometryMoved(Postcondition):
             return "", {"child_geometry_move_verified": None, "repositioned_occurrences": []}
         return "", {"child_geometry_move_verified": True,
                     "repositioned_occurrences": repositioned}
+
+
+# ── the design-wide body census the surface and pattern kinds read ─────────────────────────────
+
+# Above these sizes the census is not taken: a verify must never park a write behind a walk of
+# every edge in a large assembly (one faces.count read per edge) or every body's area.
+_CENSUS_EDGE_CAP = 20000
+_CENSUS_BODY_CAP = 2000
+_AREA_TOL_CM2 = 1e-6
+_PLACE_TOL_CM = 1e-4
+_ELEMENT_CAP = 400
+
+
+def census_bodies():
+    """Every native BRep body in every component of the active design, or None when a component's
+    body collection did not read."""
+    from ._common import design, all_components, iter_collection
+    d = design()
+    if d is None:
+        return None
+    bodies = []
+    for comp in all_components(d):
+        coll = safe(lambda comp=comp: comp.bRepBodies)
+        if coll is None:
+            return None
+        bodies.extend(b for b in iter_collection(coll) if b is not None)
+    return bodies
+
+
+def free_edge_count(bodies):
+    """How many edges across `bodies` bound exactly ONE face - a surface's open boundary - or None
+    when the walk passes _CENSUS_EDGE_CAP or an edge's face count did not read."""
+    from ._common import counted
+    total, free = 0, 0
+    for b in bodies:
+        edges = safe(lambda b=b: b.edges)
+        n = counted(lambda: edges.count) if edges is not None else None
+        if n is None:
+            return None
+        total += n
+        if total > _CENSUS_EDGE_CAP:
+            return None
+        for i in range(n):
+            faces = counted(lambda i=i: edges.item(i).faces.count)
+            if faces is None:
+                return None
+            if faces == 1:
+                free += 1
+    return free
+
+
+def total_area(bodies):
+    """(sum of body areas in cm2, how many bodies' area did not read), or None over the body cap."""
+    if len(bodies) > _CENSUS_BODY_CAP:
+        return None
+    total, unread = 0.0, 0
+    for b in bodies:
+        a = measured(lambda b=b: b.area, 1.0, 9)
+        if a is None:
+            unread += 1
+        else:
+            total += a
+    return total, unread
+
+
+class FreeEdgesChanged(Postcondition):
+    """After a stitch or unstitch: the design's FREE-edge count moved the declared way - 'sealed'
+    drops it (edge pairs joined), 'opened' raises it (faces set loose)."""
+
+    name = "free_edges_changed"
+    rung = "geometry"
+    read_tool = "model_inspect"
+
+    def __init__(self, direction):
+        if direction not in ("sealed", "opened"):
+            raise ValueError(f"direction must be 'sealed' or 'opened', got {direction!r}")
+        self.direction = direction
+
+    def describe(self) -> str:
+        return f"{self.name}({self.direction})"
+
+    def capture(self, kwargs):
+        bodies = census_bodies()
+        return free_edge_count(bodies) if bodies is not None else None
+
+    def verify(self, kwargs, payload, before):
+        bodies = census_bodies()
+        after = free_edge_count(bodies) if bodies is not None else None
+        if before is None or after is None:
+            return "", {"free_edges_confirmed": False}
+        if self.direction == "sealed":
+            if before == 0:
+                # A stitch takes open surfaces, which carry free edges; a census holding none did
+                # not reach the inputs, so it cannot convict.
+                return "", {"free_edges_confirmed": False}
+            if after >= before:
+                return (f"the stitch reported success but the design's free-edge count did not drop "
+                        f"({before} before, {after} after) - no edge pair was sealed."), {}
+        elif after <= before:
+            return (f"the unstitch reported success but the design's free-edge count did not rise "
+                    f"({before} before, {after} after) - no face was set loose."), {}
+        return "", {"free_edges_before": before, "free_edges_after": after}
+
+
+class SurfaceAreaAdded(Postcondition):
+    """After a surface-creating Edit: the design's total body surface area GREW, so the sheet the
+    payload names exists as measured area."""
+
+    name = "surface_area_added"
+    rung = "geometry"
+    read_tool = "model_inspect"
+
+    def capture(self, kwargs):
+        bodies = census_bodies()
+        return total_area(bodies) if bodies is not None else None
+
+    def verify(self, kwargs, payload, before):
+        bodies = census_bodies()
+        after = total_area(bodies) if bodies is not None else None
+        if before is None or after is None:
+            return "", {"surface_area_confirmed": False}
+        delta = after[0] - before[0]
+        if delta > _AREA_TOL_CM2:
+            return "", {"area_added_cm2": round(delta, 6)}
+        if before[1] or after[1]:
+            return "", {"surface_area_confirmed": False}
+        return (f"the surface was reported created but the design's total body surface area is "
+                f"unchanged ({round(after[0], 6)} cm2) - no surface geometry was added."), {}
+
+
+class PatternElementsPlaced(Postcondition):
+    """After a pattern: the copies sit at DISTINCT places. With ``spacings`` ((quantity key,
+    spacing key, quantity default, spacing default) per grid direction, direction one innermost)
+    the read is the element transforms and the first instance along each direction must be one
+    spacing from the seed; without them it is the result bodies' boxes."""
+
+    # A circular element's transform is NOT its placement (a 4 x 360 deg ring reads 0/180/270/0 deg
+    # while its bodies sit at 0/90/180/270, the seed LAST in feature.bodies), so a ring is read by
+    # its boxes - and softly, since a symmetric body on its own axis patterns onto itself.
+
+    name = "pattern_elements_placed"
+    rung = "geometry"
+    read_tool = "design_get"
+
+    def __init__(self, spacings=(), units_key="units", severity="hard"):
+        self.spacings = tuple(spacings)
+        self.units_key = units_key
+        self.severity = severity
+        keys = [k for spec in self.spacings for k in spec[:2]]
+        self.input_keys = tuple(keys + ([units_key] if self.spacings else []))
+
+    def describe(self) -> str:
+        return f"{self.name}({'|'.join(s[1] for s in self.spacings) or 'bodies'})"
+
+    def _timeline(self):
+        from ._common import design
+        d = design()
+        return safe(lambda: d.timeline) if d else None
+
+    def capture(self, kwargs):
+        tl = self._timeline()
+        return safe(lambda: tl.count) if tl is not None else None
+
+    def _feature(self, payload, before):
+        """The timeline entity added by this call under the payload's feature name, or None."""
+        tl = self._timeline()
+        count = safe(lambda: tl.count) if tl is not None else None
+        name = payload.get("feature")
+        if tl is None or before is None or count is None or not name:
+            return None
+        for i in range(before, count):
+            item = safe(lambda k=i: tl.item(k))
+            if item is not None and safe(lambda: item.name) == name:
+                return safe(lambda: item.entity)
+        return None
+
+    @staticmethod
+    def _transforms(feature):
+        """[(the 16 matrix values, translation)] per element, or None when any did not read."""
+        from ._common import counted
+        els = safe(lambda: feature.patternElements)
+        n = counted(lambda: els.count) if els is not None else None
+        if n is None or n > _ELEMENT_CAP:
+            return None
+        out = []
+        for i in range(n):
+            m = safe(lambda k=i: els.item(k).transform)
+            arr = safe(lambda: m.asArray()) if m is not None else None
+            tr = _xyz(safe(lambda: m.translation)) if m is not None else None
+            if arr is None or tr is None:
+                return None
+            out.append((tuple(round(float(v), 6) for v in arr), tr))
+        return out
+
+    @staticmethod
+    def _body_boxes(feature):
+        """[(min corner + max corner, min corner)] per result body, or None when the feature owns
+        no body (an occurrence pattern) or a box did not read."""
+        from ._common import result_bodies
+        bodies = result_bodies(feature)
+        if not bodies or len(bodies) > _ELEMENT_CAP:
+            return None
+        out = []
+        for b in bodies:
+            bb = safe(lambda b=b: b.boundingBox)
+            lo = _xyz(safe(lambda: bb.minPoint)) if bb is not None else None
+            hi = _xyz(safe(lambda: bb.maxPoint)) if bb is not None else None
+            if lo is None or hi is None:
+                return None
+            out.append((lo + hi, lo))
+        return out
+
+    def _spacing_miss(self, kwargs, placed):
+        """The clause naming the first direction whose landed step is not the requested spacing."""
+        from ._common import scale
+        k = scale(kwargs.get(self.units_key) or "mm")
+        if not k:
+            return ""
+        stride = 1
+        for qkey, skey, qdef, sdef in self.spacings:
+            quantity = int(kwargs.get(qkey) if kwargs.get(qkey) is not None else qdef)
+            spacing = abs(float(kwargs.get(skey) if kwargs.get(skey) is not None else sdef)) * k
+            if quantity > 1 and stride < len(placed):
+                landed = ChildGeometryMoved._dist(placed[0][1], placed[stride][1])
+                if abs(landed - spacing) > _PLACE_TOL_CM:
+                    return (f"the first instance along '{skey}' landed {round(landed * 10.0, 4)} mm "
+                            f"from the seed, not the requested {round(spacing * 10.0, 4)} mm")
+            stride *= max(1, quantity)
+        return ""
+
+    def verify(self, kwargs, payload, before):
+        feature = self._feature(payload, before)
+        if feature is None:
+            placed = None
+        elif self.spacings:
+            placed = self._transforms(feature)
+        else:
+            placed = self._body_boxes(feature)
+        if placed is None:
+            return "", {"pattern_elements_confirmed": False}
+        seen = {}
+        remedy = (" The feature is left in the timeline for inspection - design_delete_feature "
+                  "removes it.")
+        what = "one transform" if self.spacings else "one bounding box"
+        for i, (key, _tr) in enumerate(placed):
+            if key in seen:
+                return (f"the pattern reported {len(placed)} instances but copies {seen[key]} and "
+                        f"{i} share {what} - the copies are STACKED on each other." + remedy), {}
+            seen[key] = i
+        miss = self._spacing_miss(kwargs, placed)
+        if miss:
+            return miss + "." + remedy, {}
+        return "", {"elements_placed": len(placed)}
 
 
 def _verification_failed(post, ex):

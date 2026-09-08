@@ -170,7 +170,7 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_design_set_name.py::TestGuards"
                       "::test_a_silently_refused_set_is_an_error_not_a_false_ok"))
 

@@ -125,7 +125,8 @@ item = Item.create_tool_item(
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_data_switch_hub.py::TestTheReReadDecides"
-                      "::test_silent_noop_setter_reports_honest_error_not_false_success"))
+                      "::test_silent_noop_setter_reports_honest_error_not_false_success",
+        rung="value"))
 
 
 def register_tool():

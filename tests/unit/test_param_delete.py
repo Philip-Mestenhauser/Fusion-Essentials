@@ -68,6 +68,65 @@ class TestDeleteHandler:
         assert res["isError"] is True and "No USER parameter" in res["message"]
 
 
+class PhantomDelete(FakeUserParameter):
+    """deleteMe() answers True and the parameter stays in every read - the swallowed delete the
+    absence re-read exists to catch."""
+
+    def deleteMe(self):
+        return True
+
+
+class UnreadableParameters(FakeUserParameters):
+    """A userParameters collection whose count RAISES after the delete - the walk that declined."""
+
+    def __init__(self, parameters=()):
+        super().__init__(parameters)
+        self._broken = False
+
+    @property
+    def count(self):
+        if self._broken:
+            raise RuntimeError("3 : collection unavailable")
+        return len(self._live())
+
+
+class BreakingCountDelete(FakeUserParameter):
+    """A delete that succeeds and leaves the collection unable to enumerate."""
+
+    def __init__(self, collection, **kwargs):
+        super().__init__(**kwargs)
+        self._collection = collection
+
+    def deleteMe(self):
+        self._collection._broken = True
+        return super().deleteMe()
+
+
+class TestAbsenceReRead:
+    def test_a_survivor_after_a_true_delete_is_an_error(self, monkeypatch):
+        p = PhantomDelete(name="PartX", expression="10 mm")
+        up = FakeUserParameters([p])
+        _stub_design(monkeypatch, _design(up, make_timeline(), all_params=[p]))
+        res = params.handler(name="PartX")
+        assert res["isError"] is True
+        assert "still in the design's user parameters" in res["message"]
+
+    def test_a_gone_parameter_is_a_success(self, monkeypatch):
+        p = FakeUserParameter(name="PartX", expression="10 mm")
+        up = FakeUserParameters([p])
+        _stub_design(monkeypatch, _design(up, make_timeline(), all_params=[p]))
+        out = _payload(params.handler(name="PartX"))
+        assert out["deleted"] is True and up.itemByName("PartX") is None
+
+    def test_an_unreadable_list_is_unverified_not_a_confirmed_delete(self, monkeypatch):
+        up = UnreadableParameters()
+        p = BreakingCountDelete(up, name="PartX", expression="10 mm")
+        up._parameters.append(p)
+        _stub_design(monkeypatch, _design(up, make_timeline(), all_params=[p]))
+        res = params.handler(name="PartX")
+        assert res["isError"] is True and "UNVERIFIED" in res["message"]
+
+
 class TestDeleteHandlerExtra:
     def test_delete_me_false_reported(self, monkeypatch):
         p = FakeUserParameter(name="PartX", expression="10 mm", delete_ok=False)

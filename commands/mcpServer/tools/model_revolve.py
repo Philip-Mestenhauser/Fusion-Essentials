@@ -14,7 +14,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component, root_body_advisory
 from . import _common
@@ -264,7 +264,12 @@ revolve_tool = (
     .strict_schema()
 )
 revolve_item = Item.create_tool_item(tool=revolve_tool, write="write", handler=handler, run_on_main_thread=True,
-                                     postconditions=[_assert.FeatureHealthy()])
+                                     postconditions=[_assert.FeatureHealthy()],
+                                     verification=Verification(
+                                         kind="inline", rung="geometry",
+                                         evidence_test="tests/unit/test_model_revolve.py"
+                                         "::TestCutMovesMaterial"
+                                         "::test_cut_that_moves_no_volume_is_an_error"))
 
 
 def register_tool():

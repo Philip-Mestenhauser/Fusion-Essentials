@@ -145,13 +145,21 @@ def handler(template_name: str = "", operations: str = "",
         return error(f"Failed to save the template: {e}")
     if not new_url:
         return error("importTemplate returned no URL (save may have failed).")
-    if safe(lambda: lib.templateAtURL(new_url)) is None:
+    stored = safe(lambda: lib.templateAtURL(new_url))
+    if stored is None:
         return error("importTemplate returned a URL but no template loads back from it - the save "
                      "did not land.")
+    # The name is read off the STORED template, the same read cam_delete_template confirms an asset's
+    # contents by: the in-memory object's own .name says what was written, not what was kept.
+    landed = (safe(lambda: stored.name) or "").strip()
+    if landed.lower() != template_name.lower():
+        return error(f"The template was stored at {safe(lambda: new_url.toString())} but it loads "
+                     f"back as '{landed}', not '{template_name}' - the saved template is not the one "
+                     "this call named. Re-read with cam_get(include=['templates']).")
 
     return ok({
         "saved": True,
-        "template": safe(lambda: template.name),
+        "template": landed,
         "operation_count": len(selected),
         "operations": [safe(lambda: o.name) for o in selected],
         "location": location,
@@ -192,7 +200,8 @@ item = Item.create_tool_item(
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_cam_save_template.py::TestSaveTemplateRename"
-                      "::test_saved_template_that_does_not_load_back_bites")
+                      "::test_a_stored_template_under_another_name_is_an_error",
+        rung="value")
 )
 
 

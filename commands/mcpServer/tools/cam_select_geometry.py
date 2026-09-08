@@ -980,8 +980,9 @@ item = Item.create_tool_item(
     # each {which}Height_mode/_offset back and heights_set publishes those read-backs.
     verification=Verification(
         kind="inline",
-        evidence_test="tests/unit/test_cam_select_geometry.py::TestCurveSelection"
-                      "::test_zero_selections_is_error"))
+        evidence_test="tests/unit/test_cam_select_geometry.py::TestHoles"
+                      "::test_a_hole_set_that_keeps_fewer_faces_than_assigned_is_an_error",
+        rung="value"))
 
 
 def register_tool():

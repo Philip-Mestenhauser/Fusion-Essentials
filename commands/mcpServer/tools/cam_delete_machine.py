@@ -255,7 +255,8 @@ item = Item.create_tool_item(
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_cam_create_machine.py::TestDeleteMachineEffect"
-                      "::test_an_asset_still_listed_after_a_true_delete_is_an_error"))
+                      "::test_an_asset_still_listed_after_a_true_delete_is_an_error",
+        rung="value"))
 
 
 def register_tool():

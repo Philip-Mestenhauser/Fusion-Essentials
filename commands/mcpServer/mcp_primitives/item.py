@@ -12,10 +12,11 @@ from .tool import Tool
 class Verification:
     """How a WRITE tool's effect is verified, where no kernel postcondition captures it.
 
-    A closed classification passed to ``Item.create_tool_item(verification=...)``: mutually
-    exclusive with ``postconditions=[...]`` (the kernel declaration is the stronger one) and
-    refused on a read, which mutates nothing to verify. It is DATA - the reasoning lives in the
-    evidence test each declaration names, never in prose here.
+    A closed classification passed to ``Item.create_tool_item(verification=...)``, refused on a
+    read, which mutates nothing to verify. Beside ``postconditions=[...]`` only an inline or
+    effect kind that declares a ``rung`` may stand: the kernel kinds gate the call, and the
+    declaration says how much more the handler's own read-back proves. It is DATA - the
+    reasoning lives in the evidence test each declaration names, never in prose here.
 
       inline    the handler re-reads the requested effect and errors on a mismatch
       effect    the success payload is built from the live post-write state
@@ -27,11 +28,17 @@ class Verification:
     ``evidence_test`` is a pytest node id whose test proves the classification's obligation;
     ``poller`` names the read tool a deferred payload sends the caller to; ``evidence_receipt``
     points at the live receipt row for an effect no in-process test can observe; ``defect_id`` is
-    the ledger id a gap carries. tests/lints/test_postconditions_declared.py resolves each of them
-    against the test tree, the registry and the receipt.
+    the ledger id a gap carries. ``rung`` is how much the read-back proves - count, exists, value
+    or geometry (the _assert.RUNGS ladder) - declared by an inline, effect or deferred
+    verification so the lint can hold the write's verb to a minimum.
+    tests/lints/test_postconditions_declared.py resolves each of them against the test tree, the
+    registry and the receipt.
     """
 
     KINDS = ("inline", "effect", "deferred", "external", "dynamic", "gap")
+    RUNGS = ("count", "exists", "value", "geometry")
+    # The kinds whose handler reads an effect back, and so can say how much the read proves.
+    _RUNG_KINDS = ("inline", "effect", "deferred")
 
     _FIELD_NAMES = ("evidence_test", "poller", "evidence_receipt", "defect_id")
     # kind -> (fields it REQUIRES, fields it PERMITS)
@@ -44,12 +51,17 @@ class Verification:
         "gap": (("defect_id",), ("defect_id",)),
     }
 
-    __slots__ = _FIELD_NAMES + ("kind",)
+    __slots__ = _FIELD_NAMES + ("kind", "rung")
 
     def __init__(self, kind: str, evidence_test: str = None, poller: str = None,
-                 evidence_receipt: str = None, defect_id: str = None):
+                 evidence_receipt: str = None, defect_id: str = None, rung: str = None):
         if kind not in self.KINDS:
             raise ValueError(f"verification kind must be one of {list(self.KINDS)}, got {kind!r}")
+        if rung is not None and rung not in self.RUNGS:
+            raise ValueError(f"verification rung must be one of {list(self.RUNGS)}, got {rung!r}")
+        if rung is not None and kind not in self._RUNG_KINDS:
+            raise ValueError(f"verification kind '{kind}' reads no effect back, so it declares no rung")
+        self.rung = rung
         given = dict(zip(self._FIELD_NAMES,
                          (evidence_test, poller, evidence_receipt, defect_id)))
         required, permitted = self._FIELDS[kind]
@@ -75,6 +87,8 @@ class Verification:
     def __repr__(self) -> str:
         parts = [f"kind={self.kind!r}"] + [f"{f}={getattr(self, f)!r}"
                                            for f in self._FIELD_NAMES if getattr(self, f)]
+        if self.rung:
+            parts.append(f"rung={self.rung!r}")
         return f"Verification({', '.join(parts)})"
 
 
@@ -146,10 +160,12 @@ class Item:
             if not isinstance(verification, Verification):
                 raise ValueError(f"verification on '{tool.name}' must be a Verification kind, got "
                                  f"{type(verification)}")
-            if postconditions:
-                raise ValueError(f"'{tool.name}' declares postconditions AND a verification "
-                                 "classification - the kernel declaration is the stronger one and "
-                                 "the two are mutually exclusive")
+            if postconditions and not (verification.kind in ("inline", "effect")
+                                       and verification.rung):
+                raise ValueError(f"'{tool.name}' declares postconditions AND a verification - "
+                                 "beside kernel kinds only an inline or effect verification that "
+                                 "declares a rung may stand, saying how much more the handler's "
+                                 "own read-back proves")
             ann = tool.annotations
             if ann is None or ann.read_only is not False:
                 raise ValueError(f"verification declared on a non-write tool '{tool.name}' - a "

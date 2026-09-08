@@ -391,10 +391,9 @@ TOOL_DESCRIPTION = (
 
 tool = (
     Tool.create_simple(name="sys_get_preferences", description=TOOL_DESCRIPTION)
-    .add_input_property("include", {"type": ["array", "string"],
-            "description": "Groups to pull in full (a list or comma-string): general | display | "
-                           "products | units_defaults | graphics | compatibility | api | network | "
-                           "material | grid."})
+    .add_input_property("include", {"type": "array",
+            "items": {"type": "string", "enum": list(GROUP_KEYS)},
+            "description": "Groups to pull in full; omit for the default projection."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

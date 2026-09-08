@@ -13,7 +13,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component
 from . import _common
@@ -391,7 +391,12 @@ move_tool = (
 )
 move_item = Item.create_tool_item(tool=move_tool, write="write", handler=handler,
                                   run_on_main_thread=True,
-                                  postconditions=[_assert.FeatureHealthy()])
+                                  postconditions=[_assert.FeatureHealthy()],
+                                  verification=Verification(
+                                      kind="inline", rung="geometry",
+                                      evidence_test="tests/unit/test_model_move.py"
+                                      "::TestExpectedMagnitude"
+                                      "::test_a_sub_epsilon_shift_is_still_nothing_moved"))
 
 
 def register_tool():

@@ -509,9 +509,9 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="effect",
-        evidence_test="tests/unit/test_sketch_dimension.py::TestDrivingFlag"
-                      "::test_the_payload_reports_the_dimension_not_the_request"))
+        kind="effect", rung="geometry",
+        evidence_test="tests/unit/test_sketch_dimension.py::TestSolvedReadBack"
+                      "::test_a_line_reports_its_span_midpoint_and_length"))
 
 
 def register_tool():

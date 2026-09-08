@@ -133,9 +133,17 @@ class TestSaveTemplateRename:
     def _wire_full_save(self, monkeypatch, template_obj):
         cam = make_cam(_setup("S", ["Face1"]))
         monkeypatch.setattr(ct, "get_cam", lambda: (cam, None))
+        # The asset loads back the template that was stored in it - what a template library does, and
+        # what lets the save's name read-back mean anything.
+        held = {}
+
+        def _import(t, dest):
+            held["template"] = t
+            return _Url("root://T1.f3dhsm-template")
+
         lib = SimpleNamespace(urlByLocation=lambda loc: "root://", childFolderURLs=lambda u: [],
-                              importTemplate=lambda t, d: _Url("root://T1.f3dhsm-template"),
-                              templateAtURL=lambda u: _FakeTemplate("T1"))
+                              importTemplate=_import,
+                              templateAtURL=lambda u: held.get("template"))
         monkeypatch.setattr(ct, "_template_library", lambda: (lib, None))
         import adsk.cam
         adsk.cam.Operation.cast = staticmethod(lambda x: x)
@@ -170,3 +178,21 @@ class TestSaveTemplateRename:
             template_name="Ghost", operations="Face1", setup="S")
         assert res["isError"] is True
         assert "did not land" in res["message"]
+
+    def test_a_stored_template_under_another_name_is_an_error(self, monkeypatch):
+        # THE BITE: something loads back from the url, so the load-back gate above passes - but it
+        # is not the template this call named, and 'template' would publish the name that was WRITTEN.
+        t = _FakeTemplate("old")
+        lib = self._wire_full_save(monkeypatch, t)
+        lib.templateAtURL = lambda u: _FakeTemplate("Somebody Else")
+        res = ct.handler(template_name="Slot Mill", operations="Face1", setup="S")
+        assert res["isError"] is True
+        assert "'Somebody Else'" in res["message"] and "'Slot Mill'" in res["message"]
+
+    def test_the_published_name_is_the_one_the_stored_template_reads(self, monkeypatch):
+        # A case-only difference is the SAME template, and what is published is the stored spelling.
+        t = _FakeTemplate("old")
+        lib = self._wire_full_save(monkeypatch, t)
+        lib.templateAtURL = lambda u: _FakeTemplate("Slot MILL")
+        out = _payload(ct.handler(template_name="slot mill", operations="Face1", setup="S"))
+        assert out["template"] == "Slot MILL"

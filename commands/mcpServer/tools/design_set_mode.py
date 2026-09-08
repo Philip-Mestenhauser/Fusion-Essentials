@@ -12,6 +12,8 @@ from ._common import ok, error
 from . import _common
 from . import _inputs
 
+_TARGETS = (_inputs.MODE_PARAMETRIC, _inputs.MODE_DIRECT)
+
 
 def handler(target: str = "", confirm_history_loss: bool = False) -> dict:
     """Convert the active design between parametric and direct - idempotent, and refusing the
@@ -21,8 +23,8 @@ def handler(target: str = "", confirm_history_loss: bool = False) -> dict:
         return error("No active design. Create or open a document first (see doc_new).")
 
     tgt = (target or "").strip().lower()
-    if tgt not in (_inputs.MODE_PARAMETRIC, _inputs.MODE_DIRECT):
-        return error("'target' must be one of: parametric, direct (got "
+    if tgt not in _TARGETS:
+        return error(f"'target' must be one of: {', '.join(_TARGETS)} (got "
                      f"'{target}').")
 
     current = _inputs.current_design_type(design)
@@ -78,8 +80,8 @@ tool = (
     Tool.create_simple(
         name="design_set_mode",
         description=TOOL_DESCRIPTION)
-    .add_input_property("target", {"type": "string",
-            "description": "parametric | direct (required)."})
+    .add_input_property("target", {"type": "string", "enum": list(_TARGETS),
+            "description": "The modelling mode to convert the design to."})
     .add_input_property("confirm_history_loss", {"type": "boolean",
             "description": "Required true to go parametric->direct "
             "(discards the timeline). Ignored otherwise."})
@@ -89,7 +91,7 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="destructive", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="effect",
+        kind="effect", rung="value",
         evidence_test="tests/unit/test_design_set_mode.py::TestSetMode"
                       "::test_history_discarded_rides_on_the_read_back_not_the_request"))
 

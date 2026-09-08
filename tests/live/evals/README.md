@@ -68,8 +68,9 @@ report) and is prepended to every prompt identically, so the scenario files hold
 ## Watching a run
 
 The proctor prints a heartbeat each minute with the tool-call count. No tool call for `EVAL_STALL_S`
-seconds (default 300) kills the executor's process tree and records the run as stalled. A run is
-never retried by the proctor; run it again.
+seconds (default 600; a foundation-sized brief pauses over six minutes to plan before it builds)
+kills the executor's process tree and records the run as stalled. A run is never retried by the
+proctor; run it again.
 
 Every run bills the account the CLI is signed into, on the model you pass, and each executor turn
 carries the whole tool schema (about 135k cached input tokens). A long run is a real spend: run one

@@ -154,7 +154,8 @@ item = Item.create_tool_item(
     verification=Verification(
         kind="effect",
         evidence_test="tests/unit/test_cam_set_nc_comment.py::TestStuckParameter"
-                      "::test_a_stuck_comment_is_an_error_not_a_reported_success"))
+                      "::test_a_stuck_comment_is_an_error_not_a_reported_success",
+        rung="value"))
 
 
 def register_tool():

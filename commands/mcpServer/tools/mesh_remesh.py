@@ -14,7 +14,7 @@ from ._common import error, ok, safe
 from . import _common
 from ._common import target_component as _target_component
 from . import _inputs
-from ._mesh_common import _result_mesh_of, _slow_note, _tri_count
+from ._mesh_common import _area_volume, _mesh_moved, _result_mesh_of, _slow_note, _tri_count
 from ._design_common import run_in_base_feature
 
 app = adsk.core.Application.get()
@@ -32,6 +32,9 @@ def handler(mesh: str = "", density: float = 0.0) -> dict:
         return error(merr)
 
     before_tri = _tri_count(mb)
+    # A retriangulation can land with the triangle count flat, so the mesh's own area and volume are
+    # read as a second, independent signal.
+    before_av = _area_volume(mb)
     comp = _common.census_host(mb, _target_component(design))
     feats = safe(lambda: comp.features.meshRemeshFeatures)
     if feats is None:
@@ -90,13 +93,17 @@ def handler(mesh: str = "", density: float = 0.0) -> dict:
     bf_name = result["base_feature_name"]
     result_mesh = _result_mesh_of(feat, mb) if feat else mb
     after_tri = _tri_count(result_mesh)
+    after_av = _area_volume(result_mesh)
+    geometry_moved = _mesh_moved(before_av, after_av)
     out = {
     "remeshed": True,
     "changed": (after_tri != before_tri) if (before_tri and after_tri is not None) else None,
+    "geometry_moved": geometry_moved,
     "name": safe(lambda: result_mesh.name),
     "handle": safe(lambda: result_mesh.entityToken),
-    "before": {"triangle_count": before_tri},
-    "after": {"triangle_count": after_tri},
+    "before": {"triangle_count": before_tri, "area_cm2": before_av[0],
+               "volume_cm3": before_av[1]},
+    "after": {"triangle_count": after_tri, "area_cm2": after_av[0], "volume_cm3": after_av[1]},
     "feature": safe(lambda: feat.name) if feat else None,
     "design_mode": design_mode,
     "base_feature": bf_name,
@@ -104,8 +111,11 @@ def handler(mesh: str = "", density: float = 0.0) -> dict:
     if result.get("density_applied") is not None:
         out["density_applied"] = result["density_applied"]
     if out["changed"] is False:
-        out["note"] = (f"Triangle count is unchanged ({before_tri}) - an identical retriangulation "
-                       "is unlikely; verify the mesh with model_inspect before trusting the remesh.")
+        second = {True: "but its area or volume MOVED, so the retriangulation landed",
+                  False: "and its area and volume did not move either",
+                  None: "and its area/volume could not be read as a second check"}[geometry_moved]
+        out["note"] = (f"Triangle count is unchanged ({before_tri}) {second}. Read the mesh back "
+                       "with mesh_get before building on it.")
     extra = [_common.null_feature_note(design, feat, bf_name, "remesh") if feat is None else None,
              _slow_note(before_tri)]
     for note in (n for n in extra if n):
@@ -129,8 +139,9 @@ item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
         kind="effect",
+        rung="geometry",
         evidence_test="tests/unit/test_mesh_remesh.py::TestMeshRemesh"
-          "::test_unchanged_count_is_flagged_not_asserted"))
+          "::test_a_flat_count_is_judged_on_the_meshs_own_area_and_volume"))
 
 
 def register_tool():

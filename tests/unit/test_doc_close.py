@@ -216,6 +216,56 @@ class TestCloseActedOn:
         assert "discarding unsaved changes" not in note   # nothing was closed, with or without save
 
 
+class _StaysValid(FakeFusionDocument):
+    """A document whose close() answers true and leaves the wrapper reading isValid True - the one
+    shape a close judged by its own bool reports as a closed document."""
+    def close(self, save_changes=False):
+        self._closes.append(bool(save_changes))
+        return True
+
+
+class _MuteValidity(FakeFusionDocument):
+    """A closed wrapper whose isValid will not READ at all - neither closed nor open."""
+    @property
+    def isValid(self):
+        raise RuntimeError("3 : cloud read failed")
+
+
+class TestCloseReadBack:
+    """close() answering true is a CLAIM; the wrapper's own isValid is the evidence."""
+
+    def test_a_close_that_leaves_the_document_valid_is_an_error(self, install_app):
+        d = _StaysValid(name="PartA")
+        install_app([d], active=d)
+        res = dm.handler()
+        assert res["isError"] is True
+        assert "PartA" in res["message"] and "isValid=true" in res["message"]
+
+    def test_a_close_that_invalidates_the_wrapper_is_a_clean_close(self, install_app):
+        d = _CloseableDoc("PartA")
+        install_app([d], active=d)
+        out = _payload(dm.handler())
+        assert out["closed"] == ["PartA"] and out["close_unconfirmed"] == []
+
+    def test_an_unreadable_isValid_is_unconfirmed_not_a_failure(self, install_app):
+        # The flag did not answer, so this is neither a closed document nor an open one: the close
+        # stands and the payload says it was not confirmed.
+        d = _MuteValidity(name="Scratch")
+        install_app([d], active=d)
+        out = _payload(dm.handler())
+        assert out["closed"] == ["Scratch"]
+        assert out["close_unconfirmed"] == ["Scratch"]
+        assert "UNCONFIRMED" in out["note"]
+
+    def test_one_stuck_close_among_several_is_reported_beside_the_ones_that_took(self, install_app):
+        good = _CloseableDoc("Good")
+        stuck = _StaysValid(name="Stuck")
+        install_app([good, stuck], active=good)
+        out = _payload(dm.handler(close_all=True))
+        assert out["closed"] == ["Good"]
+        assert out["errors"] == [{"Stuck": dm._STILL_VALID}]
+
+
 class TestCloseAllSkipsDeadProxies:
     def test_already_invalid_proxy_is_skipped_not_errored(self, install_app):
         good = _CloseableDoc("Good")

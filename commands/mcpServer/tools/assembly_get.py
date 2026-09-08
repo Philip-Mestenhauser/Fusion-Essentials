@@ -418,8 +418,9 @@ TOOL_DESCRIPTION = (
 tool = (
     Tool.create_simple(name="assembly_get", description=TOOL_DESCRIPTION)
     .add_input_property(*_inputs.units_property(description="Display units for positions/sizes."))
-    .add_input_property("include", {"type": ["array", "string"],
-            "description": "Deeper slices: poses, all_occurrences, joint_origins, relations, contacts. Omit for the light kinematic state."})
+    .add_input_property("include", {"type": "array",
+            "items": {"type": "string", "enum": list(_SLICES)},
+            "description": "Deeper slices to add; omit for the light kinematic state."})
     .add_input_property("include_joints", {"type": "boolean", "description": "List joints + annotate occurrences with their joints (default true)."})
     .add_input_property("max_occurrences", {"type": "integer", "description": f"Cap on the 'occurrences' array (default {_MAX_OCCURRENCES_DEFAULT})."})
     .add_input_property("max_joints", {"type": "integer", "description": f"Cap on the 'joints' array (default {_MAX_JOINTS_DEFAULT})."})

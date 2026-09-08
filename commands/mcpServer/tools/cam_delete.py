@@ -76,7 +76,8 @@ item = Item.create_tool_item(
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_cam_delete.py::TestDelete"
-                      "::test_a_lying_deleteme_true_is_caught_by_the_re_resolve"))
+                      "::test_a_lying_deleteme_true_is_caught_by_the_re_resolve",
+        rung="value"))
 
 
 def register_tool():

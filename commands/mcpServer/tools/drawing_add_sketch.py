@@ -234,7 +234,7 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_drawing_add_sketch.py::TestHonesty"
                       "::test_an_entity_handed_back_while_the_count_stands_still_is_an_error"))
 

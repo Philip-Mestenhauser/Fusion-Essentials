@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 187  |  **description breadcrumbs:** 400  |  **note/error breadcrumbs:** 470
+**Tools:** 187  |  **description breadcrumbs:** 400  |  **note/error breadcrumbs:** 472
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -31,6 +31,7 @@ close orphans, factor duplicated guards into shared helpers.
 - **5x** across 5 module(s): "is not available on this Fusion version."
 - **4x** across 1 module(s): "Edits already applied before the failure:"
 - **4x** across 4 module(s): "No active design (open a document with design geometry)."
+- **4x** across 4 module(s): "deleteMe() reported success for '"
 - **4x** across 1 module(s): "setMotionData reported success on '"
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
@@ -39,13 +40,13 @@ close orphans, factor duplicated guards into shared helpers.
 - `view_screenshot`  <- 42  (desc 13, note 29)
 - `design_delete_feature`  <- 38  (desc 17, note 21)
 - `design_get`  <- 38  (desc 13, note 25)
-- `sketch_get`  <- 31  (desc 13, note 18)
 - `cam_get`  <- 30  (desc 17, note 13)
+- `sketch_get`  <- 30  (desc 13, note 17)
 - `data_get`  <- 26  (desc 12, note 14)
 - `doc_open`  <- 24  (desc 7, note 17)
 - `assembly_get`  <- 23  (desc 10, note 13)
 - `sketch_create`  <- 23  (desc 8, note 15)
-- `model_inspect`  <- 20  (desc 4, note 16)
+- `model_inspect`  <- 19  (desc 4, note 15)
 
 ## The guidance surface (every note the agent can be told)
 
@@ -272,12 +273,15 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' reads an unchanged transform - it did not move. A grounded/jointed occurrence can snap back: free it (assembly_ground false) or pose it through its joint (joint_drive).
 - ' was moved but its transform could not be read
 - the change, so the move is UNCONFIRMED - nothing here confirms the occurrence actually moved, and it may have snapped back. Re-read the position with assembly_get (occurrence origin) or model_inspect.
+- ' reads a CHANGED transform but its body geometry did NOT move - the reposition did not reach the part, and the transform it now reads is a claim nothing carried out. A pattern/mirror FEATURE re-de...
 
 ### `assembly_rigid_group`
 - No active design with components.
 - A rigid group needs at least two occurrences.
 - Rigid group creation returned nothing.
 - ' was created but reports only
+- - it locks parts that were not asked for. Remove it with assembly_edit_relations(kind='rigid_group', name='
+- ', action='delete') and retry.
 - Occurrences locked together as a rigid group.
 - Could not create rigid group:
 
@@ -649,6 +653,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not resolve the '
 - importTemplate returned no URL (save may have failed).
 - importTemplate returned a URL but no template loads back from it - the save did not land.
+- The template was stored at
+- but it loads back as '
+- ' - the saved template is not the one this call named. Re-read with cam_get(include=['templates']).
 - New template saved. Verify with cam_get(include=['templates']) (which reports each template's asset URL). This tool always creates a NEW template; overwriting an existing one is a separate capability.
 - Could not read operations in '
 - Could not build template from operations:
@@ -1169,7 +1176,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `design_set_mode`
 - The design mode does not read back after the assignment, so the conversion is UNCONFIRMED - 'converted' and 'history_discarded' are null. Re-read with design_get(include=['mode']) to see what the d...
 - No active design. Create or open a document first (see doc_new).
-- 'target' must be one of: parametric, direct (got '
+- 'target' must be one of:
 - Converting to DIRECT destroys the timeline and all design history (irreversible). Re-call with confirm_history_loss=true to proceed.
 - Re-run design_get(include=['mode']) to see the updated capability map.
 - Assignment did not take - design is still
@@ -1532,7 +1539,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `drawing_get`
 - export_index is 1-based - the address drawing_export's sheet_range and drawing_edit_sheet take. Sheet width/height are ALWAYS mm; a custom-size sheet reads sheet_size null. include=['views'] adds p...
 - Unknown include value(s):
-- . This read offers: views.
 - The active document is not a 2D drawing. Activate the drawing document first (doc_activate), then read it.
 
 ### `drawing_insert_image`
@@ -1674,6 +1680,9 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - did NOT land the commanded value -
 - . The assignments made before the failure (
 - ) were accepted; no value was read back here, so where the mechanism stands now is not known from this receipt. Read the pose back with assembly_get.
+- ' moved the placement of '
+- mm but its body geometry did not move (
+- mm) - the transform is a claim, the body corner is the evidence. Read the pose back with assembly_get.
 
 ### `joint_edit`
 - Joint edited + recomputed, but the timeline still has errored feature(s) (
@@ -1835,7 +1844,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 
 ### `mesh_remesh`
 - Triangle count is unchanged (
-- ) - an identical retriangulation is unlikely; verify the mesh with model_inspect before trusting the remesh.
+- . Read the mesh back with mesh_get before building on it.
 - No active design. Open or create a document first (see doc_new).
 - This design has no meshRemeshFeatures collection (mesh remesh unavailable here).
 - meshRemeshFeatures.createInput returned nothing.
@@ -1960,7 +1969,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - scope(s) did NOT confirm closed (
 - ) - each may still be OPEN, which keeps the design reading direct and the timeline inaccessible. Their handles are KEPT (an open base feature can be reached no other way), so model_base_feature(act...
 - No active design. Create or open a document first (see doc_new).
-- 'action' must be one of: start, finish (got '
+- 'action' must be one of:
 - Base-feature edit OPEN - geometry from subsequent tool calls lands in this scope. While it is open the design READS as 'direct' and the timeline is inaccessible; that reverts on finish. ALWAYS pair...
 - This component has no baseFeatures collection - cannot create a base feature here.
 - BaseFeatures.add() returned nothing - could not create a base feature.
@@ -2481,9 +2490,13 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - . Re-point or remove those first.
 - Fusion refused to delete '
 - ' (it may be in use).
+- deleteMe() reported success for '
+- ' but the design's user parameters would not re-read, so whether it is gone is UNVERIFIED - a list that did not read is not a list without it. Re-read with param_get before deleting more.
+- deleteMe() reported success but '
+- ' is still in the design's user parameters - it was NOT deleted. Nothing was rolled back; re-read with param_get to see what is actually there.
 - ' introduced a timeline error (
 - ). The deletion stands - undo in Fusion if needed.
-- User parameter deleted; timeline verified (no new errors).
+- User parameter deleted - the name is gone from the design's user parameters, and the timeline walks clean (no new errors).
 
 ### `param_get`
 - No active design (open a document with design geometry).
@@ -2708,7 +2721,6 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - ' for 'target_sketch'. Available:
 
 ### `sketch_create`
-- On the xz origin plane in particular the frame is NOT world-aligned: local +Y maps to world -Z (read the frame's own +Y axis for the exact per-plane axis directions). sketch_get(sketch_name) return...
 - Draw on it with sketch_add_geometry (target this sketch by name).
 - No active design. Create or open a document first (see doc_new).
 - Sketch creation returned nothing on

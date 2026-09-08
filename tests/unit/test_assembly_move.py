@@ -11,7 +11,7 @@ import pytest
 
 from conftest import (BRepEdge, FakeInfiniteLine3D, FakeJoint, FakeMatrix3D, FakeOccurrence,
                       FakePoint, FakeVector3D, Line3D, MakeComp, MakeDesign, _NamedCollection,
-                      install, load_tool, payload)
+                      install, load_tool, make_bbox, payload)
 
 import adsk.core
 import adsk.fusion
@@ -69,6 +69,51 @@ def wire():
         design = install(asm, MakeDesign(comp=MakeComp(occurrences=occs), tokens=tokens))
         return design, occs
     return build
+
+
+class _BodyCarryingOccurrence(FakeOccurrence):
+    """An instance whose world body box FOLLOWS its placement (or, with carries=False, one whose
+    transform moves while the body geometry stays exactly where it was)."""
+
+    def __init__(self, carries=True, **kw):
+        super().__init__(**kw)
+        self._carries = carries
+
+    @property
+    def boundingBox(self):
+        t = self.transform2.translation if self._carries else None
+        origin = (t.x, t.y, t.z) if t is not None else (0.0, 0.0, 0.0)
+        return make_bbox(origin, tuple(c + 1.0 for c in origin))
+
+
+class TestBodyGeometryCarried:
+    """The transform is a CLAIM; the part's own body corner is the EVIDENCE."""
+
+    def test_a_transform_the_body_geometry_did_not_follow_bites(self, wire):
+        wire(_BodyCarryingOccurrence(carries=False, path="Block:1",
+                                     component=MakeComp(name="Block"),
+                                     transform=FakeMatrix3D(), transform2=FakeMatrix3D()))
+        res = asm.handler(occurrence="Block:1", dx=10)
+        assert res["isError"] is True
+        assert "body geometry did NOT move" in res["message"]
+
+    def test_a_body_that_travelled_publishes_how_far_it_went(self, wire):
+        wire(_BodyCarryingOccurrence(path="Block:1", component=MakeComp(name="Block"),
+                                     transform=FakeMatrix3D(), transform2=FakeMatrix3D()))
+        out = payload(asm.handler(occurrence="Block:1", dx=10))
+        assert out["geometry_moved_mm"] == 10.0
+
+    def test_a_rotation_only_move_is_not_judged_by_the_box(self, wire):
+        # a symmetric part turned about its own axis keeps its world box - no verdict, no refusal
+        wire(_BodyCarryingOccurrence(carries=False, path="Block:1",
+                                     component=MakeComp(name="Block"),
+                                     transform=FakeMatrix3D(), transform2=FakeMatrix3D()))
+        out = payload(asm.handler(occurrence="Block:1", rotate_deg=90))
+        assert "geometry_moved_mm" not in out
+
+    def test_an_instance_with_no_readable_box_is_not_refused(self, wire):
+        wire()                                  # the plain fake carries no bounding box at all
+        assert payload(asm.handler(occurrence="Block:1", dx=10))["moved"] is True
 
 
 class TestMove:

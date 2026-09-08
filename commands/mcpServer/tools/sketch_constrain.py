@@ -923,7 +923,7 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_sketch_constrain.py::TestSingleLine"
                       "::test_a_silently_declined_fix_is_an_error_not_a_false_success"))
 

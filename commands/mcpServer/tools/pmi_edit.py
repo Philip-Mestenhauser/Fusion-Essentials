@@ -443,7 +443,7 @@ item = Item.create_tool_item(
     # set_values / convert_imported gate their own return and publish the object's read-back; every
     # other action compares its re-read to what it asked for and errors on a mismatch.
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_pmi_edit.py::TestSetPlane"
                       "::test_set_plane_gates_on_the_reread_even_when_the_call_returns_true"))
 

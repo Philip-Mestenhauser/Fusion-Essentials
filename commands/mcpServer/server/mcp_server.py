@@ -21,6 +21,7 @@ Differences from the sample this was adapted from:
 import asyncio
 import errno
 import json
+import os
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -36,6 +37,21 @@ from .task_manager import TaskManager
 # The MCP path served by Fusion's built-in server; we mirror it so clients
 # configured for the well-known endpoint reach us unchanged.
 MCP_PATH = '/mcp'
+
+# A measurement switch: while this marker file exists, tools/list carries no description at any
+# depth - names, types, enums and required flags only - so an eval can measure what the
+# descriptions buy. Nothing else reads it.
+BARE_WIRE_MARKER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                ".wire_bare")
+
+
+def _without_descriptions(obj):
+    """obj with every 'description' key removed at any depth."""
+    if isinstance(obj, dict):
+        return {k: _without_descriptions(v) for k, v in obj.items() if k != "description"}
+    if isinstance(obj, list):
+        return [_without_descriptions(v) for v in obj]
+    return obj
 
 # Every protocol revision this server actually understands (Streamable HTTP transport). On
 # initialize we honor the client's requested protocolVersion ONLY if it appears here; otherwise
@@ -264,6 +280,8 @@ class SimpleMCPServer:
 
     def _handle_tools_list(self, request_id: Any) -> Dict[str, Any]:
         tools = [item.primitive.to_dict() for item in self.tools.values()]
+        if os.path.exists(BARE_WIRE_MARKER):
+            tools = [_without_descriptions(t) for t in tools]
         return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": tools}}
 
     async def _handle_tools_call(self, request_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:

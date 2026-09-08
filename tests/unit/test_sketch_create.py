@@ -181,17 +181,15 @@ class TestCreateFrameParity:
 
 class TestCreateFrameNote:
 
-    def test_note_states_the_xz_origin_plane_axis_mapping(self, monkeypatch):
-        # the create result teaches the origin-plane local-axis -> world mapping so an agent
-        # need not discover it (the xz plane maps local +Y to world -Z, live-proven).
-        s = FakeSketch(); _install_draw(monkeypatch, s)
+    def test_the_note_states_this_frame_and_does_not_restate_the_xz_mapping(self, monkeypatch):
+        # The note names the space this result's frame numbers are in, and stops there. The
+        # per-plane axis mapping is the frame block's own y_world, which reads [0,0,-1] on an xz
+        # sketch.
+        _install_draw(monkeypatch, TestCreateFrameParity._framed())
         out = _payload(sk.handler(plane="xz"))
-        assert "local +Y maps to world -Z" in out["note"]
-        # The sentence points at the frame's own +Y axis rather than naming a key: the axis key is
-        # y_world or y_local depending on frame.space, so a hard-coded name would send the caller
-        # to a key that is absent on a component-local frame.
-        assert "the frame's own +Y axis" in out["note"]
-        assert "frame.y_world" not in out["note"]
+        assert "frame.space='world'" in out["note"]
+        assert "world -Z" not in out["note"]
+        assert "sketch_get" not in out["note"]        # sketch_get's own description carries that.
 
 
 class TestCreateRenameDisclosure:

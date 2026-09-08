@@ -53,7 +53,9 @@ SKILL_HEADER = ("DESIGN PRACTICE (guidance, not the task - the task is above). A
 MAX_TURNS = 300
 INIT_DEADLINE_S = 90
 HEARTBEAT_S = 60
-STALL_S_DEFAULT = 300
+# The gimbal foundation's planning pause after its first calls runs past six minutes and the run
+# then completes; a shorter watch kills a run that was about to build.
+STALL_S_DEFAULT = 600
 ACTIVE_WAIT_S = 120
 
 
@@ -98,15 +100,34 @@ def skill_body(name):
     return (text[m.end():] if m else text).strip()
 
 
-def build_prompt(body, project, folder, skill=None, preamble_path=PREAMBLE):
-    """The bytes the executor receives: the shared preamble, the brief with its tokens filled, and
-    the named skill's body after it."""
+REPORT_HEADER = ("REPORT FROM THE PREVIOUS STAGE - the agent that built the document you start "
+                 "from wrote this about it. Read it as a plan already made; check it against the "
+                 "document with fresh reads rather than deriving it again.")
+
+
+def build_prompt(body, project, folder, skill=None, preamble_path=PREAMBLE, prior_report=""):
+    """The bytes the executor receives: the shared preamble, the brief with its tokens filled, the
+    previous stage's report when the brief starts from its document, and the named skill's body."""
     preamble = open(preamble_path, encoding="utf-8").read().strip()
     task = body.replace("{{PROJECT}}", project).replace("{{FOLDER}}", folder)
     parts = [preamble, task]
+    if prior_report.strip():
+        parts.append(REPORT_HEADER + "\n\n" + prior_report.strip())
     if skill:
         parts.append(SKILL_HEADER + "\n\n" + skill_body(skill))
     return "\n\n".join(parts) + "\n"
+
+
+def prior_report(set_dir, fixture):
+    """The report.txt of the newest local run of the fixture scenario in this set, or ''."""
+    if not fixture or not os.path.isdir(set_dir):
+        return ""
+    runs = sorted(d for d in os.listdir(set_dir) if d.startswith(fixture + "_"))
+    for name in reversed(runs):
+        path = os.path.join(set_dir, name, "report.txt")
+        if os.path.isfile(path):
+            return open(path, encoding="utf-8", errors="replace").read()
+    return ""
 
 
 # --- the cloud: hub, project, set folder -----------------------------------------------------------
@@ -426,6 +447,8 @@ def harness_label(rec):
         parts.append("tool-search:on")
     if rec.get("preamble") and rec["preamble"] != "preamble":
         parts.append("preamble:" + rec["preamble"])
+    if rec.get("label"):
+        parts.append("label:" + rec["label"])
     return " ".join(parts) or "-"
 
 
@@ -460,6 +483,9 @@ def main():
                     help="let the CLI defer tool schemas (a few per turn instead of all of them)")
     ap.add_argument("--preamble", default=PREAMBLE,
                     help="the harness-rules file prepended to the brief (default preamble.md)")
+    ap.add_argument("--label", default="",
+                    help="a word for the index naming a server-side condition this run was "
+                         "measured under (a wire mode the proctor cannot set itself)")
     ap.add_argument("--deny", metavar="TOOL", action="append", default=[],
                     help="deny the executor one Fusion tool (repeatable, the full "
                          "mcp__fusion-essentials__<name>)")
@@ -492,12 +518,14 @@ def main():
         preamble_name = os.path.splitext(os.path.basename(args.preamble))[0]
         rec = {"scenario": scenario_id, "variant": variant, "set": set_folder, "model": args.model,
                "skill": args.skill, "tool_search": bool(args.tool_search),
-               "preamble": preamble_name, "denied": list(args.deny), "fixture": fixture}
+               "preamble": preamble_name, "label": args.label, "denied": list(args.deny),
+               "fixture": fixture}
         print(f"run: {run_dir}\n  cloud folder: {project}/{folder}  model: {args.model}  "
               f"harness: {harness_label(rec)}  denied: {', '.join(args.deny) or '-'}", flush=True)
         staged = stage_empty(call) if fixture is None else stage_fixture(fixture, project, folder, call)
         print(f"  staged: {staged}", flush=True)
-        prompt = build_prompt(body, project, folder, args.skill, preamble_path=args.preamble)
+        prompt = build_prompt(body, project, folder, args.skill, preamble_path=args.preamble,
+                              prior_report=prior_report(set_dir, fixture))
         with open(os.path.join(run_dir, "prompt.txt"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write(prompt)
         t0 = time.time()

@@ -61,7 +61,8 @@ item = Item.create_tool_item(
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_data_create_project.py::TestCreateProject"
-                      "::test_a_project_that_never_relists_is_an_error")
+                      "::test_a_project_that_never_relists_is_an_error",
+        rung="value")
 )
 
 

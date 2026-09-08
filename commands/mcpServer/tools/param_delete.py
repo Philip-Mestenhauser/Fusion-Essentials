@@ -14,6 +14,17 @@ from . import _common
 from ._common import timeline_health as _timeline_health
 
 
+def _user_parameter_names(design):
+    """The design's user-parameter names right now, or None when the collection would not enumerate."""
+    # None is "the walk declined", never "the design holds none": coerced to a list, an unreadable
+    # walk would prove the deleted name absent without reading anything.
+    coll = safe(lambda: design.userParameters)
+    n = _common.counted(lambda: coll.count) if coll is not None else None
+    if n is None:
+        return None
+    return [safe(lambda i=i: coll.item(i).name) for i in range(n)]
+
+
 def handler(name: str = "") -> dict:
     """Delete a USER parameter, guarded against a referencing consumer or a timeline regression. WRITES."""
     name = (name or "").strip()
@@ -45,12 +56,22 @@ def handler(name: str = "") -> dict:
         return error(f"Could not delete '{name}': {e}")
     if not did:
         return error(f"Fusion refused to delete '{name}' (it may be in use).")
+    names_after = _user_parameter_names(design)
+    if names_after is None:
+        return error(f"deleteMe() reported success for '{name}' but the design's user parameters "
+                     "would not re-read, so whether it is gone is UNVERIFIED - a list that did not "
+                     "read is not a list without it. Re-read with param_get before deleting more.")
+    if name in names_after:
+        return error(f"deleteMe() reported success but '{name}' is still in the design's user "
+                     "parameters - it was NOT deleted. Nothing was rolled back; re-read with "
+                     "param_get to see what is actually there.")
     err_after, _, _ = _timeline_health(design)
     if len(err_after) > len(err_before):
         return error(f"Deleting '{name}' introduced a timeline error ({err_after}). "
     "The deletion stands - undo in Fusion if needed.")
     return ok({"deleted": True, "name": name,
-        "note": "User parameter deleted; timeline verified (no new errors)."})
+        "note": "User parameter deleted - the name is gone from the design's user parameters, and "
+                "the timeline walks clean (no new errors)."})
 
 
 TOOL_DESCRIPTION = (
@@ -69,9 +90,9 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="destructive", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
-        evidence_test="tests/unit/test_param_delete.py::TestDeleteHandlerExtra"
-                      "::test_delete_me_false_reported"))
+        kind="inline", rung="value",
+        evidence_test="tests/unit/test_param_delete.py::TestAbsenceReRead"
+                      "::test_a_survivor_after_a_true_delete_is_an_error"))
 
 
 def register_tool():

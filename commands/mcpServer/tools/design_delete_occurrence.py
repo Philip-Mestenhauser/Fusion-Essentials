@@ -126,7 +126,7 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="destructive", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_design_delete_occurrence.py::TestAbsenceReRead"
                       "::test_a_survivor_is_an_error_not_a_false_ok"))
 

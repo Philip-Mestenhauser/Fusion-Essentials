@@ -152,7 +152,8 @@ tool = (
     Tool.create_simple(name="mesh_insert", description=TOOL_DESCRIPTION)
     .add_input_property("file_path", {"type": "string", "description": "Full path to a .stl / .obj / .3mf file (required)."})
     .add_input_property("target_component", {"type": "string", "description": "Component name to import into (default: active component)."})
-    .add_input_property("units", {"type": "string", "description": "Units the file is authored in: mm | cm | m | in | ft (default mm); area/volume are reported in it."})
+    .add_input_property("units", {"type": "string", "enum": list(_MESH_UNIT_TABLE),
+            "description": "Units the file is authored in (default mm); area/volume are reported in it."})
     .add_input_property("name", {"type": "string", "description": "Optional name for the imported body (single-body imports only)."})
     .add_required_input("file_path")
     .strict_schema()
@@ -161,6 +162,7 @@ item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
         kind="inline",
+        rung="value",
         evidence_test="tests/unit/test_mesh_insert.py::TestMeshInsert"
           "::test_empty_import_result_errors"))
 

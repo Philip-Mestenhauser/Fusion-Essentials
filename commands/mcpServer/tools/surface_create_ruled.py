@@ -13,7 +13,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, target_component
 from . import _common
@@ -289,7 +289,11 @@ surface_create_ruled_tool = (
 )
 surface_create_ruled_item = Item.create_tool_item(
     tool=surface_create_ruled_tool, write="write", handler=ruled_handler, run_on_main_thread=True,
-    postconditions=[_assert.FeatureHealthy()])
+    postconditions=[_assert.FeatureHealthy()],
+    verification=Verification(
+        kind="inline", rung="geometry",
+        evidence_test="tests/unit/test_surface_create_ruled.py::TestResultBody"
+                      "::test_a_result_set_holding_only_the_parent_is_an_error"))
 
 
 def register_tool():

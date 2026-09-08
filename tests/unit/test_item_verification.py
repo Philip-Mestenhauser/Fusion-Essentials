@@ -57,6 +57,31 @@ class TestFieldRules:
         with pytest.raises(ValueError, match="defect_id"):
             Verification(kind="effect", evidence_test=NODE, defect_id="DRAW-1")
 
+    def test_a_rung_is_taken_only_by_a_kind_that_reads_an_effect_back(self):
+        # inline / effect / deferred read something back and say how much; the others read nothing.
+        assert Verification(kind="inline", evidence_test=NODE, rung="geometry").rung == "geometry"
+        assert Verification(kind="inline", evidence_test=NODE).rung is None
+        with pytest.raises(ValueError, match="rung"):
+            Verification(kind="inline", evidence_test=NODE, rung="perfect")
+        with pytest.raises(ValueError, match="no rung"):
+            Verification(kind="gap", defect_id="DRAW-1", rung="value")
+        assert "rung='value'" in repr(Verification(kind="effect", evidence_test=NODE, rung="value"))
+
+    def test_beside_kernel_kinds_only_a_rung_declaring_inline_or_effect_stands(self):
+        kernel = load_tool("_assert")
+        posts = [kernel.FeatureHealthy()]
+        tool = _tool().add_input_property("a", {"type": "string"})
+        item = Item.create_tool_item(tool=tool, write="write", handler=_handler, postconditions=posts,
+                                     verification=Verification(kind="inline", evidence_test=NODE,
+                                                               rung="geometry"))
+        assert item.verification.rung == "geometry"
+        with pytest.raises(ValueError, match="declares a rung"):
+            Item.create_tool_item(tool=_tool(), write="write", handler=_handler, postconditions=posts,
+                                  verification=Verification(kind="inline", evidence_test=NODE))
+        with pytest.raises(ValueError, match="declares a rung"):
+            Item.create_tool_item(tool=_tool(), write="write", handler=_handler, postconditions=posts,
+                                  verification=Verification(kind="gap", defect_id="DRAW-1"))
+
     def test_external_declares_exactly_one_channel(self):
         # both channels is two accounts that can disagree; neither is an external effect with no
         # observable completion proof, which is a gap.
@@ -83,12 +108,6 @@ class TestRegistrationWiring:
             Item.create_tool_item(tool=_tool("probe_get"), write="read", handler=_handler,
                                   verification=Verification(kind="inline", evidence_test=NODE))
 
-    def test_a_kernel_declaration_and_a_classification_are_mutually_exclusive(self):
-        _assert = load_tool("_assert")
-        with pytest.raises(ValueError, match="mutually exclusive"):
-            Item.create_tool_item(tool=_tool(), write="write", handler=_handler,
-                                  postconditions=[_assert.VersionAdvanced()],
-                                  verification=Verification(kind="inline", evidence_test=NODE))
 
     def test_a_loose_object_is_not_a_classification(self):
         with pytest.raises(ValueError, match="Verification kind"):

@@ -580,7 +580,7 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_joint_create_origin.py::TestBboxCenterHandler"
                       "::test_wrong_landing_point_errors_and_rolls_back"))
 

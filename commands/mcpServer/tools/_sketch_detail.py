@@ -964,15 +964,11 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
     else:
         out["profiles"] = profiles
     lead = DEFERRED_NOTE + " " if profiles is None else ""
-    handles = ("" if profiles is None else
-               "'profiles[].handle' -> ProfileRef for extrude/revolve/loft. ")
 
     if not include_entities:
-        out["note"] = (lead + "Overview only, lengths in 'units' (area=units^2). " + handles
-                       + "Entity coordinates are sketch-LOCAL; "
+        out["note"] = (lead + "Overview only, lengths in 'units' (area=units^2). "
                        + frame_space_note(out.get("frame"))
-                       + " On the XZ plane local +Y is world -Z. For the "
-                       "full entity/constraint/dimension X-ray, call again with "
+                       + " For the full entity/constraint/dimension X-ray, call again with "
                        "include_entities=true.")
         return ok(out)
 
@@ -980,8 +976,7 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
         sketch, f, unit)
     note = (lead + "Full X-ray, lengths in 'units'. Entity coordinates are sketch-LOCAL; "
                  + frame_space_note(out.get("frame"))
-                 + " On the XZ plane local +Y is world -Z. "
-                 "Entity ids ('line:0', 'arc:1', ...) match sketch_constrain "
+                 + " Entity ids ('line:0', 'arc:1', ...) match sketch_constrain "
                  "/ extrude refs. A point OFF the sketch plane (a 3D line's endpoint) carries a 'z' (local "
                  "height along the plane normal); on-plane 2D points omit it. The point flagged origin:true "
                  "is the sketch ORIGIN (anchor origin-pinned constraints to it). is_fully_constrained=false "

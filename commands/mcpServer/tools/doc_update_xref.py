@@ -182,7 +182,8 @@ item = Item.create_tool_item(
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_doc_update_xref.py::TestUpdateBehavior"
-                      "::test_still_stale_after_true_return_is_an_error"))
+                      "::test_still_stale_after_true_return_is_an_error",
+        rung="value"))
 
 
 def register_tool():

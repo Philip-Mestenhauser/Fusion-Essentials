@@ -370,13 +370,13 @@ def get_only():
         ("drawing_get", {}, lambda p: (
             sum(1 for s in p.get("sheets") or [] if s.get("is_active")) == 1), None),
         # view_rows agree with each sheet's own view count (uncapped sheets only)
-        ("drawing_get", {"include": "views"}, lambda p: all(
+        ("drawing_get", {"include": ["views"]}, lambda p: all(
             isinstance(s.get("view_rows"), list) and len(s["view_rows"]) == s.get("views")
             for s in p.get("sheets") or [] if (s.get("views") or 0) <= 50), None),
         ("drawing_get", lambda c: {"sheet": (c.get("sheet_names") or [""])[0]},
          lambda p: len(p.get("sheets") or []) == 1, None),
         ("drawing_get", {"sheet": "NoSuchSheet_XYZ"}, "refused", None),
-        ("drawing_get", {"include": "dimensions"}, "refused", None),
+        ("drawing_get", {"include": ["dimensions"]}, "refused", None),
     ]
     print("-- GET-ONLY: drawing_get against the active drawing --")
     rows = _run_steps(steps, ctx)

@@ -515,10 +515,13 @@ tool = (
 
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    # The landed occurrences are read off the REQUESTED target component, and a derive that surfaced
+    # at root instead is an error naming what it left there.
     verification=Verification(
         kind="inline",
-        evidence_test="tests/unit/test_doc_insert_derive.py::TestReadBackHonesty"
-                      "::test_nothing_landed_is_an_error"))
+        evidence_test="tests/unit/test_doc_insert_derive.py::TestIntoComponent"
+                      "::test_root_stray_landing_is_an_honest_error",
+        rung="value"))
 
 
 def register_tool():

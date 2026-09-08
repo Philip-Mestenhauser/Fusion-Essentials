@@ -209,6 +209,7 @@ surface_delete_face_item = Item.create_tool_item(
     run_on_main_thread=True,
     verification=Verification(
         kind="inline",
+        rung="geometry",
         evidence_test="tests/unit/test_surface_delete_face.py::TestParametricFaceCountGate"
                       "::test_unchanged_face_count_is_an_error"))
 

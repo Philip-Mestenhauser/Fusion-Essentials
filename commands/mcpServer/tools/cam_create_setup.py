@@ -140,10 +140,13 @@ tool = (
 
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    # The name apply_rename reads back off Setup.name is looked for in the setups RE-LISTED off the
+    # CAM product, and a name the listing does not carry is an error, not a created=true.
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_cam_create_setup.py::TestOperationType"
-                      "::test_phantom_setup_that_never_lands_bites"))
+                      "::test_phantom_setup_that_never_lands_bites",
+        rung="value"))
 
 
 def register_tool():

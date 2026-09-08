@@ -166,6 +166,7 @@ shell_item = Item.create_tool_item(
     tool=shell_tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
         kind="inline",
+        rung="geometry",
         evidence_test="tests/unit/test_model_shell.py::TestHonesty"
                       "::test_unchanged_body_reports_error_not_ok"))
 

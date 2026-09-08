@@ -78,6 +78,20 @@ class TestPrompt:
         assert prompt.index("Build a widget") < prompt.index(proctor.SKILL_HEADER) < prompt.index("PLAN FIRST")
         assert "name: practice" not in prompt
 
+    def test_a_chain_stage_receives_the_newest_prior_report_after_its_brief(self, scenario, tmp_path):
+        path, preamble = scenario
+        set_dir = tmp_path / "set"
+        for nn, text in (("01", "old plan"), ("02", "newest plan")):
+            (set_dir / f"S98_Base_{nn}").mkdir(parents=True)
+            (set_dir / f"S98_Base_{nn}" / "report.txt").write_text(text, encoding="utf-8")
+        (set_dir / "S98_Base_03").mkdir()
+        assert proctor.prior_report(str(set_dir), "S98_Base") == "newest plan"
+        assert proctor.prior_report(str(set_dir), None) == ""
+        _, _, body = proctor.read_scenario(str(path))
+        prompt = proctor.build_prompt(body, "P", "F", preamble_path=str(preamble),
+                                      prior_report="newest plan")
+        assert prompt.index("Build a widget") < prompt.index(proctor.REPORT_HEADER) < prompt.index("newest plan")
+
     def test_a_variant_file_keeps_the_scenario_id(self, tmp_path):
         path = tmp_path / "S99_Widget.B.md"
         path.write_text(_SCENARIO.replace("fixture: none", "fixture: S98_Base"), encoding="utf-8")
@@ -184,8 +198,8 @@ class TestWatch:
     def test_harness_label_names_only_the_switches_off_their_defaults(self):
         assert proctor.harness_label({"skill": None, "tool_search": False, "preamble": "preamble"}) == "-"
         assert proctor.harness_label({"skill": "practice", "tool_search": True,
-                                      "preamble": "preamble-lean"}) == \
-            "skill:practice tool-search:on preamble:preamble-lean"
+                                      "preamble": "preamble-lean", "label": "bare"}) == \
+            "skill:practice tool-search:on preamble:preamble-lean label:bare"
 
     def test_stall_limit_reads_the_env_and_falls_back(self, monkeypatch):
         monkeypatch.setenv("EVAL_STALL_S", "45")

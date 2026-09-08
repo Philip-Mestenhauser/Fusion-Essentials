@@ -156,10 +156,13 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="destructive", handler=handler,
     run_on_main_thread=True,
+    # deleteMe()'s own answer is the whole gate: whether findFileById stops resolving a just-deleted
+    # lineage - and how long the data model takes to show that - is not measured here.
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_data_delete_file.py::TestDeleteDocument"
-                      "::test_delete_me_false_reported")
+                      "::test_delete_me_false_reported",
+        rung="exists")
 )
 
 

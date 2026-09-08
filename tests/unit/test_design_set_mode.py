@@ -106,3 +106,20 @@ class TestSetMode:
         install(dm, _ModeDesign())
         out = payload(dm.handler(target="direct", confirm_history_loss=True))
         assert out["converted"] is True and out["history_discarded"] is True
+
+
+class TestTargetEnum:
+    """The schema's target vocabulary is _TARGETS itself, and each member converts to that mode."""
+
+    def test_the_target_enum_matches_the_target_tuple(self):
+        # Catches a HAND-EDITED schema drifting from the tuple the handler guards on.
+        assert dm.tool.input_schema["properties"]["target"]["enum"] == list(dm._TARGETS)
+
+    def test_every_advertised_target_converts_to_that_mode(self):
+        # A member the guard accepts but no conversion arm resolves would assign the OTHER mode:
+        # going_to_direct is a two-way branch, so an unrecognised third value reads as parametric.
+        for name in dm._TARGETS:
+            start = _DIRECT if name == "parametric" else _PARAMETRIC
+            install(dm, _ModeDesign(design_type=start))
+            out = payload(dm.handler(target=name, confirm_history_loss=True))
+            assert out["converted"] is True and out["now"] == name, name

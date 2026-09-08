@@ -8,7 +8,7 @@ of model_stitch. WRITES; an unstitch of an already-loose surface is refused as t
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component
 from . import _common
@@ -115,7 +115,13 @@ tool = (
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
-                             postconditions=[_assert.FeatureHealthy()])
+                             postconditions=[_assert.FeatureHealthy(),
+                                             _assert.FreeEdgesChanged("opened")],
+                             verification=Verification(
+                                 kind="inline", rung="count",
+                                 evidence_test="tests/unit/test_model_unstitch.py"
+                                 "::TestUnstitchIdentityGate"
+                                 "::test_identity_unstitch_on_a_loose_surface_is_refused"))
 
 
 def register_tool():

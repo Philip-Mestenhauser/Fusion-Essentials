@@ -12,6 +12,9 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale
 from . import _common
 from . import _inputs
+# The world bbox-min corner of an instance's BODIES, over one shared position tolerance - the same
+# reader design_move_occurrence judges its own world-position claim by.
+from .design_move_occurrence import _POSITION_TOL_CM, _corner
 
 # rotate_axis is an AxisRef: a world axis x/y/z, OR a straight-edge handle the rotation runs along.
 _ROTATE_AXIS = _inputs.AxisRef("rotate_axis", default="z",
@@ -57,6 +60,7 @@ def handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: float = 
     # but the pose is transient and a move that fights the joints over-constrains the solve. So we
     # proceed and WARN (naming the joints + the capture/probe next step) rather than refuse.
     joint_names = _occurrence_joint_names(occ)
+    corner_before = _corner(occ)
 
     import math
     mat = adsk.core.Matrix3D.create()
@@ -132,6 +136,21 @@ def handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: float = 
                      f"{which} the change, so the move is UNCONFIRMED - nothing here confirms the "
                      "occurrence actually moved, and it may have snapped back. Re-read the position "
                      "with assembly_get (occurrence origin) or model_inspect.")
+    # The transform is a CLAIM; the part's own body corner is the EVIDENCE. Judged only where a
+    # TRANSLATION bigger than the read noise was asked for - a rotation can leave a symmetric part's
+    # world box exactly where it read before, and a sub-tolerance nudge moves nothing measurable.
+    asked_cm = ((float(dx) * k) ** 2 + (float(dy) * k) ** 2 + (float(dz) * k) ** 2) ** 0.5
+    corner_after = _corner(occ)
+    carried = None
+    if asked_cm > _POSITION_TOL_CM and corner_before is not None and corner_after is not None:
+        carried = max(abs(a - b) for a, b in zip(corner_before, corner_after))
+        if carried <= _POSITION_TOL_CM:
+            return error(
+                f"'{safe(lambda: occ.name)}' reads a CHANGED transform but its body geometry did "
+                "NOT move - the reposition did not reach the part, and the transform it now reads "
+                "is a claim nothing carried out. A pattern/mirror FEATURE re-derives its instances, "
+                "overwriting a free move of one: position those through the owning feature "
+                "(design_edit_timeline / the pattern's own tool) instead.")
     # Report the pose back in the caller's 'units' (translation.* is Fusion-internal cm; k is cm-per-unit).
     position = safe(lambda: {"x": round(after.translation.x / k, 4),
                              "y": round(after.translation.y / k, 4),
@@ -151,6 +170,9 @@ def handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: float = 
     "rotate_xyz": ({"x": rotate_x, "y": rotate_y, "z": rotate_z} if multi else None),
     "units": units,
     }
+    if carried is not None:
+        # How far the part's own body corner travelled - measured, not the transform's word for it.
+        result["geometry_moved_mm"] = round(carried * 10.0, 4)
     if joint_names and not quiet:
         result["jointed_joints"] = joint_names
         result["jointed_warning"] = (
@@ -190,9 +212,9 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
-        evidence_test="tests/unit/test_assembly_move.py::TestMove"
-                      "::test_move_that_does_not_take_bites"))
+        kind="inline", rung="geometry",
+        evidence_test="tests/unit/test_assembly_move.py::TestBodyGeometryCarried"
+                      "::test_a_transform_the_body_geometry_did_not_follow_bites"))
 
 
 def register_tool():

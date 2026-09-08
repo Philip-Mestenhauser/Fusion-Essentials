@@ -534,9 +534,9 @@ TOOL_DESCRIPTION = (
 tool = (
     Tool.create_simple(name="model_inspect", description=TOOL_DESCRIPTION)
     .add_input_property(*_TARGET.as_property())
-    .add_input_property("include", {"type": ["array", "string"],
-            "description": "Deeper detail: 'mass' (full physical properties). A list or comma-string. "
-                           "Omit for just the bounding box; 'default' keeps the box beside 'mass'."})
+    .add_input_property("include", {"type": "array",
+            "items": {"type": "string", "enum": list(_SLICES + _DEFAULT_NAMES)},
+            "description": "Deeper detail to add; 'default' keeps the bounding box beside it."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("accuracy", {"type": "string", "enum": ["low", "medium", "high", "very_high"],
             "description": "Physical-properties accuracy when include=['mass'] (default medium)."})

@@ -250,10 +250,14 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler,
     run_on_main_thread=True,
+    # The setup's own walk is what the applied operations are read off, gated on a count that grew.
+    # A CAMTemplate exposes name/description/validity only, so nothing here can be compared against
+    # the operations the template holds.
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_cam_apply_template.py::TestApplyTemplateToolStatus"
-                      "::test_an_operation_with_no_tool_is_named_with_its_remedy")
+                      "::test_an_operation_with_no_tool_is_named_with_its_remedy",
+        rung="exists")
 )
 
 

@@ -302,6 +302,14 @@ class TestResultBody:
         assert wired.parent.name not in body["result_bodies"]
         assert len(body["result_bodies"]) == 1
 
+    def test_a_result_set_holding_only_the_parent_is_an_error(self, wired):
+        # the census is the gate: a feature whose result set adds no body to the component made no
+        # surface, however healthy the feature object reads.
+        wired.ruled.feature = _feature(parent=wired.parent, new=[])
+        res = _call()
+        assert res["isError"] is True
+        assert "added nothing" in res["message"]
+
     def test_the_parent_reached_as_an_OCCURRENCE_PROXY_is_still_not_created(self, wired):
         # The two sides of the diff are two DIFFERENT collections - the component's own body census
         # before, feature.bodies after - and each mints its own wrapper for the same body. A proxy's

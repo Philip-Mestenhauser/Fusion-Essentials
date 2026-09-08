@@ -39,7 +39,6 @@ _LINEAR_SLOT_KINDS = ("overall_slot", "center_point_slot")
 # form and so has nowhere to put a length, angle or dimension flag.
 _SLOT_KINDS = ("slot",) + _ARC_SLOT_KINDS + _LINEAR_SLOT_KINDS
 
-_KIND = _inputs.Choice("kind", list(_KINDS), required=True, description="Which entity to draw.")
 
 # Control-point spline degree -> the SplineDegrees member. SketchControlPointSplines.add takes the
 # degree as an enum member, and its binding states only degree 3 and degree 5 can be specified at
@@ -108,6 +107,17 @@ _REQUIRED = {
 }
 
 _POINT_LIST_KINDS = ("polyline", "closed_path", "spline", "cv_spline")
+
+
+def _inputs_by_kind(required):
+    """One clause per kind naming the inputs it needs, built from the table the guard reads, so the
+    wire cannot disagree with the refusal."""
+    return "; ".join(f"{kind} {','.join(keys) or 'points'}" for kind, keys in required.items())
+
+
+_KIND = _inputs.Choice("kind", list(_KINDS), required=True,
+                       description="Which entity to draw. Inputs by kind: "
+                                   + _inputs_by_kind(_REQUIRED) + ".")
 
 
 def _pt(x, y, k):
@@ -787,7 +797,7 @@ item = Item.create_tool_item(
     tool=tool, write="write", handler=handler,
     run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_sketch_add_geometry.py::TestKindCollectionFallback"
                       "::test_a_line_that_never_lands_is_an_error"))
 

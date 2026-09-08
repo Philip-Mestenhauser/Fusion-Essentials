@@ -134,6 +134,22 @@ class TestGuards:
         msg = error_message(mi.handler(target="Body1", include=["bogus"]))
         assert "mass" in msg and "default" in msg
 
+    def test_the_include_enum_matches_the_slice_tuple(self):
+        # Catches a HAND-EDITED schema drifting from the tuple. It cannot catch a name added to the
+        # tuple itself - both sides read it - which is what the dispatch test below covers.
+        enum = mi.tool.input_schema["properties"]["include"]["items"]["enum"]
+        assert sorted(enum) == sorted(mi._SLICES + mi._DEFAULT_NAMES)
+
+    def test_every_advertised_slice_actually_dispatches(self, monkeypatch, stub_slices):
+        # A name the guard admits but no branch reads returns the box again under a token that
+        # promised something deeper.
+        _resolve_to(monkeypatch, "body")
+        for name in mi._SLICES:
+            assert name in _payload(mi.handler(target="Body1", include=[name])), name
+        for name in mi._DEFAULT_NAMES:
+            # the default tokens keep the orientation measurement rather than adding a key
+            assert "x" in _payload(mi.handler(target="Body1", include=[name])), name
+
 
 class TestBodyAabb:
     """The default bbox spans BODIES only, read through the SHARED _geom.body_aabb (its

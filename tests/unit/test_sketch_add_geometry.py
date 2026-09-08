@@ -38,6 +38,15 @@ def shared_name(monkeypatch):
     return design, alpha, beta
 
 
+class TestKindDescription:
+    def test_the_kind_description_names_every_kinds_inputs_from_the_guard_table(self):
+        desc = sk._KIND.as_property()[1]["description"]
+        for kind, keys in sk._REQUIRED.items():
+            clause = f"{kind} {','.join(keys) or 'points'}"
+            assert clause in desc, clause
+        assert desc.count(";") == len(sk._REQUIRED) - 1
+
+
 class TestScaleWiring:
 
     def test_sketches_uses_the_shared_scale(self):

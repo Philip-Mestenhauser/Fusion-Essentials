@@ -186,9 +186,9 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
-        evidence_test="tests/unit/test_design_move_occurrence.py::TestHonesty"
-                      "::test_an_unchanged_tree_is_an_error_not_a_false_ok"))
+        kind="inline", rung="geometry",
+        evidence_test="tests/unit/test_design_move_occurrence.py::TestWorldPosition"
+                      "::test_a_part_that_drifted_is_reported_not_hidden"))
 
 
 def register_tool():

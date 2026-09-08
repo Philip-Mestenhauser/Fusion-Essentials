@@ -45,7 +45,7 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="effect",
+        kind="effect", rung="value",
         evidence_test="tests/unit/test_param_set_favorite.py::TestFavoriteHandler"
                       "::test_a_stuck_flag_is_published_as_it_reads_not_as_asked"))
 

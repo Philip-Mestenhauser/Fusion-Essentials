@@ -46,7 +46,8 @@ class BRepBody:
     def __init__(self, name="Body", bbox=None, volume=0.0, is_solid=True, entity_token=None,
                  light_bulb=True, hidden_by_ancestor=False, vertices=(), parent_component=None,
                  face_count=0, faces=(), area=None, mesh_manager=None, solid_readable=True,
-                 is_derived=False, appearance=_UNSET, opacity=1.0, visible_opacity=_UNSET):
+                 is_derived=False, appearance=_UNSET, opacity=1.0, visible_opacity=_UNSET,
+                 edges=None):
         self.appearance = FakeAppearance() if appearance is BRepBody._UNSET else appearance
         self.opacity = opacity
         self._visible_opacity = visible_opacity
@@ -67,6 +68,9 @@ class BRepBody:
         self._hidden_by_ancestor = hidden_by_ancestor
         if area is not None:
             self.area = area
+        # `edges` are the body's BRepEdges, for a free-edge census; unset, the walk does not read.
+        if edges is not None:
+            self.edges = _NamedCollection(list(edges))
         if mesh_manager is not None:
             self.meshManager = mesh_manager
 
@@ -304,8 +308,12 @@ class BRepEdge:
 
     def __init__(self, curve, start=None, end=None, point_on_edge=None, entity_token=None,
                  tangent=None, co_edges=None, param_reversed=False, body=None,
-                 assembly_proxy=_UNSET):
+                 assembly_proxy=_UNSET, faces=None):
         self.geometry = curve
+        # `faces` are the BRepFaces the edge bounds - one on a surface's open boundary, two on a
+        # sealed edge; left None the edge answers no face count at all.
+        if faces is not None:
+            self.faces = _NamedCollection(list(faces))
         if assembly_proxy is not BRepEdge._UNSET:
             self.createForAssemblyContext = lambda _occ, _p=assembly_proxy: _p
         self.startVertex = _Vertex(start) if start else None

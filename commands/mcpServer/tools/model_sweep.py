@@ -280,6 +280,7 @@ sweep_item = Item.create_tool_item(
     tool=sweep_tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
         kind="inline",
+        rung="geometry",
         evidence_test="tests/unit/test_model_sweep.py::TestCutMovesMaterial"
                       "::test_unscoped_cut_that_moves_no_volume_is_an_error"))
 

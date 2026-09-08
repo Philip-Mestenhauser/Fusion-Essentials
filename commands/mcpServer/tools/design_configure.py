@@ -808,7 +808,7 @@ item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     enforce_timeout=False,
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_design_configure.py::TestAddParameterRefusals"
                       "::test_an_expression_that_does_not_take_is_an_error"))
 

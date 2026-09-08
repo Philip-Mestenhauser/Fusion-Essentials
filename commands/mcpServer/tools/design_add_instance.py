@@ -220,7 +220,7 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_design_add_instance.py::TestHonesty"
                       "::test_an_occurrence_returned_with_an_unchanged_tree_is_an_error"))
 

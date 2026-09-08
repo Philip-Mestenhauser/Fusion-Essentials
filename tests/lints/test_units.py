@@ -35,8 +35,6 @@ _EXEMPT = {
 _REPORTS_EXEMPT = {
     "workspace_orient": "reports the design's own defaultLengthUnits as a FACT (a zero-input "
                         "orientation read), not a scaled measurement the agent picks units for",
-    "mesh_insert": "hand-rolls a WIDER authored-unit set (mm/cm/m/in/ft) than the length UNITS kind - "
-                   "a mesh file can be authored in metres or feet",
     "cam_post": "reports NC OUTPUT units via a domain Choice (document/inch/mm) - not a CM_TO_UNIT "
                 "length measurement, and it is already a typed enum, not stranded prose",
     "drawing_create": "reports DRAWING display units via a domain Choice (mm/inch) - a drawing display "

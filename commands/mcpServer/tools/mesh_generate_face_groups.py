@@ -148,6 +148,7 @@ item = Item.create_tool_item(
     run_on_main_thread=True,
     verification=Verification(
         kind="inline",
+        rung="exists",
         evidence_test="tests/unit/test_mesh_generate_face_groups.py::TestFaceGroups"
                       "::test_a_null_feature_with_no_readable_readback_is_a_failure"))
 

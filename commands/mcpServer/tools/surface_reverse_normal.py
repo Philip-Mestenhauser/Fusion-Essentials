@@ -129,6 +129,7 @@ surface_reverse_normal_item = Item.create_tool_item(
     run_on_main_thread=True,
     verification=Verification(
         kind="effect",
+        rung="geometry",
         evidence_test="tests/unit/test_surface_reverse_normal.py"
                       "::test_noop_reported_honestly_not_confirmed"))
 

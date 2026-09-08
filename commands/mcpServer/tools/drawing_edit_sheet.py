@@ -365,7 +365,7 @@ item = Item.create_tool_item(
     # error on a mismatch. delete is the one arm that cannot: a drawing delete is invisible inside
     # its own call, so its payload publishes the boolean and marks the count a reading.
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_drawing_edit_sheet.py::TestRename"
                       "::test_a_silently_ignored_rename_is_an_error"))
 

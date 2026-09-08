@@ -1048,7 +1048,8 @@ item = Item.create_tool_item(
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_cam_edit_tools.py::TestEdit"
-                      "::test_persist_readback_mismatch_bites"))
+                      "::test_persist_readback_mismatch_bites",
+        rung="value"))
 
 
 def register_tool():

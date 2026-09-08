@@ -185,6 +185,18 @@ class TestBaseFeature:
         res = dm.handler(action="dance")
         assert res["isError"] is True and "must be one of" in res["message"]
 
+    def test_the_action_enum_matches_the_action_tuple(self):
+        # Catches a HAND-EDITED schema drifting from the tuple the handler guards on.
+        assert dm.tool.input_schema["properties"]["action"]["enum"] == list(dm._ACTIONS)
+
+    def test_every_advertised_action_dispatches(self, monkeypatch):
+        # A member the guard admits but no arm reads falls through to the finish path, so the wire
+        # would offer an action that CLOSES the scope instead of doing what it names.
+        for name in dm._ACTIONS:
+            _install(monkeypatch, FakeDesign(design_type=1))
+            out = _payload(dm.handler(action=name))
+            assert out["action"] == name, name
+
     def test_capability_map_matches_modeguard(self, monkeypatch):
         # the non-drift guarantee: the mode read's can{} is derived from the SAME reader this guard
         # uses, so a design the guard admits reads base_feature_scope true.

@@ -39,7 +39,7 @@ _PNG_EXT = ".png"
 # body handle/name is the only way to frame its part.
 _FIT_TO = _inputs.TargetRef("fit_to", allow=("occurrence", "body", "mesh"),
         description="Occurrence or BODY to frame the camera on: hides the rest for the shot, then "
-                    "restores them.")
+                    "restores them. Omit to frame the whole design.")
 
 
 # The frame-on-one-occurrence isolate is shared with view_set(orient, focus=) - ONE visibility walk
@@ -269,7 +269,7 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_view_screenshot.py::TestFilePathWrite"
                       "::test_a_zero_byte_write_is_a_failure_not_an_ok_carrying_the_image"))
 

@@ -981,6 +981,7 @@ construction_item = Item.create_tool_item(
     tool=construction_tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
         kind="effect",
+        rung="value",
         evidence_test="tests/unit/test_model_construction.py::TestOffsetReadBack"
                       "::test_a_mismatched_read_back_errors_naming_both_values"))
 

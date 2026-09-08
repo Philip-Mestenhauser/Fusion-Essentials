@@ -291,7 +291,8 @@ item = Item.create_tool_item(
     verification=Verification(
         kind="deferred", poller="cam_get_status",
         evidence_test="tests/unit/test_cam_generate.py::TestLaunchHandsOffToTheStatusRead"
-                      "::test_the_launch_claims_no_completion_and_names_the_poller"))
+                      "::test_the_launch_claims_no_completion_and_names_the_poller",
+        rung="exists"))
 
 
 def register_tool():

@@ -4,7 +4,7 @@
 """Joint two occurrences WHERE THEY ALREADY ARE - an as-built joint moves neither part. WRITES."""
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
@@ -211,9 +211,15 @@ tool = (
             "description": "Optional name, applied after creation and read back."})
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="write", handler=handler,
-                             run_on_main_thread=True,
-                             postconditions=[_assert.FeatureHealthy()])
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    postconditions=[_assert.FeatureHealthy()],
+    # Beside the kernel's health gate: the handler reads the created joint's motion class back and
+    # refuses one that came back as a different type, and reads an applied name back the same way.
+    verification=Verification(
+        kind="inline", rung="value",
+        evidence_test="tests/unit/test_joint_create_as_built.py::TestAsBuiltMotion"
+                      "::test_motion_readback_mismatch_is_an_error"))
 
 
 def register_tool():

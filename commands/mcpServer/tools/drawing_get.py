@@ -69,17 +69,20 @@ def _views_rows(sheet, cap):
 
 _MAX_VIEWS_PER_SHEET = 50
 
+_SLICES = ("views",)
+
 
 def handler(include=None, sheet: str = "") -> dict:
     # include accepts a list or a comma-string, like the family's other rich reads.
     if isinstance(include, str):
-        raw = [p.strip() for p in include.split(",") if p.strip()]
+        raw = [p.strip().lower() for p in include.split(",") if p.strip()]
     else:
-        raw = [str(x).strip() for x in (include or [])]
-    bad = [x for x in raw if x.lower() != "views"]
+        raw = [str(x).strip().lower() for x in (include or [])]
+    bad = [x for x in raw if x not in _SLICES]
     if bad:
-        return error(f"Unknown include value(s): {', '.join(bad)}. This read offers: views.")
-    want_views = any(x.lower() == "views" for x in raw)
+        return error(f"Unknown include value(s): {', '.join(bad)}. "
+                     f"This read offers: {', '.join(_SLICES)}.")
+    want_views = "views" in raw
 
     dwg = _drawing_common.active_drawing()
     if dwg is None:
@@ -150,9 +153,9 @@ TOOL_DESCRIPTION = (
 
 tool = (
     Tool.create_simple(name="drawing_get", description=TOOL_DESCRIPTION)
-    .add_input_property("include", {"type": ["array", "string"],
-            "description": "Deeper slice: 'views' (per-view rows per sheet). Omit for the "
-                           "orientation read."})
+    .add_input_property("include", {"type": "array",
+            "items": {"type": "string", "enum": list(_SLICES)},
+            "description": "Deeper slice to add; omit for the orientation read."})
     .add_input_property("sheet", {"type": "string",
             "description": "Scope to ONE sheet by name (case-insensitive exact; a miss lists "
                            "the sheets). Omit for all sheets."})

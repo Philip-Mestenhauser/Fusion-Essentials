@@ -540,8 +540,9 @@ item = Item.create_tool_item(
     # Operation.tool is read off the created operation - a disagreement is an error, not a payload.
     verification=Verification(
         kind="inline",
-        evidence_test="tests/unit/test_cam_create_operation.py::TestOperationLanding"
-                      "::test_an_operation_that_never_lands_in_the_setup_is_an_error"))
+        evidence_test="tests/unit/test_cam_create_operation.py::TestToolReadBack"
+                      "::test_a_read_back_naming_another_tool_is_refused_and_names_both",
+        rung="value"))
 
 
 def register_tool():

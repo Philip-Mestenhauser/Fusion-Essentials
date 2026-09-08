@@ -190,6 +190,7 @@ item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
         kind="inline",
+        rung="geometry",
         evidence_test="tests/unit/test_mesh_smooth.py::TestVerification"
                       "::test_a_smooth_that_moved_no_node_is_an_error"))
 

@@ -258,9 +258,9 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_assembly_capture_position.py::TestCapturePosition"
-                      "::test_phantom_capture_bites"))
+                      "::test_a_capture_that_REVERTS_the_pending_move_bites"))
 
 
 def register_tool():

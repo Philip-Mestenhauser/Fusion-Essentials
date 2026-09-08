@@ -158,10 +158,13 @@ tool = (
 )
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    # The poller gates on DataFile.isComplete and publishes the landed file's id, versionId and
+    # version number - the identity of the file this upload produced, not the request echoed back.
     verification=Verification(
         kind="deferred", poller="data_get_upload_status",
         evidence_test="tests/unit/test_data_upload_file.py::TestUploadFile"
-                      "::test_the_start_names_the_poller_and_claims_no_completion")
+                      "::test_the_start_names_the_poller_and_claims_no_completion",
+        rung="value")
 )
 
 

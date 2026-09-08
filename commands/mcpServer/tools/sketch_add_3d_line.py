@@ -137,7 +137,7 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="effect",
+        kind="effect", rung="value",
         evidence_test="tests/unit/test_sketch_add_3d_line.py::TestDraw3dLine"
                       "::test_a_stuck_construction_flag_is_published_as_the_line_reads_it"))
 

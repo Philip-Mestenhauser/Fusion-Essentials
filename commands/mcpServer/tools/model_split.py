@@ -12,7 +12,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component
 from . import _common
@@ -238,7 +238,11 @@ split_tool = (
     .strict_schema()
 )
 split_item = Item.create_tool_item(tool=split_tool, write="write", handler=handler, run_on_main_thread=True,
-                                   postconditions=[_assert.FeatureHealthy()])
+                                   postconditions=[_assert.FeatureHealthy()],
+                                   verification=Verification(
+                                       kind="inline", rung="geometry",
+                                       evidence_test="tests/unit/test_model_split.py::TestSplitFace"
+                                       "::test_no_new_faces_is_error"))
 
 
 def register_tool():

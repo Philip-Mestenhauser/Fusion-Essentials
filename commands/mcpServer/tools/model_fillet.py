@@ -9,7 +9,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, target_component
 from . import _common
@@ -266,7 +266,11 @@ tool = (
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
-                             postconditions=[_assert.FeatureHealthy()])
+                             postconditions=[_assert.FeatureHealthy()],
+                             verification=Verification(
+                                 kind="inline", rung="geometry",
+                                 evidence_test="tests/unit/test_model_fillet.py::TestVolumeReadBack"
+                                               "::test_unchanged_volume_errors_and_rolls_back"))
 
 
 def register_tool():

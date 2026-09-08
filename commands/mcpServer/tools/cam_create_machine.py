@@ -203,7 +203,8 @@ item = Item.create_tool_item(
         kind="effect",
         evidence_test="tests/unit/test_cam_create_machine.py"
                       "::TestStoreAndGate"
-                      "::test_a_machine_that_does_not_resolve_back_is_an_error_that_discloses_the_residue"))
+                      "::test_a_name_resolving_to_a_different_machine_is_an_error",
+        rung="value"))
 
 
 def register_tool():

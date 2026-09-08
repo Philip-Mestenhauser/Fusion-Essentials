@@ -8,7 +8,7 @@ disappearance is judged by re-scanning the collection it lived in. WRITES.
 """
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
@@ -199,8 +199,15 @@ tool = (
     .add_input_property(*_OCCURRENCE.as_property())
     .strict_schema()
 )
-item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
-                             postconditions=[_assert.FeatureHealthy()])
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    postconditions=[_assert.FeatureHealthy()],
+    # Beside the kernel's health gate: the handler re-scans the collection the item lived in and
+    # refuses a target that is still there, which is the removal itself read back.
+    verification=Verification(
+        kind="inline", rung="value",
+        evidence_test="tests/unit/test_design_remove_feature.py::TestRemoveBody"
+                      "::test_a_survivor_after_reported_success_is_an_error"))
 
 
 def register_tool():

@@ -130,7 +130,7 @@ class TestViewsSlice:
     def test_the_view_walk_is_capped_and_says_so(self, install):
         base, _ = self._typed()
         install([_sheet("S", views=FakeViews([FakeView(base)] * (dg._MAX_VIEWS_PER_SHEET + 3)))])
-        row = payload(dg.handler(include="views"))["sheets"][0]
+        row = payload(dg.handler(include=["views"]))["sheets"][0]
         assert len(row["view_rows"]) == dg._MAX_VIEWS_PER_SHEET
         assert row["view_rows_truncated"] is True
 
@@ -148,6 +148,23 @@ class TestViewsSlice:
         install([_sheet("S")])
         res = dg.handler(include=["dimensions"])
         assert res["isError"] is True and "views" in res["message"]
+
+    def test_the_include_enum_matches_the_slice_tuple(self):
+        # Catches a HAND-EDITED schema drifting from the tuple. It cannot catch a name added to the
+        # tuple itself - both sides read it - which is what the dispatch test below covers.
+        enum = dg.tool.input_schema["properties"]["include"]["items"]["enum"]
+        assert sorted(enum) == sorted(dg._SLICES)
+
+    def test_every_advertised_slice_actually_dispatches(self, install):
+        # A name the guard admits but no branch reads returns the orientation read again under a
+        # token that promised a deeper one.
+        adds = {"views": "view_rows"}
+        base, _proj = self._typed()
+        install([_sheet("S", views=FakeViews([FakeView(base)]))])
+        for name in dg._SLICES:
+            assert name in adds, f"name the sheet key include=['{name}'] adds"
+            row = payload(dg.handler(include=[name]))["sheets"][0]
+            assert adds[name] in row, name
 
 
 class TestSheetScope:

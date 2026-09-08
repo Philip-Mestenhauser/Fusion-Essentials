@@ -198,7 +198,7 @@ motion_link_tool = (
 motion_link_item = Item.create_tool_item(
     tool=motion_link_tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_joint_motion_link.py::TestValueReadBack"
                       "::test_a_link_left_holding_a_different_coupling_is_an_error"))
 

@@ -17,6 +17,9 @@ import types
 import pytest
 
 from conftest import (
+    BRepBody,
+    BRepEdge,
+    BRepFace,
     FakeApplication,
     FakeDocumentReference,
     FakeFusionDocument,
@@ -892,6 +895,269 @@ class TestChildGeometryMoved:
 
         out = _payload(kernel.wrap(handler, [p])())
         assert "child_geometry_move_verified" not in out
+
+
+# ── the design-wide census kinds: free edges, surface area, pattern placement ───────────────────
+#
+# Each reads the census through kernel.census_bodies, which a test replaces with ONE list the
+# handler rewrites in place - the before/after pair the kind compares.
+
+def _edge(face_count):
+    """An edge bounding `face_count` faces - one on an open boundary, two once sealed."""
+    return BRepEdge(curve=None, faces=[BRepFace(surface=None) for _ in range(face_count)])
+
+
+def _sheet(name, free, sealed=0, area=1.0):
+    return BRepBody(name=name, is_solid=False, area=area,
+                    edges=[_edge(1) for _ in range(free)] + [_edge(2) for _ in range(sealed)])
+
+
+class TestFreeEdgesChanged:
+    def _wire(self, monkeypatch, census):
+        monkeypatch.setattr(kernel, "census_bodies", lambda: census)
+
+    def _handler(self, census, after):
+        def handler(**kw):
+            census[:] = after
+            return _ok({"stitched": True})
+        return handler
+
+    def test_a_stitch_that_sealed_edges_confirms_with_both_counts(self, monkeypatch):
+        census = [_sheet("A", free=4), _sheet("B", free=4)]
+        self._wire(monkeypatch, census)
+        out = _payload(kernel.wrap(self._handler(census, [_sheet("A", free=6, sealed=1)]),
+                                   [kernel.FreeEdgesChanged("sealed")])())
+        assert out["free_edges_before"] == 8 and out["free_edges_after"] == 6
+
+    def test_a_stitch_that_sealed_nothing_bites(self, monkeypatch):
+        census = [_sheet("A", free=4), _sheet("B", free=4)]
+        self._wire(monkeypatch, census)
+        res = kernel.wrap(self._handler(census, list(census)), [kernel.FreeEdgesChanged("sealed")])()
+        assert res["isError"] is True
+        assert "did not drop" in res["message"] and "8 before, 8 after" in res["message"]
+
+    def test_a_stitch_whose_inputs_the_census_never_reached_is_disclosed_not_failed(self, monkeypatch):
+        # A stitch takes open surfaces, so a census with no free edge at all did not hold them.
+        census = [_sheet("Solid", free=0, sealed=12)]
+        self._wire(monkeypatch, census)
+        out = _payload(kernel.wrap(self._handler(census, list(census)),
+                                   [kernel.FreeEdgesChanged("sealed")])())
+        assert out["free_edges_confirmed"] is False
+        assert "free_edges_after" not in out
+
+    def test_an_unstitch_that_set_faces_loose_confirms(self, monkeypatch):
+        census = [_sheet("Solid", free=0, sealed=12)]
+        self._wire(monkeypatch, census)
+        out = _payload(kernel.wrap(self._handler(census, [_sheet(f"F{i}", free=4) for i in range(6)]),
+                                   [kernel.FreeEdgesChanged("opened")])())
+        assert out["free_edges_before"] == 0 and out["free_edges_after"] == 24
+
+    def test_an_unstitch_that_freed_no_edge_bites(self, monkeypatch):
+        census = [_sheet("A", free=4)]
+        self._wire(monkeypatch, census)
+        res = kernel.wrap(self._handler(census, list(census)), [kernel.FreeEdgesChanged("opened")])()
+        assert res["isError"] is True
+        assert "did not rise" in res["message"]
+
+    def test_an_edge_whose_face_count_does_not_read_is_disclosed(self, monkeypatch):
+        census = [BRepBody(name="A", is_solid=False, edges=[BRepEdge(curve=None)])]
+        self._wire(monkeypatch, census)
+        out = _payload(kernel.wrap(self._handler(census, list(census)),
+                                   [kernel.FreeEdgesChanged("opened")])())
+        assert out["free_edges_confirmed"] is False
+
+    def test_a_census_over_the_edge_cap_is_not_taken(self, monkeypatch):
+        monkeypatch.setattr(kernel, "_CENSUS_EDGE_CAP", 3)
+        census = [_sheet("A", free=4)]
+        self._wire(monkeypatch, census)
+        out = _payload(kernel.wrap(self._handler(census, [_sheet("A", free=6)]),
+                                   [kernel.FreeEdgesChanged("opened")])())
+        assert out["free_edges_confirmed"] is False
+
+    def test_a_direction_outside_the_two_is_refused_at_construction(self):
+        with pytest.raises(ValueError, match="sideways"):
+            kernel.FreeEdgesChanged("sideways")
+
+
+class TestSurfaceAreaAdded:
+    def _wire(self, monkeypatch, census):
+        monkeypatch.setattr(kernel, "census_bodies", lambda: census)
+
+    def _handler(self, census, after):
+        def handler(**kw):
+            census[:] = after
+            return _ok({"created": True})
+        return handler
+
+    def test_a_created_sheet_confirms_with_the_area_it_added(self, monkeypatch):
+        census = [_sheet("Old", free=4, area=3.0)]
+        self._wire(monkeypatch, census)
+        out = _payload(kernel.wrap(self._handler(census, census + [_sheet("New", free=4, area=2.5)]),
+                                   [kernel.SurfaceAreaAdded()])())
+        assert out["area_added_cm2"] == 2.5
+
+    def test_an_unchanged_total_area_bites_naming_it(self, monkeypatch):
+        census = [_sheet("Old", free=4, area=3.0)]
+        self._wire(monkeypatch, census)
+        res = kernel.wrap(self._handler(census, list(census)), [kernel.SurfaceAreaAdded()])()
+        assert res["isError"] is True
+        assert "unchanged (3.0 cm2)" in res["message"]
+
+    def test_no_growth_beside_an_unread_area_is_disclosed_not_failed(self, monkeypatch):
+        # the sheet may be the body whose area did not read - no conviction from a blind census
+        census = [BRepBody(name="Blind", is_solid=False)]
+        self._wire(monkeypatch, census)
+        out = _payload(kernel.wrap(self._handler(census, list(census)), [kernel.SurfaceAreaAdded()])())
+        assert out["surface_area_confirmed"] is False
+
+    def test_growth_beside_an_unread_area_still_confirms(self, monkeypatch):
+        census = [BRepBody(name="Blind", is_solid=False)]
+        self._wire(monkeypatch, census)
+        out = _payload(kernel.wrap(self._handler(census, census + [_sheet("New", free=4, area=2.0)]),
+                                   [kernel.SurfaceAreaAdded()])())
+        assert out["area_added_cm2"] == 2.0
+
+    def test_an_unreadable_census_is_disclosed(self, monkeypatch):
+        monkeypatch.setattr(kernel, "census_bodies", lambda: None)
+        out = _payload(kernel.wrap(lambda **kw: _ok({"created": True}), [kernel.SurfaceAreaAdded()])())
+        assert out["surface_area_confirmed"] is False
+
+
+def _placed(x, y=0.0, z=0.0, rotation=None):
+    """A pattern element at a translation, optionally under a rotation block (a 3x3 row-major)."""
+    r = rotation or (1, 0, 0, 0, 1, 0, 0, 0, 1)
+    arr = (r[0], r[1], r[2], x, r[3], r[4], r[5], y, r[6], r[7], r[8], z, 0, 0, 0, 1)
+    return types.SimpleNamespace(transform=types.SimpleNamespace(asArray=lambda arr=arr: arr,
+                                                                  translation=_pt(x, y, z)))
+
+
+_GRID = (("quantity_one", "spacing_one", 2, 10.0), ("quantity_two", "spacing_two", 1, 10.0))
+
+
+class TestPatternElementsPlaced:
+    def _wire(self, monkeypatch, tl, **kw):
+        p = kernel.PatternElementsPlaced(**kw)
+        monkeypatch.setattr(p, "_timeline", lambda: tl)
+        return p
+
+    def _handler(self, tl, elements, name="Pattern1", feature_name="Pattern1"):
+        def handler(quantity_one=2, spacing_one=10.0, quantity_two=1, spacing_two=10.0, units="mm"):
+            feature = types.SimpleNamespace(patternElements=_coll(elements))
+            tl._items.append(FakeTimelineObject(name=name, entity=feature))
+            return _ok({"patterned": True, "feature": feature_name})
+        return handler
+
+    def test_distinct_instances_one_spacing_apart_confirm_with_the_count(self, monkeypatch):
+        tl = FakeTimeline()
+        p = self._wire(monkeypatch, tl, spacings=_GRID)
+        out = _payload(kernel.wrap(self._handler(tl, [_placed(0), _placed(2), _placed(4)]), [p])(
+            quantity_one=3, spacing_one=20, units="mm"))
+        assert out["elements_placed"] == 3
+
+    def test_stacked_copies_bite_naming_the_pair(self, monkeypatch):
+        tl = FakeTimeline()
+        p = self._wire(monkeypatch, tl, spacings=_GRID)
+        res = kernel.wrap(self._handler(tl, [_placed(0), _placed(2), _placed(2)]), [p])(
+            quantity_one=3, spacing_one=20, units="mm")
+        assert res["isError"] is True
+        assert "STACKED" in res["message"] and "copies 1 and 2" in res["message"]
+
+    def test_a_first_instance_off_the_requested_spacing_bites(self, monkeypatch):
+        tl = FakeTimeline()
+        p = self._wire(monkeypatch, tl, spacings=_GRID)
+        res = kernel.wrap(self._handler(tl, [_placed(0), _placed(1.5)]), [p])(
+            quantity_one=2, spacing_one=20, units="mm")
+        assert res["isError"] is True
+        assert "'spacing_one'" in res["message"]
+        assert "15.0 mm" in res["message"] and "20.0 mm" in res["message"]
+
+    def test_the_second_direction_is_read_one_row_along(self, monkeypatch):
+        # Elements lay out direction one innermost (measured), so the second direction's first
+        # instance is the element quantity_one along, not element 1.
+        tl = FakeTimeline()
+        p = self._wire(monkeypatch, tl, spacings=_GRID)
+        good = [_placed(0, 0), _placed(2, 0), _placed(0, 3), _placed(2, 3)]
+        out = _payload(kernel.wrap(self._handler(tl, good), [p])(
+            quantity_one=2, spacing_one=20, quantity_two=2, spacing_two=30, units="mm"))
+        assert out["elements_placed"] == 4
+        tl2 = FakeTimeline()
+        p2 = self._wire(monkeypatch, tl2, spacings=_GRID)
+        bad = [_placed(0, 0), _placed(2, 0), _placed(0, 2.5), _placed(2, 2.5)]
+        res = kernel.wrap(self._handler(tl2, bad), [p2])(
+            quantity_one=2, spacing_one=20, quantity_two=2, spacing_two=30, units="mm")
+        assert res["isError"] is True and "'spacing_two'" in res["message"]
+
+    def test_omitted_inputs_are_judged_at_the_handlers_defaults(self, monkeypatch):
+        # quantity_one defaults to 2 and spacing_one to 10 mm, so a bare call still gates spacing.
+        tl = FakeTimeline()
+        p = self._wire(monkeypatch, tl, spacings=_GRID)
+        res = kernel.wrap(self._handler(tl, [_placed(0), _placed(2)]), [p])()
+        assert res["isError"] is True and "10.0 mm" in res["message"]
+
+    def test_the_feature_named_by_the_payload_is_the_one_read(self, monkeypatch):
+        tl = FakeTimeline([FakeTimelineObject(name="Pattern1", entity=types.SimpleNamespace(
+            patternElements=_coll([_placed(0), _placed(0)])))])      # an OLD stacked pattern
+        p = self._wire(monkeypatch, tl, spacings=_GRID)
+        out = _payload(kernel.wrap(self._handler(tl, [_placed(0), _placed(1)], name="Pattern2",
+                                                 feature_name="Pattern2"), [p])())
+        assert out["elements_placed"] == 2
+
+    def test_a_feature_not_found_on_the_timeline_is_disclosed(self, monkeypatch):
+        tl = FakeTimeline()
+        p = self._wire(monkeypatch, tl, spacings=_GRID)
+        out = _payload(kernel.wrap(self._handler(tl, [_placed(0)], feature_name="Ghost"), [p])())
+        assert out["pattern_elements_confirmed"] is False
+
+    def test_an_element_transform_that_does_not_read_is_disclosed(self, monkeypatch):
+        tl = FakeTimeline()
+        p = self._wire(monkeypatch, tl, spacings=_GRID)
+        blind = types.SimpleNamespace(transform=None)
+        out = _payload(kernel.wrap(self._handler(tl, [_placed(0), blind]), [p])())
+        assert out["pattern_elements_confirmed"] is False
+
+    # Without spacings the read is the result bodies' boxes: a circular element's transform is not
+    # its placement (measured: a 4 x 360 deg ring reads 0/180/270/0 deg while its bodies sit at
+    # 0/90/180/270, the seed LAST in feature.bodies), so the transforms cannot be the evidence.
+    def _boxed_handler(self, tl, corners, transforms=()):
+        def handler(**kw):
+            feature = types.SimpleNamespace(
+                patternElements=_coll(list(transforms)),
+                bodies=_coll([BRepBody(name=f"B{i}", bbox=types.SimpleNamespace(
+                    minPoint=_pt(*c), maxPoint=_pt(c[0] + 1, c[1] + 1, c[2] + 1)))
+                    for i, c in enumerate(corners)]))
+            tl._items.append(FakeTimelineObject(name="Ring1", entity=feature))
+            return _ok({"patterned": True, "feature": "Ring1"})
+        return handler
+
+    def test_a_ring_is_judged_by_its_bodies_boxes_not_its_element_transforms(self, monkeypatch):
+        tl = FakeTimeline()
+        p = self._wire(monkeypatch, tl)
+        # the transforms read as the measured ring would - the seed's twice - yet the boxes differ
+        out = _payload(kernel.wrap(self._boxed_handler(
+            tl, [(3, 0, 0), (-3, 0, 0)], transforms=[_placed(0), _placed(0)]), [p])())
+        assert out["elements_placed"] == 2
+
+    def test_coincident_boxes_are_a_soft_verdict_when_declared_soft(self, monkeypatch):
+        tl = FakeTimeline()
+        p = self._wire(monkeypatch, tl, severity="soft")
+        out = _payload(kernel.wrap(self._boxed_handler(tl, [(0, 0, 0), (0, 0, 0)]), [p])())
+        assert out["verified"]["pattern_elements_placed"]["confirmed"] is False
+        assert "copies 0 and 1" in out["verified"]["pattern_elements_placed"]["reason"]
+
+    def test_a_pattern_owning_no_body_is_disclosed_not_judged(self, monkeypatch):
+        tl = FakeTimeline()
+        p = self._wire(monkeypatch, tl)
+        out = _payload(kernel.wrap(self._boxed_handler(tl, []), [p])())
+        assert out["pattern_elements_confirmed"] is False
+
+    def test_spacing_keys_the_handler_lacks_are_refused_at_wiring(self):
+        p = kernel.PatternElementsPlaced(spacings=_GRID)
+
+        def handler(quantity=2):
+            return _ok({})
+
+        with pytest.raises(ValueError, match="spacing_one"):
+            kernel.wrap(handler, [p])
 
 
 class TestFileLanded:

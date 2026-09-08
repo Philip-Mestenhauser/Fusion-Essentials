@@ -116,6 +116,7 @@ item = Item.create_tool_item(
     tool=tool, write="destructive", handler=handler, run_on_main_thread=True,
     verification=Verification(
         kind="inline",
+        rung="value",
         evidence_test="tests/unit/test_mesh_delete.py::TestDirectDelete"
                       "::test_a_survivor_after_success_is_an_error"))
 

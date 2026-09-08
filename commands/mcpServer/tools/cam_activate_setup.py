@@ -87,7 +87,8 @@ activate_setup_item = Item.create_tool_item(
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_cam_activate_setup.py"
-                      "::test_activate_that_does_not_take_is_an_error")
+                      "::test_activate_that_does_not_take_is_an_error",
+        rung="value")
 )
 
 

@@ -156,6 +156,7 @@ surface_untrim_item = Item.create_tool_item(
     tool=surface_untrim_tool, write="write", handler=untrim_handler, run_on_main_thread=True,
     verification=Verification(
         kind="effect",
+        rung="geometry",
         evidence_test="tests/unit/test_surface_untrim.py::test_no_growth_reported_honestly"))
 
 

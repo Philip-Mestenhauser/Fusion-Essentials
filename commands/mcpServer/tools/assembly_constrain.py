@@ -249,9 +249,9 @@ item = Item.create_tool_item(
     tool=tool, write="write", handler=handler,
     run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
-        evidence_test="tests/unit/test_assembly_constrain.py::TestConstraintSolveState"
-                      "::test_failed_solve_is_refused_naming_the_delete_path"))
+        kind="inline", rung="value",
+        evidence_test="tests/unit/test_assembly_constrain.py::TestConstraintMovedVerdict"
+                      "::test_a_repositioned_part_is_published_with_its_distance"))
 
 
 def register_tool():

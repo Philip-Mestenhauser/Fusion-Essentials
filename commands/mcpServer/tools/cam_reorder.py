@@ -176,7 +176,8 @@ item = Item.create_tool_item(
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_cam_reorder.py::TestLyingMove::"
-                      "test_a_move_that_left_the_order_alone_errors"))
+                      "test_a_move_that_left_the_order_alone_errors",
+        rung="value"))
 
 
 def register_tool():

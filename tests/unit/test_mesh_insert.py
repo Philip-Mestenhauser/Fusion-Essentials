@@ -26,15 +26,19 @@ class _ImportingMeshBodies(_MeshBodies):
         return self._import_result
 
 
+# MeshUnits member -> the sentinel installed for it. Mocked MeshUnits answers EVERY name with a
+# truthy child Mock, so only equality against one of these says which unit reached meshBodies.add.
+_MESH_UNIT_SENTINELS = {"MillimeterMeshUnit": "MM", "CentimeterMeshUnit": "CM",
+                        "MeterMeshUnit": "M", "InchMeshUnit": "IN", "FootMeshUnit": "FT"}
+
+
 @pytest.fixture(autouse=True)
 def _types(monkeypatch):
     """The adsk.fusion type identities and the MeshUnits members the import enum is read from."""
     monkeypatch.setattr(adsk.fusion, "MeshBody", MeshBody, raising=False)
     monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
     monkeypatch.setattr(adsk.fusion, "BaseFeature", FakeBaseFeature, raising=False)
-    for member, sentinel in (("MillimeterMeshUnit", "MM"), ("CentimeterMeshUnit", "CM"),
-                             ("MeterMeshUnit", "M"), ("InchMeshUnit", "IN"),
-                             ("FootMeshUnit", "FT")):
+    for member, sentinel in _MESH_UNIT_SENTINELS.items():
         monkeypatch.setattr(adsk.fusion.MeshUnits, member, sentinel, raising=False)
 
 
@@ -201,13 +205,28 @@ class TestMeshInsertStats:
         # imports at one scale and reports at another - so both are asserted per key, against
         # cm-per-unit restated here rather than read from the tool.
         rows = [("mm", "MM", 0.1), ("cm", "CM", 1.0), ("m", "M", 100.0),
-                ("in", "IN", 2.54), ("ft", "FT", 30.48)]
+                ("in", "IN", 2.54), ("inch", "IN", 2.54), ("ft", "FT", 30.48)]
         for key, enum_sentinel, cm_per_unit in rows:
             out, coll = self._insert_with_collection(units=key, area=6.0, volume=1.0)
             assert coll.add_args[1] == enum_sentinel, f"{key} imported as {coll.add_args[1]}"
             assert out["units"] == key
             assert abs(out["bodies"][0]["area"] - round(6.0 / cm_per_unit ** 2, 6)) < 1e-6, key
             assert abs(out["bodies"][0]["volume"] - round(1.0 / cm_per_unit ** 3, 6)) < 1e-6, key
+
+    def test_the_units_enum_matches_the_unit_table(self):
+        # The enum IS the table the handler dispatches through, so every key it accepts is on the
+        # wire - 'inch' rides beside 'in'. A hand-edited enum drifting from the table fails here.
+        assert mo.tool.input_schema["properties"]["units"]["enum"] == list(mo._MESH_UNIT_TABLE)
+
+    def test_every_advertised_unit_dispatches(self):
+        # The rows come from the table, so a key added there forces one here. Each must reach the
+        # MeshUnits member its own row names - a key the import cannot serve is one the wire
+        # promised and the tool declines.
+        for key, (member, _cm_per_unit) in mo._MESH_UNIT_TABLE.items():
+            assert member in _MESH_UNIT_SENTINELS, f"install a MeshUnits sentinel for {member}"
+            out, coll = self._insert_with_collection(units=key)
+            assert out["units"] == key, key
+            assert coll.add_args[1] == _MESH_UNIT_SENTINELS[member], key
 
     def test_area_and_volume_are_scaled_into_the_reported_units(self):
         out = self._insert(units="mm", area=6.0, volume=1.0)      # cm^2, cm^3

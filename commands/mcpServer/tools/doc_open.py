@@ -179,10 +179,13 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     enforce_timeout=False,
+    # is_active compares app.activeDocument against the document THIS call opened, and the poller
+    # names the active document again once the async load has caught up.
     verification=Verification(
         kind="deferred", poller="workspace_orient",
         evidence_test="tests/unit/test_doc_open.py::TestAsyncLoadHandoff"
-                      "::test_a_document_not_yet_active_claims_no_load_and_names_the_poller"))
+                      "::test_a_document_not_yet_active_claims_no_load_and_names_the_poller",
+        rung="value"))
 
 
 def register_tool():

@@ -31,6 +31,19 @@ def FakeFile(name, fid="urn:adsk.file:src", child_refs=None, copy_returns=True, 
                         rename_ok=rename_ok)
 
 
+class _DeafRename(FakeDataFile):
+    """A copy whose name setter SWALLOWS the write - it neither raises nor keeps the value, the one
+    shape a rename that only checks for an exception reports as landed."""
+    def __init__(self, name, folder):
+        super().__init__(name, file_id="urn:adsk.file:copy", parent_folder=folder,
+                         parent_project=getattr(folder, "parentProject", None))
+        folder._files.append(self)
+
+    @FakeDataFile.name.setter
+    def name(self, value):
+        pass
+
+
 def FakeProject(name, pid="p1"):
     """A project whose root folder starts empty - tests append files and subfolders to it."""
     project = FakeDataProject(name=name, project_id=pid,
@@ -264,6 +277,20 @@ class TestCopyDocument:
         # with the request and the id is the copy's own lineage.
         assert out["copied_name"] == "Template"
         assert out["copied_id"] == "urn:adsk.file:copy"
+
+    def test_a_rename_that_silently_does_not_take_is_disclosed(self, _install):
+        # THE BITE: the setter neither raises nor keeps the name. Without the read-back the payload
+        # reports copied=true with no warning at all, and the caller addresses a file by a name
+        # nothing carries.
+        src = FakeFile("Template", fid="urn:adsk.file:src")
+        src.copy = lambda folder: _DeafRename("Template", folder)
+        _install([FakeProject("CAM")], by_id={"urn:adsk.file:src": src})
+        out = _payload(dm.handler(
+            document_id="urn:adsk.file:src", project="CAM", name="PartA_CAM"))
+        assert out["copied"] is True
+        assert "did not take" in out["rename_warning"]
+        assert "'PartA_CAM'" in out["rename_warning"]
+        assert out["copied_name"] == "Template"
 
 
 class TestCopyByNameWalkBound:

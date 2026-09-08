@@ -401,7 +401,7 @@ item = Item.create_tool_item(
     # Every VALUE the tool sets is re-read off the joint and published as that read-back, erroring
     # when the joint keeps its own value; the motion arm gates on the platform's own setter bool.
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_joint_edit.py::TestSwallowedSets::"
                       "test_a_flip_that_did_not_take_errors_naming_it"))
 

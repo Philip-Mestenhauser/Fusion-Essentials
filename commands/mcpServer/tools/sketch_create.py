@@ -75,12 +75,7 @@ def handler(plane: str = "xy", name: str = "", on_face: str = "") -> dict:
         "plane": _plane_name(sketch),
         "frame": frame,
         "note": ("Draw on it with sketch_add_geometry (target this sketch by name). "
-            + frame_space_note(frame)
-            + " On the "
-            "xz origin plane in particular the frame is NOT world-aligned: local +Y maps to world -Z "
-            "(read the frame's own +Y axis for the exact per-plane axis directions). "
-            "sketch_get(sketch_name) "
-            "returns the same 'frame' for any sketch, which is how you verify a plane later."),
+            + frame_space_note(frame)),
     }
     if rename_warning:
         payload["rename_warning"] = rename_warning
@@ -106,7 +101,7 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="effect",
+        kind="effect", rung="value",
         evidence_test="tests/unit/test_sketch_create.py::TestCreateRenameDisclosure"
                       "::test_a_swallowed_rename_is_disclosed_beside_the_actual_name"))
 

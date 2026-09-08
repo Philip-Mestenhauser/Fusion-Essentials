@@ -9,7 +9,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, target_component
 from . import _common
@@ -249,7 +249,12 @@ tool = (
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler,
                              run_on_main_thread=True,
-                             postconditions=[_assert.FeatureHealthy()])
+                             postconditions=[_assert.FeatureHealthy(), _assert.SurfaceAreaAdded()],
+                             verification=Verification(
+                                 kind="inline", rung="exists",
+                                 evidence_test="tests/unit/test_surface_patch.py"
+                                               "::TestSurfacePatch"
+                                               "::test_patch_with_no_result_body_is_an_error"))
 
 
 def register_tool():

@@ -219,8 +219,8 @@ class TestIncludeSlices:
         assert set(out) == default | {"grid"}
         assert set(out["grid"]) == {"isLayoutGridLockEnabled"}
 
-    def test_include_accepts_a_comma_string(self, prefs):
-        out = _payload(get.handler(include="grid,network"))["preferences"]
+    def test_include_takes_several_groups_at_once(self, prefs):
+        out = _payload(get.handler(include=["grid", "network"]))["preferences"]
         assert {"grid", "network"} <= set(out)
 
     def test_included_group_returns_every_member_of_the_table(self, prefs):
@@ -230,6 +230,21 @@ class TestIncludeSlices:
     def test_unknown_include_is_refused_naming_the_valid_groups(self, prefs):
         msg = _message(get.handler(include=["usage_data"]))
         assert "usage_data" in msg and "graphics" in msg
+
+    def test_the_include_enum_matches_the_group_keys(self):
+        # Catches a HAND-EDITED schema drifting from the table's own keys. It cannot catch a key
+        # added to GROUPS - both sides read it - which is what the dispatch test below covers.
+        enum = get.tool.input_schema["properties"]["include"]["items"]["enum"]
+        assert sorted(enum) == sorted(get.GROUP_KEYS)
+
+    def test_every_advertised_group_actually_dispatches(self, prefs):
+        # A key the guard admits but whose group object does not read publishes nothing: the schema
+        # would offer a group the read never returns.
+        for key in get.GROUP_KEYS:
+            out = _payload(get.handler(include=[key]))["preferences"]
+            assert key in out, key
+            listed = out[key]["Design"] if key in get.COLLECTION_KEYS else out[key]
+            assert set(listed) == set(get.GROUP_MEMBERS[key]), key
 
     def test_compatibility_group_carries_the_measured_members(self, prefs):
         out = _payload(get.handler(include=["compatibility"]))["preferences"]["compatibility"]

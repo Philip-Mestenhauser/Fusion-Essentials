@@ -215,7 +215,7 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="destructive", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_sys_preferences.py::TestWriteProtocol"
                       "::test_a_silent_noop_setter_is_an_error"))
 

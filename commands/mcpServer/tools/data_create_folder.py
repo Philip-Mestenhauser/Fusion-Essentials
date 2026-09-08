@@ -97,7 +97,8 @@ item = Item.create_tool_item(
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_data_create_folder.py::TestCreateFolder"
-                      "::test_a_folder_that_never_relists_is_an_error")
+                      "::test_a_folder_that_never_relists_is_an_error",
+        rung="value")
 )
 
 

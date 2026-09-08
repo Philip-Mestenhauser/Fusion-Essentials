@@ -641,7 +641,7 @@ item = Item.create_tool_item(
     # returned, and a create that hands back nothing or no readable id is an error. settings_requested
     # is the request, published under its own key and named as not read back in the note.
     verification=Verification(
-        kind="effect",
+        kind="effect", rung="value",
         evidence_test="tests/unit/test_drawing_create.py::TestGuards"
                       "::test_missing_file_id_on_created_drawing_errors"))
 

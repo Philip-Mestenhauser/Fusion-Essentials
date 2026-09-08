@@ -209,7 +209,8 @@ item = Item.create_tool_item(
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_cam_edit_folders.py::TestLyingReturns::"
-                      "test_a_create_that_never_joined_the_setup_errors"))
+                      "test_a_create_that_never_joined_the_setup_errors",
+        rung="value"))
 
 
 def register_tool():

@@ -86,6 +86,25 @@ def _call(server, name, arguments):
     }))
 
 
+class TestBareWireMarker:
+    def test_the_marker_strips_every_description_and_nothing_else(self, server, mcp_server_module,
+                                                                  tmp_path, monkeypatch):
+        server.register(_enum_tool_item("probe", lambda **kw: _ok()))
+        marker = tmp_path / ".wire_bare"
+        monkeypatch.setattr(mcp_server_module, "BARE_WIRE_MARKER", str(marker))
+        full = server._handle_tools_list(1)["result"]["tools"][0]
+        assert full["description"] == "synthetic enum tool"
+        marker.write_text("on", encoding="utf-8")
+        bare = server._handle_tools_list(1)["result"]["tools"][0]
+        assert "description" not in json.dumps(bare)
+        assert bare["name"] == "probe"
+        assert bare["inputSchema"]["properties"]["kind"]["enum"] == ["cylinder_face", "planar_face"]
+        assert bare["inputSchema"]["properties"]["include"]["items"]["enum"] == ["versions", "xref_tree"]
+        assert bare["inputSchema"].get("additionalProperties") is False
+        marker.unlink()
+        assert server._handle_tools_list(1)["result"]["tools"][0]["description"] == "synthetic enum tool"
+
+
 class TestInitializeProtocolVersionNegotiation:
     def test_initialize_with_supported_version_echoes_it(self, server):
         response = asyncio.run(server.handle_request({

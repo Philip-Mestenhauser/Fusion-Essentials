@@ -98,6 +98,17 @@ class TestMeshRemesh:
         assert out["changed"] is False
         assert "unchanged" in out["note"]
 
+    def test_a_flat_count_is_judged_on_the_meshs_own_area_and_volume(self):
+        # a retriangulation can land with the triangle count flat, so the mesh's own area/volume is
+        # read back as the second signal and the note reports what it observed
+        src = MeshBody("Scan", tri=2000, area=50.0, volume=10.0)
+        _wire(src, _MeshFeatures([MeshBody("Scan", tri=2000, area=51.5, volume=10.0)]))
+        out = payload(mo.handler(mesh="H"))
+        assert out["changed"] is False
+        assert out["geometry_moved"] is True
+        assert out["before"]["area_cm2"] == 50.0 and out["after"]["area_cm2"] == 51.5
+        assert "MOVED" in out["note"]
+
     def test_missing_remesh_features_collection_errors(self):
         src = MeshBody("Scan", tri=2000)
         _wire(src, None)

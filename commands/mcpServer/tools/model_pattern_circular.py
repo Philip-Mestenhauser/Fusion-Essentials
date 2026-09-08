@@ -8,7 +8,7 @@ angle. WRITES; the instance count is read back off the created feature, never ec
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
@@ -98,7 +98,13 @@ tool = (
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler,
                              run_on_main_thread=True,
-                             postconditions=[_assert.FeatureHealthy()])
+                             postconditions=[_assert.FeatureHealthy(),
+                                             _assert.PatternElementsPlaced(severity="soft")],
+                             verification=Verification(
+                                 kind="inline", rung="value",
+                                 evidence_test="tests/unit/test_model_pattern_circular.py"
+                                 "::TestInstanceCountReadBack"
+                                 "::test_a_feature_reporting_fewer_instances_is_an_error_naming_both_counts"))
 
 
 def register_tool():

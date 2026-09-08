@@ -18,6 +18,7 @@ from . import _common
 from . import _geom
 from . import _inputs
 from . import _write_guard
+from .design_move_occurrence import _corner
 from ._joints import (DRIVES_ANGLE, DRIVES_ANY, DRIVES_SLIDE, find_joint as _find_joint,
                       current_joint_type as _current_joint_type,
                       motion_link_record as _motion_link_record)
@@ -327,12 +328,12 @@ def _delta_deg(before, after):
 
 
 def _moved_rows(members):
-    """(rows, readable) over [(occurrence, before-sample)]: one row per member whose placement
-    changed by MORE than its band, ordered by how far it moved. `readable` says at least one
-    member's placement was readable at both ends - which is what tells 'nothing moved' apart from
-    'the move could not be measured'."""
+    """(rows, readable) over [(occurrence, before-sample, before-corner)]: one row per member whose
+    placement changed by MORE than its band, farthest first, with 'geometry_moved_mm' (its own body
+    corner's travel) when that corner read on both sides. `readable` says at least one placement
+    read at both ends - what tells 'nothing moved' apart from 'the move could not be measured'."""
     rows, readable = [], False
-    for occ, before in members:
+    for occ, before, corner_before in members:
         after = _placement(occ)
         dmm, ddeg = _delta_mm(before, after), _delta_deg(before, after)
         if dmm is None and ddeg is None:
@@ -348,6 +349,10 @@ def _moved_rows(members):
             row["delta_mm"] = dmm
         if ddeg is not None:
             row["delta_deg"] = ddeg
+        corner_after = _corner(occ) if corner_before is not None else None
+        if corner_after is not None:
+            row["geometry_moved_mm"] = round(
+                max(abs(a - b) for a, b in zip(corner_before, corner_after)) * 10.0, 4)
         rows.append((span, turn, row))
     rows.sort(key=lambda r: (r[0], r[1]), reverse=True)
     return [r[2] for r in rows], readable
@@ -475,6 +480,8 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
     # re-sampling those placements after the drive is what says WHICH member was displaced.
     occ_one, occ_two = safe(lambda: joint.occurrenceOne), safe(lambda: joint.occurrenceTwo)
     before_one, before_two = _placement(occ_one), _placement(occ_two)
+    # The placement is the transform's CLAIM; each member's body corner is the EVIDENCE.
+    corner_one, corner_two = _corner(occ_one), _corner(occ_two)
     directions = {}
     if cm is not None:
         slide_dir = _geom.axis_vec(safe(lambda: jm.slideDirectionVector))
@@ -690,14 +697,28 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
     # WHICH member the drive displaced, from the placement samples taken either side of it. This is
     # an observation, never a prediction: the rows name the occurrence that moved and its measured
     # change, and a drive after which neither placement changed says exactly that.
-    rows, placement_readable = _moved_rows(((occ_one, before_one), (occ_two, before_two)))
+    rows, placement_readable = _moved_rows(((occ_one, before_one, corner_one),
+                                            (occ_two, before_two, corner_two)))
+    # A drive with no angle commanded TRANSLATES its moved member whole, so a placement that moved
+    # over a body corner that stayed is a claim the geometry contradicts - an error, not a pose.
+    if rad is None:
+        for row in rows:
+            carried = row.get("geometry_moved_mm")
+            if carried is not None and carried <= _MOVE_BAND_MM:
+                _driven_this_session.add(_reg_key(doc_id, joint))
+                return error(
+                    f"Drive of '{resolved_name}' moved the placement of '{row['occurrence']}' by "
+                    f"{row.get('delta_mm')} mm but its body geometry did not move "
+                    f"({carried} mm) - the transform is a claim, the body corner is the evidence. "
+                    "Read the pose back with assembly_get.")
     if rows:
         result["moved"] = rows[0]
         if len(rows) > 1:
             result["also_moved"] = rows[1]
         result["note"] += (" 'moved' names the member whose placement changed across this drive: "
                            "delta_mm is how far its origin moved (mm), delta_deg the angle between "
-                           "its before and after orientation (a magnitude, no sense).")
+                           "its before and after orientation (a magnitude, no sense), "
+                           "geometry_moved_mm how far its own body corner travelled.")
     elif placement_readable:
         result["moved"] = None
         result["note"] += (f" 'moved' is null - neither member's placement changed by more than "
@@ -766,9 +787,9 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
-        evidence_test="tests/unit/test_joint_drive.py::TestDriveTookGate"
-                      "::test_a_within_limits_no_take_is_still_an_ERROR"))
+        kind="inline", rung="geometry",
+        evidence_test="tests/unit/test_joint_drive.py::TestBodyCornerEvidence"
+                      "::test_a_slide_whose_placement_moved_but_body_stayed_is_an_error"))
 
 
 def register_tool():

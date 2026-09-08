@@ -280,6 +280,7 @@ mesh_combine_item = Item.create_tool_item(
     tool=mesh_combine_tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
         kind="inline",
+        rung="geometry",
         evidence_test="tests/unit/test_mesh_combine.py::TestNoOpGate::test_unchanged_target_bites"))
 
 

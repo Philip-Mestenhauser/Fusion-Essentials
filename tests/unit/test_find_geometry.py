@@ -279,6 +279,14 @@ class TestFind:
         # The declared output contract holds: the handler actually mints the 'handle' RETURNS declares.
         assert fg.RETURNS[0].assert_present(out) == ""
 
+    def test_the_result_note_does_not_repeat_the_produces_block(self):
+        # the block is a standing contract the DESCRIPTION already carries; repeating it in the
+        # note re-sends it on every call, and this read is called many times per session.
+        _install([FakeOcc("Crank:1", "Crank", [FakeBody(faces=[_cyl("C", 0.8, (0, 0, 0))])])])
+        note = _payload(fg.handler(target="Crank:1"))["note"]
+        assert fg._outputs.produces_block(fg.RETURNS) not in note
+        assert "hidden:true" in note and "frame.origin" in note   # the per-result facts stay
+
     def test_kind_filter_cylinder_only(self):
         body = FakeBody(faces=[_cyl("C", 0.8, (0, 0, 0)), _plane("P", (1, 0, 0))])
         _install([FakeOcc("X:1", "X", [body])])

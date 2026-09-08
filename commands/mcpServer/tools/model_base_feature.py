@@ -25,6 +25,8 @@ _PARAMETRIC_GUARD = _inputs.ModeGuard(
 # open scope is the BaseFeature object add() returned, which start() stashes here for finish().
 _OPEN_BASE_FEATURES = []
 
+_ACTIONS = ("start", "finish")
+
 
 def _resolve_base_feature(design, comp, name):
     """Find an existing base feature by name across the design (the named comp first, then root, then
@@ -59,8 +61,8 @@ def handler(action: str = "start", base_feature: str = "") -> dict:
         return error("No active design. Create or open a document first (see doc_new).")
 
     act = (action or "start").strip().lower()
-    if act not in ("start", "finish"):
-        return error(f"'action' must be one of: start, finish (got '{action}').")
+    if act not in _ACTIONS:
+        return error(f"'action' must be one of: {', '.join(_ACTIONS)} (got '{action}').")
 
     comp = target_component(design)
 
@@ -181,8 +183,8 @@ tool = (
     Tool.create_simple(
         name="model_base_feature",
         description=TOOL_DESCRIPTION)
-    .add_input_property("action", {"type": "string",
-            "description": "start | finish (default start)."})
+    .add_input_property("action", {"type": "string", "enum": list(_ACTIONS),
+            "description": "Open or close the edit scope (default start)."})
     .add_input_property("base_feature", {"type": "string",
             "description": "Optional name: on 'start' names the new base "
             "feature; on 'finish' selects which to finish (omit to finish "
@@ -193,6 +195,7 @@ item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
         kind="inline",
+        rung="exists",
         evidence_test="tests/unit/test_model_base_feature.py::TestBaseFeature"
                       "::test_start_errors_and_cleans_up_when_startEdit_returns_false"))
 

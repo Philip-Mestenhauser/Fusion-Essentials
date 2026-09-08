@@ -285,7 +285,7 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="destructive", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_sketch_delete_entity.py::TestDeleteCurve"
                       "::test_a_delete_that_reports_true_but_removes_nothing_is_an_error"))
 

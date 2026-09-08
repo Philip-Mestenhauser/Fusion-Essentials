@@ -84,6 +84,119 @@ class TestPostconditionsDeclared:
             for p in posts or []:
                 assert isinstance(p, kernel.Postcondition), (
                     f"{it.get_name()}: postconditions must be _assert.Postcondition kinds, got {type(p)}")
+                assert p.rung in kernel.RUNGS, f"{it.get_name()}: {p.name} declares rung {p.rung!r}"
+
+
+# The minimum a write VERB's read-back has to prove, on the _assert.RUNGS ladder. A verb that adds or
+# removes material or moves geometry is held to GEOMETRY (the right shape changed); one that sets,
+# names, creates or deletes a thing is held to VALUE (the right thing read back); the rest to EXISTS.
+# A name matches on its longest listed prefix; a write verb listed nowhere is held to EXISTS.
+_MINIMUM_RUNG = {
+    "geometry": ("model_", "surface_", "mesh_", "sketch_add", "sketch_move", "sketch_copy",
+                 "sketch_project", "sketch_edit", "sketch_insert", "sketch_dimension",
+                 "joint_drive", "assembly_move", "design_move_occurrence"),
+    "value": ("cam_", "data_", "doc_", "design_", "drawing_", "joint_", "param_", "pmi_",
+              "appearance_", "assembly_", "save_", "sketch_create", "sketch_add_3d_line",
+              "sketch_constrain", "sketch_set_text", "sketch_delete", "model_set_material",
+              "model_create_component", "model_construction", "mesh_delete", "mesh_insert",
+              "mesh_export"),
+    "exists": ("view_", "sys_", "model_base_feature", "cam_show_toolpath", "cam_generate",
+               "cam_activate_setup", "design_activate_component"),
+}
+# The kinds whose handler reads an effect back in the call; a deferred kind's rung is the POLLER's
+# read, made later, so it is recorded but never counted toward the verb's minimum.
+_IN_CALL_KINDS = ("inline", "effect")
+
+# Tools whose read-back stops short of their verb's minimum, each with the reason - a platform
+# that offers no stronger read, a request that carries no value to compare, or a kind not yet
+# built (the ledger id names the row). Shrink-only: an entry leaves when the read-back lands.
+_RUNG_SHORT = {
+    "mesh_generate_face_groups": "a landed generation can leave the face-group count and the "
+                                 "group ids unchanged, so no read can convict",
+    "cam_apply_template": "CAMTemplate exposes no operation list to compare; the setup's own "
+                          "census (count grew, each added op read) is the strongest read",
+    "data_delete_file": "post-delete resolvability of a URN is unmeasured (DATADELETE-RESOLVE-1)",
+    "data_delete_folder": "post-delete resolvability of a folder id is unmeasured "
+                          "(DATADELETE-RESOLVE-1)",
+    "doc_new": "the request carries no value: a new document exists and is active",
+    "design_recompute": "the request carries no value: the timeline health after the rebuild is "
+                        "the only observation",
+    "sketch_add_geometry": "the SketchCurvesChanged fingerprint costs 0.27 s per read on a "
+                           "200-curve sketch, two reads per draw; adopted with the batched writes, "
+                           "where one pair covers a whole list (SKETCHFP-COST-1)",
+    "sketch_project": "the SketchCurvesChanged fingerprint costs 0.27 s per read on a 200-curve "
+                      "sketch; adopted with the batched writes (SKETCHFP-COST-1)",
+}
+
+
+def _minimum_rung_for(name):
+    """The rung a tool's verb is held to: its longest matching prefix in _MINIMUM_RUNG."""
+    best, best_len = "exists", -1
+    for rung, prefixes in _MINIMUM_RUNG.items():
+        for prefix in prefixes:
+            if name.startswith(prefix) and len(prefix) > best_len:
+                best, best_len = rung, len(prefix)
+    return best
+
+
+def _declared_rung(item, kernel):
+    """The strongest rung a tool's IN-CALL declarations reach - the kernel kinds and, beside them,
+    an inline/effect verification's own rung - or None when nothing is read back in the call."""
+    rungs = [p.rung for p in (_postconditions_of(item) or [])]
+    v = _verification_of(item)
+    if v is not None and v.kind in _IN_CALL_KINDS and v.rung:
+        rungs.append(v.rung)
+    if not rungs:
+        return None
+    return max(rungs, key=kernel.RUNGS.index)
+
+
+class TestRungMeetsTheVerb:
+    def test_every_read_back_declares_its_rung(self):
+        silent = []
+        for it in register_all_tools():
+            v = _verification_of(it)
+            if v is not None and v.kind in _IN_CALL_KINDS + ("deferred",) and not v.rung:
+                silent.append(f"{it.get_name()}: {v.kind} with no rung")
+        assert not silent, (
+            "a verification that reads an effect back says how much the read proves - declare "
+            "rung= (count | exists | value | geometry) on each of these:\n  " + "\n  ".join(silent))
+
+    def test_every_write_reads_back_at_least_what_its_verb_demands(self):
+        kernel = load_tool("_assert")
+        short = []
+        for it in register_all_tools():
+            if not is_write_tool(it):
+                continue
+            declared = _declared_rung(it, kernel)
+            if declared is None:
+                continue                      # deferred / external / dynamic / gap: nothing read in-call
+            need = _minimum_rung_for(it.get_name())
+            if kernel.RUNGS.index(declared) < kernel.RUNGS.index(need):
+                if it.get_name() in _RUNG_SHORT:
+                    continue
+                short.append(f"{it.get_name()}: declares {declared}, its verb needs {need}")
+        assert not short, (
+            "a write's read-back proves less than its verb demands (count < exists < value < "
+            "geometry). Raise the read-back - a kernel kind of the needed rung, or the handler "
+            "reading the right value/geometry back with rung= declared on its verification - or "
+            "add the tool to _RUNG_SHORT with the reason it cannot:\n  " + "\n  ".join(sorted(short)))
+
+    def test_every_short_entry_is_still_short(self):
+        kernel = load_tool("_assert")
+        items = {it.get_name(): it for it in register_all_tools()}
+        stale = []
+        for name in _RUNG_SHORT:
+            it = items.get(name)
+            if it is None:
+                stale.append(f"{name}: no such tool")
+                continue
+            declared = _declared_rung(it, kernel)
+            need = _minimum_rung_for(name)
+            if declared is None or kernel.RUNGS.index(declared) >= kernel.RUNGS.index(need):
+                stale.append(f"{name}: now reaches {declared}, its verb needs {need}")
+        assert not stale, ("_RUNG_SHORT only shrinks - these entries no longer describe a shortfall, "
+                           "remove them:\n  " + "\n  ".join(stale))
 
 
 # A node id is resolved by PARSING its file with ast - neither importing the test module nor

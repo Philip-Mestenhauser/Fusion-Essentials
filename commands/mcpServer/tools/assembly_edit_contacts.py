@@ -404,7 +404,7 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="destructive", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_assembly_edit_contacts.py::TestDelete"
                       "::test_a_survivor_after_a_true_delete_is_an_error"))
 

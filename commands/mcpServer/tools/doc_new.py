@@ -50,10 +50,13 @@ tool = Tool.create_simple(
 ).strict_schema()
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    # is_active compares app.activeDocument against the document this call created. The tool takes
+    # no inputs, so there is no requested value for a read-back to be held against.
     verification=Verification(
         kind="effect",
         evidence_test="tests/unit/test_doc_new.py::TestNewDocument"
-                      "::test_a_different_active_document_reads_inactive")
+                      "::test_a_different_active_document_reads_inactive",
+        rung="exists")
 )
 
 

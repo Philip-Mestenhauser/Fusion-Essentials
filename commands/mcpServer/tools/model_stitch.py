@@ -8,7 +8,7 @@
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, scale, target_component
 from . import _common
@@ -133,7 +133,11 @@ tool = (
 )
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
-    postconditions=[_assert.FeatureHealthy()])
+    postconditions=[_assert.FeatureHealthy(), _assert.FreeEdgesChanged("sealed")],
+    verification=Verification(
+        kind="inline", rung="exists",
+        evidence_test="tests/unit/test_model_stitch.py::TestStitch"
+                      "::test_an_empty_result_set_is_an_error_not_a_gap_diagnosis"))
 
 
 def register_tool():

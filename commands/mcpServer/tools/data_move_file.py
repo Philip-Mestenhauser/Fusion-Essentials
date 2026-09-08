@@ -164,7 +164,8 @@ item = Item.create_tool_item(
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_data_move_file.py::TestMoveVerification"
-                      "::test_true_with_an_unchanged_parent_is_an_error"))
+                      "::test_true_with_an_unchanged_parent_is_an_error",
+        rung="value"))
 
 
 def register_tool():

@@ -58,10 +58,14 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler,
     run_on_main_thread=True,
+    # The poller reports WHICH document is active, which is the requested value here; this call
+    # already compares app.activeDocument against the document it activated and says 'pending'
+    # rather than true while that comparison has not caught up.
     verification=Verification(
         kind="deferred", poller="doc_get",
         evidence_test="tests/unit/test_doc_activate.py::TestActivateDocument"
-                      "::test_activate_async_pending_reports_pending_not_true"))
+                      "::test_activate_async_pending_reports_pending_not_true",
+        rung="value"))
 
 
 def register_tool():

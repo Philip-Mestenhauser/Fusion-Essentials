@@ -436,6 +436,28 @@ class TestGuards:
         assert "No active document" in res["message"]
 
 
+class TestActionEnum:
+    """The schema's action vocabulary is _ACTIONS itself, and every member reaches a branch."""
+
+    def test_the_action_enum_matches_the_action_tuple(self):
+        # Catches a HAND-EDITED schema drifting from the tuple the handler guards on.
+        assert st.tool.input_schema["properties"]["action"]["enum"] == list(st._ACTIONS)
+
+    def test_every_advertised_action_dispatches(self):
+        # A member no branch reads falls through to the single-operation show path. The tail arm
+        # ECHOES the caller's own action, so the action key proves a branch ran for hide,
+        # show_folder, hide_all and list; show shares that tail, and isolate is judged by effect.
+        extra = {"show": {"operation": "Rough Top"}, "hide": {"operation": "Rough Top"},
+                 "isolate": {"operation": "Rough Top"}, "show_folder": {"folder": "Op1"}}
+        for name in st._ACTIONS:
+            _op1, _op2, op3 = _simple_world()
+            out = _payload(st.handler(action=name, **extra.get(name, {})))
+            assert out["action"] == name, name
+            if name == "isolate":
+                # op3 starts shown, and isolate is the one action that darkens every other op.
+                assert op3.isLightBulbOn is False
+
+
 # ── list ───────────────────────────────────────────────────────────────────
 
 class TestList:

@@ -422,7 +422,7 @@ item = Item.create_tool_item(
     # Every assignment arm re-reads through the two-key _reads_as compare and errors on a mismatch.
     # The albedo write re-reads its channel too; opacity discloses what renders instead of gating.
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_appearance_set.py::TestApply"
                       "::test_a_body_left_holding_a_same_base_copy_is_not_a_success"))
 

@@ -9,10 +9,14 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import iter_collection, ok, error, safe
+from ._common import iter_collection, ok, error, read_flag, safe
 from ._doc_common import _resolve_open_document
 
 app = adsk.core.Application.get()
+
+# MEASURED: a closed document's wrapper reads isValid False without raising. So a
+# close() that answered true over a wrapper STILL reading valid did not take.
+_STILL_VALID = "close returned true but the document still reads isValid=true"
 
 
 def handler(name: str = "", save_changes: bool = False,
@@ -37,6 +41,7 @@ def handler(name: str = "", save_changes: bool = False,
 
     closed, errors, skipped_invalid = [], [], 0
     closed_identities = []
+    unconfirmed = []
     for d in targets:
         # A close_all closes reference/dependency docs too; closing one INVALIDATES its now-orphaned
         # reference proxies, so a later close on such a dead proxy raises a cosmetic error. Skip a proxy
@@ -50,6 +55,14 @@ def handler(name: str = "", save_changes: bool = False,
         ident = {"name": nm, "document_id": safe(lambda d=d: d.dataFile.id)}
         try:
             if d.close(bool(save_changes)):
+                # read_flag, not safe(..., False): a flag that did not answer is not a closed
+                # document, and it is not an open one either.
+                still = read_flag(lambda d=d: d.isValid)
+                if still is True:
+                    errors.append({nm: _STILL_VALID})
+                    continue
+                if still is None:
+                    unconfirmed.append(nm)
                 closed.append(nm)
                 closed_identities.append(ident)
             else:
@@ -72,9 +85,13 @@ def handler(name: str = "", save_changes: bool = False,
         note += f" Skipped {skipped_invalid} already-invalidated reference doc(s)."
     if errors:
         note += f" {len(errors)} of {len(targets)} target(s) failed to close - see 'errors'."
+    if unconfirmed:
+        note += (f" {len(unconfirmed)} closed document(s) did not answer isValid afterwards, so the "
+                 "close is UNCONFIRMED for them - see 'close_unconfirmed'.")
     payload = {
     "closed": closed, "closed_count": len(closed),
     "errors": errors,
+    "close_unconfirmed": unconfirmed,
     "skipped_invalid": skipped_invalid,
     "save_changes": bool(save_changes),
     "remaining_open": safe(lambda: app.documents.count),
@@ -120,10 +137,13 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="destructive", handler=handler,
     run_on_main_thread=True,
+    # isValid is read off each document AFTER its close and a wrapper still reading valid is an
+    # error, not a closed document; a flag that did not answer publishes close_unconfirmed.
     verification=Verification(
         kind="inline",
-        evidence_test="tests/unit/test_doc_close.py::TestCloseDocument"
-                      "::test_close_returning_false_is_now_an_error"))
+        evidence_test="tests/unit/test_doc_close.py::TestCloseReadBack"
+                      "::test_a_close_that_leaves_the_document_valid_is_an_error",
+        rung="value"))
 
 
 def register_tool():

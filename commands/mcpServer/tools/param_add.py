@@ -124,7 +124,7 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="effect",
+        kind="effect", rung="value",
         evidence_test="tests/unit/test_param_add.py::TestAddFavorite"
                       "::test_a_stuck_favorite_is_published_as_the_parameter_reads_it"))
 

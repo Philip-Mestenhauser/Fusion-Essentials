@@ -197,10 +197,13 @@ tool = (
 
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    # isReferencedComponent is read off the inserted occurrence and anything but a reference is an
+    # error, and bound_version reads the version the host's reference actually holds.
     verification=Verification(
         kind="inline",
         evidence_test="tests/unit/test_doc_insert_occurrence.py::TestAlwaysReference"
-                      "::test_embedded_result_bites"))
+                      "::test_embedded_result_bites",
+        rung="value"))
 
 
 def register_tool():

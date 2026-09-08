@@ -11,6 +11,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
 from . import _inputs
+from . import _relations
 
 
 def _resolve_many(design, names):
@@ -30,6 +31,19 @@ def _resolve_many(design, names):
         else:
             errors.append(err)
     return coll, resolved, errors
+
+
+def _missing_members(rg, coll):
+    """The requested occurrences the created group does NOT hold, by assembly path."""
+    # Compared only when every member answered a label: a label that did not read is not a member
+    # that is missing. include_children puts EXTRA members in the group, so this asks for a subset.
+    held, total = _relations.rigid_group_members(rg)
+    labelled = [h for h in held if h]
+    if len(labelled) != total:
+        return []
+    wanted = [safe(lambda o=o: o.fullPathName) or safe(lambda o=o: o.name)
+              for o in _common.iter_collection(coll)]
+    return [w for w in wanted if w and w not in labelled]
 
 
 def handler(occurrences: str = "", include_children: bool = False) -> dict:
@@ -53,6 +67,13 @@ def handler(occurrences: str = "", include_children: bool = False) -> dict:
     if member_count is not None and member_count < coll.count:
         return error(f"Rigid group '{safe(lambda: rg.name)}' was created but reports only "
                      f"{member_count} member(s) of the {coll.count} requested.")
+    missing = _missing_members(rg, coll)
+    if missing:
+        gname = safe(lambda: rg.name)
+        return error(f"Rigid group '{gname}' holds {member_count} member(s) but not "
+                     f"{', '.join(missing)} - it locks parts that were not asked for. Remove it "
+                     f"with assembly_edit_relations(kind='rigid_group', name='{gname}', "
+                     "action='delete') and retry.")
     return ok({
     "assembly_rigid_group": safe(lambda: rg.name),
     "member_count": member_count,
@@ -74,9 +95,9 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
-        evidence_test="tests/unit/test_assembly_rigid_group.py::TestRigidGroup"
-                      "::test_group_reporting_fewer_members_bites"))
+        kind="inline", rung="value",
+        evidence_test="tests/unit/test_assembly_rigid_group.py::TestMembersReadBack"
+                      "::test_a_group_holding_the_right_count_of_the_wrong_parts_bites"))
 
 
 def register_tool():

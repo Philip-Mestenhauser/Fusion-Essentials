@@ -12,7 +12,7 @@ import adsk.core
 import adsk.fusion
 
 from ..mcp_primitives.tool import Tool
-from ..mcp_primitives.item import Item
+from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe, set_verified, build_path
 from . import _common
@@ -170,7 +170,12 @@ pattern_path_tool = (
 )
 pattern_path_item = Item.create_tool_item(tool=pattern_path_tool, write="write", handler=handler,
                                           run_on_main_thread=True,
-                                          postconditions=[_assert.FeatureHealthy()])
+                                          postconditions=[_assert.FeatureHealthy(),
+                                                          _assert.PatternElementsPlaced(severity="soft")],
+                                          verification=Verification(
+                                              kind="inline", rung="value",
+                                              evidence_test="tests/unit/test_model_pattern_path.py"
+                                              "::test_wrong_instance_count_fails_the_call"))
 
 
 def register_tool():

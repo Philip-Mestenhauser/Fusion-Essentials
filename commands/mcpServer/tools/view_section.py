@@ -247,12 +247,10 @@ TOOL_DESCRIPTION = (
 )
 
 tool = (
-    Tool.create_with_string_input(
-        name="view_section",
-        description=TOOL_DESCRIPTION,
-        input_param_name="action",
-        input_param_description="cut | list | clear.",
-    )
+    Tool.create_simple(name="view_section", description=TOOL_DESCRIPTION)
+    .add_input_property("action", {"type": "string", "enum": list(_ACTIONS),
+            "description": "What to do with this design's section analyses."})
+    .add_required_input("action")
     .add_input_property(*_PLANE.as_property())
     .add_input_property("through", {"type": "string",
             "description": "Occurrence name to cut through its center (alternative to a bare plane)."})
@@ -271,7 +269,7 @@ tool = (
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,
     verification=Verification(
-        kind="inline",
+        kind="inline", rung="value",
         evidence_test="tests/unit/test_view_section.py::TestListClear"
                       "::test_a_surviving_section_after_every_delete_returned_true_is_an_error"))
 
