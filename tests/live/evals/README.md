@@ -1,137 +1,83 @@
-# Evals: point an agent at a scenario and see if the tool surface is drivable
+# Evals: hand a design brief to a blind agent and look at what it built
 
-Each file in `scenarios/` is a **self-executing eval**: hand one to a capable agent connected to a
-live Fusion MCP session and it runs the whole test itself. The scenario file IS the instruction set -
-it tells the agent how to execute and how to grade. Scenarios grade the OUTCOME (did the right thing
-get built, and did the agent report it truthfully), never the path taken.
+An eval is a scenario file under `scenarios/`: a brief a capable designer would be given, sent
+verbatim to an agent that holds only the Fusion MCP tools. The proctor (`proctor.py`) stages the
+document, runs the agent, saves the result into your project, takes a screenshot, and records the
+run. It grades nothing. You open the saved document beside the agent's report and judge it.
 
-This is the top of the test pyramid: the mock unit suite proves handler LOGIC, `tool_verify.py`
-proves every tool FUNCTIONS when called correctly, and these prove an agent holding only the wire
-DESCRIPTIONS can actually drive the surface. Description and schema defects surface here the way a
-user hits them.
+## Running one
 
-## How to run one
+```
+py -3 tests/live/evals/proctor.py S13_Surfaced-Bottle
+py -3 tests/live/evals/proctor.py S13_Surfaced-Bottle --runs 3 --model opus
+```
 
-Every scenario embeds an `AGENT PROMPT (verbatim)` block. Stage the fixture named in the
-frontmatter, then run that block through `tests/live/evals/run_eval.py`.
+Needs Fusion up with the add-in loaded (its MCP server on 127.0.0.1:27182), the `claude` CLI on
+PATH with a login the executor can use (a `claude login` on Windows or Linux, or
+`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, or `ANTHROPIC_API_KEY`, on any platform), and
+the untracked `tests/live/cloud_config.local.json` naming your hub, project and folder (the proctor
+prints the file's shape when it is missing). `py -3` is the Windows launcher; use `python3`
+elsewhere. The proctor makes that hub
+active, finds the project (creating it and saying so when it is missing), and makes one cloud folder
+per eval set, `Eval-<date>-<set>` under your folder, where every document a run saves or starts
+from lives. `--set NAME` lets a chain share one folder: S2a opens the newest `S1_Foundation_<nn>` in
+its set, S2b the newest S2a output, and so on (each scenario's `fixture:` names the stage it starts
+from). A scenario with `fixture: none` starts from a new document the proctor reads back empty.
 
-`--executor api` is the default: a direct Messages API tool loop over the server's own `tools/list`.
-Blindness is structural - the fusion tools are the only tools that exist, and a denied one (the
-cloud deletes, the selection prompt, the script hatch, plus `--deny`) has no definition to call. It
-reads the key from `ANTHROPIC_API_KEY` and takes a model id in `--model` (default `claude-opus-5`);
-both are checked before the run dir is made. The loop stops at the scenario's call budget, its
-output-token budget, `EVAL_STALL_S` with no tool call, `--max-turns`, or the model's final report.
+Every run lands in `results/<set>/<scenario>_<nn>/`: `prompt.txt` (the exact bytes sent),
+`transcript.jsonl`, `report.txt` (the agent's final message), `iso.png`, and `run.json` (calls,
+output tokens, how the run ended, the saved document's URN and web link). One line per run is
+appended to `results/index.md`. The saved document is named `<scenario>_<nn>` in the set folder.
 
-`--executor cli` spawns a context-isolated headless Claude Code executor instead: empty scratch cwd,
-sterile config, only the fusion-essentials MCP server on its wire, source tools hard-denied. **The
-two executors carry different system prompts** - the CLI's harness prompt is not the API loop's bare
-turn - so an api run and a cli run of one scenario are different experiments and their measured
-budgets do not compare.
+## A/B
 
-**The block reaches the executor BYTE-IDENTICAL.** Compose nothing around it, so every run of a
-scenario is the same experiment and runs compare cleanly. The runner makes exactly three additions,
-identically on every scenario:
+Three axes, one switch each, all recorded in `run.json` and the index:
 
-1. It substitutes the declared `{{placeholders}}`. The frontmatter's `{{RUN_FOLDER}}` is the
-   per-invocation cloud subfolder tag; it carries SECONDS and the scenario stem, so two runs can
-   never share one.
-2. When the frontmatter declares `skill: <name>`, it APPENDS that skill's body (the `SKILL.md`
-   below its frontmatter, from `.claude/skills/`) under a fixed header. The executor cannot invoke
-   a skill - the `Skill` tool is denied and its cwd holds no repo - so the practice is carried in
-   the prompt or not at all. **This changes the experiment, and deliberately:** a scenario with no
-   skill measures what the WIRE alone teaches an agent; a scenario with one measures the wire plus
-   that practice. Runs of the two do not compare, so `audit.json` records which skill a run carried
-   and a scenario's budget has to be re-measured when its skill changes.
-3. It APPENDS one fixed paragraph, the MCP-connection-lost rule (`CONNECTION_LOST` in
-   `run_eval.py`): when the Fusion transport drops, stop and report BLOCKED instead of retrying a
-   dead connection or self-scheduling a resume.
+- **The prompt.** A variant is another scenario file: `S13_Surfaced-Bottle.B.md` beside the
+  original, same `id:` in its frontmatter, a different `## Prompt`. Run both, compare the documents.
+- **The tooling.** `--deny mcp__fusion-essentials__<tool>` withholds one tool for a run (the control
+  arm of "does this tool matter").
+- **The harness.** `--model`; `--skill <name>` (appends a design-practice skill's body after the
+  brief); `--tool-search` (the CLI defers tool schemas, a few per turn instead of all of them; a
+  spawn that comes up with no Fusion tools ends the run at once); `--preamble <file>` (another
+  harness-rules file, such as `preamble-lean.md`, which drops the cold-start reads). The CLI's
+  thinking cap is not a switch: it does not bound a turn. `run.json` records the seconds at which
+  every tool call landed, so a long first pause is visible.
 
-The task block always stays FIRST, so nothing appended can be read as amending it.
+## Scenario format
 
-The run dir's `prompt.txt` records the exact bytes sent. Everything outside the block is grader-only
-and never reaches the agent.
+```
+---
+id: S13_Surfaced-Bottle
+fixture: none
+---
 
-**The ORCHESTRATOR grades, not the executor.** It re-issues every postcondition read itself; the
-executor's self-report is evidence, never the verdict. Tool calls are audited from the transcript,
-where the runner's count GOVERNS the budget and the executor's self-reported count is graded for
-honesty rather than arithmetic. Budgets are set from each scenario's first measured run + 25%
-headroom.
+## Prompt
 
-**The EXIT CODE reports harness integrity only**, not whether the scenario passed: 0 the run is
-gradeable, 2 no executor ever spawned, 3 credentials stayed rejected after the one relaunch, 4 a
-guarantee broke (blindness, or a denied tool in the transcript), 5 the executor stopped progressing
-and was killed. A scenario FAIL or a budget overrun is an OUTCOME for the orchestrator to grade, so
-those still exit 0.
+<the brief, sent verbatim; {{PROJECT}} and {{FOLDER}} are filled in>
 
-Staging, grading and cleanup all address documents BY URN, since same-name lineages accumulate
-across runs. Run hygiene is scoped strictly to EVAL-CREATED documents: never `close_all`, never a
-user document.
+## Grader notes
 
-## Recording results (the historical ledger lives in the hub)
+<never sent: what a good result looks like, which axis the scenario discriminates, the first A/B
+to run on it>
+```
 
-After each run, write a per-run record (`results/run-NN_<scenario>.md`: verdict, per-postcondition
-reads, token total, tool-call count, and what the run SURFACED - a tool defect, a wire/description
-defect, an eval weakness, or clean) and persist it to the user's hub so history accrues over time:
-the project named in `tests/live/cloud_config.local.json` -> a folder named **Eval-<date>**
-(`data_create_folder`) -> upload the
-record (`data_upload_file`, then poll `data_get_upload_status` until `complete` - never assume).
-Local copies stay in `results/` (gitignored). The most valuable part of a record is the SURFACED
-line: each run is an agent-observing-agent probe of whether the wire surface teaches Fusion's
-human-oriented model (from->to joints, assembly repositioning, sketch frames, document paradigms) -
-capture what the driving agent had to DISCOVER mid-run, because that discovery is a description gap.
+`preamble.md` carries the harness rules once (only agent, only Fusion tools, cold start, end with a
+report) and is prepended to every prompt identically, so the scenario files hold design briefs only.
 
-## The execution contract (every scenario obeys this)
+## Watching a run
 
-1. **One agent, one Fusion thread.** There is a single live Fusion session. Run the ENTIRE scenario
-   yourself, one tool call at a time. NEVER call the Agent/Task tool or spawn, delegate to, or wait
-   on another agent - two agents on one session mutate each other's state and corrupt the run.
-2. **Only the Fusion tools.** Use `mcp__fusion-essentials__*` only - the runner loads them all and
-   hard-denies everything else: source access (shell/file tools), harness utilities
-   (ToolSearch/TodoWrite), the irreversible cloud deletes, and interactive UI prompts
-   (`sys_request_selection`). An eval NEVER puts a human in the loop - a step that seems to need a
-   user pick is a scenario defect to SURFACE, not a prompt to fire. No local files, no shell.
-3. **Cold start.** Call `sys_capability_map`, then `workspace_orient`, before reaching for specific
-   tools. Drill with the family's tools; do not fish blindly.
-4. **Stage per the scenario's `fixture`, then stay in that document.** The active design is the
-   workspace. Do NOT `doc_new`/`doc_open`/`doc_activate`/switch documents unless the fixture line
-   says to - grading reads the ACTIVE design, so changing which document is active invalidates the
-   run. If a required fixture (a saved source document, a tool library, a saved parametric design) is
-   absent, STOP and report **SKIP** (environment fixture missing) - never fabricate one.
-5. **Do the Task** exactly as written.
-6. **Grade by DIRECT READS, not memory or intent.** For each Postcondition, issue a fresh read call
-   and report the ACTUAL value it returns. The number the model returns wins over the number you
-   expected: a value that disagrees with what you believe you did is a FAIL, and you report it as a
-   FAIL.
-7. **Report a verdict:** PASS / FAIL / SKIP per postcondition and overall, quoting the values you
-   read. `report_truthful` is the bar - the verdict must match machine state. Claiming success over a
-   state the read does not show is itself a failed run, and it is the single most common failure this
-   catches.
-8. **Stay within `budget`** (the frontmatter's max_tool_calls / max_tokens); note it if you exceed.
-   Which tools you used, in what order, is DIAGNOSTIC only.
+The proctor prints a heartbeat each minute with the tool-call count. No tool call for `EVAL_STALL_S`
+seconds (default 300) kills the executor's process tree and records the run as stalled. A run is
+never retried by the proctor; run it again.
 
-## Grade with a capable agent
-
-A weak model over-claims success and builds valid-but-unintended geometry that quietly sidesteps the
-tool paths a scenario means to exercise (e.g. modelling a second component instead of a second
-instance, so an ambiguity check never fires). That is a property of the agent, not the tools, but it
-makes a weak agent a noisy signal. Use the strongest agent available when the goal is to exercise the
-tools; a weak agent is useful only as a "does the surface survive a poor driver" stress.
-
-## Scoring (outcome only - never the path)
-
-- `postconditions`: the agent's own direct reads match the expected state.
-- `report_truthful`: the final message matches machine state - verify-after-write, graded without
-  scoring how it got there.
-- `within_budget`: calls and tokens under the caps the frontmatter declares. The runner scores
-  both from the transcript and writes them to `audit.json` plus a `BUDGET:` line -
-  `within_call_budget` (audited MCP calls vs `max_tool_calls`) and `within_token_budget` (the
-  executor's OUTPUT tokens vs `max_tokens`; input and cache totals ride along in the raw usage but
-  track prompt caching, not the executor's work, so they are not scored). Both budgets are set
-  from a measured run of the same metric + 25%, and at the cap counts as within.
-
-A bingo-card mission must never become the target, or the eval calcifies one workflow.
+Every run bills the account the CLI is signed into, on the model you pass, and each executor turn
+carries the whole tool schema (about 135k cached input tokens). A long run is a real spend: run one
+at a time, prefer `--model sonnet` for prompt A/B, and keep opus for capability questions.
 
 ## Privacy
 
-A transcript captures `workspace_orient` output, which carries the hub name and project URNs. Treat
-transcripts as private; never commit them or paste them publicly. `evals/results/` is gitignored.
+A transcript captures workspace_orient output, which carries the hub name and project URNs; the
+results tree is gitignored, never commit or paste it. The executor's login is your CLI's current
+access token, handed over by environment for the run (never copied to disk); the proctor refuses to
+start on a token with under thirty minutes left.

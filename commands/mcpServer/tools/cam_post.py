@@ -56,9 +56,8 @@ _NAMES_LISTED = 30
 
 _POST_SCOPE_CHOICE = _inputs.Choice(
     "post_scope", options=["local", "cloud", "hub", "fusion"], default="local",
-    description="Where to resolve 'post' from: local .cps folder (default) | cloud | hub team post "
-                "library (network-slow) | fusion, the posts this installation ships - where a "
-                "turning post resolves from.")
+    description="Where to resolve 'post' from: the local .cps folder (default), cloud, the hub team "
+                "post library (network-slow), or fusion - the posts this installation ships.")
 
 
 def _post_library():
@@ -780,16 +779,12 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
 
 TOOL_DESCRIPTION = (
     "Create (or reuse) an NC Program for the chosen toolpaths, then post it to a G-code / NC file on "
-    "disk - the final CAM step. If an NC Program already named 'program_name' exists it is UPDATED "
-    "and re-posted (not duplicated); "
-    "otherwise a new one is created. 'scope': omit (or 'document') for the whole document, or a "
+    "disk - the final CAM step. A program already named 'program_name' is UPDATED and re-posted, not "
+    "duplicated; naming one with scope/setups/post/output_folder all omitted posts it AS-IS from its "
+    "stored configuration. 'scope': omit (or 'document') for the whole document, or a "
     "setup/folder/operation NAME; 'setups' instead names SEVERAL setups for one program (the two "
-    "are exclusive). "
-    "Only VALID toolpaths post (out-of-date/errored "
-    "ops are omitted) - run cam_generate first. Success is gated on the file actually landing on disk. "
-    "Naming an EXISTING program with scope/setups/post/output_folder all omitted posts it AS-IS from "
-    "its own stored configuration. "
-    "WRITES a persistent NC Program and a file.\n"
+    "are exclusive). Only VALID toolpaths post (out-of-date/errored ops are omitted) - run "
+    "cam_generate first.\n"
     + _outputs.produces_block(RETURNS)
 )
 
@@ -808,7 +803,7 @@ tool = (
     .add_input_property("program_comment", {"type": "string",
             "description": "Optional comment embedded in the NC program header."})
     .add_input_property("overwrite", {"type": "boolean",
-            "description": "Required true to reconfigure (scope/setups/post/output_folder) an existing program whose stored operations differ from the requested scope (default false)."})
+            "description": "Required true to reconfigure (scope/setups/post/output_folder) an existing program whose stored operations differ from the request (default false)."})
     .add_input_property("setups", {"type": "array", "items": {"type": "string"},
             "description": "Setup NAMES this one program holds - the multi-setup form of 'scope'; pass one or the other, not both."})
     .strict_schema()

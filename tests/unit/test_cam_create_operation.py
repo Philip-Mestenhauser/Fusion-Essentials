@@ -356,6 +356,19 @@ class TestProbeStrategyNeedsAProbe:
         _payload(cco.handler(setup="Setup1", strategy="face", tool_library_url="u", tool_index=0))
         assert cam.setups.item(0).operations.count == 1
 
+    def test_inspect_surface_says_its_points_are_ui_only(self, monkeypatch):
+        # inspectSurfacePositions takes no write through the API, so an agent that created the
+        # operation and waited for a points call would wait forever - the note says so once, and
+        # only for that strategy.
+        self._with_tool(monkeypatch, _tool("OMP400", tool_type="probe"))
+        out = _payload(cco.handler(setup="Setup1", strategy="inspect_surface",
+                                   tool_library_url="u", tool_index=0))
+        assert "UI-only" in out["note"] and "inspectSurfacePositions" in out["note"]
+        self._with_tool(monkeypatch, _tool("OMP400", tool_type="probe"))
+        other = _payload(cco.handler(setup="Setup1", strategy="probe",
+                                     tool_library_url="u", tool_index=0))
+        assert "inspectSurfacePositions" not in other["note"]
+
     def test_a_tool_type_that_does_not_read_refuses_nothing(self, monkeypatch):
         # an unread type is no verdict - refusing on it would block a create off a read that
         # never answered.

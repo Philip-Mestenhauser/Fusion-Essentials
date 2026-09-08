@@ -46,27 +46,15 @@ _KIND = _inputs.Choice("kind", list(_KINDS), required=True, description="Which e
 # creation - so this map IS the legal set the handler guards on.
 _SPLINE_DEGREES = {3: "SplineDegreeThree", 5: "SplineDegreeFive"}
 
-# Kinds with NO '<type>:<index>' ref token, so _common.entity_collection cannot name their
-# collection: conic and elliptical arcs have no ref kind. Every other counted kind is addressed by
-# its ref token and routes through _common instead of a second copy of that mapping.
-_NO_REF_CURVE_ATTR = {
-    "conic": "sketchConicCurves",
-    "elliptical_arc": "sketchEllipticalArcs",
-}
-
-
-# The wire note for each ref-less kind: what the caller loses (no ref token, so no dimension/
-# constraint/delete by ref and no entry in sketch_get's entity list) and what still works - both
-# curves close a region that forms a profile and extrudes to a solid, measured live.
-_REF_LESS_NOTES = {
-    "conic": ("Conic drawn. This curve has NO '<type>:<index>' ref, so it cannot be dimensioned, "
-              "constrained or deleted by ref and sketch_get's entity list omits it. Modelling with "
-              "it works: closed by a chord between its endpoints it forms a profile that extrudes "
-              "to a solid."),
-    "elliptical_arc": ("Elliptical arc drawn. This curve has NO '<type>:<index>' ref, so it cannot "
-                       "be dimensioned, constrained or deleted by ref and sketch_get's entity list "
-                       "omits it. Modelling with it works: a 180 deg arc closed by a line across "
-                       "its diameter forms a profile that extrudes to a solid."),
+# The wire note for the two conic-family kinds: the ref token that names one, and the closure each
+# needs to bound a profile that extrudes (measured live on both).
+_CONIC_FAMILY_NOTES = {
+    "conic": ("Conic drawn. Address it as 'conic:<index>' - "
+              "sketch_get(include_entities=true) lists the index. Closed by a chord between its "
+              "endpoints it forms a profile that extrudes to a solid."),
+    "elliptical_arc": ("Elliptical arc drawn. Address it as 'elliptical_arc:<index>' - "
+                       "sketch_get(include_entities=true) lists the index. A 180 deg arc closed by "
+                       "a line across its diameter forms a profile that extrudes to a solid."),
 }
 
 
@@ -130,16 +118,9 @@ def _pt(x, y, k):
 def _kind_curve_collection(sketch, kind):
     """The sketch sub-collection this kind's factory adds to - the one the before/after count that
     VERIFIES the draw is read from. None when no collection answers for the kind."""
-    # Both exception tables answer BEFORE the fall-through: _common knows no token for
-    # conic/elliptical_arc, so reaching it first would resolve those to None.
-    token = _KIND_REF_TOKEN.get(kind)
-    if token is not None:
-        return _common.entity_collection(sketch, token)
-    attr = _NO_REF_CURVE_ATTR.get(kind)
-    if attr is not None:
-        curves = safe(lambda: sketch.sketchCurves)
-        return safe(lambda: getattr(curves, attr)) if curves is not None else None
-    return _common.entity_collection(sketch, kind)
+    # The token table answers BEFORE the fall-through: a kind whose curves land in another kind's
+    # collection is counted there, and every ref token resolves through _common.
+    return _common.entity_collection(sketch, _KIND_REF_TOKEN.get(kind, kind))
 
 
 def _kind_curve_count(sketch, kind):
@@ -753,8 +734,8 @@ def handler(kind: str = "", sketch_name: str = "", units: str = "mm",
                        "point instead of carrying two at the same coordinates, and needs no "
                        "closing coincident. Size it with sketch_dimension; the loop still carries "
                        "its position and shape freedom.")
-    if kind in _REF_LESS_NOTES:
-        out["note"] = _REF_LESS_NOTES[kind]
+    if kind in _CONIC_FAMILY_NOTES:
+        out["note"] = _CONIC_FAMILY_NOTES[kind]
     if restore_error:
         out["compute_deferred"] = True
         out["note"] += _restore_clause(restore_error, sketch)
@@ -763,38 +744,38 @@ def handler(kind: str = "", sketch_name: str = "", units: str = "mm",
 
 TOOL_DESCRIPTION = (
     "Draw one geometry entity on a sketch; coords/sizes in 'units', angles in degrees. "
-    "Both rectangle kinds get horizontal/vertical constraints on their sides (the constructors "
-    "land none); no center/symmetry constraint is added - dimension position and size after. "
-    "Every slot kind takes x1,y1 / x2,y2 + radius, but the point roles DIFFER: overall_slot's two "
-    "are the overall TIPS, center_point_slot's are the centre and a CAP CENTRE, and the arc slots "
-    "add cx,cy = the arc centre (center_point_arc_slot) or a point ON the arc "
-    "(three_point_arc_slot). Pair with view_screenshot to view what was drawn."
+    "Both rectangle kinds get horizontal/vertical constraints on their sides; no center/symmetry "
+    "constraint is added - dimension position and size after. Every slot kind takes x1,y1 / "
+    "x2,y2 + radius with DIFFERENT point roles: overall_slot's are the TIPS, center_point_slot's "
+    "the centre and a CAP CENTRE, and the arc slots add cx,cy = the arc centre "
+    "(center_point_arc_slot) or a point ON the arc (three_point_arc_slot). "
+    "Pair with view_screenshot to view what was drawn."
 )
 tool = (
     Tool.create_simple(name="sketch_add_geometry", description=TOOL_DESCRIPTION)
     .add_input_property(*_KIND.as_property())
     .add_required_input("kind")
     .add_input_property("points", {"type": "array",
-            "description": "For polyline/closed_path/spline/cv_spline: [x,y] points in 'units'. polyline/closed_path share endpoints; spline fits a smooth curve THROUGH them; cv_spline treats them as the control polygon.",
+            "description": "[x,y] points in 'units': the chain for polyline/closed_path, the curve a spline passes THROUGH, or cv_spline's control polygon.",
             "items": {"type": "array"}})
     .add_input_property("sketch_name", {"type": "string", "description": "Sketch to draw on (default: most recent)."})
     .add_input_property(*COMPONENT_SCOPE)
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("x1", {"type": "number", "description": "X of point 1 / start (line, rectangle, arc)."})
-    .add_input_property("y1", {"type": "number", "description": "Y of point 1 / start (line, rectangle, arc)."})
-    .add_input_property("x2", {"type": "number", "description": "X of point 2 (line, rectangle); center_rectangle: HALF-width from center."})
-    .add_input_property("y2", {"type": "number", "description": "Y of point 2 (line, rectangle); center_rectangle: HALF-height from center."})
-    .add_input_property("cx", {"type": "number", "description": "Center X (circle, arc, polygon, center_rectangle, arc slots); point X for kind='point'; conic APEX X."})
-    .add_input_property("cy", {"type": "number", "description": "Center Y (circle, arc, polygon, center_rectangle, arc slots); point Y for kind='point'; conic APEX Y."})
-    .add_input_property("radius", {"type": "number", "description": "Radius (circle, polygon); ellipse MAJOR; slot HALF-width (full width = radius*2)."})
+    .add_input_property("x1", {"type": "number", "description": "X of point 1 / start."})
+    .add_input_property("y1", {"type": "number", "description": "Y of point 1 / start."})
+    .add_input_property("x2", {"type": "number", "description": "X of point 2; center_rectangle: HALF-width from center."})
+    .add_input_property("y2", {"type": "number", "description": "Y of point 2; center_rectangle: HALF-height from center."})
+    .add_input_property("cx", {"type": "number", "description": "Center X; point X for kind='point'; conic APEX X."})
+    .add_input_property("cy", {"type": "number", "description": "Center Y; point Y for kind='point'; conic APEX Y."})
+    .add_input_property("radius", {"type": "number", "description": "Radius; ellipse MAJOR; slot HALF-width (full width = radius*2)."})
     .add_input_property("minor", {"type": "number", "description": "Ellipse MINOR radius (optional; default = major/2)."})
     .add_input_property("sweep_deg", {"type": "number", "description": "Arc sweep in degrees (CCW positive)."})
-    .add_input_property("start_deg", {"type": "number", "description": "elliptical_arc start angle in degrees, measured from the major axis (default 0)."})
+    .add_input_property("start_deg", {"type": "number", "description": "elliptical_arc start angle in degrees from the major axis (default 0)."})
     .add_input_property("rho", {"type": "number", "description": "Conic rho (how far the curve pulls toward the apex)."})
     .add_input_property("degree", {"type": "integer", "description": "cv_spline degree - 3 or 5 (default 3)."})
     .add_input_property("sides", {"type": "integer", "description": "Polygon side count (>=3)."})
-    .add_input_property("arc_radius", {"type": "number", "description": "center_point_arc_slot: the arc radius. Overrides the x1,y1 distance to cx,cy, which then sets direction only."})
-    .add_input_property("slot_length", {"type": "number", "description": "overall_slot: the tip-to-tip length; center_point_slot: the centre-to-cap-centre HALF length (tip-to-tip = 2*slot_length + width). Overrides the x2,y2 distance, which then sets direction only."})
+    .add_input_property("arc_radius", {"type": "number", "description": "center_point_arc_slot: the arc radius. Overrides the x1,y1-to-cx,cy distance, which then sets direction only."})
+    .add_input_property("slot_length", {"type": "number", "description": "overall_slot: the tip-to-tip length; center_point_slot: the centre-to-cap-centre HALF length. Overrides the x2,y2 distance, which then sets direction only."})
     .add_input_property("angle_deg", {"type": "number", "description": "Slot angle in degrees."})
     .add_input_property("create_width_dimension", {"type": "boolean", "description": "Slot kinds: dimension the full width."})
     .add_input_property("create_radius_dimension", {"type": "boolean", "description": "center_point_arc_slot: dimension arc_radius."})

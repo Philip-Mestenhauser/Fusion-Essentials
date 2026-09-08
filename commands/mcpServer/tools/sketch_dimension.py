@@ -24,9 +24,8 @@ _DIM_TYPES = ("distance", "horizontal_distance", "vertical_distance", "radius", 
               "ellipse_major_radius", "ellipse_minor_radius", "point_to_surface", "line_to_surface")
 _DISTANCE_TYPES = ("distance", "horizontal_distance", "vertical_distance")  # sign is a signed placement
 _DIM_TYPE = _inputs.Choice("dim_type", list(_DIM_TYPES), default="distance",
-                          description="What kind of dimension to add. 'angle' takes the wedge "
-                                      "FACING THE SKETCH ORIGIN; 'offset' ROTATES the second line "
-                                      "parallel (it MOVES geometry).")
+                          description="'angle' takes the wedge FACING THE SKETCH ORIGIN; 'offset' "
+                                      "ROTATES the second line parallel (it MOVES geometry).")
 
 # dim_type -> ('<type>:<index>' ref kinds legal as entity_one, same for entity_two or None), read
 # off the ARGUMENT TYPES the installed SketchDimensions bindings declare. Surfaced in the refusal,
@@ -57,8 +56,7 @@ _SURFACE_TYPES = ("point_to_surface", "line_to_surface")
 # curved_op, and the kind carries that split into both the schema and the resolution.
 _CURVED_SURFACE_OK = ("point_to_surface",)
 _SURFACE = _inputs.SurfaceRef("surface", curved_ops=_CURVED_SURFACE_OK,
-                              description="Face/plane point_to_surface / line_to_surface measure "
-                                          "to.")
+                              description="The *_to_surface operand.")
 
 # Dims whose API failure message NAMES its own cause ("Both sketch lines should be parallel",
 # "line is not parallel to the planar surface"), so it is surfaced alone with no operand-kind hint.
@@ -488,9 +486,8 @@ TOOL_DESCRIPTION = (
 "Add a DIMENSIONAL constraint to a sketch and optionally drive its value (sketch_constrain does "
 "the geometric half). 'entity_one'/'entity_two' are '<type>:<index>' refs from sketch_get; "
 "point:0 is ALWAYS the sketch ORIGIN. To pin a POSITION, anchor on an entity's OWN point rather "
-"than a bare 'point:N': append ':start'/':end'/':mid' or ':center', e.g. 'line:0:end'. Each "
-"dim_type names its operands in the error it returns when the refs are wrong. 'value' drives it "
-"by expression; omit to keep the measured value and drive it later with param_set."
+"than a bare 'point:N': append ':start'/':end'/':mid' or ':center', e.g. 'line:0:end'. 'value' "
+"drives it by expression; omit to keep the measured value and drive it later with param_set."
 )
 
 tool = (
@@ -499,7 +496,7 @@ tool = (
     .add_required_input("dim_type")
     .add_input_property("sketch_name", {"type": "string", "description": "Sketch to dimension (omit = most recent)."})
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
-    .add_input_property("entity_one", {"type": "string", "description": "First entity ref '<type>:<index>', optional anchor ':start/:end/:mid/:center'. A BARE ref measures from the entity's own START point; a circle or ellipse, having none, measures from its CENTRE."})
+    .add_input_property("entity_one", {"type": "string", "description": "First entity ref '<type>:<index>', optional anchor ':start/:end/:mid/:center'. A BARE ref measures from the entity's own START point; a circle or ellipse from its CENTRE."})
     .add_input_property("entity_two", {"type": "string", "description": "Second entity ref; same anchor forms as entity_one."})
     .add_input_property("value", {"type": "string", "description": "Driven expression (e.g. '25 mm', 'StockX/2'); omit to keep measured."})
     .add_input_property(*_SURFACE.as_property())

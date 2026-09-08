@@ -287,7 +287,7 @@ def _shoot(label, out_dir, seq):
 
 
 def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, timings=None,
-              shots_dir=None):
+              shots_dir=None, act=""):
     """The ONE (tool, args, expect, save) step engine - every live harness judges its steps here,
     so the status vocabulary cannot fork: pass / pass* / expected-refusal / FAIL / blocked.
     'pass*' means a passing step whose saved-value extraction failed - a payload-shape mismatch
@@ -316,9 +316,11 @@ def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, tim
             if on_result:
                 on_result(*rows[-1])
             continue
-        if trace:
-            # flushed per step so a hard Fusion crash still names its killer in the log
-            print(f"    -> {tool} {json.dumps(arguments)[:120]}", flush=True)
+        # Flushed BEFORE the call, on every run: a redirected log buffers per act, so a step that
+        # kills the process leaves its own line rather than only the act it was in. 'act' names
+        # that act, since the act header shares the buffer this line escapes.
+        print(f"    -> {tool} {act}".rstrip()
+              + (f" {json.dumps(arguments)[:120]}" if trace else ""), flush=True)
         t0 = time.time()
         is_error, payload = call(tool, arguments)
         if timings is not None:
@@ -561,7 +563,7 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
         # docstring for what a dwell does to the pairing.
         for step, (tool, status, note) in zip(judged_steps(steps),
                                               run_steps(steps, ctx, trace=trace, timings=timings,
-                                                        shots_dir=shots_dir)):
+                                                        shots_dir=shots_dir, act=name)):
             rows.append((tool, status, note))
             if status in ("pass", "pass*") and predicate_kind(step[2]) == "value":
                 valued.add(tool)

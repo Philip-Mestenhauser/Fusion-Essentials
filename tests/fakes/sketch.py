@@ -44,6 +44,7 @@ def make_sketch_curve(token="curve0", length=1.0, is_closed=None):
 
 
 _CURVE_KINDS = ("sketchLines", "sketchArcs", "sketchCircles", "sketchEllipses",
+                "sketchEllipticalArcs", "sketchConicCurves",
                 "sketchFittedSplines", "sketchControlPointSplines", "sketchFixedSplines")
 
 
@@ -62,6 +63,8 @@ class SketchCurves:
         self.sketchArcs = _NamedCollection(arcs)
         self.sketchCircles = _NamedCollection(circles)
         self.sketchEllipses = _NamedCollection(ellipses)
+        self.sketchEllipticalArcs = _NamedCollection()
+        self.sketchConicCurves = _NamedCollection()
         self.sketchFittedSplines = _NamedCollection(splines)
         self.sketchControlPointSplines = _NamedCollection()
         self.sketchFixedSplines = _NamedCollection()

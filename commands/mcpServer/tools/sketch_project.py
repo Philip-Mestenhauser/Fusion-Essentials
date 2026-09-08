@@ -53,14 +53,14 @@ _DIRECTION = _inputs.AxisRef("direction", entity_only=True,
     description="project_type='along_vector': the direction to project along.")
 
 # The sketch-entity ref kinds sketch_constrain / sketch_dimension can address ('<type>:<index>') -
-# _common.ENTITY_REF_KINDS is the single source of truth; defer to it instead of a local copy that can
-# drift (a projected elliptical arc / conic curve is still created but not addressable this way).
+# _common.ENTITY_REF_KINDS is the single source of truth; defer to it instead of a local copy that
+# can drift.
 _ADDRESSABLE = _common.ENTITY_REF_KINDS
 
 _REFS_NOTE = ("'entity_refs' are '<type>:<index>' handles for sketch_constrain / sketch_dimension ("
               + "/".join(_ADDRESSABLE) + ").")
-_SHORTFALL_NOTE = (" Some created curves are non-addressable types (elliptical arc/conic curve) - "
-                   "use sketch_get(include_entities=true) to inspect them.")
+_SHORTFALL_NOTE = (" Some created curves have no '<type>:<index>' ref - list them with "
+                   "sketch_get(include_entities=true).")
 
 # input name -> the actions whose Sketch method can consume it. Each action calls a different method
 # with a different signature, so an input the chosen method has no argument for is refused; accepting

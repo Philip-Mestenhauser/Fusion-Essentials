@@ -55,13 +55,13 @@ object graph, or they are a rare branch). These are pinned by the mock unit suit
   honest per-reference refusal + delete-and-re-derive fallback) and pinned by the doc_get /
   doc_update_xref unit tests.
 - **sys_request_selection** - interactive by design: it holds for a HUMAN pick, and an eval never
-  puts a human in the loop (run_eval.py hard-denies it; that affordance belongs to skills a human
+  puts a human in the loop (proctor.py hard-denies it; that affordance belongs to skills a human
   invoked). Its guards (nothing-to-select, wait bounds, single-pending) are pinned by
   test_sys_request_selection.py; the pick path is verified owner-present at the tool level.
 
 ## Running
 
 Stage the fixture per each scenario's frontmatter, then run the AGENT PROMPT block through
-`run_eval.py` (blind executor; audited counts; see README.md). The chain runs S1 -> S9 in order,
+`proctor.py` (blind executor; audited counts; see README.md). The chain runs S1 -> S9 in order,
 each consuming the prior artifact by URN; a scenario whose fixture the environment cannot provide
 is reported SKIP, not a tool failure.

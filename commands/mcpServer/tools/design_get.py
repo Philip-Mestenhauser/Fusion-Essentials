@@ -68,10 +68,11 @@ _TREE_CHILDREN_DEFAULT = 30  # children listed per LEVEL; the rest ride on child
 
 # The narrowings a capped level is answered with, plus the flag that restores the withheld address.
 _TREE_NOTE = ("Light nodes: name, component, body_count, child_count. Narrow with "
-              "name_filter='<text>' (top level), component='<name>' (roots the tree there), "
-              "max_depth, max_results (children per level). tree_handles=true adds each node's "
-              "handle + full_path, the addresses an occurrence-taking tool accepts. "
-              "children_truncated marks a level cut; child_count is the true count.")
+              "name_filter='<text>' (top level), component='<name>' (roots the tree), max_depth, "
+              "max_results (children per level). tree_handles=true adds the addresses an "
+              "occurrence-taking tool accepts: each node's handle + full_path, and an xref's "
+              "source_id + source_url. children_truncated marks a level cut; child_count is the "
+              "true count.")
 
 
 def _body_rows(bodies):
@@ -189,9 +190,12 @@ def _walk_occurrence(occ, depth, max_depth, counter, with_bodies=False, with_han
                 node["is_out_of_date"] = safe(lambda: dr.isOutOfDate)
                 df = safe(lambda: dr.dataFile)
                 if df:
-                    node["source_id"] = safe(lambda: df.id)
+                    # source_name names the source FILE, which two sources can share; source_id is
+                    # its unique address, and rides with the other addresses under tree_handles.
                     node["source_name"] = safe(lambda: df.name)
-                    node["source_url"] = safe(lambda: df.fusionWebURL)
+                    if with_handles:
+                        node["source_id"] = safe(lambda: df.id)
+                        node["source_url"] = safe(lambda: df.fusionWebURL)
         except Exception:
             pass
     # The unresolved children are found on the COMPONENT-LOCAL collection and counted here, so
@@ -934,10 +938,9 @@ TOOL_DESCRIPTION = (
 
 tool = (
     Tool.create_simple(name="design_get", description=TOOL_DESCRIPTION)
-    .add_input_property("include", {"type": ["array", "string"],
-            "description": "Deeper slices (a list or comma-string): tree | timeline | mode | "
-                           "configurations | materials | appearances | attributes. Omit for the "
-                           "orientation slice; add 'default' to keep it beside a deeper one."})
+    .add_input_property("include", {"type": "array",
+            "items": {"type": "string", "enum": list(_SLICES + _DEFAULT_NAMES)},
+            "description": "Deeper slices to add; 'default' keeps the orientation slice beside them."})
     .add_input_property("max_depth", {"type": "integer",
             "description": f"Tree depth when include=tree (default {_TREE_DEFAULT_DEPTH}, "
                            f"max {_TREE_MAX_DEPTH})."})
@@ -947,7 +950,8 @@ tool = (
             "description": "Add each tree node's body records (name, handle, is_solid, visible) "
                            "when include=tree."})
     .add_input_property("tree_handles", {"type": "boolean",
-            "description": "Add each tree node's handle + full_path (include=tree)."})
+            "description": "Add each tree node's handle + full_path, and an xref node's source_id + "
+                           "source_url (include=tree)."})
     .add_input_property("include_suppressed", {"type": "boolean",
             "description": "Include suppressed timeline objects when include=timeline (default true)."})
     .add_input_property("group", {"type": "string",

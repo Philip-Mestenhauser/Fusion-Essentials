@@ -44,8 +44,8 @@ _CORNER_TYPES = {"chamfer": "ChamferCornerType", "miter": "MiterCornerType",
 # edge_filter caveat (shared by both tools): convex/concave classify each edge by its LOCAL dihedral
 # only, so on a plate with holes every hole rim matches exactly like the outer perimeter - the filter
 # cannot mean "outer edges only". The 'edges' handle list is the precise path when the set matters.
-_EDGE_FILTER_DESC = ("REQUIRED when 'edges' is omitted; selects by per-edge dihedral, so hole rims "
-    "match like the outer perimeter - pass 'edges' handles to isolate a specific set.")
+_EDGE_FILTER_DESC = ("REQUIRED when 'edges' is omitted: which of the body's edges to take, by "
+    "per-edge dihedral. Pass 'edges' handles to isolate a specific set.")
 
 # How close to parallel two out-of-material normals may read and still meet smoothly, which is
 # neither convex nor concave. Vectors carry 12 decimals: at 6 the dot quantizes in steps of 1e-6,

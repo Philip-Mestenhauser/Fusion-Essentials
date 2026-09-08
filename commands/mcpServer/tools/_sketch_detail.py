@@ -203,6 +203,8 @@ def _curve_collections(sketch):
                            ("arc", lambda: curves.sketchArcs),
                            ("circle", lambda: curves.sketchCircles),
                            ("ellipse", lambda: curves.sketchEllipses),
+                           ("elliptical_arc", lambda: curves.sketchEllipticalArcs),
+                           ("conic", lambda: curves.sketchConicCurves),
                            ("spline", lambda: curves.sketchFittedSplines),
                            ("cv_spline", lambda: curves.sketchControlPointSplines),
                            ("fixed_spline", lambda: curves.sketchFixedSplines)):
@@ -220,8 +222,8 @@ def curve_id(sketch, curve):
 
 
 def _build_token_map(sketch):
-    """Map entityToken -> '<type>:<index>' for every entity kind resolve_entity_ref addresses (line/
-    arc/circle/ellipse/point/spline/cv_spline/fixed_spline)."""
+    """Map entityToken -> '<type>:<index>' for every entity kind resolve_entity_ref addresses -
+    _curve_collections' kinds plus 'point'."""
     tok2id = {}
     for kind, coll in _curve_collections(sketch):
         for i in range(safe(lambda coll=coll: coll.count, 0) if coll else 0):
@@ -342,6 +344,27 @@ def _entities(sketch, f):
         "center": _xy(c, f),
         "major_radius": _round(safe(lambda: el.majorAxisRadius), f),
         "minor_radius": _round(safe(lambda: el.minorAxisRadius), f)})
+
+    ell_arcs = safe(lambda: curves.sketchEllipticalArcs)
+    for i in range(safe(lambda: ell_arcs.count, 0) if ell_arcs else 0):
+        ea = ell_arcs.item(i)
+        con = bool(safe(lambda ea=ea: ea.isConstruction, False))
+        construction += 1 if con else 0
+        c = safe(lambda: ea.centerSketchPoint.geometry)
+        out.append({"id": f"elliptical_arc:{i}", "type": "elliptical_arc", "construction": con,
+        **_projected(ea), "center": _xy(c, f),
+        "major_radius": _round(safe(lambda: ea.majorAxisRadius), f),
+        "minor_radius": _round(safe(lambda: ea.minorAxisRadius), f)})
+
+    conics = safe(lambda: curves.sketchConicCurves)
+    for i in range(safe(lambda: conics.count, 0) if conics else 0):
+        cn = conics.item(i)
+        con = bool(safe(lambda cn=cn: cn.isConstruction, False))
+        construction += 1 if con else 0
+        # A conic is shaped by an APEX and a rho, not by a centre and a radius.
+        apex = safe(lambda: cn.apexSketchPoint.geometry)
+        out.append({"id": f"conic:{i}", "type": "conic", "construction": con, **_projected(cn),
+        "apex": _xy(apex, f), "rho": _round(safe(lambda: cn.rhoValue), 1.0)})
 
     splines = safe(lambda: curves.sketchFittedSplines)
     for i in range(safe(lambda: splines.count, 0) if splines else 0):
@@ -634,15 +657,15 @@ _SCOPE_VOCABULARY = "a component name, or an occurrence fullPathName/handle."
 # The ONE wire declaration of that input: tool.add_input_property(*_sketch_detail.COMPONENT_SCOPE),
 # resolved through scoped_sketch / scoped_or_recent_sketch below.
 COMPONENT_SCOPE = ("component", {"type": "string", "description":
-                   "Narrow the sketch name to ONE component: " + _SCOPE_VOCABULARY})
+                   "Component holding the sketch: " + _SCOPE_VOCABULARY})
 
 
 def component_scope(input_name, narrows=""):
     """(name, schema) for that same scope under a DIFFERENT input name - for a tool whose own
     'component' already names something else, or that scopes a SECOND sketch reference.
     ``narrows`` names the sketch input this scope applies to."""
-    lead = (f"Narrow '{narrows}' to ONE component: " if narrows
-            else "Narrow the sketch name to ONE component: ")
+    lead = (f"Component holding '{narrows}': " if narrows
+            else "Component holding the sketch: ")
     return input_name, {"type": "string", "description": lead + _SCOPE_VOCABULARY}
 
 
@@ -906,6 +929,8 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
     "arcs": safe(lambda: sketch.sketchCurves.sketchArcs.count, 0),
     "circles": safe(lambda: sketch.sketchCurves.sketchCircles.count, 0),
     "ellipses": safe(lambda: sketch.sketchCurves.sketchEllipses.count, 0),
+    "elliptical_arcs": safe(lambda: sketch.sketchCurves.sketchEllipticalArcs.count, 0),
+    "conics": safe(lambda: sketch.sketchCurves.sketchConicCurves.count, 0),
     "points": safe(lambda: sketch.sketchPoints.count, 0),
     "splines": safe(lambda: sketch.sketchCurves.sketchFittedSplines.count, 0),
     "cv_splines": safe(lambda: sketch.sketchCurves.sketchControlPointSplines.count, 0),

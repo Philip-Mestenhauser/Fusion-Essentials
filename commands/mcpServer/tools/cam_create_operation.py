@@ -135,6 +135,14 @@ def _names_the_same_tool(read_back, library):
 _PROBE_STRATEGIES = ("probe", "probe_geometry", "inspect_surface")
 _PROBE_TOOL_TYPE = "probe"
 
+_INSPECT_SURFACE = "inspect_surface"
+
+# MEASURED: inspectSurfacePositions takes no write through the API, so no call here lands the
+# operation's first inspection point.
+_INSPECT_POINTS_NOTE = (
+    " Its inspection points are UI-only: no API write lands one in inspectSurfacePositions - place "
+    "them in Fusion.")
+
 
 def _probe_tool_refusal(strategy, tool):
     """The refusal for a probing strategy handed a tool whose tool_type is not a probe, else None -
@@ -483,6 +491,8 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
     # aimed by, whichever arm wrote the sentence before it.
     if chosen is not None and chosen.get("is_drilling") is True:
         result["note"] += _DRILLING_AXIS_NOTE
+    if strategy == _INSPECT_SURFACE:
+        result["note"] += _INSPECT_POINTS_NOTE
     if chosen is None:
         # absent = the read answered and the pre-flight ran, for both keys
         result["strategy_checked"] = False

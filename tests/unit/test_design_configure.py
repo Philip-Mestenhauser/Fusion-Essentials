@@ -65,6 +65,7 @@ class _Col:
         self.id = "col-" + kind
         self._cls = cls
         self._cells = {}
+        self._scratch = {}
         self.cell_factory = cls
         self.owner = None
         self.delete_lands = True
@@ -80,8 +81,10 @@ class _Col:
     def getCellByRowName(self, name):
         return self._cell(name)
     def getCell(self, idx):
-        # appearance theme path uses index; map to a synthetic name
-        return self._cell("__idx_%d" % idx)
+        # NOT the addressing the tool should use - the index runs over the COLUMN's own rowCount,
+        # so this hands back a scratch cell unrelated to the by-name cells the assertions read.
+        self._scratch.setdefault(idx, self.cell_factory())
+        return self._scratch[idx]
     def classType(self):
         return self._cls.__name__
 
@@ -204,14 +207,16 @@ class ConfigurationMaterialCell:
 
 
 class _MaterialColumn:
-    """A material column: cells are addressed positionally (getCell(theme_row_index)) and the column
-    exposes .title/.id/.entity - a real ConfigurationMaterialColumn has NO .name."""
+    """A material column: cells are addressed by theme ROW NAME, getCell(index) hands back an
+    unrelated scratch cell, and the column exposes .title/.id/.entity - a real
+    ConfigurationMaterialColumn has NO .name."""
     def __init__(self, entity, title, table=None):
         self.entity = entity
         self.id = "matcol-" + title
         self.title = title
         self._table = table
         self._cells = {}
+        self._scratch = {}
 
     @property
     def cell_mode(self):
@@ -225,15 +230,21 @@ class _MaterialColumn:
     def substitute(self):
         return getattr(self._table, "substitute", None)
 
-    def getCell(self, idx):
-        if idx not in self._cells:
-            self._cells[idx] = ConfigurationMaterialCell(self)
-        return self._cells[idx]
+    def getCellByRowName(self, name):
+        if name not in self._cells:
+            self._cells[name] = ConfigurationMaterialCell(self)
+        return self._cells[name]
 
-    def material_at(self, idx):
+    def getCell(self, idx):
+        # NOT the addressing the tool should use - the index runs over the COLUMN's own rowCount,
+        # so this hands back a scratch cell unrelated to the by-name cells the assertions read.
+        self._scratch.setdefault(idx, ConfigurationMaterialCell(self))
+        return self._scratch[idx]
+
+    def material_of(self, row_name):
         """The material name this column holds on a theme row, or None - what a caller sees for the
         configurations linked to that row."""
-        m = self._cells.get(idx)
+        m = self._cells.get(row_name)
         return getattr(m.material, "name", None) if m is not None else None
 
 
@@ -284,14 +295,15 @@ class _MaterialRows(_Rows):
         taken = next((self.item(i) for i in range(self.count) if self.item(i).name == name), None)
         if taken is not None:
             return taken
-        prev = self.count - 1
+        prev = self.item(self.count - 1) if self.count else None
         row = super().add(name)
-        if prev >= 0:
+        if prev is not None:
             for i in range(self._table.columns.count):
                 col = self._table.columns.item(i)
-                src = col.getCell(prev).material
+                src = col.getCellByRowName(prev.name).material
                 if src is not None:
-                    col.getCell(self.count - 1)._material = src   # the platform copies, not the tool
+                    # the platform copies, not the tool
+                    col.getCellByRowName(row.name)._material = src
         return row
 
 
@@ -309,9 +321,6 @@ class _MaterialTable:
     def config_names(self):
         top = self._top
         return [top.rows.item(i).name for i in range(top.rows.count)] if top is not None else []
-
-    def row_index(self, name):
-        return next(i for i in range(self.rows.count) if self.rows.item(i).name == name)
 
 
 class ConfigurationInsertCell:
@@ -695,12 +704,9 @@ class TestAppearanceTheme:
         assert ref_default is not ref_small      # distinct configs -> distinct theme rows
         # and each linked theme row carries the right appearance
         col = appt._columns_added[0]
-        # find which theme index each ref points at, then check that column's cell appearance
+        # the cell each ref points at, read by the theme row's NAME - the addressing a caller sees
         def appearance_for(ref_row):
-            for i in range(appt.rows.count):
-                if appt.rows.item(i) is ref_row:
-                    return col.getCell(i).appearance
-            return None
+            return col.getCellByRowName(ref_row.name).appearance
         assert appearance_for(ref_default) is d._appearances["Red"]
         assert appearance_for(ref_small) is d._appearances["Blue"]
 
@@ -766,7 +772,7 @@ def _material_for(design, config, column_title):
     if row is None:
         return None
     col = next(c for c in mtbl.columns.added if c.title == column_title)
-    return col.material_at(mtbl.row_index(row.name))
+    return col.material_of(row.name)
 
 
 class TestAddMaterial:
@@ -782,6 +788,15 @@ class TestAddMaterial:
         res = dc.handler(action="add_material", body="Body1", materials="not json {")
         assert res["isError"] is True
         assert "'materials'" in res["message"] and "JSON object" in res["message"]
+
+    def test_the_material_lands_on_the_cell_addressed_by_theme_row_name(self, mat_design):
+        # A column's getCell(index) runs over the COLUMN's own rowCount, not the table's row order,
+        # so a positional write lands on a cell no configuration reads - and its own read-back
+        # still passes, because that cell does hold the material.
+        _payload(dc.handler(action="add_material", body="Body1", materials={"Default": "Steel"}))
+        col = _mat_table(mat_design).columns.added[0]
+        assert col.material_of("Theme 1") == "Steel"
+        assert col._scratch == {}
 
     def test_links_each_config_to_its_own_theme_row_by_row_name(self, mat_design):
         dc.handler(action="add_configuration", name="Small")
@@ -872,7 +887,7 @@ class TestAddMaterial:
         dc.handler(action="add_configuration", name="Large")     # inherits Small's theme row
         mtbl = _mat_table(mat_design)
         root = mtbl.columns.item(0)                              # the root-component column
-        root.getCell(mtbl.row_index("Theme 1"))._material = mat_design.materials.named("Steel")
+        root.getCellByRowName("Theme 1")._material = mat_design.materials.named("Steel")
         mtbl.silent_columns.add(root.title)
         res = dc.handler(action="add_material", body="Body2", materials={"Large": "Aluminum"})
         assert res["isError"] is True and root.title in res["message"]
@@ -1015,12 +1030,12 @@ class TestAddMaterialRefusesBeforeAndDuringTheBuild:
 
         def add_cell_less_column(entity):
             col = real_add(entity)
-            col.getCell = lambda idx: None
+            col.getCellByRowName = lambda name: None
             return col
 
         mtbl.columns.add = add_cell_less_column
         res = dc.handler(action="add_material", body="Body1", materials={"Default": "Steel"})
-        assert res["isError"] is True and "No material cell at theme index" in res["message"]
+        assert res["isError"] is True and "No material cell on theme row 'Theme 1'" in res["message"]
 
     def test_a_configuration_with_no_theme_cell_is_an_error(self, mat_design):
         # the column and its theme row already exist; the LINK step is the one with no cell
@@ -1462,9 +1477,9 @@ class TestAddParameterRefusals:
         assert "param_set after activating the row" in res["message"]
 
     def test_a_text_parameter_is_refused_before_the_column_lands(self, col_design):
-        # MEASURED LIVE: a text parameter reads unit 'Text'. Its column is created but no cell takes
-        # a value, so the refusal goes BEFORE addParameterColumn - a rollback afterwards is second
-        # best, and a retry loop would leave an orphan column each time.
+        # MEASURED LIVE: a text parameter reads unit 'Text', and a shipped configured sample varies
+        # such a column per row, its cells reading the expression quoted ('40') and the value only
+        # on textValue - a form this handler neither sets nor verifies, so it refuses up front.
         table = _top(col_design)
         p = col_design.allParameters.itemByName("plate_len")
         p.unit = "Text"
@@ -1641,12 +1656,13 @@ class TestSetAppearanceRefusals:
 
         def cell_less(body):
             col = real_add(body)
-            col.getCell = lambda idx: None
+            col.getCellByRowName = lambda name: None
             return col
 
         appt.add = cell_less
         res = dc.handler(action="set_appearance", body="Body1", appearances={"Default": "Red"})
-        assert res["isError"] is True and "No appearance cell/row at theme index 0" in res["message"]
+        assert res["isError"] is True
+        assert "No appearance cell/row on theme row 'Theme 1'" in res["message"]
 
     def test_a_cell_reading_back_another_appearance_is_an_error(self, col_design, monkeypatch):
         self._named(monkeypatch, Red=SimpleNamespace(name="Red"))

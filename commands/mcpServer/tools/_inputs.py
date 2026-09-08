@@ -1604,8 +1604,8 @@ class SurfaceRef(InputKind):
         note = "A plane: xy/xz/yz alias, a construction-plane name, or a planar-face handle."
         if self.curved_ops:
             verb = "accepts" if len(self.curved_ops) == 1 else "accept"
-            note += (" " + " / ".join(self.curved_ops) + f" also {verb} a CURVED face handle; every "
-                     "other one here takes a PLANAR face.")
+            note += (" " + " / ".join(self.curved_ops) + f" also {verb} a CURVED face handle; "
+                     "the rest take a PLANAR face.")
         return note
 
     def resolve(self, raw, operation=None):

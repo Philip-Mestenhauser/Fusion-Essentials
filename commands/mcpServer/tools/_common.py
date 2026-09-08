@@ -1025,7 +1025,8 @@ def target_sketch(comp, name):
 # The '<type>:<index>' ref kinds resolve_entity_ref addresses. spline = fitted, cv_spline =
 # control-point, fixed_spline = fixed/NURBS-referenced: three distinct SketchCurves collections,
 # each with its own creation-order index space.
-ENTITY_REF_KINDS = ("line", "arc", "circle", "ellipse", "point", "spline", "cv_spline", "fixed_spline")
+ENTITY_REF_KINDS = ("line", "arc", "circle", "ellipse", "elliptical_arc", "conic", "point",
+                    "spline", "cv_spline", "fixed_spline")
 
 # kind -> the SketchCurves sub-collection it indexes ('point' lives on the sketch itself).
 _ENTITY_REF_CURVE_ATTR = {
@@ -1033,6 +1034,8 @@ _ENTITY_REF_CURVE_ATTR = {
     "arc": "sketchArcs",
     "circle": "sketchCircles",
     "ellipse": "sketchEllipses",
+    "elliptical_arc": "sketchEllipticalArcs",
+    "conic": "sketchConicCurves",
     "spline": "sketchFittedSplines",
     "cv_spline": "sketchControlPointSplines",
     "fixed_spline": "sketchFixedSplines",

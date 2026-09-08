@@ -99,7 +99,7 @@ no test per function, no mutant theater in review (a reviewer runs a handful of 
 the reviewer drives the live session to check API claims whenever it can. The three defects found on
 2026-09-02 (a false `ok` pinned by a test, a classifier whose docstring asserted the opposite of the
 live shape, an unconsumable remedy) all came from thirty minutes of using the tools, none from 11,000
-unit tests. Every wave ends with a cold eval run (`tests/live/evals/run_eval.py`) with NO skill
+unit tests. Every wave ends with a cold eval run (`tests/live/evals/proctor.py`) with NO skill
 appended, so the wire alone is what gets graded.
 
 ## Enforcement is a closed list

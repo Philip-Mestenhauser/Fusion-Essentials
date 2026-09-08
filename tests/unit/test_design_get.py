@@ -1048,6 +1048,21 @@ class TestGuards:
         msg = error_message(dg.handler(include=["bogus"]))
         assert "tree" in msg and "default" in msg
 
+    def test_the_include_enum_matches_the_slice_tuple(self, stub_slices):
+        # Catches a HAND-EDITED schema drifting from the tuple. It cannot catch a name added to the
+        # tuple itself - both sides read it - which is what the dispatch test below covers.
+        enum = dg.tool.input_schema["properties"]["include"]["items"]["enum"]
+        assert sorted(enum) == sorted(dg._SLICES + dg._DEFAULT_NAMES)
+
+    def test_every_advertised_slice_actually_dispatches(self, stub_slices):
+        # A name in _SLICES that no `if ... in inc` branch reads returns a silent empty ok: the
+        # schema offers a slice the router never builds. 'mode' is the one slice whose payload key
+        # differs from its include name.
+        keys = {"mode": "mode_detail"}
+        for name in dg._SLICES:
+            out = _payload(dg.handler(include=[name], attribute_group="g"))
+            assert keys.get(name, name) in out, name
+
     def test_no_active_design_guard(self, monkeypatch):
         monkeypatch.setattr(dg._common, "design", lambda: None)
         res = dg.handler()
@@ -1523,13 +1538,12 @@ class TestTreeNameFilter:
 class TestTreePayloadSize:
     """The rich read's SIZE on a large design - the thing the projection exists to bound.
 
-    MEASURED live on a scripted 64-top-level x 3 rig (256 occurrences): the light default read is
-    10.2 KB against 95.5 KB for the same walk with handles on and no per-level cap; at max_depth=1,
-    3.4 KB against 23.2 KB; name_filter='Part07' is 0.8 KB. The fake rig below stands in for that
-    shape offline."""
+    MEASURED with tree_handles=true on the Airport Seating Primary Assembly sample (65 nodes, 64
+    top level): 41.1 KB compact, and 21.3 KB at max_depth=1; on the Bench sample (117 nodes),
+    77.3 KB. The fake rig below stands in for that shape offline."""
 
-    # The ceiling sits between the two live figures, so restoring either half of the projection -
-    # handles by default, or an uncapped level - trips it.
+    # The ceiling sits between the fake rig's two projections, so restoring either half - the
+    # addresses by default, or an uncapped level - trips it.
     LIGHT_CEILING_BYTES = 20_000
 
     def _big(self, n=64, per=3):
@@ -1557,15 +1571,31 @@ class TestWalkOccurrenceReference:
     """An xref node carries its source identity (version/staleness/file) so an agent can see WHERE a
     referenced component comes from and whether it is out of date."""
 
+    _DF = SimpleNamespace(id="urn:adsk:123", name="LibPart", fusionWebURL="https://autodesk/x")
+
+    def _ref_node(self, **kw):
+        dr = SimpleNamespace(version=7, isOutOfDate=True, dataFile=self._DF)
+        return dg._walk_occurrence(_tocc("Lib:1", is_ref=True, docref=dr), 0, 3,
+                                   {"n": 0, "truncated": False}, **kw)
+
     def test_reference_node_carries_source_metadata(self):
-        df = SimpleNamespace(id="urn:adsk:123", name="LibPart", fusionWebURL="https://autodesk/x")
-        dr = SimpleNamespace(version=7, isOutOfDate=True, dataFile=df)
-        node = dg._walk_occurrence(_tocc("Lib:1", is_ref=True, docref=dr), 0, 3,
-                                   {"n": 0, "truncated": False})
+        node = self._ref_node()
         assert node["is_reference"] is True
         assert node["source_version"] == 7 and node["is_out_of_date"] is True
-        assert node["source_id"] == "urn:adsk:123" and node["source_name"] == "LibPart"
+        # the light node names the source FILE; its unique address rides under tree_handles
+        assert node["source_name"] == "LibPart"
+
+    def test_the_light_node_withholds_the_source_addresses(self):
+        # the default tree is the read that must stay light, so the addresses ride with the other
+        # addresses instead of on every node.
+        node = self._ref_node()
+        assert "source_id" not in node and "source_url" not in node
+
+    def test_tree_handles_adds_the_source_addresses(self):
+        node = self._ref_node(with_handles=True)
+        assert node["source_id"] == "urn:adsk:123"
         assert node["source_url"] == "https://autodesk/x"
+        assert node["source_name"] == "LibPart"
 
     def test_local_node_states_neither_is_reference_nor_source_fields(self):
         # a flag that READ false is the boring case: publishing is_reference:false on every node of

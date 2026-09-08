@@ -585,9 +585,9 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
 TOOL_DESCRIPTION = (
     "Create a 2D drawing from the active design via Fusion's automatic generator. The source design "
     "must be cloud-saved. The result is a CLOUD file, NOT opened - doc_open the returned file_id, "
-    "then drawing_export for the PDF, with no Fusion UI step first. Per-view placement/scale is not "
-    "API-controllable. A client TIMEOUT is not a verdict here - the create can still land; re-check "
-    "with data_get before retrying, or a retry mints a second drawing."
+    "then drawing_export for the PDF, no UI step. Per-view placement/scale is not API-controllable. "
+    "A client TIMEOUT is not a verdict: the create can still land, so re-check with data_get before "
+    "retrying or a retry mints a second drawing."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)

@@ -277,9 +277,8 @@ tool = (
     )
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("target", {"type": "string",
-            "description": "What to delete as '<type>:<index>' - line | arc | circle | ellipse | "
-                           "point | spline | cv_spline | fixed_spline | constraint | dimension | "
-                           "text (e.g. 'circle:0'). 0-based, in creation order."})
+            "description": "What to delete as '<type>:<index>' (e.g. 'circle:0'); 0-based, in "
+                           "creation order. An unknown type is refused with the list."})
     .add_required_input("target")
     .strict_schema()
 )

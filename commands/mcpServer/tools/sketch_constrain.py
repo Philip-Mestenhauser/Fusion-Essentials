@@ -208,7 +208,7 @@ def _anchor_refusal(cname, label, anchor):
 # in the parameter, so they stay on PlaneRef; only these two resolve through the wider kind.
 _CURVED_SURFACE_OK = ("coincident_to_surface", "perpendicular_to_surface")
 _SURFACE = _inputs.SurfaceRef("surface", curved_ops=_CURVED_SURFACE_OK,
-                              description="Face/plane for the *_to_surface constraints.")
+                              description="The *_to_surface operand.")
 _DISTANCE = _inputs.Distance("distance", allow_zero=False,
                              description="Offset distance, or rectangular_pattern spacing in direction one.")
 _DISTANCE_TWO = _inputs.Distance("distance_two", allow_zero=False,

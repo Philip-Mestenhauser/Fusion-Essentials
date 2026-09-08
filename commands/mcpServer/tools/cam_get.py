@@ -668,36 +668,35 @@ TOOL_DESCRIPTION = (
 
 tool = (
     Tool.create_simple(name="cam_get", description=TOOL_DESCRIPTION)
-    .add_input_property("include", {"type": ["array", "string"],
-            "description": "Deeper slices; 'default'/'setups' keeps setups too: operations | strategies | "
-                           "parameters | tool | references | nc_programs | time | tools | library | library_types | "
-                           "machine | machines | templates | inspection."})
+    .add_input_property("include", {"type": "array",
+            "items": {"type": "string", "enum": list(_SLICES + _DEFAULT_NAMES)},
+            "description": "Deeper slices to add; 'default'/'setups' keeps the setups slice beside them."})
     .add_input_property("setup", {"type": "string",
-            "description": "Setup name. Scopes operations/strategies/references/time/machine; alone, targets a setup parameter read; with 'operation', picks which of several same-named ops."})
+            "description": "Setup name. Scopes operations/strategies/references/time/machine; alone, targets a setup parameter read; with 'operation', picks which of several same-named ops. Every other slice ignores it."})
     .add_input_property("operation", {"type": "string",
-            "description": "The operation whose parameters/tool to read (required for include=tool)."})
+            "description": "The operation whose parameters/tool to read."})
     .add_input_property("preset", {"type": "string",
             "description": "With include=['tool']: this preset's feeds/speeds expressions."})
     .add_input_property("scope", {"type": "string",
             "enum": ["document", "local", "cloud", "hub", "fusion"],
-            "description": "The 'library' slice: which location (default document; fusion = the shipped samples)."})
+            "description": "'library': which location (fusion = the shipped samples). Default document."})
     .add_input_property("library", {"type": "string",
-            "description": "The 'library' slice, shared scope: library name/url (omit to list the libraries there)."})
+            "description": "'library', shared scope: a library name/url (omit to list the libraries there)."})
     .add_input_property("tool_type", {"type": "string",
-            "description": "The 'library' slice: filter by tool type (e.g. 'ball', 'drill')."})
+            "description": "'library': filter by tool type (e.g. 'ball', 'drill')."})
     .add_input_property("vendor", {"type": "string",
-            "description": "The 'machines' slice: filter by vendor (e.g. 'Haas')."})
+            "description": "'machines': filter by vendor (e.g. 'Haas')."})
     .add_input_property("machine_type", {"type": "string",
             "enum": ["milling", "turning", "cutting", "additive"],
-            "description": "The 'machines' slice: keep only machines with this capability."})
+            "description": "'machines': keep only machines with this capability."})
     .add_input_property("template_location", {"type": "string",
-            "description": "The 'templates' slice: library location (default cloud)."})
+            "description": "'templates': library location (default cloud)."})
     .add_input_property("template_url", {"type": "string",
-            "description": "The 'templates' slice: a folder URL to start at (overrides location)."})
+            "description": "'templates': a folder URL to start at (overrides location)."})
     .add_input_property("template_depth", {"type": "integer",
-            "description": "The 'templates' slice: folder depth to walk (default 4)."})
+            "description": "'templates': folder depth to walk (default 4)."})
     .add_input_property("measure", {"type": "string",
-            "description": "The 'inspection' slice: drill one measure's out-of-tolerance points by INDEX ('0'), or one of its paths ('0/1')."})
+            "description": "'inspection': one measure's out-of-tolerance points by INDEX ('0'), or one of its paths ('0/1')."})
     .add_input_property("max_results", {"type": "integer",
             "description": "With 'measure': point-row cap (default 50, max 200)."})
     .add_input_property(*_inputs.UNITS.as_property())

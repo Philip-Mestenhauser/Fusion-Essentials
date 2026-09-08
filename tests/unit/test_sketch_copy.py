@@ -65,8 +65,7 @@ def _copier(store, target, made=(), extra_points=0, proxies=False, unreffable=()
     proxies=True returns each landed curve as the assembly-context proxy a COMPONENT-owned sketch
     hands back (see _proxy_of); the default returns the native curve itself with nativeObject None,
     the measured root-owned shape. `unreffable` curves land in the flat sketchCurves collection only,
-    the way a conic does - sketch_add_geometry: "This curve has NO '<type>:<index>' ref" - so they raise the
-    curve COUNT while no ref can ever name them."""
+    in no per-kind sub-collection, so they raise the curve COUNT while no ref can name them."""
     def _copy(collection, matrix, target_sketch=None):
         store.append((collection, matrix, target_sketch))
         landed = target_sketch if target_sketch is not None else target
@@ -355,8 +354,8 @@ class TestCopyRefsCrossTheProxySeam:
         assert out["new_curves"] == ["line:2"] and "new_curves_complete" not in out
 
     def test_a_curve_no_ref_addresses_is_reported_not_silently_dropped(self, mod, sketches):
-        # a conic raises the curve count but carries no '<type>:<index>' ref at all - the count
-        # delta is then the whole truth, and saying so beats handing back a bare []
+        # a curve landing in no per-kind sub-collection raises the curve count with no ref to name
+        # it - the count delta is then the whole truth, and saying so beats handing back a bare []
         plate, _ = sketches
         plate.copy = _copier([], plate, made=[], unreffable=[_boxed("C0", 9.0, 0.0)], proxies=True)
         out = payload(mod.handler(entities="line:0", dx=10))

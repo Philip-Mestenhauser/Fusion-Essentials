@@ -28,19 +28,18 @@ def _shared_component_names(design) -> set:
     return {nm for nm, n in counts.items() if n > 1}
 
 
-# Rows PAGED per component, so one dense component cannot flood a design-wide list. max_results is
-# the page size - the same knob and the same default shape design_get's tree children use - and it
-# is what reaches a withheld row, since scoping to that component pages it identically.
-_LIST_PER_COMPONENT_CAP = 25
+# Rows PAGED design-wide, so a sketch-dense document cannot flood the list however its sketches are
+# spread over components. max_results is the page size - the same knob and the same default shape
+# design_get's tree children use.
+_LIST_CAP = 50
 
-_LIST_CAP_NOTE = ("Sketches are paged {cap} per component; 'sketch_count' is the true total and "
-                  "'components_truncated' names each component holding more. Raise max_results for "
-                  "the withheld rows, narrow with component='<name or occurrence path>', or read "
-                  "one sketch by sketch_get(sketch_name='<name>').")
+_LIST_CAP_NOTE = ("Sketches are paged {cap} per read; 'sketch_count' is the true total. Raise "
+                  "max_results for the rows past the page, narrow with component='<name or "
+                  "occurrence path>', or read one sketch by sketch_get(sketch_name='<name>').")
 
 
 def _list_sketches(component: str = "", max_results: int = 0) -> dict:
-    """List the design's sketches, each tagged with its owning component, max_results per component;
+    """List the design's sketches, each tagged with its owning component, max_results rows per read;
     'component' narrows the list, taking the same component name / occurrence path / handle the
     by-name read scopes by. Two components can wear one NAME, so the rows they own are identical -
     top-level 'placements' carries the occurrence paths that tell them apart."""
@@ -51,34 +50,29 @@ def _list_sketches(component: str = "", max_results: int = 0) -> dict:
     if scope_error:
         return error(scope_error)
     try:
-        cap = max(1, int(max_results)) if max_results else _LIST_PER_COMPONENT_CAP
+        cap = max(1, int(max_results)) if max_results else _LIST_CAP
     except (TypeError, ValueError):
-        cap = _LIST_PER_COMPONENT_CAP
-    sketches, cut, total = [], [], 0
+        cap = _LIST_CAP
+    sketches, total = [], 0
     try:
         for comp in comps:
             comp_name = safe(lambda c=comp: c.name)
-            shown, held = 0, 0
             for sk in _common.iter_collection(safe(lambda c=comp: c.sketches)):
-                held += 1
+                total += 1
                 # The walk runs on PAST the page so sketch_count stays the count of what is there,
                 # never the count of what fitted.
-                if shown >= cap:
+                if len(sketches) >= cap:
                     continue
                 rec = _sketch_summary(sk)
                 rec["component"] = comp_name
                 sketches.append(rec)
-                shown += 1
-            total += held
-            if held > shown:
-                cut.append({"component": comp_name, "sketch_count": held, "listed": shown})
     except Exception as e:
         return error(f"Could not read sketches: {e}")
+    withheld = total > len(sketches)
     payload = {"sketch_count": total, "sketches": sketches}
-    if cut:
+    if withheld:
         payload["returned"] = len(sketches)
         payload["truncated"] = True
-        payload["components_truncated"] = cut
     # Only the ambiguous names THIS RESPONSE's rows carry earn the placement block.
     shared = _shared_component_names(design)
     listed = [r["component"] for r in sketches]
@@ -95,7 +89,7 @@ def _list_sketches(component: str = "", max_results: int = 0) -> dict:
             "those rows apart. 'placements' lists every occurrence path placing a component of one "
             "of the names just listed, and no others; passing one back as 'component' reads THAT "
             "component's sketches.")
-    if cut:
+    if withheld:
         payload["note"] = (payload.get("note", "") + " " + _LIST_CAP_NOTE.format(cap=cap)).strip()
     if any(r.get("compute_deferred") for r in sketches):
         payload["note"] = (payload.get("note", "") + " " + DEFERRED_NOTE).strip()
@@ -104,7 +98,7 @@ def _list_sketches(component: str = "", max_results: int = 0) -> dict:
 
 def handler(sketch_name: str = "", include_entities: bool = False, units: str = "mm",
             component: str = "", max_results: int = 0) -> dict:
-    """No 'sketch_name': the summary list, max_results rows per component. With one: that sketch's
+    """No 'sketch_name': the summary list, max_results rows per read. With one: that sketch's
     overview (or the full X-ray with include_entities=true) via the _sketch_detail engine, in
     'units' (mm). 'component' scopes BOTH shapes to one component - the answer to a sketch name two
     components share, which Fusion produces by default (it numbers sketches per component from 1)."""
@@ -115,8 +109,8 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
 
 
 TOOL_DESCRIPTION = (
-    "Read sketches by zoom level: a summary list of the design's sketches (paged per component by "
-    "max_results; 'truncated' means the note names the narrowing), or ONE sketch's overview - entity "
+    "Read sketches by zoom level: a summary list of the design's sketches (paged by max_results; "
+    "'truncated' means the note names the narrowing), or ONE sketch's overview - entity "
     "counts, is_fully_constrained, and a 'profiles' list (area, centroid, loop_count, and a "
     "'handle' to pass as a ProfileRef to model_extrude / model_revolve / model_loft - pick a region "
     "by area/position, not a guessed index). The overview also carries 'frame' - where sketch (0,0) "
@@ -126,13 +120,13 @@ TOOL_DESCRIPTION = (
 tool = (
     Tool.create_simple(name="sketch_get", description=TOOL_DESCRIPTION)
     .add_input_property("sketch_name", {"type": "string",
-            "description": "Omit for the summary list (paged per component); give a name for that sketch's overview (counts + profiles)."})
+            "description": "Omit for the summary list (paged); give a name for that sketch's overview (counts + profiles)."})
     .add_input_property("max_results", {"type": "integer",
-            "description": f"Summary-list rows per COMPONENT (default {_LIST_PER_COMPONENT_CAP}). Raise it to reach the rows a 'components_truncated' entry withheld."})
+            "description": f"Summary-list rows per read (default {_LIST_CAP}); raise it for the rows past a 'truncated' page."})
     .add_input_property("component", {"type": "string",
-            "description": "Read the sketch of that name inside THIS component; with no 'sketch_name', list only its sketches. A component name, or an occurrence fullPathName/handle from design_get(include=['tree'])."})
+            "description": "Component to read within; with no 'sketch_name', only its sketches are listed. A component name, or an occurrence fullPathName/handle."})
     .add_input_property("include_entities", {"type": "boolean",
-            "description": "Also return the full per-entity/constraint/dimension X-ray (default false - heavier; for editing geometry)."})
+            "description": "Also return the full per-entity/constraint/dimension X-ray (default false - heavier)."})
     .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )

@@ -289,11 +289,13 @@ def _do_add_parameter(design, table, parameter, values):
     if unknown:
         return error(f"Values reference configurations that don't exist: {', '.join(unknown)}. "
                      f"Existing: {', '.join(str(n) for n in _row_names(table))}.")
-    # A TEXT parameter's column is created but no cell takes a value on this build, so it is refused
-    # BEFORE the column lands rather than rolled back after. A text parameter reads unit 'Text'.
+    # A TEXT parameter's column is refused BEFORE it lands rather than rolled back after. Measured
+    # on the owner's open Configured Dumbbell: a text parameter reads unit 'Text', and its per-row
+    # cells read the expression quoted ('10'), with the value only on textValue.
     if safe(lambda: p.unit) == _TEXT_UNIT:
-        return error(f"'{parameter}' is a {_TEXT_UNIT} parameter: its column would be created and "
-                     "every cell would keep the parameter's own value, so no row could vary. Vary a "
+        return error(f"'{parameter}' is a {_TEXT_UNIT} parameter: its cells read the expression "
+                     "quoted ('10'), with the value only on textValue. This tool sets and verifies "
+                     "plain expressions, so it does not configure a Text column. Vary a "
                      "length/number parameter in the table, and relabel per configuration with "
                      "param_set after activating the row.")
     col = table.columns.addParameterColumn(p)    # MUTATION
@@ -319,9 +321,7 @@ def _do_add_parameter(design, table, parameter, values):
                          + ("The column has been rolled back." if removed else
                             "The column could NOT be auto-removed and is still on the table - "
                             "delete it before retrying.")
-                         + f" If '{parameter}' is a Text parameter, no cell takes a value on this "
-                           "build - relabel per configuration with param_set after activating the "
-                           "row.")
+                         + " Relabel per configuration with param_set after activating the row.")
         n += 1
     return ok({"parameter": parameter, "column_id": safe(lambda: col.id), "set": n,
                "note": "Parameter column added and per-configuration expressions set. Switch with "
@@ -431,17 +431,20 @@ def _do_set_appearance(design, table, body, appearances):
     theme_col = safe(lambda: appt.parentTableColumn)
     if theme_col is None:
         return error("The appearance table has no theme column (parentTableColumn) to link configurations.")
+    theme_rows = _theme_rows(appt)
     set_count = 0
     for theme_idx, (rname, appearance) in enumerate(resolved.items()):
-        theme_row = safe(lambda theme_idx=theme_idx: appt.rows.item(theme_idx))
-        cell = safe(lambda theme_idx=theme_idx: col.getCell(theme_idx))
+        theme_row, theme_name = (theme_rows[theme_idx] if theme_idx < len(theme_rows)
+                                 else (None, None))
+        cell = safe(lambda theme_name=theme_name: col.getCellByRowName(theme_name))
         if cell is None or theme_row is None:
-            return error(f"No appearance cell/row at theme index {theme_idx}.")
+            return error(f"No appearance cell/row on theme row {theme_name!r} (for configuration "
+                         f"'{rname}').")
         cell.appearance = appearance # MUTATION (assign appearance to this theme row)
         # An unreadable read-back is a FAILURE, not a pass (the material path's stated rule).
         got = safe(lambda cell=cell: cell.appearance.name)
         if got is None or got != safe(lambda: appearance.name):
-            return error(f"Appearance cell at theme index {theme_idx} reads "
+            return error(f"Appearance cell on theme row '{theme_name}' reads "
                          f"{'nothing' if got is None else repr(got)} after the set - the "
                          "assignment did not verifiably take.")
         # Link the configuration row to this theme row. CRITICAL: the theme column's getCell(index)
@@ -463,13 +466,15 @@ def _do_set_appearance(design, table, body, appearances):
 
 
 def _theme_rows(mtbl):
-    """[(index, row, name)] for every theme row of a theme table. The index IS the argument a
-    column's getCell(rowIndex) takes."""
+    """[(row, name)] for every theme row of a theme table. The NAME is the argument a column's
+    getCellByRowName takes - ConfigurationMaterialColumn and ConfigurationAppearanceColumn both
+    expose it; a column's getCell index runs over the column's own rowCount, which is not the
+    table's row order."""
     out = []
     for i in range(safe(lambda: mtbl.rows.count, 0) or 0):
         r = safe(lambda i=i: mtbl.rows.item(i))
         if r is not None:
-            out.append((i, r, safe(lambda r=r: r.name)))
+            out.append((r, safe(lambda r=r: r.name)))
     return out
 
 
@@ -482,14 +487,14 @@ def _theme_links(table, theme_col):
     return links
 
 
-def _carry_theme_materials(mtbl, from_index, to_index):
+def _carry_theme_materials(mtbl, from_name, to_name):
     """Copy every column's material from one theme row to another. A minted row copies the row ABOVE
     it, which is not the row the configuration being moved was referencing - without this carry, the
     OTHER bodies in that configuration silently take some other configuration's materials. Returns
     the title of a column whose copy did not read back, or None."""
     for c in iter_collection(safe(lambda: mtbl.columns)):
-        src = safe(lambda c=c: c.getCell(from_index))
-        dst = safe(lambda c=c: c.getCell(to_index))
+        src = safe(lambda c=c: c.getCellByRowName(from_name))
+        dst = safe(lambda c=c: c.getCellByRowName(to_name))
         mat = safe(lambda src=src: src.material) if src is not None else None
         if dst is None or mat is None:
             continue
@@ -505,7 +510,7 @@ def _mint_theme_row(mtbl, rows, prefix="Material"):
     The name search is load-bearing: rows.add(<a name an existing row carries>) adds NOTHING and
     returns THAT row, so a colliding name would hand this configuration a row another configuration
     already references."""
-    taken = {n for (_i, _r, n) in rows}
+    taken = {n for (_r, n) in rows}
     n = len(rows) + 1
     while ("%s %d" % (prefix, n)) in taken:
         n += 1
@@ -556,29 +561,29 @@ def _do_add_material(design, table, body, materials):
     for rname, material in resolved.items():
         rows = _theme_rows(mtbl)
         cur = links.get(rname)
-        held = next(((i, r, n) for (i, r, n) in rows if n == cur), None) if cur else None
+        held = next(((r, n) for (r, n) in rows if n == cur), None) if cur else None
         shared = [c for c, t in links.items() if t == cur and c != rname]
         if held is None or shared:
             new_row, new_name = _mint_theme_row(mtbl, rows)
             if not new_row:
                 return error(f"Adding a theme row for configuration '{rname}' returned null.")
             rows = _theme_rows(mtbl)
-            entry = next(((i, r, n) for (i, r, n) in rows if r is new_row or n == new_name), None)
+            entry = next(((r, n) for (r, n) in rows if r is new_row or n == new_name), None)
             if entry is None:
                 return error(f"Theme row '{new_name}' is not in the material table after adding it.")
             if held is not None:
-                bad = _carry_theme_materials(mtbl, held[0], entry[0])
+                bad = _carry_theme_materials(mtbl, held[1], entry[1])
                 if bad:
                     return error(f"Configuration '{rname}' moved to a new theme row, but column "
                                  f"'{bad}' did not carry its material over - the material table is "
                                  "partially built; inspect it before retrying.")
         else:
             entry = held
-        theme_idx, theme_row, want_row = entry
+        theme_row, want_row = entry
 
-        cell = safe(lambda theme_idx=theme_idx: col.getCell(theme_idx))
+        cell = safe(lambda want_row=want_row: col.getCellByRowName(want_row))
         if cell is None:
-            return error(f"No material cell at theme index {theme_idx} for configuration '{rname}'.")
+            return error(f"No material cell on theme row '{want_row}' for configuration '{rname}'.")
         cell.material = material # MUTATION (assign material to this configuration's theme row)
         want = safe(lambda material=material: material.name)
         got = safe(lambda cell=cell: cell.material.name)

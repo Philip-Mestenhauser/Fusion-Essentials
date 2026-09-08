@@ -161,7 +161,9 @@ def handler(file_path: str = "", sketch_name: str = "", x=None, y=None, units: s
         "sketch_extent": _extent(sketch, f, unit),
         "note": ("SVG curves APPEND to the sketch: the '<type>:<index>' ids already in use keep "
                  "their entities and the new curves take the ids after them - list them with "
-                 "sketch_get(include_entities=true). " + extent_note
+                 "sketch_get(include_entities=true). Each lands as a cv_spline whose control "
+                 "points read EMPTY and whose degree raises; sketch_edit_curve(offset) copies "
+                 "them as more of the same. " + extent_note
                  + "If the art is the wrong size, change 'scale' and re-import."),
     })
 

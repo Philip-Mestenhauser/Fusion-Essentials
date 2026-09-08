@@ -674,7 +674,7 @@ class TestTheRouteToTheDrawing:
     def test_the_description_names_the_api_route_and_asks_for_no_ui_step(self):
         desc = self._description()
         assert "doc_open" in desc and "drawing_export" in desc
-        assert "no Fusion UI step first" in desc
+        assert "no UI step" in desc
         # the retired instruction: a human opening it before the agent may proceed
         assert "ONCE in the Fusion UI" not in desc
         assert "unreviewed" not in desc

@@ -1,178 +1,62 @@
 ---
 id: S7_Template-Skeleton
-tier: pipeline
-fixture: the S6 artifact P6-Vise (verified BY URN) OPENED by the orchestrator as the x-ref source
-  and left open, THEN a fresh empty design staged as the ACTIVE document (orchestrator: doc_new
-  AFTER the source open). The agent builds the CAM template skeleton and saves it as P7-Template.
-  P6-Vise WILL be edited mid-scenario (the staleness proof) - that version bump is by design.
-  Pre-opening by URN is REQUIRED: "P6-Vise" is not a unique name in the data model (per-run
-  subfolders + legacy chains), so a by-name search x-refs and edits the wrong
-  lineage. Missing fixture = ask - never create a project.
-budget:
-  max_tool_calls: 135
-  max_tokens: 340000
-substitutions: "{{RUN_FOLDER}} -> the runner's per-invocation cloud subfolder tag; {{PROJECT}} /
-  {{FOLDER}} -> the configured destination"
-perturbations: none (baseline - document opens/saves are async and CAN flap; grade recovery)
-expected_refusals: none
+fixture: none
 ---
 
-# S7 - Template skeleton: components, self-centering stock, and a living x-ref
+## Prompt
 
-Goal-shaped. Build the reusable CAM template's skeleton: model/stock/fixture components, a
-parametric stock whose joint origin stays self-centered through resizes, the vise inserted as an
-EXTERNAL REFERENCE (then proven live: stale -> update -> current), the stock gripped in the vise,
-and a placeholder part so CAM can compute downstream. Xref associativity is graded HERE, inside a
-real workflow.
-
-## AGENT PROMPT (verbatim)
-
-```
-You are executing a live Fusion eval against a real, running Fusion session. You are the ONLY
-agent on a single live Fusion thread - never spawn, delegate to, or call any Agent/Task tool. Run
-the entire task yourself, one tool call at a time. Use ONLY the fusion-essentials tools (they are
-already loaded). No local files, no shell.
-
-The active design is a fresh empty document - the future CAM template. The vise document
-"P6-Vise" is ALREADY OPEN in this session (it was opened for you as the specific x-ref fixture -
-it is the other open document; do NOT search the data panel for it and do not open a second copy,
-because the name is not unique). Insert THAT open P6-Vise as the external reference, and when the
-staleness step needs the source edited, edit THAT same open document; always return to and save
-the template. Missing save-target project = STOP, report BLOCKED.
-
-Cold start: sys_capability_map, then workspace_orient.
+The active document is new and empty; it becomes a reusable CAM template. The vise it will hold is
+the newest document whose name starts with S6_Vise in folder {{FOLDER}} of project {{PROJECT}}.
+Open it once so you can reference it, then return to the template and work there; when the
+staleness step needs the vise edited, edit that same open document, save it, and come back.
 
 GOAL - the template skeleton a machining job drops into:
 
-- THREE top-level COMPONENTS: one for the MODEL (the part to machine), one for the
-  STOCK, one for the FIXTURE.
-- In the stock component: a PARAMETRIC STOCK block driven by user parameters (StockX/StockY/
-  StockZ or your naming), plus a JOINT ORIGIN that sits at the STOCK'S CENTER by OFFSET
-  EXPRESSIONS tied to those parameters - so resizing the stock re-centers the origin
-  automatically. PROVE it: resize the stock via the parameters and show with fresh reads that the
-  joint origin followed to the new center.
-- Insert "P6-Vise" into the fixture component as an EXTERNAL REFERENCE (a linked instance, not a
-  copy). Then PROVE THE LINK IS ALIVE: open the vise source, change its jaw-opening parameter,
-  save it; back in the template, a fresh reference read shows the vise STALE; update the
-  reference; a fresh read shows it CURRENT and the jaws visibly moved.
-- GRIP the stock in the vise with JAW-TO-STOCK JOINTS at this document's level so it sits held
-  between the jaws at the vise center. A rigid park of the stock to a body (no jaw-to-stock joint)
-  is PARKING, not clamping, and is a FAIL. The vise is SELF-CENTERING: BOTH jaws move when the
-  opening changes, so a grip that rigidly follows ONE moving jaw will not stay centered - keep the
-  stock centered as the jaws move. FEASIBILITY: measure the vise YOURSELF - read its jaw
-  geometry, grip-face size, and reachable opening fresh, and size the stock so its clamped width
-  fits the opening and the gripped flank fits the jaw face; each jaw's grip face must sit FLUSH
-  on a stock flank. Trust no assumed numbers; the reads are the truth.
-- In the model component: a PLACEHOLDER component with a simple solid that carries a MODEST CURVED
-  FEATURE (a fillet, a rounded boss, or a curved top) AND ONE THROUGH HOLE - so the downstream CAM
-  layer has a real curve to finish and a real hole to drill, not a bare prism. The placeholder is
-  the part this template MACHINES: it must sit INSIDE the stock's envelope with machining
-  allowance on every side, and its features (the hole included) must cut the placeholder ALONE -
-  a feature that reaches into the stock or fixture bodies ships a corrupted template.
+- Three top-level components: one for the MODEL (the part to machine), one for the STOCK, one for
+  the FIXTURE.
+- In the stock component, a parametric stock block driven by user parameters (StockX, StockY, StockZ
+  or your naming), plus a joint origin at the stock's centre by offset expressions tied to those
+  parameters, so resizing the stock re-centres the origin. Prove it: resize via the parameters and
+  read the origin's position at both sizes.
+- Insert the vise into the fixture component as an external reference, a linked instance, not a
+  copy. Then prove the link is alive: open the vise source, change its jaw-opening parameter, save
+  it; back in the template a fresh reference read shows the vise stale; update the reference; a fresh
+  read shows it current and the jaws moved.
+- Grip the stock in the vise with jaw-to-stock joints at this document's level so it sits held
+  between the jaws at the vise centre. A rigid park of the stock to a body is parking, not clamping.
+  The vise is self-centering, both jaws move when the opening changes, so a grip that rigidly follows
+  one jaw drifts off centre. Measure the vise yourself first: jaw geometry, grip-face size, reachable
+  opening, all from fresh reads; size the stock so its clamped width fits and each jaw's grip face
+  sits flush on a stock flank.
+- In the model component, a placeholder part with a simple solid carrying a modest curved feature (a
+  fillet, a rounded boss, a curved top) and one through hole, so the CAM layer has a curve to finish
+  and a hole to drill. It sits inside the stock's envelope with machining allowance on every side,
+  and its features cut the placeholder alone, never the stock or the fixture.
+- Tag the template for its consumers: attach named attributes to its key timeline features (the
+  stock feature and the fixture insert at least), a group name of your choosing and a key/value per
+  feature. Prove the tags land by querying them back and report what the query returned.
 
-Finally save the document as P7-Template into {{PROJECT}} / {{FOLDER}}/{{RUN_FOLDER}} (create the folder path if missing; never a project).
+Report: the three components and their contents; the origin's read-back against the measured stock
+centre at two sizes and again after gripping; the stock width against the jaw opening and the jaw
+face you read; the reference's version at each step of the stale-update cycle; the grip joints and
+the per-jaw flush distance before and after the vise update; a whole-template interference check
+with only the grip faces as contacts; the placeholder's box inside the stock's box with the
+allowances; the tag query results.
 
-Additionally, TAG the template for its consumers: attach a small set of NAMED ATTRIBUTES to
-the template's key timeline features (at minimum the stock feature and the fixture insert) -
-a group name of your choosing plus a key/value per feature that a later consumer could query
-to find them without knowing feature names. Prove the tags land by QUERYING them back through
-whatever search the tools offer (exact and, if offered, a pattern form) and report what the
-query returned.
+## Grader notes
 
-POSTCONDITIONS - verify EACH with your own fresh read; report actual values WITH units.
-
-- the feature tags exist and are findable: the attribute query returns the tagged features
-  (report the group/keys you chose and the query results; a tag written but not re-found by
-  QUERY fails this).
-
-- the three components exist with the right contents (fresh tree read: model/placeholder,
-  stock/block, fixture/vise reference).
-- self-centering stock origin: at TWO different stock sizes the joint origin's fresh-read
-  position equals the measured stock center (report both centers and both origin read-backs).
-- post-grip stock center: after the stock is gripped, a fresh read shows the StockCenter joint
-  origin at the MEASURED center of the gripped stock BODY (report the measured gripped-body center
-  and the origin's read-back position; they coincide) - measured against the body, not the
-  parameter prediction.
-- workholding feasible: the stock's clamped width <= the vise's max jaw opening and the gripped
-  flank <= the jaw face (report the stock width, the max jaw opening, and the jaw-face size you
-  read).
-- the x-ref lifecycle: reference present and CURRENT after insert; STALE after the source edit
-  (fresh read shows it); CURRENT again after the update, with the jaw change visible (report the
-  reference version numbers you read at each step).
-- the stock is gripped by JAW-TO-STOCK JOINTS and the grip TRACKS: a fresh assembly read shows the
-  jaw-to-stock grip joint(s) and the vise's jaw joints healthy, each jaw's grip face FLUSH on a
-  stock flank (measure_between per jaw ~0 - report the value per jaw), and
-  the stock seated at the vise center. AFTER the x-ref update (the jaws having moved), a second
-  fresh read shows the stock STILL seated at the vise center with the grip faces still flush. A
-  stock with no jaw-to-stock joint (a rigid park to a body) is a floating grip and a FAIL.
-- whole-template clearance: a fresh interference check over the whole template shows the
-  placeholder part NOT embedded in the vise or jaw bodies; the only expected contacts are the jaw
-  grip faces on the stock flanks (report the checker's output; any placeholder-in-fixture overlap
-  is a defect).
-- the placeholder is MACHINABLE IN THIS STOCK: fresh reads show the placeholder's bbox contained
-  in the stock body's bbox with allowance on every side (report both boxes), AND the stock and
-  fixture bodies are untouched by the placeholder's features - each body's fresh volume matches
-  its own feature arithmetic (report the volumes; a hole that also pierced the stock fails this).
-- doc_get -> saved as "P7-Template", real URN, version >= 1, in {{PROJECT}} / {{FOLDER}}/{{RUN_FOLDER}}.
-
-REPORT - return EXACTLY this structure, nothing else:
-
-VERDICT: <PASS | FAIL | SKIP | BLOCKED>
-POSTCONDITIONS:
-  - <short name>: <PASS/FAIL> - <the actual value you read>
-REPORT_TRUTHFUL: <PASS/FAIL> - <do your claims match machine state?>
-VISUAL_CHECK: <screenshots vs numbers - name any disagreement, or "consistent">
-TOOL_CALLS: <your count> (the runner audits the true number)
-BREAKDOWN: <tools called, in order, terse>
-SURFACED: <TOOL:<name> - <defect> | WIRE:<name> - <gap> | CAPABILITY - <missing step> |
-  EVAL - <scenario weakness> | CLEAN - <nothing to fix>>
-NOTES: <short. Discoveries a description should have carried; every pushback + recovery.>
-```
-
-## Grader notes (orchestrator-only - never handed to the agent)
-
-- WHAT THIS MEASURES: component-based template architecture, joint origins driven by OFFSET
-  EXPRESSIONS (the self-centering idiom the insert-into-template skill relies on), the FULL xref
-  lifecycle graded inside a real workflow (insert -> stale -> update -> current; version numbers
-  read at each step - old T5's strongest coverage relocated), cross-document editing discipline
-  (open source, edit, save, return), and joints against an x-ref's geometry.
-- The stale/update proof requires editing P6-Vise (version bump by design - the ONE mutable
-  artifact in the chain; record its versions in the run record).
-- THE GRIP-TRACKS CLAUSE (rule): grip is JAW-TO-STOCK JOINTS at this document's level - a
-  rigid park of the stock to a body is PARKING, not clamping, and fails. Clamp contact is graded
-  concretely: each jaw's grip face FLUSH on a stock flank (measure_between per jaw ~0). S6
-  guarantees jointed jaws whose occurrences move under the opening parameter; this
-  clause grades that the stock is JOINTED to the jaws and stays seated at the center AND flush
-  through the x-ref update. The self-centering caution stands: BOTH jaws move symmetrically, so a
-  grip that rigidly follows ONE moving jaw drags the stock off-center, and joint_create_as_built
-  rigid joints drifted half the opening delta against an xref with internal DOF (C investigation) -
-  the executor must find a jaw-to-stock scheme that stays centered as the jaws close. The
-  post-update seating-and-flush read is the compounding-defect firewall for S9's CAM boundary.
-- WORKHOLDING FEASIBILITY + WHOLE-TEMPLATE CLEARANCE: without these checks a placeholder
-  embedded 8.5/10.2 mm inside the vise/jaw geometry goes ungraded, and a stock that does not
-  fit the jaws is not clampable. Grade that the stock's clamped width <= the read max jaw opening
-  and the gripped flank <= the read jaw face, and that a whole-template interference check finds the
-  placeholder clear of the fixture (only the jaw grip faces contact the stock flanks). These are
-  the same feasibility checks S9 applies to the real ring; S7's small placeholder makes them
-  satisfiable, S9's oversize ring makes them a disclosure trap.
-- PLACEHOLDER GEOMETRY: the placeholder carries a modest curved feature and
-  one through hole so S8's four operations aim at real geometry (drill the hole, ball-finish the
-  curve) instead of the executor drilling a bare prism to invent a target.
-- Async trap (live-known): doc_open/doc_activate and post-save version metadata can lag - grade
-  recovery-by-polling, not first-read luck; a false-stale first read honestly re-read is GOOD
-  behavior.
-- Multi-doc session hygiene: the agent may open the vise source; grade that it returns to the
-  template and leaves the session tidy (template active, saved).
-- Staging (same as S5): verify P6 present BY URN; doc_open the source P6 by URN
-  (force_api_open, leave open); doc_new for the fresh empty active AFTER; verify twice; run the
-  block. The pre-open removes the name-collision that x-ref'd/edited the wrong lineage - source
-  IDENTITY is not a graded skill; the xref LIFECYCLE (insert/stale/update/current), self-centering
-  origin, and the stock-gripping joints are. The runner auto-derives --max-turns from the budget.
-- WHY MEASURE-THE-VISE + MACHINABLE-IN-STOCK: prompt-asserted fixture numbers go stale against
-  the real artifact (measured: an asserted 90-96mm opening and 50mm jaw face against a real
-  84x32mm face with no modeled limit) - a prose-trusting agent mis-sizes the stock, so the
-  prompt forbids assumed numbers. And a template can ship its placeholder entirely above the
-  stock with its hole drilled through the stock (extent-all overreach), leaving S8 to repair it
-  mid-run - the machinable-in-stock postconditions fail both defects at the source.
-- Budget: the last measured run (Agent-executor harness) was 106 calls, PASS with three
-  disclosed repairs; 135 = 106 + 25% rounded.
+- A good result, opened in Fusion: a template with three named components, a stock block whose joint
+  origin sits at its centre at any size, the vise as a live reference gripping the stock flush on both
+  flanks and still centred after the jaws moved, a small placeholder with a rounded feature and a hole
+  fully inside the stock, and tags that a query finds.
+- What a weak agent does: parks the stock rigidly to one jaw and drifts off centre when the jaws
+  move, sizes the stock from numbers in its head rather than the vise it read, drills the placeholder's
+  hole through the stock, or inserts a stale vise found by name.
+- Axis this discriminates: MCP tooling. doc_insert_occurrence as a reference, doc_update_xref, the
+  attribute tagging and query, and jaw-to-stock joints across a reference are all wire questions.
+- First A/B to run: `--deny mcp__fusion-essentials__doc_update_xref` (does the agent find another
+  way to refresh, or report the wall), then `--skill insert-into-template`.
+- Earlier runs surfaced: a placeholder shipped entirely above the stock with its hole drilled through
+  the stock; asserted jaw numbers in a brief went stale against the real vise, which is why the brief
+  forbids assumed numbers; post-save version reads lag by seconds, so a stale first read honestly
+  re-read is good behaviour.

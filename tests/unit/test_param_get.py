@@ -143,8 +143,9 @@ class TestGeneratedParameters:
         assert len(out["user_parameters"]) == 2
 
     def test_the_authored_read_is_a_fraction_of_the_whole_table(self, monkeypatch):
-        # MEASURED live on a scripted 311-parameter rig (53 authored, 258 adsk_*): 8.5 KB authored
-        # against 45.9 KB for every row, favorites_only 0.2 KB. The fake rig mirrors that offline.
+        # MEASURED on the Airport Seating Primary Assembly sample (311 parameters: 53 authored, 258
+        # adsk_*): 10.1 KB authored against 49.8 KB for every row, favorites_only 2.2 KB. On the
+        # Bench sample all 350 read adsk_*, so the authored read is 239 bytes against 47.4 KB.
         import json
         self._design_with(monkeypatch, [f"Part{i}" for i in range(53)]
                           + [f"adsk_Screw{i}_Len" for i in range(258)])

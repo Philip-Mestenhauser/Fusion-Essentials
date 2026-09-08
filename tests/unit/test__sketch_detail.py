@@ -54,6 +54,29 @@ class FakeEllipse:
         self.minorAxisRadius = minor
 
 
+class FakeEllipticalArc:
+    """Local double - SketchEllipticalArc has no live_api_facts.SHAPES entry. It carries a centre
+    and two axis radii, and no radius of its own."""
+
+    def __init__(self, tok, cx, cy, major, minor, construction=False):
+        self.entityToken = tok
+        self.isConstruction = construction
+        self.centerSketchPoint = type("P", (), {"geometry": FakePoint(cx, cy)})()
+        self.majorAxisRadius = major
+        self.minorAxisRadius = minor
+
+
+class FakeConic:
+    """Local double - SketchConicCurve has no live_api_facts.SHAPES entry. It carries an APEX point
+    and a rhoValue in place of a centre and a radius."""
+
+    def __init__(self, tok, ax, ay, rho, construction=False):
+        self.entityToken = tok
+        self.isConstruction = construction
+        self.apexSketchPoint = type("P", (), {"geometry": FakePoint(ax, ay)})()
+        self.rhoValue = rho
+
+
 class _Vec:
     """Mimics SketchLineVector — the REAL one uses len()/[i] (not .count/.item)."""
     def __init__(self, items):
@@ -172,12 +195,14 @@ def _bbox(x0, y0, x1, y1):
 class FakeCurves(SketchCurves):
     """The shared SketchCurves, every per-kind sub-collection filled from its own argument."""
     def __init__(self, lines, circles, arcs, ellipses=(), splines=(), cv_splines=(),
-                 fixed_splines=()):
+                 fixed_splines=(), ell_arcs=(), conics=()):
         super().__init__()
         self.sketchLines = _Coll(lines)
         self.sketchCircles = _Coll(circles)
         self.sketchArcs = _Coll(arcs)
         self.sketchEllipses = _Coll(list(ellipses))
+        self.sketchEllipticalArcs = _Coll(list(ell_arcs))
+        self.sketchConicCurves = _Coll(list(conics))
         self.sketchFittedSplines = _Coll(list(splines))
         self.sketchControlPointSplines = _Coll(list(cv_splines))
         self.sketchFixedSplines = _Coll(list(fixed_splines))
@@ -200,7 +225,8 @@ class FakeSketch(Sketch):
     refuse to read."""
     def __init__(self, name, lines=(), circles=(), arcs=(), ellipses=(), points=(),
                  constraints=(), dimensions=(), profiles=0, fully_constrained=False,
-                 splines=(), cv_splines=(), fixed_splines=(), texts=(), compute_deferred=False):
+                 splines=(), cv_splines=(), fixed_splines=(), texts=(), compute_deferred=False,
+                 ell_arcs=(), conics=()):
         # 'profiles' may be an int (count only, legacy) OR a list of Profile (for the per-profile
         # records). _Coll gives count + item(i) either way.
         rows = [None] * profiles if isinstance(profiles, int) else list(profiles)
@@ -208,7 +234,7 @@ class FakeSketch(Sketch):
         # state read_flag answers None for, which must publish neither a flag nor a refusal.
         super().__init__(name=name,
                          curves=FakeCurves(list(lines), list(circles), list(arcs), list(ellipses),
-                                           splines, cv_splines, fixed_splines),
+                                           splines, cv_splines, fixed_splines, ell_arcs, conics),
                          is_compute_deferred=compute_deferred)
         self.profiles = _Coll(rows)
         self.sketchPoints = _Coll(list(points))
@@ -1100,6 +1126,41 @@ class TestSplineCounts:
         spline_recs = [e for e in out["entities"] if e["type"] == "spline"]
         assert len(spline_recs) == 1
         assert spline_recs[0]["fit_point_count"] == 7
+
+
+class TestConicFamily:
+    """A conic and an elliptical arc are walked like every other kind: listed with their own
+    geometry, counted, token-mapped, and resolvable by ref."""
+
+    def _sketch(self):
+        return FakeSketch("S", conics=[FakeConic("TOK-CN", 1.0, 2.0, 0.6)],
+                          ell_arcs=[FakeEllipticalArc("TOK-EA", 0.0, 0.0, 2.0, 1.0)])
+
+    def test_both_kinds_are_listed_with_their_own_geometry(self):
+        entities, _construction = sd._entities(self._sketch(), 10.0)   # cm -> mm
+        conic = next(e for e in entities if e["type"] == "conic")
+        arc = next(e for e in entities if e["type"] == "elliptical_arc")
+        assert conic["id"] == "conic:0" and conic["apex"] == {"x": 10.0, "y": 20.0}
+        # rho is a ratio, so it is NOT scaled by the display-unit factor
+        assert conic["rho"] == 0.6
+        assert arc["id"] == "elliptical_arc:0"
+        assert (arc["major_radius"], arc["minor_radius"]) == (20.0, 10.0)
+
+    def test_their_tokens_map_to_those_ids(self):
+        tok2id = sd._build_token_map(self._sketch())
+        assert tok2id["TOK-CN"] == "conic:0"
+        assert tok2id["TOK-EA"] == "elliptical_arc:0"
+
+    def test_the_handler_counts_them(self):
+        _install(self._sketch())
+        out = _payload(sd.handler(sketch_name="S"))
+        assert out["counts"]["conics"] == 1
+        assert out["counts"]["elliptical_arcs"] == 1
+
+    def test_a_write_resolves_both_ids_back_to_the_curve(self):
+        s = self._sketch()
+        assert sd._common.resolve_entity_ref(s, "conic:0").entityToken == "TOK-CN"
+        assert sd._common.resolve_entity_ref(s, "elliptical_arc:0").entityToken == "TOK-EA"
 
 
 # ── sketch text: the read half of sketch_set_text ────────────────────────────

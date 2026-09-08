@@ -189,8 +189,9 @@ tool = (
                            "the root of the tree with include=['folders']."})
     .add_input_property("recursive", {"type": "boolean",
             "description": "Descend into subfolders (default true)."})
-    .add_input_property("include", {"type": ["array", "string"],
-            "description": "'hubs' or 'folders'; a list or comma-string."})
+    .add_input_property("include", {"type": "array",
+            "items": {"type": "string", "enum": list(_SLICES)},
+            "description": "Switches the read: the hub list, or the folder tree instead of the files."})
     .add_input_property("max_depth", {"type": "integer",
             "description": f"With include=['folders']: depth cap (default {_MAX_DEPTH_DEFAULT})."})
     .add_input_property("folder_budget", {"type": "integer",

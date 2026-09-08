@@ -586,8 +586,8 @@ _SKETCHWORK = [
     ("sketch_add_geometry", {"kind": "ellipse", "cx": 830, "cy": 0, "radius": 20,
                              "sketch_name": "W3Curves"},
      lambda p: "minor=10" in (p.get("drawn") or ""), None),
-    # conic closed by its chord forms a profile that extrudes - the missing ref token is a
-    # reference gap only, and this proves the note's modelling claim end to end.
+    # conic closed by its chord forms a profile that extrudes - this proves the note's modelling
+    # claim end to end.
     ("sketch_create", {"plane": "xy", "name": "W3Conic"}, "ok", None),
     ("sketch_add_geometry", {"kind": "conic", "x1": 740, "y1": 60, "x2": 780, "y2": 60,
                              "cx": 760, "cy": 90, "rho": 0.6, "sketch_name": "W3Conic"}, "ok", None),

@@ -299,6 +299,21 @@ class TestGuards:
         res = dge.handler(include=["bogus"])
         assert "bogus" in error_message(res).lower() or "unknown" in error_message(res).lower()
 
+    def test_the_include_enum_matches_the_slice_tuple(self, stub):
+        # Catches a HAND-EDITED schema drifting from the tuple. It cannot catch a name added to the
+        # tuple itself - both sides read it - which is what the dispatch test below covers.
+        enum = dge.tool.input_schema["properties"]["include"]["items"]["enum"]
+        assert sorted(enum) == sorted(dge._SLICES)
+
+    def test_every_advertised_slice_actually_dispatches(self, stub):
+        # A name in _SLICES that no branch reads falls THROUGH to the default project listing - a
+        # silent ok for a slice never built. Each must switch the read to its own 'scope'.
+        reached_by = {"hubs": {}, "folders": {"project": "P1"}}
+        assert sorted(reached_by) == sorted(dge._SLICES), "a slice with no scope stated to reach it"
+        for name in dge._SLICES:
+            out = _payload(dge.handler(include=[name], **reached_by[name]))
+            assert out["scope"] == name, name
+
     def test_cloud_error_propagates(self, monkeypatch):
         stub_tool_module(monkeypatch, "_data_read",
             type("DR", (), {"list_projects_handler": staticmethod(lambda: _err("not signed in"))}))

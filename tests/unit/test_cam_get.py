@@ -570,6 +570,23 @@ class TestGuards:
         msg = error_message(cg.handler(include=["bogus"]))
         assert "operations" in msg and "default" in msg and "setups" in msg
 
+    def test_the_include_enum_matches_the_slice_tuple(self, stub_slices):
+        # Catches a HAND-EDITED schema drifting from the tuple. It cannot catch a name added to the
+        # tuple itself - both sides read it - which is what the dispatch test below covers.
+        enum = cg.tool.input_schema["properties"]["include"]["items"]["enum"]
+        assert sorted(enum) == sorted(cg._SLICES + cg._DEFAULT_NAMES)
+
+    def test_every_advertised_slice_actually_dispatches(self, monkeypatch, stub_slices):
+        # A name in _SLICES that no `if ... in inc` branch reads returns a silent empty ok: the
+        # schema offers a slice the router never builds. Each one must put its own key in the payload.
+        monkeypatch.setattr(cg, "_slice_parameters",
+                            lambda cam, operation, setup, units: ({"sections": {}}, None))
+        monkeypatch.setattr(cg, "_slice_tool",
+                            lambda cam, operation, preset, setup, units: ({"tool": None}, None))
+        for name in cg._SLICES:
+            out = _payload(cg.handler(include=[name]))
+            assert name in out, name
+
     def test_no_cam_data_guard(self, monkeypatch):
         monkeypatch.setattr(cg, "get_cam", lambda: (None, "This document has no CAM (Manufacture) data."))
         res = cg.handler()

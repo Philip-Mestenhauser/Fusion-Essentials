@@ -197,6 +197,15 @@ class TestEffectIsReadBack:
         assert "APPEND" in note and "sketch_get" in note
         assert "RENUMBER" not in note.upper()
 
+    def test_the_note_states_what_the_imported_curves_read_as(self, mod, sketch, svg):
+        # measured on every curve an SVG import traced: they land as SketchControlPointSplines
+        # whose controlPoints read empty and whose degree raises, and an offset copy is another
+        # one - a caller planning to edit them by control point needs that before it tries.
+        _wire(sketch, _importer([]))
+        note = payload(mod.handler(file_path=svg))["note"]
+        assert "cv_spline" in note and "EMPTY" in note and "degree raises" in note
+        assert "sketch_edit_curve" in note
+
     def test_the_note_does_not_point_at_a_tool_that_refuses_sketch_curves(self, mod, sketch, svg):
         # model_measure_between's TargetRef refuses a sketch curve, so pointing there is a dead end -
         # the measured 'sketch_extent' carries the size evidence instead.

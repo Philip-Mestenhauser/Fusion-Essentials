@@ -169,6 +169,8 @@ CLAUDE.local.md
 # Eval run outputs: a transcript captures workspace_orient output (hub name, project URNs) - private,
 # never committed (see tests/live/evals/README.md "Privacy"). The scenarios are tracked; results are not.
 tests/live/evals/results/
+# The proctor's executor config dir: the CLI's own state files for the blind executor.
+tests/live/evals/.claude-eval/
 
 # The opt-in cloud tier's operator config: it names a real hub, project and folder, which are
 # private and machine-local. Without it the cloud_tier capability probe answers false and ACT 11a-c

@@ -25,8 +25,8 @@ _FILLET_TYPE = _inputs.Choice("fillet_type", ["constant", "variable", "chord_len
                               description="Which fillet shape the feature builds.")
 _TOPOLOGY = _inputs.Choice("topology", ["rounds_and_fillets", "rounds_only", "fillets_only"],
                            default="rounds_and_fillets",
-                           description="Rule fillet: which edges it takes - convex ones (rounds), "
-                                       "concave ones (fillets), or both.")
+                           description="Rule fillet: convex edges (rounds), concave ones (fillets), "
+                                       "or both.")
 _RULE_FACES = _inputs.GeometryHandleList("faces", require="face", required=False,
     description="Rule fillet: every edge of these faces is rounded.")
 _RULE_FACES_TWO = _inputs.GeometryHandleList("second_faces", require="face", required=False,
@@ -250,16 +250,16 @@ tool = (
         "description": _EDGE_FILTER_DESC})
     .add_input_property(*_FILLET_TYPE.as_property())
     .add_input_property("end_radius", {"type": "number",
-        "description": "Variable-radius fillet: the radius at the far end of the edge chain."})
+        "description": "Variable-radius: the radius at the far end of the edge chain."})
     .add_input_property("positions", {"type": "array", "items": {"type": "number"},
-        "description": "Variable-radius fillet: fractions from 0 to 1 along the edge chain placing "
-                       "each intermediate radius; same length as 'radii'."})
+        "description": "Variable-radius: fractions 0 to 1 along the edge chain, one per intermediate "
+                       "radius; same length as 'radii'."})
     .add_input_property("radii", {"type": "array", "items": {"type": "number"},
-        "description": "Variable-radius fillet: the intermediate radii in 'units', paired by index "
-                       "with 'positions'."})
+        "description": "Variable-radius: the intermediate radii in 'units', paired by index with "
+                       "'positions'."})
     .add_input_property("chord_length", {"type": "number",
-        "description": "Chord-length fillet: the straight-line distance across the rounded corner, "
-                       "in 'units'."})
+        "description": "Chord-length: the straight-line distance across the rounded corner, in "
+                       "'units'."})
     .add_input_property(*_RULE_FACES.as_property())
     .add_input_property(*_RULE_FACES_TWO.as_property(brief=True))
     .add_input_property(*_TOPOLOGY.as_property())

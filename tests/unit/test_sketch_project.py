@@ -369,13 +369,16 @@ class TestLinkReadBack:
         # the resolved entity list (stubbed to 2 objects) reached project2
         assert len(sk.projected_with[0]) == 2
 
-    def test_note_flags_non_addressable_curves(self, call):
-        # created_count (4) exceeds addressable refs (only the ellipse-ish extra) -> note warns
+    def test_note_flags_curves_no_ref_addresses(self, call):
+        # created_count (4) exceeds the refs the walk could name -> the note says so WITHOUT naming
+        # a kind: which kinds carry a ref follows _common.ENTITY_REF_KINDS, and a sentence listing
+        # them goes stale the moment that tuple grows.
         out, sk = call(sketch=FakeSketch(creates={"line": 1, "ellipse_like": 3}))
         # only line:0 is addressable; created_count counts all 4
         assert out["entity_refs"] == ["line:0"]
         assert out["created_count"] == 4
-        assert "non-addressable" in out["note"]
+        assert ("Some created curves have no '<type>:<index>' ref - list them with "
+                "sketch_get(include_entities=true).") in out["note"]
 
 
 # ── honesty gate: zero entities created is an error ───────────────────────────

@@ -488,13 +488,9 @@ class TestCoreKinds:
 
 class TestKindCollectionFallback:
 
-    """A kind whose curves land in its OWN '<type>:<index>' collection resolves through _common, so
-    the factory-returned-but-nothing-landed gate runs for line/circle/arc/ellipse/point/spline as
-    well as for the kinds the two exception tables name, and each of them publishes 'curves_added'.
-
-    The tables answer FIRST, and that order is load-bearing: _common holds no token for conic or
-    elliptical_arc, so a lookup that reached it before _NO_REF_CURVE_ATTR would resolve those two to
-    None and take their gate away."""
+    """Every kind's collection resolves through _common, so the factory-returned-but-nothing-landed
+    gate runs for all of them and each publishes 'curves_added'. _KIND_REF_TOKEN answers first, for
+    a kind whose curves land in ANOTHER kind's collection (a rectangle's four lines)."""
 
     def test_a_line_that_never_lands_is_an_error(self, monkeypatch):
         # addByTwoPoints hands back a curve without it reaching sketchLines: a false success
@@ -568,8 +564,9 @@ class TestKindCollectionFallback:
         assert out["curves_added"] == 1
         assert sk._kind_curve_collection(s, "point") is s.sketchPoints
 
-    def test_the_ref_less_kinds_keep_their_own_collection(self, monkeypatch):
-        # conic/elliptical_arc have no ref token for _common to resolve; their table answers first
+    def test_the_conic_family_kinds_resolve_their_own_collection(self, monkeypatch):
+        # conic/elliptical_arc are ref tokens _common resolves, so they count in their own
+        # collection rather than falling through to None
         s = FakeSketch(); _install_draw(monkeypatch, s)
         assert sk._kind_curve_collection(s, "conic") is s.sketchConicCurves
         assert sk._kind_curve_collection(s, "elliptical_arc") is s.sketchEllipticalArcs
@@ -613,11 +610,11 @@ class TestConic:
                                                       cx=10, cy=10, rho=0.4))
         assert out["curves_added"] == 1
 
-    def test_note_states_the_missing_ref_and_the_profile_that_works(self, monkeypatch):
+    def test_note_states_the_ref_and_the_profile_that_works(self, monkeypatch):
         s = FakeSketch(); _install_draw(monkeypatch, s)
         out = _payload(sk.handler(kind="conic", x1=0, y1=0, x2=20, y2=0,
                                                       cx=10, cy=10, rho=0.4))
-        assert "NO '<type>:<index>' ref" in out["note"]
+        assert "'conic:<index>'" in out["note"]
         assert "chord" in out["note"] and "extrudes" in out["note"]
 
     def test_a_curve_that_never_lands_is_an_error(self, monkeypatch):
@@ -769,11 +766,11 @@ class TestEllipticalArc:
                                                       minor=5, sweep_deg=90))
         assert "minor=5" in out["drawn"]
 
-    def test_note_states_the_missing_ref_and_the_profile_that_works(self, monkeypatch):
+    def test_note_states_the_ref_and_the_profile_that_works(self, monkeypatch):
         s = FakeSketch(); _install_draw(monkeypatch, s)
         out = _payload(sk.handler(kind="elliptical_arc", cx=0, cy=0, radius=20,
                                                       sweep_deg=180))
-        assert "NO '<type>:<index>' ref" in out["note"]
+        assert "'elliptical_arc:<index>'" in out["note"]
         assert "profile" in out["note"] and "extrudes" in out["note"]
 
     def test_zero_radius_is_refused(self, monkeypatch):

@@ -300,9 +300,10 @@ class TestProbe:
         assert "include=['poses']" in out["note"]
 
     def test_the_default_read_is_a_fraction_of_the_posed_one(self, kin_design):
-        # MEASURED live on a scripted 64-occurrence rig: 7.2 KB default against 11.5 KB with poses,
-        # and 44.9 KB against 72.1 KB once include=['all_occurrences'] widens it to all 256. The
-        # fake rig here mirrors that ratio offline.
+        # MEASURED on the Airport Seating Primary Assembly sample: the occurrences array is 8.9 KB
+        # against 17.5 KB with poses (29.7 -> 38.1 KB whole payload, 53.3 -> 78.7 KB once
+        # include=['all_occurrences'] widens it); Bench reads 10.7 against 18.8 KB. Both land just
+        # under 2x - the fake rig's rows carry less identity per pose, so it clears the assertion.
         kin_design(occs=[_occ(f"P{i}:1", f"P{i}", origin=(float(i), 1.0, 2.0), rotation_deg=30.0,
                               body_bbox=((0, 0, 0), (2, 1, 1))) for i in range(50)])
         size = lambda p: len(json.dumps(p, separators=(",", ":")))

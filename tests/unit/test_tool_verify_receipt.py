@@ -539,6 +539,18 @@ class TestPredicateKind:
         assert [r[0] for r in rows] == ["a_get", "b_get", "c_get", "d_get"]
         assert [r[1] for r in rows] == ["pass", "pass", "blocked", "FAIL"]
 
+    def test_the_step_engine_names_its_call_before_making_it(self, monkeypatch, capsys):
+        # A redirected sweep log buffers per act, so the line naming a step has to be flushed
+        # BEFORE the call: a step that kills the Fusion process leaves no line printed after it.
+        def _call(tool, args):
+            print(f"CALLED {tool}")
+            return False, {"n": 1}
+        monkeypatch.setattr(tool_verify, "call", _call)
+        monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
+        tool_verify.run_steps([("a_get", {}, "ok", None)], {}, act="ACT 3")
+        printed = [ln.strip() for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        assert printed == ["-> a_get ACT 3", "CALLED a_get"]
+
     def test_judged_steps_and_run_steps_agree_on_every_step_kind(self, monkeypatch):
         # The by-position pairing needs these two lists to be the same length, and each decides
         # what yields a row through _leaves_no_row. A second row-less step kind taught to one site

@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 187  |  **description breadcrumbs:** 401  |  **note/error breadcrumbs:** 469
+**Tools:** 187  |  **description breadcrumbs:** 400  |  **note/error breadcrumbs:** 470
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -17,8 +17,8 @@ close orphans, factor duplicated guards into shared helpers.
 **Read/Acquire (5)** - higher concern, a check-your-work tool nothing points to:
   `cam_compare_operations`, `cam_inspect_toolpaths`, `drawing_get`, `model_compute_holder`, `sys_get_api_doc`
 
-**Edit (47)** - usually leaf actions, scan for genuine gaps:
-  `assembly_edit_contacts`, `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_configure`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_update`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_generate_face_groups`, `mesh_plane_cut`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_edit_curve`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
+**Edit (46)** - usually leaf actions, scan for genuine gaps:
+  `assembly_edit_contacts`, `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_configure`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_update`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_generate_face_groups`, `mesh_plane_cut`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
 - **50x** across 50 module(s): "No active design. Create or open a document first (see doc_new)."
@@ -37,8 +37,8 @@ close orphans, factor duplicated guards into shared helpers.
 - `doc_new`  <- 83  (desc 1, note 82)
 - `find_geometry`  <- 53  (desc 26, note 27)
 - `view_screenshot`  <- 42  (desc 13, note 29)
-- `design_get`  <- 39  (desc 14, note 25)
 - `design_delete_feature`  <- 38  (desc 17, note 21)
+- `design_get`  <- 38  (desc 13, note 25)
 - `sketch_get`  <- 31  (desc 13, note 18)
 - `cam_get`  <- 30  (desc 17, note 13)
 - `data_get`  <- 26  (desc 12, note 14)
@@ -902,11 +902,11 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide 'parameter' - the name of a model parameter to vary across configurations.
 - '. (Add/expose it first; a parameter column only matters if the parameter drives geometry.)
 - Values reference configurations that don't exist:
-- parameter: its column would be created and every cell would keep the parameter's own value, so no row could vary. Vary a length/number parameter in the table, and relabel per configuration with par...
+- parameter: its cells read the expression quoted ('10'), with the value only on textValue. This tool sets and verifies plain expressions, so it does not configure a Text column. Vary a length/number...
 - addParameterColumn for '
 - Parameter column added and per-configuration expressions set. Switch with design_configure(action='activate', name=...) - the geometry rebuilds only if this parameter drives a dimension.
 - No cell for configuration '
-- ' is a Text parameter, no cell takes a value on this build - relabel per configuration with param_set after activating the row.
+- Relabel per configuration with param_set after activating the row.
 - The column has been rolled back.
 - The column could NOT be auto-removed and is still on the table - delete it before retrying.
 - after the set - the expression '
@@ -934,8 +934,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Appearance theme column added and configurations linked to theme rows. Switch configurations to see the color change (design_configure(action='activate', name=...)).
 - No appearance named '
 - ' in the design. Copy it in first (design.appearances.addByCopy) - appearance_set copies the Fusion Appearance Library's 'Paint - Enamel Glossy (White)' and keeps it in the document as 'MCP Neutral...
-- No appearance cell/row at theme index
-- Appearance cell at theme index
+- No appearance cell/row on theme row
+- Appearance cell on theme row '
 - after the set - the assignment did not verifiably take.
 - No theme cell for configuration '
 - after the set - the theme link did not verifiably take.
@@ -946,7 +946,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - This design has no material table.
 - materialTable.columns.add for '
 - The material table has no theme column (parentTableColumn) to link configurations.
-- No material cell at theme index
+- No material cell on theme row '
+- ' for configuration '
 - Material cell for configuration '
 - ' reads back no material after setting '
 - ' - the assignment could not be confirmed.
@@ -2794,7 +2795,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - ' gained no curves (still
 - ) - nothing was imported. Measured: an empty-but-valid SVG and a non-SVG file carrying an .svg name both answer true this way.
 - If the art is the wrong size, change 'scale' and re-import.
-- SVG curves APPEND to the sketch: the '<type>:<index>' ids already in use keep their entities and the new curves take the ids after them - list them with sketch_get(include_entities=true).
+- SVG curves APPEND to the sketch: the '<type>:<index>' ids already in use keep their entities and the new curves take the ids after them - list them with sketch_get(include_entities=true). Each land...
 - 'scale' must be a number - a multiplier on the SVG's own size (got '
 - . SVG curves land in an EXISTING sketch - make one with sketch_create.
 

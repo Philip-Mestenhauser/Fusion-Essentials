@@ -28,7 +28,7 @@ _TO_OBJECT = _inputs.GeometryHandle("to_object", require="face", required=False,
     description="Extrude up to THIS face instead of by 'distance'.")
 # target_bodies: scope a cut/join/intersect to these bodies so it doesn't bleed through others.
 _TARGET_BODIES = _inputs.BodyRefList("target_bodies", required=False,
-    description="Bodies a cut/join/intersect may affect. Every component's first body is named 'Body1', so scope across components with '<occurrence>/<body>' - 'RingOuter:1/Body1'.")
+    description="Bodies a cut/join/intersect may affect; qualify a name across components as '<occurrence>/<body>'.")
 
 # extent: the depth STYLE. 'distance' is the legacy default (distance/symmetric/taper_deg); the other
 # three map to measured ExtrudeFeatureInput setters, each reading its own inputs below.
@@ -911,7 +911,7 @@ extrude_tool = (
     .add_input_property("sketch_name", {"type": "string",
             "description": "Sketch holding the profile (omit = most recent sketch)."})
     .add_input_property("profile_index", {"type": ["integer", "string", "array"],
-            "description": "Region(s): an index (default 0), a list [0,2,3], '0,2,3', 'all', or ONE sketch_get profile 'handle' (a LIST of handles is rejected). A sketch TEXT extrudes as itself: 'text:<i>' or '<sketch>/text:<i>', alone."})
+            "description": "Region(s): an index (default 0), a list [0,2,3], '0,2,3', 'all', or ONE profile 'handle' (a LIST of handles is refused). A sketch TEXT extrudes as itself: 'text:<i>' or '<sketch>/text:<i>', alone."})
     .add_input_property("distance", {"type": ["number", "string"],
             "description": "Extrude depth in 'units' (negative reverses), OR a parameter EXPRESSION string ('StockZ/2', '25 mm'; carries its own units). Side one for two_side; sign-only direction for through_all."})
     .add_input_property("distance2", {"type": ["number", "string"],
@@ -927,7 +927,7 @@ extrude_tool = (
     .add_input_property("target_bodies", _TARGET_BODIES.schema())
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("as_surface", {"type": "boolean",
-            "description": "Extrude into a SURFACE wall (no end caps) instead of a solid; auto-applied when the sketch has only an open path. Every result reports 'is_solid'."})
+            "description": "Extrude into a SURFACE wall (no end caps) instead of a solid; auto-applied when the sketch has no closed profile. Every result reports 'is_solid'."})
     .strict_schema()
 )
 extrude_item = Item.create_tool_item(tool=extrude_tool, write="write", handler=handler, run_on_main_thread=True,

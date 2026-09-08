@@ -472,12 +472,11 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
 
 TOOL_DESCRIPTION = (
     "Edit a CAM SETUP: its machine, its model/fixture/stock selections, its WCS, any other setup "
-    "parameter, or its name. 'machine' is the prerequisite a job needs before posting; browse "
-    "names with cam_get(include=['machines']). 'stock_mode' picks what the setup machines from; "
-    "'stock' switches it to from-solid stock with those bodies and "
-    "'fixtures' auto-enables fixtures. Select the COMPONENT occurrence, not the body inside, so a "
-    "swapped part keeps the selection. A 'parameters' expression that does not evaluate rolls the "
-    "whole call back. Regenerate toolpaths with cam_generate."
+    "parameter, or its name. A job needs a 'machine' before posting; browse names with "
+    "cam_get(include=['machines']). 'stock_mode' picks what the setup machines from; 'stock' "
+    "switches it to from-solid stock with those bodies and 'fixtures' auto-enables fixtures. "
+    "Select the COMPONENT occurrence, not the body inside, so a swapped part keeps the selection. "
+    "Regenerate toolpaths with cam_generate."
 )
 
 tool = (
@@ -493,11 +492,11 @@ tool = (
             "description": "Solid stock: bodies (handles/names) or a stock component occurrence name - REPLACES the stock set."})
     .add_input_property(*_STOCK_MODE.as_property())
     .add_input_property("machine", {"type": "string",
-            "description": "Machine to assign: 'vendor|model' (or a bare model) from the machine library (browse: cam_get include=['machines'])."})
+            "description": "Machine to assign: 'vendor|model' (or a bare model) from the machine library."})
     .add_input_property("machine_strip_simulation", {"type": "boolean",
             "description": "With 'machine': strip the simulation model from the resolved copy before assigning."})
     .add_input_property("wcs", {"type": "object",
-            "description": "Bind the WCS: {origin/z_axis/x_axis: a find_geometry handle OR a Joint Origin (handle/name from assembly_get)}. Binds as a live reference (bound_entities read back); the WCS re-derives from it (associative)."})
+            "description": "Bind the WCS: {origin/z_axis/x_axis: a find_geometry handle OR a Joint Origin (handle/name from assembly_get)}. Binds as a live reference - bound_entities reads back what took."})
     .add_input_property("rename", {"type": "string",
             "description": "New name for the setup; a name another setup already carries is refused before the write."})
     .strict_schema()
