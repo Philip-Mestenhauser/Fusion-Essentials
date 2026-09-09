@@ -3728,6 +3728,56 @@ ROWS = [
 """,
     },
     {
+        "id": "shape-dump-ellipse3d",
+        "claim": "core.Ellipse3D - the curve an extruded ellipse's two elliptical BRepEdges carry (curveType Ellipse3DCurveType) - exposes center, majorRadius and minorRadius, reading back the 2.0 x 1.0 cm ellipse the sketch was drawn at",
+        "encoded_in": "find_geometry.py's ellipse_edge record (major_radius/minor_radius/center reads)",
+        "body": """
+    # A REAL elliptical edge, in its own document so the shared scratch keeps the geometry the
+    # other rows measure. A transient factory would not prove what a BRepEdge hands back.
+    kinds = []
+    n = 0
+    members = False
+    major = None
+    minor = None
+    centred = False
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        r2 = d.rootComponent
+        sk = r2.sketches.add(r2.xYConstructionPlane)
+        sk.sketchCurves.sketchEllipses.add(
+            adsk.core.Point3D.create(0.0, 0.0, 0.0), adsk.core.Point3D.create(2.0, 0.0, 0.0),
+            adsk.core.Point3D.create(0.0, 1.0, 0.0))
+        solid = r2.features.extrudeFeatures.addSimple(
+            sk.profiles.item(0), adsk.core.ValueInput.createByReal(1.0),
+            adsk.fusion.FeatureOperations.NewBodyFeatureOperation).bodies.item(0)
+        ell = None
+        seen = set()
+        for i in range(solid.edges.count):
+            g = solid.edges.item(i).geometry
+            seen.add(type(g).__name__ + ":" + str(g.curveType))
+            if g.curveType == adsk.core.Curve3DTypes.Ellipse3DCurveType and ell is None:
+                ell = g
+        kinds = sorted(seen)
+        if ell is not None:
+            n = dump_shape("Ellipse3D", ell)
+            names = [x for x in dir(ell) if not x.startswith("_")]
+            members = ("center" in names and "majorRadius" in names and "minorRadius" in names)
+            if members:
+                major = ell.majorRadius
+                minor = ell.minorRadius
+                c = ell.center
+                centred = abs(c.x) < 1e-9 and abs(c.y) < 1e-9 and abs(c.z) < 1e-9
+    finally:
+        tmp.close(False)
+    emit(n > 0 and members and centred
+         and abs(major - 2.0) < 1e-6 and abs(minor - 1.0) < 1e-6,
+         "shape-dump-ellipse3d: " + str(n) + " attrs majorRadius=" + repr(major)
+         + " minorRadius=" + repr(minor) + " (drawn 2.0 x 1.0 cm) centre-at-origin="
+         + repr(centred) + " edge curve types=" + str(kinds))
+""",
+    },
+    {
         "id": "fillet-tangent-chain-loop-faces",
         "claim": "A fillet driven from ONE edge of an 8-edge tangent top loop (4 lines + 4 arcs, isTangentChain=True) lands FilletFeature.faces.count == 8 - the chain expands across every tangent neighbour, so the number of edges HANDED IN predicts nothing about what got filleted",
         "encoded_in": "_edge_common.py's tangent-chain wording and its off-the-feature face read-back",

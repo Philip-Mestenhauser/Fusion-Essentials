@@ -289,6 +289,10 @@ DISPLAY_UNITS = {"document": "UseDocumentUnitPMIUnitType", "mm": "MillimetersPMI
                  "cm": "CentimetersPMIUnitType", "m": "MetersPMIUnitType",
                  "in": "InchesPMIUnitType", "ft": "FeetPMIUnitType"}
 
+# The closed set of keys build_display writes; anything else is refused, so the wire never has to
+# carry the list ('secondary' is peeled off by apply_display before the spec gets here).
+DISPLAY_KEYS = ("precision", "units", "leading_zeros", "trailing_zeros", "unit_abbreviation")
+
 # The numeric fields a hole/thread note carries as PMIGeometricValue, by wire key. Angle fields
 # resolve in radians, lengths in cm.
 HOLE_VALUE_PROPS = ("diameter", "radius", "depth", "counterbore_diameter", "counterbore_radius",
@@ -412,7 +416,11 @@ def build_display(spec):
     """(PMIDisplaySettings, error) from a wire spec dict: precision (0-8), units
     (document/mm/cm/m/in/ft), leading_zeros, trailing_zeros, unit_abbreviation."""
     if not isinstance(spec, dict):
-        return None, "'display' must be an object: {precision, units, leading_zeros, trailing_zeros, unit_abbreviation}."
+        return None, "'display' must be an object: {%s}." % ", ".join(DISPLAY_KEYS)
+    for key in spec:
+        if key not in DISPLAY_KEYS:
+            return None, (f"Unknown display key '{key}'. Legal keys: "
+                          f"{', '.join(DISPLAY_KEYS)} (plus secondary: {{...}} at the top level).")
     ds = adsk.fusion.PMIDisplaySettings.create()
     try:
         if spec.get("precision") is not None:
@@ -444,10 +452,11 @@ def display_record(ds):
     }
 
 
-def apply_note_format(obj, align="", valign="", perpendicular=None, extension_cm=None):
+def apply_note_format(obj, align="", valign="", perpendicular=None, extension_cm=None,
+                      units="cm"):
     """Apply the shared leader/text format knobs to a note or note-input `obj`. EVERY set is
-    re-read and a value that did not take is an error - including the two bools/numbers a caller
-    cannot see fail any other way. Returns an error string, or None."""
+    re-read and a value that did not take is an error, reported in the caller's `units` (the
+    extension arrives in cm). Returns an error string, or None."""
     try:
         if align:
             attr = H_ALIGN.get(align.strip().lower())
@@ -473,14 +482,19 @@ def apply_note_format(obj, align="", valign="", perpendicular=None, extension_cm
                 return (f"'perpendicular'={want_perp} did not take on this annotation "
                         f"(re-read {got_perp}).")
         if extension_cm is not None:
+            per_cm = _common.scale(units)
+            unit = units if per_cm else "cm"
+            per_cm = per_cm or 1.0
             if extension_cm < LEADER_EXT_FLOOR:
-                return (f"'leader_extension'={extension_cm} cm is under the {LEADER_EXT_FLOOR} cm "
-                        "floor these tools refuse below.")
+                return (f"'leader_extension'={round(extension_cm / per_cm, 6)} {unit} is under the "
+                        f"{round(LEADER_EXT_FLOOR / per_cm, 6)} {unit} floor these tools refuse "
+                        "below.")
             obj.leaderLineExtension = float(extension_cm)
             got_ext = safe(lambda: obj.leaderLineExtension)
             if got_ext is None or abs(got_ext - float(extension_cm)) > 1e-6:
-                return (f"'leader_extension'={extension_cm} cm did not take on this annotation "
-                        f"(re-read {got_ext}).")
+                return (f"'leader_extension'={round(extension_cm / per_cm, 6)} {unit} did not take "
+                        f"on this annotation (re-read "
+                        f"{round(got_ext / per_cm, 6) if got_ext is not None else None} {unit}).")
     except Exception as e:
         return f"Note format set failed: {e}"
     return None

@@ -176,7 +176,7 @@ def _do_set_alignment(ann, comp, align, valign, perpendicular):
     return ok(rec)
 
 
-def _do_set_extension(ann, comp, leader_extension, f):
+def _do_set_extension(ann, comp, leader_extension, f, units):
     gerr = _require_created(ann, "set_extension")
     if gerr:
         return error(gerr)
@@ -186,12 +186,13 @@ def _do_set_extension(ann, comp, leader_extension, f):
         ext_cm = float(leader_extension) * f
     except Exception:
         return error("'leader_extension' must be a number.")
-    ferr = _pmi.apply_note_format(ann, "", "", None, ext_cm)
+    ferr = _pmi.apply_note_format(ann, "", "", None, ext_cm, units)
     if ferr:
         return error(ferr)
     got = safe(lambda: ann.leaderLineExtension)
     if got is None or abs(got - ext_cm) > 1e-6:
-        return error(f"The extension set did not take (re-read {got} cm).")
+        return error("The extension set did not take (re-read %s %s)."
+                     % (round(got / f, 6) if got is not None else None, units))
     rec = _pmi.annotation_record(comp, ann)
     rec["leader_extension"] = round(got / f, 6)
     return ok(rec)
@@ -373,7 +374,7 @@ def handler(action=None, annotation="", component="", text="", new_name="", text
     if action_v == "set_alignment":
         return _do_set_alignment(ann, comp, align, valign, perpendicular)
     if action_v == "set_extension":
-        return _do_set_extension(ann, comp, leader_extension, f)
+        return _do_set_extension(ann, comp, leader_extension, f, units)
     if action_v == "set_flags":
         return _do_set_flags(ann, comp, flags)
     if action_v == "set_values":
@@ -421,7 +422,7 @@ tool = (
     .add_input_property("values", {"type": "object",
         "description": "hole_note overrides: {diameter: 6.2} or {diameter: {value, tolerance}}."})
     .add_input_property("display", {"type": "object",
-        "description": "Keys: precision, units, leading_zeros, trailing_zeros, unit_abbreviation, secondary{}."})
+        "description": "hole_note number formatting; secondary{} nests the same keys."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_required_input("action")
     .add_required_input("annotation")

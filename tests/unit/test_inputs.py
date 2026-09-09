@@ -4445,6 +4445,39 @@ class TestTimelineObjectsWalk:
         assert inp._match_timeline_objects(objs, "Extrude1@1") == []
 
 
+class TestStaleTimelineIndex:
+    """A 'name@index' whose two halves name different objects - what a re-used index becomes once
+    the timeline has moved. The matcher confirms the name, so the pair MISSES; the refusal is what
+    tells the caller which half went stale."""
+
+    def test_a_mismatch_names_the_object_at_that_index_and_where_the_name_is(self):
+        objs = [_tl_obj("Extrude3", 4), _tl_obj("Fillet2", 7)]
+        obj, err = inp.resolve_timeline_object(objs, "Extrude3@7", "'feature'")
+        assert obj is None
+        assert "'Extrude3@7'" in err and "index 7 is 'Fillet2'" in err
+        assert "'Extrude3' is at index 4" in err
+        assert "design_get(include=['timeline'])" in err
+
+    def test_an_index_no_object_carries_still_places_the_name(self):
+        objs = [_tl_obj("Extrude3", 4)]
+        obj, err = inp.resolve_timeline_object(objs, "Extrude3@7", "'feature'")
+        assert obj is None and "no timeline item reads index 7" in err
+        assert "'Extrude3' is at index 4" in err
+
+    def test_a_pair_that_agrees_still_resolves(self):
+        objs = [_tl_obj("Extrude3", 4), _tl_obj("Fillet2", 7)]
+        obj, err = inp.resolve_timeline_object(objs, "Extrude3@4", "'feature'")
+        assert err is None and obj is objs[0]
+
+    def test_a_name_no_object_carries_keeps_the_plain_miss_listing(self):
+        # the index half explains nothing when the NAME is absent anywhere: the sample of what IS
+        # there is the actionable answer, so that path stays untouched.
+        objs = [_tl_obj("Extrude3", 4)]
+        obj, err = inp.resolve_timeline_object(objs, "Ghost@7", "'feature'")
+        assert obj is None and "no timeline feature named 'Ghost@7'" in err
+        assert "Extrude3" in err
+
+
 class TestTimelineNameWhitespace:
     """Surrounding whitespace is not a distinguishing feature on EITHER side of the comparison.
 

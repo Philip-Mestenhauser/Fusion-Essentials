@@ -390,9 +390,9 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
         # explicit scope makes body-wide edge treatment a stated choice).
         flt = (edge_filter or "").strip().lower()
         if not flt:
-            by_face = (" or 'faces' (every edge of the named faces)" if kind == "chamfer" else "")
             return error(f"State the edge scope: pass 'edges' (find_geometry edge handles - the "
-                         f"precise set to {kind}){by_face} or an explicit edge_filter ('all' | "
+                         f"precise set to {kind}) or 'faces' (every edge of the named faces) or an "
+                         f"explicit edge_filter ('all' | "
                          f"'convex' | 'concave') to sweep the body. An omitted scope never means "
                          f"the whole body.")
         if flt not in ("all", "convex", "concave"):

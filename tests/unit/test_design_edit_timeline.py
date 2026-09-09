@@ -543,10 +543,11 @@ class TestNameResolution:
 
     def test_name_at_index_mismatch_is_refused(self, wire):
         # 'Extrude1@0' pairs a name with an index no object carries together - refused as given,
-        # never widened to the Extrude1 that sits at index 1.
+        # never widened to the Extrude1 that sits at index 1, and the refusal names both halves so
+        # the caller can see which one moved.
         tl = wire(FakeTimeline([FakeTimelineObject("Sketch1", 0), FakeTimelineObject("Extrude1", 1)]))
         msg = error_message(et.handler(action="suppress", feature="Extrude1@0"))
-        assert "no timeline feature named 'Extrude1@0'" in msg
+        assert "index 0 is 'Sketch1'" in msg and "'Extrude1' is at index 1" in msg
         assert tl._items[1].isSuppressed is False
 
     def test_partial_name_does_not_match(self, wire):

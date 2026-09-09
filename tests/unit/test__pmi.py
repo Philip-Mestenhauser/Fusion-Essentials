@@ -240,6 +240,15 @@ class TestApplyNoteFormat:
         assert err and str(pm.LEADER_EXT_FLOOR) in err
         assert note.leaderLineExtension == 0.5          # untouched
 
+    def test_the_floor_refusal_reads_in_the_callers_units(self):
+        # The caller typed mm; a refusal quoting 0.1 cm against a 0.25 cm floor names two numbers
+        # it never wrote and cannot act on.
+        note = _Note()
+        err = pm.apply_note_format(note, extension_cm=0.1, units="mm")
+        assert err and "'leader_extension'=1.0 mm" in err and "2.5 mm" in err
+        assert "cm" not in err
+        assert note.leaderLineExtension == 0.5          # untouched
+
     def test_an_unknown_align_token_lists_the_vocabulary(self):
         err = pm.apply_note_format(_Note(), align="sideways")
         assert err and "left" in err and "center" in err
@@ -447,6 +456,19 @@ class TestDisplay:
     def test_a_non_object_display_is_refused(self):
         ds, err = pm.build_display("precision=3")
         assert ds is None and "must be an object" in err
+
+    def test_an_unknown_display_key_is_refused_naming_it_and_the_legal_set(self):
+        # An ignored key wrote the platform's default formatting and reported ok, so the callout
+        # read back in a precision the caller never asked for.
+        ds, err = pm.build_display({"precision": 2, "decimals": 4})
+        assert ds is None and "'decimals'" in err
+        assert all(key in err for key in pm.DISPLAY_KEYS)
+
+    def test_the_writer_both_pmi_tools_run_refuses_before_it_writes(self):
+        note = _display_note()
+        err = pm.apply_display(note, {"decimals": 4})
+        assert err and "'decimals'" in err
+        assert note.primaryDisplaySettings is None
 
     def test_display_record_reads_the_five_fields_back(self):
         ds = FakePMIDisplaySettings(

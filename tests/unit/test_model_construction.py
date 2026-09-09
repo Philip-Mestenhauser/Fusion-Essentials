@@ -1504,6 +1504,22 @@ class TestGeometryReadback:
         assert out["geometry"] == {}
 
 
+class TestPlaneSketchOriginNote:
+    def test_a_plane_note_points_at_the_sketch_origin_it_does_not_publish(self):
+        # 'geometry.origin' is the PLANE's own origin; a sketch built on it starts at the world
+        # origin's projection instead, so the note has to name where that number is read.
+        comp = _install()
+        comp.constructionPlanes.result_geometry = Plane(FakeVector3D(0, 0, 1), FakePoint(1, 2, 3))
+        out = _payload(cn.handler(kind="plane", plane="xy", offset=5))
+        assert "world origin's projection" in out["note"]
+        assert "frame.origin_mm" in out["note"]
+
+    def test_an_axis_datum_does_not_carry_it(self):
+        _install()
+        out = _payload(cn.handler(kind="axis", axis="z"))
+        assert "world origin's projection" not in out["note"]
+
+
 # ── the payload's coordinates come from the same space the gates verify in ──────────────────────
 #
 # Measured: a datum created while an occurrence is active reads component-LOCAL off .geometry, and

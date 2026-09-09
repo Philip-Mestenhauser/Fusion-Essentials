@@ -442,6 +442,7 @@ _MESH = [
                      "units": "mm"},
      lambda p: (len(p["bodies"]) == 1 and p["bodies"][0]["name"] == "MshIns"
                 and (p["bodies"][0]["triangle_count"] or 0) > 0
+                and p.get("name_applied") is True
                 and "rename_warning" not in p), None),
     # the round trip measured END TO END: the re-imported mesh is the size of the mesh that was
     # written - measured 74.99 x 74.99 x 20.0 on a finished run. A size, not a position: the layout

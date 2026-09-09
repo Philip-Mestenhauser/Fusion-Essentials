@@ -408,6 +408,8 @@ _DENYLIST = {
     "sketch_world_frame": ("_sketch_detail", "def"),
     "resolve_thread_info": ("_threads", "def"),
     "build_joint_geometry": ("_joints", "def"),
+    "component_body_names": ("_common", "def"),
+    "join_new_body_clause": ("_common", "def"),
     "apply_motion": ("_joints", "def"),
     "find_joint": ("_joints", "def"),
     "all_joints": ("_joints", "def"),

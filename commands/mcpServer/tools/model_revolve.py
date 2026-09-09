@@ -183,6 +183,8 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
     # object alone cannot say material changed - only this before/after pair can.
     check_bodies = _cut_check_bodies(host) if op_key in ("cut", "intersect") else []
     vol_before = _geom.volumes(check_bodies)
+    # A join is told "grew a body" from "made a second one" by the host's body NAMES before the add.
+    bodies_before = _common.component_body_names(host) if op_key == "join" else None
 
     try:
         feature = host.features.revolveFeatures.add(rev_input)
@@ -215,6 +217,15 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
 
     body_names = [f["name"] for f in _common.body_facts(_common.result_bodies(feature))]
 
+    note = "Profile revolved into a solid. Pair with view_screenshot (iso) to view it."
+    if op_key == "new":
+        adv = root_body_advisory(design, host)
+        if adv:
+            note += " " + adv
+    join_clause = _common.join_new_body_clause(op_key, bodies_before, body_names)
+    if join_clause:
+        note += " " + join_clause
+
     payload = {
         "revolved": True,
         "feature": safe(lambda: feature.name),
@@ -227,8 +238,7 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
         "second_angle_deg": round(float(second_angle_deg or 0.0), 6),
         "symmetric": bool(symmetric),
         "result_bodies": body_names,
-        "note": ("Profile revolved into a solid. Pair with view_screenshot (iso) to view it."
-                 + ((" " + _adv) if (op_key == "new" and (_adv := root_body_advisory(design, host))) else "")),
+        "note": note,
     }
     # Absent, never null: a null would read as "no material moved".
     if volume_delta_cm3 is not None:

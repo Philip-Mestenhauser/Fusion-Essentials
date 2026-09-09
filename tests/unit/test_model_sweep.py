@@ -218,6 +218,20 @@ class TestOptions:
         assert out["orientation"] == "parallel"
         assert sf.last.orientation == adsk.fusion.SweepOrientationTypes.ParallelOrientationType
 
+    def test_a_join_landing_a_new_body_names_model_combine(self):
+        _install(bodies=[BRepBody("Bar")])
+        out = _payload(sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch",
+                                  operation="join"))
+        assert "landed a NEW body (Body1)" in out["note"]
+        assert "model_combine(join)" in out["note"]
+
+    def test_a_join_that_grew_the_body_already_there_appends_nothing(self):
+        # the feature's result body IS the one the component held - the join fused, say nothing
+        _install(bodies=[BRepBody("Body1")])
+        out = _payload(sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch",
+                                  operation="join"))
+        assert "NEW body" not in out["note"]
+
     def test_target_bodies_rejected_on_new(self):
         _install()
         res = sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch",

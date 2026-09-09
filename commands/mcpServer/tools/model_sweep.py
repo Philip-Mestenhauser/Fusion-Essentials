@@ -167,6 +167,8 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
     if op_key in ("cut", "intersect"):
         check_bodies = list(bodies_ents) if bodies_ents else _cut_check_bodies(host)
     vol_before = _geom.volumes(check_bodies)
+    # A join is told "grew a body" from "made a second one" by the host's body NAMES before the add.
+    bodies_before = _common.component_body_names(host) if op_key == "join" else None
 
     try:
         feature = host.features.sweepFeatures.add(sweep_input)
@@ -224,6 +226,9 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
         adv = root_body_advisory(design, host)
         if adv:
             note += " " + adv
+    join_clause = _common.join_new_body_clause(op_key, bodies_before, body_names)
+    if join_clause:
+        note += " " + join_clause
     if path_curves is not None and sketch_curves is not None and path_curves < sketch_curves:
         note += (f" WARNING: the path chained {path_curves} of the sketch's {sketch_curves} curves, so "
                  "the sweep covers only that run - chaining follows tangent continuity and a sharp "

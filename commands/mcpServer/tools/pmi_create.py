@@ -87,13 +87,13 @@ def handler(kind=None, geometry=None, text="", name="", text_point=None, leader_
         if flags is not None or values is not None or display is not None:
             return error("'flags'/'values'/'display' apply to kind='hole_note' only.")
         ann, comp, cerr = _create_note(d, ents, text, leader_point, plane, plane_face,
-                                       align, valign, perpendicular, ext_cm, f)
+                                       align, valign, perpendicular, ext_cm, f, units)
     else:
         if plane or plane_face or leader_point is not None:
             return error("'plane'/'plane_face'/'leader_point' apply to kind='note' only - a "
                          "hole note derives its plane and leader from the hole faces.")
         ann, comp, cerr = _create_hole_note(d, ents, text, align, valign, perpendicular,
-                                            ext_cm, flags, values, display, f)
+                                            ext_cm, flags, values, display, f, units)
     if cerr:
         return error(cerr)
 
@@ -124,7 +124,7 @@ def handler(kind=None, geometry=None, text="", name="", text_point=None, leader_
 
 
 def _create_note(d, ents, text, leader_point, plane, plane_face, align, valign,
-                 perpendicular, ext_cm, f):
+                 perpendicular, ext_cm, f, units):
     """Create a leader-line note from resolved inputs. Returns (annotation, component, error)."""
     ent, eerr = _resolve_note_entity(ents)
     if eerr:
@@ -157,7 +157,7 @@ def _create_note(d, ents, text, leader_point, plane, plane_face, align, valign,
             sperr = _set_plane(note_in, plane_v, pface)
             if sperr:
                 return None, None, sperr
-        ferr = _pmi.apply_note_format(note_in, align, valign, perpendicular, ext_cm)
+        ferr = _pmi.apply_note_format(note_in, align, valign, perpendicular, ext_cm, units)
         if ferr:
             return None, None, ferr
         if leader_point is not None:
@@ -178,7 +178,7 @@ def _create_note(d, ents, text, leader_point, plane, plane_face, align, valign,
 
 
 def _create_hole_note(d, ents, text, align, valign, perpendicular, ext_cm, flags, values,
-                      display, f):
+                      display, f, units):
     """Create a hole/thread note from resolved inputs. Returns (annotation, component, error)."""
     non_faces = [type(e).__name__ for e in ents if type(e).__name__ != "BRepFace"]
     if non_faces:
@@ -191,7 +191,7 @@ def _create_hole_note(d, ents, text, align, valign, perpendicular, ext_cm, flags
                             "this Fusion build may not support PMI authoring.")
     try:
         note_in = notes.createInput(ents)
-        ferr = _pmi.apply_note_format(note_in, align, valign, perpendicular, ext_cm)
+        ferr = _pmi.apply_note_format(note_in, align, valign, perpendicular, ext_cm, units)
         if ferr:
             return None, None, ferr
         ann = notes.add(note_in)
@@ -259,7 +259,7 @@ tool = (
     .add_input_property("values", {"type": "object",
         "description": "hole_note overrides: {diameter: 6.2} or {diameter: {value, tolerance}}."})
     .add_input_property("display", {"type": "object",
-        "description": "Keys: precision, units, leading_zeros, trailing_zeros, unit_abbreviation, secondary{}."})
+        "description": "hole_note number formatting; secondary{} nests the same keys."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_required_input("kind")
     .add_required_input("geometry")

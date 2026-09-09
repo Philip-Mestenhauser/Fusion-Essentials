@@ -484,6 +484,24 @@ class TestCutMovesMaterial:
         assert out["revolved"] is True and "volume_delta_cm3" not in out
 
 
+# -- a join whose result body is not one the component already held ------------------------------
+
+class TestJoinLandedANewBody:
+    def test_a_result_body_the_component_did_not_hold_before_names_model_combine(self, wire):
+        wire([_sketch("S")])
+        _host_bodies(BRepBody("Bar", volume=12.0))
+        out = payload(rv.handler(sketch_name="S", operation="join"))
+        assert "landed a NEW body (Body1)" in out["note"]
+        assert "model_combine(join)" in out["note"]
+
+    def test_a_join_that_grew_the_body_already_there_appends_nothing(self, wire):
+        # the feature's result body IS the one the component held - the join fused, say nothing
+        wire([_sketch("S")])
+        _host_bodies(BRepBody("Body1", volume=12.0))
+        out = payload(rv.handler(sketch_name="S", operation="join"))
+        assert "NEW body" not in out["note"]
+
+
 # -- the feature is built on the sketch's OWNING component, not the active one ------------------
 
 class TestHostComponent:

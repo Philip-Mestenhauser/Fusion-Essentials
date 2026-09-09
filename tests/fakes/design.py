@@ -250,7 +250,8 @@ class BRepFace:
     which is how a face whose normal cannot be sampled reads. `bounding_box` is the face's own AABB
     (BRepFace.boundingBox); without it the face reads as one whose box is unavailable.
     `assembly_context` is the occurrence a PROXY face was read through - None (the default) is a
-    NATIVE face, whose reads are in its owning component's space. `param_reversed` is the live
+    NATIVE face, whose reads are in its owning component's space; `native_object` is the face that
+    proxy STANDS FOR, and reads None on a native one. `param_reversed` is the live
     isParamReversed a normal flip is read back on; None leaves that flag unreadable.
     `assembly_proxy` installs createForAssemblyContext answering it - pass None for the factory that
     ANSWERS NOTHING, which is the state a caller must not fall back to the native face on. Left
@@ -265,10 +266,11 @@ class BRepFace:
     def __init__(self, surface, area=0.0, centroid=None, edge_count=0, body_name=None,
                  entity_token=None, body=None, point_on_face=None, normal=None,
                  bounding_box=None, assembly_context=None, param_reversed=None,
-                 assembly_proxy=_UNSET, appearance=_UNSET, edges=None):
+                 assembly_proxy=_UNSET, appearance=_UNSET, edges=None, native_object=None):
         self.appearance = FakeAppearance() if appearance is BRepFace._UNSET else appearance
         self.geometry = surface
         self.assemblyContext = assembly_context
+        self.nativeObject = native_object
         if assembly_proxy is not BRepFace._UNSET:
             self.createForAssemblyContext = lambda _occ, _p=assembly_proxy: _p
         if param_reversed is not None:

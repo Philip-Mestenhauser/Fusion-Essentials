@@ -281,10 +281,11 @@ def _install(bodies):
     return ff, cf
 
 
-def _edge_ent(body_name="Block", body=None):
-    """A BRep edge resolved from a handle; carries .body.name for the result label. Its body's
-    volume does not read, so the material gate has nothing to judge unless a test supplies one."""
-    edge = BRepEdge(curve=None)
+def _edge_ent(body_name="Block", body=None, token=None):
+    """A BRep edge resolved from a handle, or bounding a face; carries .body.name for the result
+    label. Its body's volume does not read, so the material gate has nothing to judge unless a test
+    supplies one."""
+    edge = BRepEdge(curve=None, entity_token=token)
     edge.body = body if body is not None else BRepBody(name=body_name, volume=None)
     return edge
 
@@ -293,6 +294,11 @@ def _face(body_name="Block"):
     """A BRep face resolved from a handle - what a rule fillet selects through. conftest's shared
     BRepFace, so the face surface stays swept against the live shape record."""
     return BRepFace(surface=None, body_name=body_name)
+
+
+def _face_with_edges(edges, body_name="Block"):
+    """A BRep face carrying the edges that bound it - what a face-scoped fillet expands."""
+    return BRepFace(surface=None, body_name=body_name, edges=edges)
 
 
 def _install_edge_handles(handle_map):
@@ -721,6 +727,48 @@ class TestChordLength:
                                           chord_length=1, edge_filter="convex"))
         assert out["edges_requested"] == 1
         assert ff.last.chord_set[1] == ("real", 0.1)
+
+
+class TestFaceScopedFillet:
+
+    """'faces' rounds every edge of the named faces - the expansion model_chamfer runs, reached
+    here for the constant and chord-length shapes. The other two say why they cannot take it."""
+
+    def test_a_constant_fillet_takes_every_edge_of_the_named_faces_once(self):
+        # Two faces meeting at one edge: the shared edge belongs to both, and the same edge twice in
+        # the feature's edge set is a duplicate.
+        shared, only_a, only_b = (_edge_ent(token="e0"), _edge_ent(token="e1"),
+                                  _edge_ent(token="e2"))
+        ff, _ = _install_edge_handles({"FA": _face_with_edges([shared, only_a]),
+                                       "FB": _face_with_edges([shared, only_b])})
+        out = _payload(fl.handler(faces=["FA", "FB"], radius=1, fillet_type="constant"))
+        edges, _val, _tangent = ff.last.edge_set
+        assert list(edges) == [shared, only_a, only_b]   # those faces' edges, and nothing else
+        assert out["edges_requested"] == 3 and out["faces_selected"] == 2
+        assert out["edge_selection"] == "3 edge(s) of 2 face(s)"
+
+    def test_faces_reach_the_chord_length_shape_too(self):
+        ff, _ = _install_edge_handles({"FA": _face_with_edges([_edge_ent(token="e1")])})
+        out = _payload(fl.handler(faces=["FA"], fillet_type="chord_length", chord_length=1))
+        assert ff.last.chord_set is not None and ff.last.edge_set is None
+        assert out["edges_requested"] == 1 and out["faces_selected"] == 1
+
+    def test_a_variable_fillet_refuses_faces_naming_both_ways_out(self):
+        # The radius runs from the chain's start to its far end and a face set carries no such
+        # order, so 'faces' is REFUSED here - never accepted and dropped.
+        ff, _ = _install_edge_handles({"FA": _face_with_edges([_edge_ent(token="e1")])})
+        res = fl.handler(faces=["FA"], fillet_type="variable", radius=1, end_radius=2)
+        assert res["isError"] is True and "'faces'" in res["message"]
+        assert "'edges'" in res["message"] and "fillet_type='rule'" in res["message"]
+        assert ff.last is None
+
+    def test_a_rule_fillet_refuses_edges_rather_than_dropping_them(self):
+        # The rule fillet's selection is the FACES, so an 'edges' list has nowhere to land.
+        ff, _ = _install_edge_handles({"FA": _face_with_edges([]), "E1": _edge_ent()})
+        res = fl.handler(fillet_type="rule", faces=["FA"], edges=["E1"], radius=1)
+        assert res["isError"] is True and "'edges'" in res["message"]
+        assert "fillet_type='constant'" in res["message"]
+        assert ff.rule_last is None
 
 
 class TestRuleFillet:

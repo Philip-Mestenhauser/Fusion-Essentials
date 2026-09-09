@@ -445,6 +445,32 @@ def body_facts(bodies):
             for b in bodies]
 
 
+def component_body_names(comp):
+    """The names of the bodies `comp` holds right now, or None when the collection or any one name
+    will not read - the BEFORE image a feature's result bodies are told new-vs-existing against."""
+    bodies = safe(lambda: comp.bRepBodies)
+    n = counted(lambda: bodies.count) if bodies is not None else None
+    if n is None:
+        return None
+    names = [f["name"] for f in body_facts([safe(lambda i=i: bodies.item(i)) for i in range(n)])]
+    return None if any(nm is None for nm in names) else names
+
+
+JOIN_NEW_BODY_NOTE = (
+    "operation='join' landed a NEW body ({name}) instead of growing one of the bodies present "
+    "before this call; model_combine(join) merges them.")
+
+
+def join_new_body_clause(op_key, before_names, result_names):
+    """The clause for a join whose result body is NOT one the host component held before the call -
+    '' for any other operation, for a before-image that did not read or held no body, and for a
+    result body that already existed."""
+    if op_key != "join" or not before_names or not result_names:
+        return ""
+    new = [n for n in result_names if n and n not in before_names]
+    return JOIN_NEW_BODY_NOTE.format(name=new[0]) if new else ""
+
+
 def most_recent_body(comp):
     """The most recently created body in a component, or None - the blank-input fallback for a tool
     that defaults to 'the body you just made'."""

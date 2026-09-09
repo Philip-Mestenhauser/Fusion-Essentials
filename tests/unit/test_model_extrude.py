@@ -2087,6 +2087,30 @@ class TestNoTargetBodyDirectionTeaching:
     def test_an_unreadable_distance_sign_is_not_stated(self):
         # The 'distance' was <sign>' clause is dropped rather than guessed at.
         assert "'distance' was" not in ex._no_target_body_hint("distance", None)
+
+
+def _install_with_bodies(*body_names):
+    """The extrude surface over a component that already holds these bodies - the before-image a
+    join's result body is told new-vs-existing against."""
+    ef = FakeExtrudeFeatures()
+    install(ex, make_design(comp=_component("Root", sketches=[_sketch("S")],
+                                            bodies=list(body_names), ef=ef)))
+    _wire_adsk()
+    return ef
+
+
+class TestJoinLandedANewBody:
+    def test_a_result_body_the_component_did_not_hold_before_names_model_combine(self):
+        _install_with_bodies("Bar")
+        out = _payload(ex.handler(sketch_name="S", distance=5, operation="join"))
+        assert "landed a NEW body (Body1)" in out["note"]
+        assert "model_combine(join)" in out["note"]
+
+    def test_a_join_that_grew_the_body_already_there_appends_nothing(self):
+        # the feature's result body IS the one the component held - the join fused, say nothing
+        _install_with_bodies("Body1")
+        out = _payload(ex.handler(sketch_name="S", distance=5, operation="join"))
+        assert "NEW body" not in out["note"]
         assert "'distance' was positive" in ex._no_target_body_hint("distance", 5)
 
     def test_the_same_refusal_on_a_new_extrude_keeps_the_plain_hint(self):

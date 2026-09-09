@@ -119,11 +119,16 @@ def handler(file_path: str = "", target_component: str = "",
         return error("Mesh import returned no bodies (the file may be empty or unreadable as a mesh).")
 
     inv_scale = 1.0 / unit_cm
+    want_name = (name or "").strip()
     bodies = []
     rename_warning = None
+    name_applied = None
     for mb in _common.iter_collection(mesh_list):
-        if (name or "").strip() and count == 1:
-            _final, rename_warning = _common.apply_rename(mb, name)
+        # count is the LANDED body count read off what meshBodies.add returned - a name addresses
+        # one body, so it is applied only when exactly one landed, never silently dropped.
+        if want_name and count == 1:
+            _final, rename_warning = _common.apply_rename(mb, want_name)
+            name_applied = rename_warning is None
         bodies.append(_mesh_summary(mb, inv_scale=inv_scale))
 
     payload = {
@@ -138,6 +143,13 @@ def handler(file_path: str = "", target_component: str = "",
             else "Direct design - no base-feature scope needed.") +
             " Convert to BRep with mesh_to_brep to use find_geometry / fillet / CAM on it."),
     }
+    if want_name and count != 1:
+        name_applied = False
+        payload["note"] = payload["note"] + (
+            " 'name' was not applied: the import landed %d mesh bodies - rename each with "
+            "design_set_name, using the names in 'bodies'." % count)
+    if want_name:
+        payload["name_applied"] = bool(name_applied)
     if rename_warning:
         payload["rename_warning"] = rename_warning
     return ok(payload)

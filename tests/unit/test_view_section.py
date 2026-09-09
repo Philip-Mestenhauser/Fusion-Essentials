@@ -217,7 +217,7 @@ class TestPlaneCut:
         # gracefully (not a NameError). PlaneRef resolves the handle; we feed it through the seam.
         sections = _install()
         real_resolve = sv._PLANE.resolve
-        sv._PLANE.resolve = lambda v: ("FACE_HANDLE", None)
+        sv._PLANE.resolve = lambda v, component=None: ("FACE_HANDLE", None)
         try:
             out = _payload(sv.handler(action="cut", plane="Plane3"))   # auto_view default True
         finally:
@@ -226,39 +226,37 @@ class TestPlaneCut:
         assert out["auto_viewed"] is False
 
 
-# ── the assembly-context refusal teaches its remedy ─────────────────────────
+# ── the plane is resolved in ROOT context, not the active component's ───────
 
-class TestSubComponentContextRefusal:
-    """With a sub-component active, an origin alias resolves to THAT component's plane and the
-    section is refused '... object is not in the assembly context of this component'. The platform
-    text says what is wrong, not what to do - the error must carry the activate-root remedy."""
+class TestRootContextPlane:
+    """A Section Analysis is a DOCUMENT-level view: whatever component is active, the plane it cuts
+    on is the root's. Resolved against the active component instead, a sub-component's own native
+    plane reaches sectionAnalyses.add, which refuses it ('object is not in the assembly context of
+    this component') - the model is then not cut at all."""
 
-    def _install_failing(self, monkeypatch, message):
+    def _sub_active(self, monkeypatch):
+        """Install the rig with a SUB-COMPONENT active, carrying origin planes of its own so an
+        alias resolved against it would succeed - and land on the wrong plane."""
         sections = _install()
-        # the ACTIVE component is a sub-component: it carries its own origin planes, so the alias
-        # resolves fine - the section is what refuses the resulting plane
         sub = type("Comp", (), {"name": "Inner", "xYConstructionPlane": "SUB_XY",
-                                "xZConstructionPlane": "SUB_XZ", "yZConstructionPlane": "SUB_YZ"})()
+                                "xZConstructionPlane": "SUB_XZ", "yZConstructionPlane": "SUB_YZ",
+                                "constructionPlanes": None})()
         monkeypatch.setattr(sv._common, "target_component", lambda d: sub)
-
-        def boom(entity, distance_cm):
-            raise RuntimeError(message)
-        monkeypatch.setattr(sections, "createInput", boom)
+        monkeypatch.setattr(sv._inputs._common, "target_component", lambda d: sub)
         return sections
 
-    def test_assembly_context_failure_names_the_remedy_and_the_active_component(self, monkeypatch):
-        self._install_failing(monkeypatch, "3 : object is not in the assembly context of this component")
-        res = sv.handler(action="cut", plane="yz")
-        assert res["isError"] is True
-        assert "design_activate_component" in res["message"]
-        assert "Inner" in res["message"]                     # which component is active
-        assert "assembly context" in res["message"]          # the platform's own text is kept
+    def test_an_alias_cuts_on_the_ROOTs_plane_while_a_sub_component_is_active(self, monkeypatch):
+        sections = self._sub_active(monkeypatch)
+        out = _payload(sv.handler(action="cut", plane="xz", auto_view=False))
+        assert out["action"] == "cut"
+        assert sections.last_input.entity == "PLANE_XZ"       # the ROOT's, never "SUB_XZ"
 
-    def test_an_unrelated_failure_is_not_given_the_remedy(self, monkeypatch):
-        self._install_failing(monkeypatch, "3 : a totally different problem")
-        res = sv.handler(action="cut", plane="yz")
-        assert res["isError"] is True
-        assert "design_activate_component" not in res["message"]
+    def test_every_alias_reaches_the_root_not_the_active_sub_component(self, monkeypatch):
+        # One alias could be right by accident (a shared attribute name); all three cannot.
+        for alias, want in (("xy", "PLANE_XY"), ("front", "PLANE_XZ"), ("right", "PLANE_YZ")):
+            sections = self._sub_active(monkeypatch)
+            _payload(sv.handler(action="cut", plane=alias, auto_view=False))
+            assert sections.last_input.entity == want, alias
 
 
 # ── through-occurrence center math ──────────────────────────────────────────

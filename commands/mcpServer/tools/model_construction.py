@@ -184,6 +184,12 @@ _HANDLE_NOTE = {
 }
 
 
+# A plane's own origin and the origin a sketch built on it takes are DIFFERENT points, and only the
+# plane's is published here, so the sketch's is pointed at rather than left to be assumed.
+_SKETCH_ORIGIN_NOTE = (" A sketch on this plane takes its origin at the world origin's projection "
+                       "onto it, not at geometry.origin - sketch_create's frame.origin_mm reads it.")
+
+
 # Appended when a claim came back null because the entity could not be read in the ACTIVE
 # occurrence's space: a missing key reads as "not applicable", a null with this sentence reads as
 # "not checked, and here is why".
@@ -922,6 +928,8 @@ def handler(kind: str = "point", mode: str = "", x: float = 0.0, y: float = 0.0,
         out["rename_warning"] = rename_warning
     if handle:
         out["note"] += " " + _HANDLE_NOTE[knd]
+    if knd == "plane":
+        out["note"] += _SKETCH_ORIGIN_NOTE
     out.update(extra or {})
     # One disclosure for every null the active occurrence's space cost us - the mode's own claim
     # (flagged by the builder) and/or the geometry read-back, which comes back empty for the same

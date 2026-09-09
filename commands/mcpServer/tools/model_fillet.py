@@ -16,7 +16,7 @@ from . import _common
 from . import _geom
 from . import _inputs
 from . import _assert
-from ._edge_common import _BODY, _EDGES, _EDGE_FILTER_DESC, _apply, _size_hint
+from ._edge_common import _BODY, _EDGES, _EDGE_FILTER_DESC, _FACES, _apply, _size_hint
 
 app = adsk.core.Application.get()
 
@@ -24,7 +24,6 @@ _FILLET_TYPE = _inputs.Choice("fillet_type", ["constant", "variable", "chord_len
                               default="constant")
 _TOPOLOGY = _inputs.Choice("topology", ["rounds_and_fillets", "rounds_only", "fillets_only"],
                            default="rounds_and_fillets")
-_RULE_FACES = _inputs.GeometryHandleList("faces", require="face", required=False)
 _RULE_FACES_TWO = _inputs.GeometryHandleList("second_faces", require="face", required=False)
 
 
@@ -103,7 +102,7 @@ def _rule_fillet(radius, units, faces, second_faces, topology):
         return error("A rule fillet needs 'faces' - find_geometry face handles. Every edge of those "
                      "faces is rounded; add 'second_faces' to round only the edges between the two "
                      "sets.")
-    first, ferr = _RULE_FACES.resolve(faces)
+    first, ferr = _FACES.resolve(faces)
     if ferr:
         return error(ferr)
     second = None
@@ -208,10 +207,19 @@ def handler(body_name: str = "", radius: float = 1.0, units: str = "mm",
     if terr:
         return error(terr)
     if ftype == "rule":
+        if edges not in (None, "", []):
+            return error("A rule fillet selects FACES, so 'edges' cannot be passed with "
+                         "fillet_type='rule'. Drop 'edges', or use fillet_type='constant' to round "
+                         "exactly those edge handles.")
         return _rule_fillet(radius, units, faces, second_faces, topology)
 
     variant, size = None, radius
     if ftype == "variable":
+        if faces not in (None, "", []):
+            return error("A variable-radius fillet cannot take 'faces': its radius runs from the "
+                         "start of the edge chain to the far end, and a face set carries no such "
+                         "order. Pass 'edges' handles in chain order, or fillet_type='rule' to "
+                         "round every edge of those faces at one radius.")
         if edges in (None, "", []):
             return error("A variable-radius fillet needs 'edges' - find_geometry edge handles for a "
                          "single edge, or a tangentially connected chain listed in order from its "
@@ -225,7 +233,8 @@ def handler(body_name: str = "", radius: float = 1.0, units: str = "mm",
             return error("A chord-length fillet needs 'chord_length' - the straight-line distance "
                          "across the rounded corner. 'radius' does not drive this type.")
         variant, size = {"type": "chord_length"}, chord_length
-    return _apply("fillet", body_name, size, units, edge_filter, edges, variant=variant)
+    return _apply("fillet", body_name, size, units, edge_filter, edges, variant=variant,
+                  face_handles=faces)
 
 
 TOOL_DESCRIPTION = (
@@ -246,7 +255,7 @@ tool = (
     .add_input_property("positions", {"type": "array", "items": {"type": "number"}})
     .add_input_property("radii", {"type": "array", "items": {"type": "number"}})
     .add_input_property("chord_length", {"type": "number"})
-    .add_input_property(*_RULE_FACES.as_property())
+    .add_input_property(*_FACES.as_property())
     .add_input_property(*_RULE_FACES_TWO.as_property(brief=True))
     .add_input_property(*_TOPOLOGY.as_property())
     .strict_schema()

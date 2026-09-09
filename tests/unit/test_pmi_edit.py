@@ -401,7 +401,8 @@ class TestNewActions:
     def test_set_extension_rereads_the_length_itself(self, rig):
         # the handler's own read-back, on top of the writer's: a writer reporting success while
         # the length never moved is still an error.
-        rig.monkeypatch.setattr(pe._pmi, "apply_note_format", lambda ann, a, v, p, ext: None)
+        rig.monkeypatch.setattr(pe._pmi, "apply_note_format",
+                                lambda ann, a, v, p, ext, units="cm": None)
         msg = error_message(pe.handler(action="set_extension", annotation="Note1",
                                        leader_extension=6))
         assert "did not take" in msg and "re-read" in msg
@@ -661,6 +662,15 @@ class TestHoleCallouts:
     def test_set_display_without_a_display_object_is_refused(self, hole):
         assert "needs 'display'" in error_message(
             pe.handler(action="set_display", annotation="Hole Note1"))
+
+    def test_an_unknown_display_key_reaches_the_wire_as_a_refusal(self, hole):
+        # the real writer, not a stub: the key the tool cannot honour must refuse before the
+        # settings object is assigned, the way an unknown flag does
+        hole.primaryDisplaySettings = None
+        msg = error_message(pe.handler(action="set_display", annotation="Hole Note1",
+                                       display={"decimals": 4}))
+        assert "Unknown display key 'decimals'" in msg and "precision" in msg
+        assert hole.primaryDisplaySettings is None
 
     def test_set_display_republishes_the_secondary_settings_a_note_carries(self, hole, rig):
         mm = pe.adsk.fusion.PMIUnitTypes.MillimetersPMIUnitType

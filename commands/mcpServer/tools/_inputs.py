@@ -1175,6 +1175,26 @@ def _name_key(obj):
     return (_common.safe(lambda: obj.name) or "").strip().lower()
 
 
+def _index_mismatch(objs, want):
+    """The refusal for a 'name@index' pair whose halves name different objects - what sits at that
+    index, and the index the name is at now - or None when `want` is not that form, or its name is
+    nowhere in `objs` (a plain miss)."""
+    base, at, idx = want.rpartition("@")
+    if not (at and base.strip() and idx.strip().isdigit()):
+        return None
+    i, name = int(idx.strip()), base.strip()
+    named = [str(_common.safe(lambda o=o: o.index))
+             for o in objs if _name_key(o) == name.lower()]
+    if not named:
+        return None
+    at_i = [o for o in objs if _common.safe(lambda o=o: o.index) == i]
+    seat = (f"index {i} is '{_common.safe(lambda: at_i[0].name)}'" if at_i
+            else f"no timeline item reads index {i}")
+    return (f"'{want}': {seat}, and '{name}' is at index "
+            f"{_common.named_with_remainder(named)}. Re-read design_get(include=['timeline']) for "
+            "the current indices.")
+
+
 def resolve_timeline_object(objs, want, label, miss_hint=None):
     """(timeline object, error) - the ONE object `want` names out of `objs`: a miss lists a sample
     of what IS there, a name several objects carry is refused with the 'name@index' candidates.
@@ -1182,6 +1202,9 @@ def resolve_timeline_object(objs, want, label, miss_hint=None):
     MISS only, standing in for the generic text where the caller can explain the absence."""
     hits = _match_timeline_objects(objs, want)
     if not hits:
+        stale = _index_mismatch(objs, want)
+        if stale:
+            return None, f"{label}: {stale}"
         hinted = miss_hint(want) if miss_hint is not None else None
         if hinted:
             return None, f"{label}: {hinted}"
@@ -1439,7 +1462,9 @@ class PlaneRef(InputKind):
     def contract_note(self) -> str:
         return "xy/xz/yz/top/front/right, a construction-plane name, or a planar-face 'handle'."
 
-    def resolve(self, raw):
+    def resolve(self, raw, component=None):
+        # `component` is the context the plane is resolved FOR - the active component unless the
+        # caller builds somewhere else (a document-level Section Analysis resolves against the root).
         s = (raw or "").strip() if isinstance(raw, str) else raw
         if not s or not isinstance(s, str):
             if self.required:
@@ -1452,7 +1477,7 @@ class PlaneRef(InputKind):
         des = _common.design()
         if not des:
             return None, "No active design to resolve the plane against."
-        comp = _common.target_component(des)
+        comp = component if component is not None else _common.target_component(des)
         # 1) origin-plane alias
         key = _ORIGIN_PLANES.get(s.lower().replace(" ", ""))
         if key:

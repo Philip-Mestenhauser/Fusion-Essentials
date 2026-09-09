@@ -73,20 +73,6 @@ def _aim_at_cut(normal, flipped):
     vp.refresh()
 
 
-def _context_remedy(design, exc):
-    """The remedy sentence for the assembly-context refusal, or '' for any other failure."""
-    # A plane alias resolves against the ACTIVE component, so a sub-component active makes the
-    # section raise '3 : object is not in the assembly context of this component'.
-    if "assembly context" not in str(exc).lower():
-        return ""
-    active = safe(lambda: _common.target_component(design).name)
-    where = f" The active component is '{active}'." if active else ""
-    return (f"{where} A plane alias (xy/xz/yz) resolves against the ACTIVE component, as does a "
-            "construction-plane name that component carries, and a section taken on a "
-            "sub-component's own plane is refused this way. Activate the root with "
-            "design_activate_component and retry - the same cut works with the root active.")
-
-
 def handler(action: str = "", plane: str = "", through: str = "", offset: float = 0.0,
             units: str = "mm", flip: bool = False, show_hatch: bool = True, auto_view: bool = True) -> dict:
     """See TOOL_DESCRIPTION."""
@@ -184,9 +170,10 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
         if not (plane or "").strip():
             return error("Provide 'plane' (an origin alias xy/xz/yz, a construction-plane name, or "
     "a planar-face handle from find_geometry) or 'through' (an occurrence).")
-        # plane is a PlaneRef: resolves an origin alias OR construction-plane name OR a planar-face/plane
-        # handle, so a section can be taken on an arbitrary plane (face/construction), not just an origin one.
-        cut_entity, perr = _PLANE.resolve(plane)
+        # plane is a PlaneRef, resolved FOR THE ROOT and never the active component: a section is a
+        # document-level view, and MEASURED, a sub-component's own native plane is refused by
+        # sectionAnalyses.add with '3 : object is not in the assembly context of this component'.
+        cut_entity, perr = _PLANE.resolve(plane, component=root)
         if perr:
             return error(perr)
         # If the plane is an origin alias, remember its key so auto_view can aim at the cut. For a
@@ -204,7 +191,7 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
         inp.isHatchShown = bool(show_hatch)
         sec = sections.add(inp)
     except Exception as e:
-        return error(f"Failed to create section ({desc}): {e}{_context_remedy(design, e)}")
+        return error(f"Failed to create section ({desc}): {e}")
     if not sec:
         return error(f"Section creation returned nothing ({desc}).")
     app.activeViewport.refresh()

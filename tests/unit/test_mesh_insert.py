@@ -177,6 +177,33 @@ class TestMeshInsert:
         res = mo.handler(file_path="C:/scan.stl")
         assert res["isError"] is True and "no bodies" in res["message"].lower()
 
+    def test_a_name_lands_on_the_one_body_that_arrived(self):
+        mb = MeshBody("Imported")
+        comp = _comp(mesh_bodies=_ImportingMeshBodies(import_result=_NamedCollection([mb])),
+                     base_feature=FakeBaseFeature())
+        _wire(comp, design_type=0)
+        out = payload(mo.handler(file_path="C:/scan.stl", name="MyScan"))
+        assert out["name_applied"] is True
+        assert mb.name == "MyScan" and out["bodies"][0]["name"] == "MyScan"
+
+    def test_a_name_a_multi_body_import_cannot_take_is_declined_with_the_count(self):
+        # A name addresses ONE body. Dropping it silently on a 2-body import returns ok, and the
+        # caller then looks up a mesh by a name no body carries.
+        a, b = MeshBody("Imported1"), MeshBody("Imported2")
+        comp = _comp(mesh_bodies=_ImportingMeshBodies(import_result=_NamedCollection([a, b])),
+                     base_feature=FakeBaseFeature())
+        _wire(comp, design_type=0)
+        out = payload(mo.handler(file_path="C:/scan.3mf", name="MyScan"))
+        assert out["name_applied"] is False
+        assert a.name == "Imported1" and b.name == "Imported2"
+        assert "landed 2 mesh bodies" in out["note"] and "design_set_name" in out["note"]
+
+    def test_an_import_with_no_name_asked_for_publishes_no_name_verdict(self):
+        comp = _comp(mesh_bodies=_ImportingMeshBodies(
+            import_result=_NamedCollection([MeshBody("Imported")])), base_feature=FakeBaseFeature())
+        _wire(comp, design_type=0)
+        assert "name_applied" not in payload(mo.handler(file_path="C:/scan.stl"))
+
     def test_import_failure_surfaces_not_swallowed(self):
         # meshBodies.add raises -> must become an error, NOT a false success (no safe() around mutation)
         comp = _comp(mesh_bodies=_ImportingMeshBodies(raise_on_add=True), base_feature=FakeBaseFeature())

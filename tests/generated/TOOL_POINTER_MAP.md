@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 187  |  **description breadcrumbs:** 265  |  **note/error breadcrumbs:** 468
+**Tools:** 187  |  **description breadcrumbs:** 265  |  **note/error breadcrumbs:** 470
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -17,8 +17,8 @@ close orphans, factor duplicated guards into shared helpers.
 **Read/Acquire (6)** - higher concern, a check-your-work tool nothing points to:
   `cam_compare_operations`, `cam_inspect_toolpaths`, `drawing_get`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`
 
-**Edit (57)** - usually leaf actions, scan for genuine gaps:
-  `assembly_edit_contacts`, `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_configure`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `doc_insert_import`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_insert_image`, `drawing_update`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_generate_face_groups`, `mesh_plane_cut`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_sweep`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
+**Edit (56)** - usually leaf actions, scan for genuine gaps:
+  `assembly_edit_contacts`, `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_configure`, `design_remove_feature`, `doc_insert_derive`, `doc_insert_import`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_insert_image`, `drawing_update`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_generate_face_groups`, `mesh_plane_cut`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_sweep`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
 - **50x** across 50 module(s): "No active design. Create or open a document first (see doc_new)."
@@ -83,7 +83,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `assembly_capture_position`
 - Latest captured position discarded - back to the last captured position that remains (or the joint-defined state when nothing else was ever captured).
-- has_pending = a moved-but-uncaptured position exists (a joint_drive pose sets it the same way a free move does; a design_add_instance placement does NOT). Use capture to record it into the timeline...
+- has_pending = a moved-but-uncaptured position exists (a joint_drive pose sets it the same way a free move does; a design_add_instance placement and an assembly_constrain relationship do NOT). Use c...
 - Current position captured into the timeline.
 - Uncaptured move thrown away - the assembly is back at its last captured position (or the joint-defined state when nothing was ever captured). Captured markers are untouched; use revert to drop the ...
 - Captured position removed from the timeline; later captured positions (if any) survive a recompute unchanged.
@@ -1796,6 +1796,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Imported as MESH body(ies).
 - Direct design - no base-feature scope needed.
 - Wrapped in BaseFeature '%s' (parametric design requires it).
+- 'name' was not applied: the import landed %d mesh bodies - rename each with design_set_name, using the names in 'bodies'.
 - file_path is required - a full path to a .stl / .obj / .3mf file.
 - Unsupported mesh file '
 - '. Import needs one of:
@@ -2096,6 +2097,8 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - , so nothing was extruded.
 
 ### `model_fillet`
+- A rule fillet selects FACES, so 'edges' cannot be passed with fillet_type='rule'. Drop 'edges', or use fillet_type='constant' to round exactly those edge handles.
+- A variable-radius fillet cannot take 'faces': its radius runs from the start of the edge chain to the far end, and a face set carries no such order. Pass 'edges' handles in chain order, or fillet_t...
 - A variable-radius fillet needs 'edges' - find_geometry edge handles for a single edge, or a tangentially connected chain listed in order from its start end. An edge_filter sweep has no such order, ...
 - A chord-length fillet needs 'chord_length' - the straight-line distance across the rounded corner. 'radius' does not drive this type.
 - Rule fillet created - the rounded edge set is defined by the selected FACES, not by individual edge handles. Pair with view_screenshot.
@@ -2573,7 +2576,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - . plane=face needs plane_face (an ADJACENT face); custom_face needs plane_face.
 - action='set_alignment' needs align, valign, and/or perpendicular.
 - action='set_extension' needs 'leader_extension' (in 'units').
-- The extension set did not take (re-read
+- The extension set did not take (re-read %s %s).
 - 'leader_extension' must be a number.
 - set_flags applies to hole/thread callouts only.
 - action='set_flags' needs a non-empty 'flags' - {threaded: true, through: false}.

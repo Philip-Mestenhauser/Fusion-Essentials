@@ -13,7 +13,7 @@ import json
 
 import adsk.core
 
-from conftest import MakeDesign, MeshBody, load_tool, _NamedCollection
+from conftest import Circle3D, MakeDesign, MeshBody, load_tool, _NamedCollection
 
 fg = load_tool("find_geometry")
 
@@ -67,6 +67,34 @@ class _LineGeo:
         self.curveType = _CURVES.Line3DCurveType
         self.startPoint = _Pt(*start)
         self.endPoint = _Pt(*end)
+
+
+class _EllipseGeo:
+    """An ellipse edge's curve. Ellipse3D has no live shape dump, so this is a local double."""
+    def __init__(self, major, minor, center):
+        self.curveType = _CURVES.Ellipse3DCurveType
+        self.majorRadius = major
+        self.minorRadius = minor
+        self.center = _Pt(*center)
+
+
+class _EllipticalArcGeo:
+    """A partial ellipse's curve. EllipticalArc3D has no live shape dump - a local double."""
+    def __init__(self, major, minor, center):
+        self.curveType = _CURVES.EllipticalArc3DCurveType
+        self.majorRadius = major
+        self.minorRadius = minor
+        self.center = _Pt(*center)
+
+
+class _NurbsGeo:
+    """A spline edge's curve. NurbsCurve3D has no live shape dump - a local double."""
+    curveType = _CURVES.NurbsCurve3DCurveType
+
+
+class _PolylineGeo:
+    """A curve type find_geometry gives no label of its own. Polyline3D has no dump - a double."""
+    curveType = _CURVES.Polyline3DCurveType
 
 
 class FakeEdge:
@@ -250,6 +278,18 @@ def _plane(token, centroid):
     return FakeFace(token, _PlaneGeo(), centroid)
 
 
+def _circle(radius, center=(0, 0, 0)):
+    return Circle3D(None, _Pt(*center), radius)
+
+
+def _blind_radius_circle(center=(0, 0, 0)):
+    """A circular edge's curve whose radius read RAISES - the shape measured() answers None for, so
+    the record carries radius None."""
+    g = _circle(1.0, center)
+    del g.radius
+    return g
+
+
 class TestGuards:
     def test_unknown_units(self):
         _install([FakeOcc("P:1", "P", [FakeBody()])])
@@ -300,6 +340,15 @@ class TestFind:
         out = _payload(fg.handler(target="X:1", kind="cylinder_face", radius=8, units="mm"))
         # only the r8mm pin; handle is the composite '<token>|@...'
         assert out["returned"] == 1 and out["matches"][0]["handle"].startswith("PIN|@")
+
+    def test_a_record_whose_radius_did_not_read_is_skipped_by_the_radius_filter(self):
+        # measured() answers None for a radius the curve would not give, and subtracting from that
+        # raises inside the handler. An edge whose radius never read cannot match one either.
+        blind = FakeEdge("BLIND", _blind_radius_circle(), (1.0, 0, 0))
+        good = FakeEdge("R8", _circle(0.8), (2.0, 0, 0))
+        _install([FakeOcc("X:1", "X", [FakeBody(edges=[blind, good])])])
+        out = _payload(fg.handler(target="X:1", radius=8, units="mm"))
+        assert out["returned"] == 1 and out["matches"][0]["handle"].startswith("R8|@")
 
     def test_nearest_to_sorts(self):
         # faces at world 10cm (FAR) and 1cm (NEAR); nearest_to is in mm.
@@ -762,3 +811,66 @@ class TestCaps:
         self._many_faces(25)
         out = _payload(fg.handler(target="X:1", kind="planar_face", max_results="lots"))
         assert out["returned"] == 20
+
+
+# ── ELLIPSE / SPLINE edges: labelled, filterable, and carrying their own shape data ─────────────
+# An extruded ellipse's two elliptical edges came back as the generic "edge" with no 'kind' value to
+# filter by, so a caller narrowing by kind never saw them. Each curve type the classifier knows gets
+# its OWN label; anything it does not know still reads "edge".
+
+class TestEllipseAndSplineEdges:
+    def _edges(self, *edges):
+        _install([FakeOcc("X:1", "X", [FakeBody(edges=list(edges))])])
+
+    def _ellipse(self, token="ELL", center=(3, 0, 0)):
+        return FakeEdge(token, _EllipseGeo(2.0, 1.0, center), (5.0, 0, 0))
+
+    def test_elliptical_edge_reports_its_kind_and_both_radii(self):
+        # major/minor ride the same cm -> requested-units conversion 'radius' does; swapping the two
+        # or leaving them in cm would size a bore wrong by exactly the factor under test.
+        self._edges(self._ellipse())
+        m = _payload(fg.handler(target="X:1", units="mm"))["matches"][0]
+        assert m["kind"] == "ellipse_edge"
+        assert m["major_radius"] == 20.0 and m["minor_radius"] == 10.0
+
+    def test_an_elliptical_edge_reports_its_CENTRE_as_the_position(self):
+        # the circular-edge convention: 'position' is the centre, not the point on the edge at 5cm
+        self._edges(self._ellipse(center=(3, 0, 0)))
+        m = _payload(fg.handler(target="X:1", units="mm"))["matches"][0]
+        assert m["position"] == [30.0, 0.0, 0.0]
+
+    def test_a_partial_ellipse_is_its_own_kind(self):
+        # a full ellipse and an elliptical ARC are different curve types; one label for both would
+        # hand a caller asking for closed rims the open arcs too
+        self._edges(FakeEdge("ARC", _EllipticalArcGeo(2.0, 1.0, (0, 0, 0)), (1.0, 0, 0)))
+        m = _payload(fg.handler(target="X:1", units="mm"))["matches"][0]
+        assert m["kind"] == "elliptical_arc_edge"
+        assert m["major_radius"] == 20.0 and m["minor_radius"] == 10.0
+
+    def test_a_nurbs_edge_reads_spline_edge(self):
+        self._edges(FakeEdge("SPL", _NurbsGeo(), (1.0, 0, 0)))
+        m = _payload(fg.handler(target="X:1"))["matches"][0]
+        assert m["kind"] == "spline_edge"
+        # a spline has no centre and no radii - none may be fabricated for it
+        assert "major_radius" not in m and "minor_radius" not in m
+        assert m["position"] == [10.0, 0.0, 0.0]        # the point ON the edge, in mm
+
+    def test_kind_filter_selects_only_the_full_ellipse(self):
+        self._edges(self._ellipse(),
+                    FakeEdge("ARC", _EllipticalArcGeo(2.0, 1.0, (0, 0, 0)), (1.0, 0, 0)),
+                    FakeEdge("LN", _LineGeo((0, 0, 0), (3, 0, 0)), (1.5, 0, 0)))
+        out = _payload(fg.handler(target="X:1", kind="ellipse_edge"))
+        assert out["returned"] == 1
+        assert out["matches"][0]["handle"].startswith("ELL|@ellipse_edge:")
+
+    def test_each_new_kind_is_offered_on_the_wire(self):
+        # a label the 'kind' enum does not carry cannot be asked for at all - the schema is the only
+        # place a caller learns the filter value from.
+        enum = fg.find_tool.to_dict()["inputSchema"]["properties"]["kind"]["enum"]
+        assert {"ellipse_edge", "elliptical_arc_edge", "spline_edge"} <= set(enum)
+
+    def test_an_unclassified_curve_type_still_reads_edge(self):
+        # the fallback stays: a curve type with no label of its own is "edge", never mislabelled as
+        # one of the six the classifier knows
+        self._edges(FakeEdge("POLY", _PolylineGeo(), (1.0, 0, 0)))
+        assert _payload(fg.handler(target="X:1"))["matches"][0]["kind"] == "edge"

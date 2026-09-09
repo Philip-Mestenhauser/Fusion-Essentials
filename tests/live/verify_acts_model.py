@@ -1462,14 +1462,15 @@ _RESIZE = [
         "feature": "StepFloor@{0}".format(_ctx_get(c, "hub_index", "the step floor's index")),
         "attribute_group": "sweep_w1d", "attribute_name": "at"},
      lambda p: p.get("attribute_deleted") is True, None),
-    # the NEIGHBOURING index carries the same name and misses: the pair must agree, so an off-by-one
-    # is a refusal naming the miss rather than the feature next door.
+    # the NEIGHBOURING index: the pair must agree, so an off-by-one is refused - and the refusal
+    # says what sits at the index asked for and which index 'StepFloor' answers to now, rather than
+    # editing the feature next door.
     ("design_edit_timeline", lambda c: {
         "action": "set_attribute",
         "feature": "StepFloor@{0}".format(_ctx_get(c, "hub_index",
                                                          "the step floor's index") + 1),
         "attribute_group": "sweep_w1d", "attribute_name": "at", "attribute_value": "x"},
-     _refused("no timeline feature named"), None),
+     _refused("'StepFloor' is at index", "design_get(include=['timeline'])"), None),
 ]
 
 # --- the retained SCRATCH fixtures - the precondition fallbacks (today's proven step bodies) ---

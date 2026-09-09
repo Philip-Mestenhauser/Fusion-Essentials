@@ -10,8 +10,9 @@ import json
 
 import pytest
 
-from conftest import (BRepBody, BRepFace, FakeExportManager, FakeOccurrence, MakeComp, MakeDesign,
-                      Sketch, SketchCurves, _ExportOptions, _NamedCollection, install, load_tool)
+from conftest import (BRepBody, BRepEdge, BRepFace, FakeExportManager, FakeOccurrence, MakeComp,
+                      MakeDesign, Sketch, SketchCurves, _ExportOptions, _NamedCollection, install,
+                      load_tool)
 
 dx = load_tool("design_export")
 
@@ -911,6 +912,90 @@ class TestDxfExport:
         out = _payload(dx.handler(format="dxf", dxf_sketch="Profile1",
                                    file_path=str(tmp_path / "noext")))
         assert out["file_path"].lower().endswith(".dxf")
+
+
+class TestDxfFaceProjection:
+    """What the face path sketches ON and projects. MEASURED on a root-owned body and on a
+    sub-component's alike: project2 of the FACE into a sketch that lies on that same face raises
+    '2 : InternalValidationError : res', and Fusion may have projected the outline as it created
+    the sketch - so the edges are projected, into the component that owns the NATIVE face."""
+
+    def _face_with_edges(self, comp, edges):
+        return BRepFace(None, body=BRepBody("FaceBody", parent_component=comp), edges=edges)
+
+    def test_the_faces_EDGES_are_projected_never_the_face_itself(self, tmp_path, monkeypatch):
+        _, _em, _ = _install(monkeypatch)
+        sk = FakeSketch(lines=0, project_adds=2)
+        comp = FakeFaceComp(sk)
+        edges = [BRepEdge(None), BRepEdge(None)]
+        face = self._face_with_edges(comp, edges)
+        monkeypatch.setattr(dx._DXF_FACE, "resolve", lambda raw: (face, None))
+        out = _payload(dx.handler(format="dxf", dxf_face="H" * 40,
+                                  file_path=str(tmp_path / "p.dxf")))
+        assert out["exported"] is True
+        assert len(sk.project_calls) == 1
+        assert sk.project_calls[0][0] == edges          # the edges, not [face]
+
+    def test_a_proxy_handle_sketches_in_the_NATIVE_faces_component(self, tmp_path, monkeypatch):
+        # A find_geometry handle at a sub-component's face resolves to a PROXY; sketching in the
+        # proxy's own component and projecting the proxy is the pair that raises.
+        _install(monkeypatch)
+        native_sk = FakeSketch(lines=0, project_adds=2)
+        owner = FakeFaceComp(native_sk)
+        edges = [BRepEdge(None)]
+        native = self._face_with_edges(owner, edges)
+        other = FakeFaceComp(FakeSketch(lines=0, project_adds=2))
+        proxy = BRepFace(None, body=BRepBody("FaceBody", parent_component=other),
+                         assembly_context=object(), native_object=native, edges=[BRepEdge(None)])
+        monkeypatch.setattr(dx._DXF_FACE, "resolve", lambda raw: (proxy, None))
+        out = _payload(dx.handler(format="dxf", dxf_face="H" * 40,
+                                  file_path=str(tmp_path / "p.dxf")))
+        assert out["exported"] is True
+        assert owner.sketches.added_with is native      # the native face, in ITS component
+        assert other.sketches.added_with is None        # never the proxy's own component
+        assert native_sk.project_calls[0][0] == edges   # the NATIVE face's edges
+
+    def test_a_sketch_fusion_already_filled_is_not_projected_a_second_time(self, tmp_path,
+                                                                          monkeypatch):
+        # Creating a sketch on a face can arrive with the face's edges already projected; projecting
+        # again writes every outline curve to the DXF twice.
+        _, em, _ = _install(monkeypatch)
+        sk = FakeSketch(lines=4, project_adds=4)
+        comp = FakeFaceComp(sk)
+        face = self._face_with_edges(comp, [BRepEdge(None)])
+        monkeypatch.setattr(dx._DXF_FACE, "resolve", lambda raw: (face, None))
+        out = _payload(dx.handler(format="dxf", dxf_face="H" * 40,
+                                  file_path=str(tmp_path / "p.dxf")))
+        assert out["exported"] is True
+        assert sk.project_calls == []
+        assert em._calls[-1]["geom"] is sk
+
+    def test_projected_false_is_refused_before_the_design_is_touched(self, tmp_path, monkeypatch):
+        # MEASURED: the DXF this wrote landed ~2 KB with an EMPTY entities section, under
+        # exported:true - the face path's whole content is the projected outline.
+        _, em, _ = _install(monkeypatch)
+        sk = FakeSketch(lines=0, project_adds=4)
+        comp = FakeFaceComp(sk)
+        face = self._face_with_edges(comp, [BRepEdge(None)])
+        monkeypatch.setattr(dx._DXF_FACE, "resolve", lambda raw: (face, None))
+        res = dx.handler(format="dxf", dxf_face="H" * 40, dxf_export_projected=False,
+                         file_path=str(tmp_path / "p.dxf"))
+        assert res["isError"] is True
+        assert "'dxf_export_projected'" in res["message"]
+        assert comp.sketches.added_with is None          # no scratch sketch was made
+        assert em._calls == []                           # and nothing was written
+
+    def test_projected_true_and_omitted_both_export(self, tmp_path, monkeypatch):
+        # The refusal is keyed on the value FALSE, not on the flag being present: true must pass.
+        for i, kwargs in enumerate(({"dxf_export_projected": True}, {})):
+            _install(monkeypatch)
+            sk = FakeSketch(lines=0, project_adds=2)
+            comp = FakeFaceComp(sk)
+            face = self._face_with_edges(comp, [BRepEdge(None)])
+            monkeypatch.setattr(dx._DXF_FACE, "resolve", lambda raw: (face, None))
+            out = _payload(dx.handler(format="dxf", dxf_face="H" * 40,
+                                      file_path=str(tmp_path / f"p{i}.dxf"), **kwargs))
+            assert out["exported"] is True, kwargs
 
 
 class TestDxfWriterGuards:

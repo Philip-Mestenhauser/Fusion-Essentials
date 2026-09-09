@@ -536,8 +536,10 @@ class TestStatusPublishesTheFlagTriState:
         res = ja.handler(action="capture")
         assert res["isError"] is True and "no pending" in res["message"].lower()
 
-    def test_the_status_note_names_the_placement_exception(self, capture):
-        # a placement does NOT set this flag - a caller told otherwise chases a capture that refuses
+    def test_the_status_note_names_both_exceptions(self, capture):
+        # neither a placement nor a constraint sets this flag - a caller told otherwise chases a
+        # capture that refuses
         capture(pending=True)
         note = payload(ja.handler(action="status"))["note"]
-        assert "design_add_instance placement does NOT" in note
+        assert ("a design_add_instance placement and an assembly_constrain relationship do NOT"
+                in note)

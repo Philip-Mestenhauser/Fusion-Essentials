@@ -133,6 +133,22 @@ class TestLoft:
         # ORDER is the whole game: sections added exactly H0,H1,H2.
         assert lf.last_input.loftSections.added == [p0, p1, p2]
 
+    def test_a_join_landing_a_new_body_names_model_combine(self):
+        lf = _FakeLoftFeatures()
+        _install(_FakeFeatures(loft=lf), bodies_by_name={"Bar": BRepBody("Bar")},
+                 handle_map={"H0": Profile("0"), "H1": Profile("1")})
+        out = _payload(so.handler(profiles=["H0", "H1"], operation="join"))
+        assert "landed a NEW body (Body1)" in out["note"]
+        assert "model_combine(join)" in out["note"]
+
+    def test_a_join_that_grew_the_body_already_there_appends_nothing(self):
+        # the feature's result body IS the one the component held - the join fused, say nothing
+        lf = _FakeLoftFeatures()
+        _install(_FakeFeatures(loft=lf), bodies_by_name={"Body1": BRepBody("Body1")},
+                 handle_map={"H0": Profile("0"), "H1": Profile("1")})
+        out = _payload(so.handler(profiles=["H0", "H1"], operation="join"))
+        assert "NEW body" not in out["note"]
+
     def test_reports_is_solid_read_back(self):
         self._profiles_design(result_is_solid=True)
         out = _payload(so.handler(profiles=["H0", "H1", "H2"]))

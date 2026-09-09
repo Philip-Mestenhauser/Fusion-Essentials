@@ -31,7 +31,12 @@ _MAX_RESULTS_CEILING = 100   # hard cap on returned match rows (each crosses the
 # friendly 'kind' -> what it matches. Faces by surfaceType, edges by curveType, plus vertex.
 _FACE_KINDS = {"cylinder_face": "Cylinder", "planar_face": "Plane",
     "cone_face": "Cone", "sphere_face": "Sphere", "torus_face": "Torus"}
-_EDGE_KINDS = {"circular_edge": "Circle3D", "line_edge": "Line3D", "arc_edge": "Arc3D"}
+_EDGE_KINDS = {"circular_edge": "Circle3D", "line_edge": "Line3D", "arc_edge": "Arc3D",
+    "ellipse_edge": "Ellipse3D", "elliptical_arc_edge": "EllipticalArc3D",
+    "spline_edge": "NurbsCurve3D"}
+# Edge kinds whose reported 'position' is the curve CENTRE rather than the point on the edge. The
+# handle locator stays keyed to pointOnEdge either way - that is what _refind_by_locator compares.
+_CENTERED_EDGES = ("circular_edge", "arc_edge", "ellipse_edge", "elliptical_arc_edge")
 
 
 
@@ -169,7 +174,10 @@ def _edge_record(edge, inv_k):
     ct = safe(lambda: g.curveType)
     kind = {adsk.core.Curve3DTypes.Circle3DCurveType: "circular_edge",
             adsk.core.Curve3DTypes.Line3DCurveType: "line_edge",
-            adsk.core.Curve3DTypes.Arc3DCurveType: "arc_edge"}.get(ct, "edge")
+            adsk.core.Curve3DTypes.Arc3DCurveType: "arc_edge",
+            adsk.core.Curve3DTypes.Ellipse3DCurveType: "ellipse_edge",
+            adsk.core.Curve3DTypes.EllipticalArc3DCurveType: "elliptical_arc_edge",
+            adsk.core.Curve3DTypes.NurbsCurve3DCurveType: "spline_edge"}.get(ct, "edge")
     pt = safe(lambda: edge.pointOnEdge)
     # Keyed to pointOnEdge - what _refind_by_locator compares an edge against, not the circle center
     # the display 'position' may carry below.
@@ -179,6 +187,11 @@ def _edge_record(edge, inv_k):
             "length": _common.measured(lambda: edge.length, inv_k, 3)}
     if kind in ("circular_edge", "arc_edge"):
         rec["radius"] = _common.measured(lambda: g.radius, inv_k, 3)
+    elif kind in ("ellipse_edge", "elliptical_arc_edge"):
+        # Two radii, so the single-value 'radius' filter selects no elliptical edge.
+        rec["major_radius"] = _common.measured(lambda: g.majorRadius, inv_k, 3)
+        rec["minor_radius"] = _common.measured(lambda: g.minorRadius, inv_k, 3)
+    if kind in _CENTERED_EDGES:
         ctr = safe(lambda: g.center)
         if ctr:
             rec["position"] = [round(ctr.x * inv_k, 3), round(ctr.y * inv_k, 3), round(ctr.z * inv_k, 3)]
@@ -246,10 +259,12 @@ def handler(target: str = "", kind: str = "", radius: float = None,
                 rec["hidden"] = True
         matches.extend(recs)
 
-    # radius filter (cylinder faces / circular edges)
+    # radius filter (cylinder faces / circular edges). A record whose radius did not read carries
+    # None, and cannot match a radius it never answered - it is skipped, not compared.
     if radius is not None:
         r = float(radius)
-        matches = [m for m in matches if "radius" in m and abs(m["radius"] - r) <= max(0.05 * r, 1e-6)]
+        matches = [m for m in matches if m.get("radius") is not None
+                   and abs(m["radius"] - r) <= max(0.05 * r, 1e-6)]
 
     # sort by distance to nearest_to, else leave in discovery order
     if isinstance(nearest_to, (list, tuple)) and len(nearest_to) == 3:
@@ -292,7 +307,8 @@ find_tool = (
             "Occurrence/component/body; a shared name scans every match. '' = whole design."})
     .add_input_property(*_inputs.Choice("kind",
         ["cylinder_face", "planar_face", "cone_face", "sphere_face", "torus_face",
-         "circular_edge", "line_edge", "arc_edge", "vertex"]).as_property())
+         "circular_edge", "line_edge", "arc_edge", "ellipse_edge", "elliptical_arc_edge",
+         "spline_edge", "vertex"]).as_property())
     .add_input_property("radius", {"type": "number",
             "description": "In 'units', 5% tolerance."})
     .add_input_property("nearest_to", {"type": "array", "items": {"type": "number"},

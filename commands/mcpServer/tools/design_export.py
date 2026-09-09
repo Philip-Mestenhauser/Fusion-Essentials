@@ -317,16 +317,36 @@ def _export_dxf_sketch(design, sketch_name, path,
     })
 
 
+def _sketch_curve_count(sk):
+    """How many curves a scratch projection sketch holds - the face path's whole content."""
+    return (safe(lambda: sk.sketchCurves.sketchLines.count, 0)
+            or safe(lambda: sk.sketchCurves.sketchArcs.count, 0)
+            or safe(lambda: sk.sketchCurves.sketchCircles.count, 0))
+
+
 def _export_dxf_face(design, dxf_face, path, want_construction, want_points, want_projected):
+    # MEASURED: with this flag false the written DXF's ENTITIES section is EMPTY, because a scratch
+    # sketch on a face holds the projected outline and nothing else. The file still lands ~2 KB of
+    # header, so the export would report exported:true over a drawing with no curve in it.
+    if want_projected is not None and not want_projected:
+        return error("'dxf_export_projected' (false) writes an ENTITIES section with no curve in "
+                     "it for 'dxf_face': the scratch sketch this path projects the outline into "
+                     "holds nothing else - refusing rather than writing an empty DXF. Omit it, or "
+                     "pass 'dxf_sketch' to filter a sketch that has geometry of its own.")
+
     face, ferr = _DXF_FACE.resolve(dxf_face)
     if ferr:
         return error(ferr)
 
-    comp = safe(lambda: face.body.parentComponent) or safe(lambda: design.rootComponent)
+    # A find_geometry handle at a sub-component's face resolves to a PROXY (measured: assemblyContext
+    # reads the occurrence), and the scratch sketch is built in the component that OWNS the face, so
+    # the native face is what both the sketch's plane and the projection are taken from.
+    native = _common._native_of(face)
+    comp = safe(lambda: native.body.parentComponent) or safe(lambda: design.rootComponent)
     if comp is None:
         return error("Could not resolve a component to build the projection sketch in.")
     try:
-        sk = comp.sketches.add(face)
+        sk = comp.sketches.add(native)
     except Exception as e:
         return error(f"Could not create a projection sketch on the face: {e}")
     if not sk:
@@ -336,27 +356,26 @@ def _export_dxf_face(design, dxf_face, path, want_construction, want_points, wan
     def _cleanup():
         return bool(safe(lambda: sk.deleteMe(), False))
 
-    try:
-        sk.project2([face], False)
-    except Exception as e:
-        cleaned = _cleanup()
-        msg = f"Could not project the face's edges into a sketch for DXF: {e}"
-        if not cleaned:
-            msg += f" Also failed to remove the scratch sketch '{sk_name}' - delete it manually."
-        return error(msg)
+    # MEASURED on a root-owned body and on a sub-component's: project2 of the FACE into a sketch that
+    # lies on that same face raises '2 : InternalValidationError : res', while its EDGES project. A
+    # sketch Fusion already filled is left alone - projecting again doubles every outline curve.
+    if not _sketch_curve_count(sk):
+        try:
+            sk.project2(list(_common.iter_collection(safe(lambda: native.edges))), False)
+        except Exception as e:
+            cleaned = _cleanup()
+            msg = f"Could not project the face's edges into a sketch for DXF: {e}"
+            if not cleaned:
+                msg += f" Also failed to remove the scratch sketch '{sk_name}' - delete it manually."
+            return error(msg)
 
-    has_geom = (safe(lambda: sk.sketchCurves.sketchLines.count, 0)
-                or safe(lambda: sk.sketchCurves.sketchArcs.count, 0)
-                or safe(lambda: sk.sketchCurves.sketchCircles.count, 0))
-    if not has_geom:
+    if not _sketch_curve_count(sk):
         cleaned = _cleanup()
         msg = "Face projection produced no sketch geometry - nothing to write to DXF."
         if not cleaned:
             msg += f" Also failed to remove the scratch sketch '{sk_name}' - delete it manually."
         return error(msg)
 
-    # The face path's ENTIRE content is projected geometry, so want_projected=False writes an empty
-    # DXF. That is the caller's choice to make and is passed through unchanged, not overridden here.
     size, werr = _write_dxf(design, sk, path, want_construction, want_points, want_projected)
     cleaned = _cleanup()
     if werr:

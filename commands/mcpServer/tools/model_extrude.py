@@ -659,6 +659,8 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     # report which bodies (and whose components) actually changed - and warn when an UNSCOPED cut bled
     # into a co-located component (feature.bodies sees only the own-component result body; see helper).
     solid_snap = _solid_bodies_snapshot(design) if op_key in ("cut", "intersect") else []
+    # A join is told "grew a body" from "made a second one" by the host's body NAMES before the add.
+    bodies_before = _common.component_body_names(host) if op_key == "join" else None
 
     try:
         feature = host.features.extrudeFeatures.add(ext_input)
@@ -809,6 +811,9 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         adv = root_body_advisory(design, host)          # advise on where the body actually landed
         if adv:
             note += " " + adv
+    join_clause = _common.join_new_body_clause(op_key, bodies_before, body_names)
+    if join_clause:
+        note += " " + join_clause
     # 'all' takes every closed region, so a bay inside a frame extrudes into material and the payload
     # cannot show it - the enclosed regions are counted and named here instead, behind safe() so a
     # misbehaving containment read cannot sink an extrude that landed.

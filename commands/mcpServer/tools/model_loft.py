@@ -168,6 +168,8 @@ def handler(profiles=None, rails=None, centerline="", operation="new",
     # before/after pair can say material actually changed.
     check_bodies = _cut_check_bodies(root) if op_key in ("cut", "intersect") else []
     vol_before = _geom.volumes(check_bodies)
+    # A join is told "grew a body" from "made a second one" by the host's body NAMES before the add.
+    bodies_before = _common.component_body_names(root) if op_key == "join" else None
 
     try:
         feature = root.features.loftFeatures.add(loft_input)
@@ -221,6 +223,10 @@ def handler(profiles=None, rails=None, centerline="", operation="new",
     else:
         shape = ("The feature's isSolid flag could not be read back, so whether the result is a "
                  "solid or a surface is UNVERIFIED.")
+    note = ("Lofted through %d profiles in order. " % len(secs)) + shape
+    join_clause = _common.join_new_body_clause(op_key, bodies_before, body_names)
+    if join_clause:
+        note += " " + join_clause
     payload = {
         "lofted": True,
         "feature": safe(lambda: feature.name),
@@ -230,7 +236,7 @@ def handler(profiles=None, rails=None, centerline="", operation="new",
         "has_centerline": center_ent is not None,
         "is_solid": is_solid,
         "result_bodies": body_names,
-        "note": ("Lofted through %d profiles in order. " % len(secs)) + shape,
+        "note": note,
     }
     if is_solid is None:
         payload["unverified"] = ["is_solid"]
