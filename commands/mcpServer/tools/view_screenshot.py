@@ -26,8 +26,8 @@ _VIEWS = ("current",) + tuple(_view_common.VIEW_DIRECTIONS)
 
 _MAX_DIM = 4096
 
-# The pixel size a caller who names none gets. The handler signature, its non-numeric fallback and
-# the three wire sentences all read these, so they cannot state different numbers.
+# The pixel size a caller who names none gets. The handler signature and its non-numeric fallback
+# both read these, so they cannot state different numbers.
 _WIDTH_DEFAULT = 800
 _HEIGHT_DEFAULT = 600
 
@@ -38,8 +38,7 @@ _PNG_EXT = ".png"
 # A TargetRef, not an OccurrenceRef: a single-body root design places no occurrence at all, so a
 # body handle/name is the only way to frame its part.
 _FIT_TO = _inputs.TargetRef("fit_to", allow=("occurrence", "body", "mesh"),
-        description="Occurrence or BODY to frame the camera on: hides the rest for the shot, then "
-                    "restores them. Omit to frame the whole design.")
+        description="Hides the rest for the shot, then restores them.")
 
 
 # The frame-on-one-occurrence isolate is shared with view_set(orient, focus=) - ONE visibility walk
@@ -239,27 +238,22 @@ def handler(view: str = "current", width: int = _WIDTH_DEFAULT, height: int = _H
 
 
 TOOL_DESCRIPTION = (
-    "Capture the current Fusion viewport as an image. 'view' reorients the camera first, 'zoom' "
-    "scales after fitting, 'fit_to' frames ONE occurrence or body. 'file_path' also writes the PNG to "
-    "local disk (the image still returns inline) - the raster file drawing_insert_image takes. "
-    "view_screenshot_multi captures several views in one call."
+    "Capture the current Fusion viewport as an image; 'file_path' also writes the PNG to disk, and "
+    "the image still returns inline. view_screenshot_multi captures several views at once."
 )
 
 tool = (
     Tool.create_simple(name="view_screenshot", description=TOOL_DESCRIPTION)
-    .add_input_property(*_inputs.Choice("view", list(_VIEWS), default="current",
-            description="Camera orientation.").as_property())
-    .add_input_property("width", {"type": "integer", "description": f"Width in px (1-{_MAX_DIM}, default {_WIDTH_DEFAULT})."})
-    .add_input_property("height", {"type": "integer", "description": f"Height in px (1-{_MAX_DIM}, default {_HEIGHT_DEFAULT})."})
-    .add_input_property("zoom", {"type": "number", "description": "Zoom factor after fitting (>1 out, <1 in; default 1)."})
+    .add_input_property(*_inputs.Choice("view", list(_VIEWS), default="current").as_property())
+    .add_input_property("width", {"type": "integer"})
+    .add_input_property("height", {"type": "integer"})
+    .add_input_property("zoom", {"type": "number",
+            "description": "Applied after fitting: >1 out, <1 in. Default 1."})
     .add_input_property(*_FIT_TO.as_property())
-    .add_input_property("transparent_background", {"type": "boolean",
-            "description": "Render the background transparent."})
-    .add_input_property("anti_aliased", {"type": "boolean",
-            "description": "Anti-alias the rendered image."})
+    .add_input_property("transparent_background", {"type": "boolean"})
+    .add_input_property("anti_aliased", {"type": "boolean"})
     .add_input_property("file_path", {"type": "string",
-            "description": "Local path to ALSO write the PNG to ('.png' appended if missing, "
-                           "directory created)."})
+            "description": "Also write the PNG to this local path."})
     .strict_schema()
 )
 

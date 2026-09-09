@@ -2066,25 +2066,19 @@ class TestDriveDirection:
         assert "motion vector" not in out["note"]
 
 
-# ── the description states both motion-link claims CONDITIONALLY ─────────────
+# ── the description makes no motion-link claim: the receipt answers it ───────
 
 class TestTheDescriptionGatesItsMotionLinkClaims:
-    """The description is all an agent knows before its first call, and BOTH motion-link claims are
-    conditional in the handler: the coupling claim is withheld for a link reading suppressed or
-    compute-failed (_link_couples False), and the second-member refusal is armed only where that
-    state is not False. Asserting on the wire that a drive moves the partner, or that the second
-    member is refused whatever the link reads, states ahead of every call the two things the receipt
-    withholds for such a link - both of them pinned by TestLinkStateGating above."""
+    """BOTH motion-link claims are conditional in the handler: the coupling claim is withheld for a
+    link reading suppressed or compute-failed (_link_couples False), and the second-member refusal
+    is armed only where that state is not False. The description is read before every call and
+    cannot carry either condition, so it states neither - the receipt answers the coupling and the
+    refusal names the partner, both pinned by TestLinkStateGating above."""
 
-    def test_the_coupling_is_wired_as_something_the_receipt_ANSWERS(self):
-        assert "the receipt says whether the link couples" in jd.TOOL_DESCRIPTION
-
-    def test_the_wire_makes_no_flat_promise_that_the_link_moves_the_partner(self):
-        # a bare parenthetical of the "the link moves it" shape asserts the coupling for every
-        # link, which is the claim the receipt refuses to make for a dead one.
-        assert "the link moves it" not in jd.TOOL_DESCRIPTION
-
-    def test_the_partner_read_and_the_refusal_ride_the_SAME_condition(self):
-        desc = jd.TOOL_DESCRIPTION
-        assert "Where it may, read the partner back rather than driving it" in desc
-        assert "an xref/referenced pair refuses the SECOND member for the session" in desc
+    def test_the_wire_makes_no_motion_link_claim_at_all(self):
+        # a wire sentence of the "the link moves it" shape asserts the coupling for every link,
+        # which is what the receipt refuses to say for a suppressed or compute-failed one.
+        low = jd.TOOL_DESCRIPTION.lower()
+        for claim in ("the link moves it", "motion link", "motion-link", "couple", "partner",
+                      "second member"):
+            assert claim not in low, claim

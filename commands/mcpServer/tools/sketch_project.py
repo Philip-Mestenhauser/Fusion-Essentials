@@ -23,34 +23,28 @@ from . import _sketch_detail
 app = adsk.core.Application.get()
 
 _ACTIONS = ("into_sketch", "to_surface", "intersect")
-_ACTION = _inputs.Choice("action", list(_ACTIONS), default="into_sketch",
-                         description="Which projection to run.")
+_ACTION = _inputs.Choice("action", list(_ACTIONS), default="into_sketch")
 
 # The geometry to project: find_geometry handles at edges/faces/vertices (a face projects all its
 # edges). require="any" so faces, edges, and vertices are all accepted; the Sketch method rejects
 # anything it can't take and that surfaces as the mutation error.
 _ENTITIES = _inputs.GeometryHandleList("entities", require="any", required=True,
-    description="What to project in (a face gives all its edges), or to cross the sketch plane.")
+    description="A face gives all its edges.")
 
 # projectToSurface's first argument is typed std::vector<BRepFace>, so a non-face here is a SWIG
 # TypeError rather than a wrong-but-working call.
-_TARGET_FACES = _inputs.GeometryHandleList("target_faces", require="face", required=True,
-    description="The face(s) curves are projected ONTO.")
+_TARGET_FACES = _inputs.GeometryHandleList("target_faces", require="face", required=True)
 
-_CURVE_HANDLES = _inputs.GeometryHandleList("curve_handles", require="edge",
-    description="Model edge(s) to project onto 'target_faces'.")
+_CURVE_HANDLES = _inputs.GeometryHandleList("curve_handles", require="edge")
 
-_BODIES = _inputs.BodyRefList("bodies",
-    description="The bodies to cut with the sketch plane.")
+_BODIES = _inputs.BodyRefList("bodies")
 
 _PROJECT_TYPE = _inputs.Choice("project_type", ["closest_point", "along_vector"],
-    default="closest_point",
-    description="Nearest point of the face, or along 'direction'.")
+    default="closest_point")
 
 # projectToSurface wants an ENTITY for directionEntity (a ConstructionAxis is accepted), so
 # entity_only refuses a face handle - a face resolves to a direction VECTOR the call cannot consume.
-_DIRECTION = _inputs.AxisRef("direction", entity_only=True,
-    description="project_type='along_vector': the direction to project along.")
+_DIRECTION = _inputs.AxisRef("direction", entity_only=True)
 
 # The sketch-entity ref kinds sketch_constrain / sketch_dimension can address ('<type>:<index>') -
 # _common.ENTITY_REF_KINDS is the single source of truth; defer to it instead of a local copy that
@@ -647,11 +641,7 @@ def handler(entities="", sketch_name: str = "", link: bool = None, action: str =
 
 
 TOOL_DESCRIPTION = (
-    "Create sketch curves from existing model geometry. into_sketch (default) is Fusion's Project: "
-    "'entities' become curves on the sketch plane. to_surface projects 'curve_refs'/'curve_handles' "
-    "onto 'target_faces' - they land ON the face, off the sketch plane, so they do not close a "
-    "profile. intersect sections 'bodies'/'entities' with the sketch plane. Every action reports "
-    "the created '<type>:<index>' refs for sketch_constrain / sketch_dimension.\n"
+    "Create sketch curves from model geometry.\n"
     + _outputs.produces_block(RETURNS)
 )
 
@@ -659,18 +649,13 @@ tool = (
     Tool.create_simple(name="sketch_project", description=TOOL_DESCRIPTION)
     .add_input_property(*_ACTION.as_property())
     .add_input_property("entities", _ENTITIES.schema())
-    .add_input_property("sketch_name", {"type": "string",
-            "description": "Sketch to project INTO (omit = most recent)."})
+    .add_input_property("sketch_name", {"type": "string"})
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
-    .add_input_property("link", {"type": "boolean",
-            "description": "Keep the curves linked to the source. Default true."})
+    .add_input_property("link", {"type": "boolean"})
     .add_input_property(*_TARGET_FACES.as_property())
-    .add_input_property("source_sketch", {"type": "string",
-            "description": "The sketch 'curve_refs' are read against; not the receiving one."})
-    .add_input_property("source_component", {"type": "string",
-            "description": "Component holding 'source_sketch'; same forms as 'component'."})
-    .add_input_property("curve_refs", {"type": "array", "items": {"type": "string"},
-            "description": "'<type>:<index>' curve ids in 'source_sketch'."})
+    .add_input_property("source_sketch", {"type": "string"})
+    .add_input_property("source_component", {"type": "string"})
+    .add_input_property("curve_refs", {"type": "array", "items": {"type": "string"}})
     .add_input_property(*_CURVE_HANDLES.as_property())
     .add_input_property(*_PROJECT_TYPE.as_property())
     .add_input_property(*_DIRECTION.as_property())

@@ -73,10 +73,7 @@ def handler(folder_name: str = "", project: str = "", project_id: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Create a folder in a project, identified by 'project' (name) or 'project_id'. "
-    "'parent_folder' may be a nested path like 'Fixtures/Vises' - missing folders "
-    "along it are created (mkdir -p). Fails on a duplicate name in the same location; "
-    "data_get(include=['folders']) shows the existing structure."
+    "Create a folder in a project; a nested 'parent_folder' path creates its missing folders."
 )
 
 tool = (
@@ -87,9 +84,9 @@ tool = (
         input_param_description="Name for the new folder.",
     )
     .add_input_property("project", {"type": "string", "description": "Destination project name."})
-    .add_input_property("project_id", {"type": "string", "description": "Destination project id (alt to name)."})
+    .add_input_property("project_id", {"type": "string", "description": "Alt to 'project'."})
     .add_input_property("parent_folder", {"type": "string",
-        "description": "Parent path (e.g. 'Fixtures/Vises'); missing folders are created."})
+        "description": "Path, e.g. 'Fixtures/Vises'. Default: the project root."})
     .strict_schema()
 )
 item = Item.create_tool_item(

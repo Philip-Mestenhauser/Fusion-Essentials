@@ -31,7 +31,7 @@ _EXTENTS = ("blind", "through")
 
 # the face the holes are drilled into (a find_geometry planar-face handle) - defines orientation.
 _FACE = _inputs.GeometryHandle("face", require="planar_face", required=True,
-    description="Planar face to drill into. Holes go into the body, normal to this face.")
+    description="Drilled into, normal to it.")
 
 _PLACEMENTS = ("sketch_points", "center", "on_edge", "plane_offsets")
 
@@ -39,8 +39,7 @@ _PLACEMENTS = ("sketch_points", "center", "on_edge", "plane_offsets")
 # which differs from the face plane's in origin AND in axis sign and is not derivable from the face.
 # 'world' lets a caller hand over coordinates it already read; _sketch_space_point converts them.
 _POINTS_SPACES = ("sketch", "world")
-_POINTS_SPACE = _inputs.Choice("points_space", options=list(_POINTS_SPACES), default="sketch",
-    description="Which frame 'points' are read in.")
+_POINTS_SPACE = _inputs.Choice("points_space", options=list(_POINTS_SPACES), default="sketch")
 
 # How far off the face's plane a WORLD point may sit and still be drilled. It absorbs the rounding a
 # world read publishes (find_geometry rounds to 3 decimals in the caller's units); past it the point
@@ -48,11 +47,11 @@ _POINTS_SPACE = _inputs.Choice("points_space", options=list(_POINTS_SPACES), def
 _OFF_PLANE_TOL_CM = 0.005
 
 _EDGE = _inputs.GeometryHandle("edge", require="edge",
-    description="center: circular/elliptical edge to centre on. on_edge: the edge to sit on")
+    description="For placement=center or on_edge.")
 _OFFSET_EDGE_ONE = _inputs.GeometryHandle("offset_edge_one", require="edge",
-    description="plane_offsets: straight edge 'offset_one' is measured from.")
+    description="'offset_one' is measured from it.")
 _OFFSET_EDGE_TWO = _inputs.GeometryHandle("offset_edge_two", require="edge",
-    description="plane_offsets: second straight edge, paired with 'offset_two'.")
+    description="Paired with 'offset_two'.")
 
 _EDGE_POSITIONS = ("start", "middle", "end")
 _EDGE_POSITION_ATTRS = {"start": "EdgeStartPointPosition", "middle": "EdgeMidPointPosition",
@@ -829,51 +828,47 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
 
 
 TOOL_DESCRIPTION = (
-    "Drill HOLES with the real Hole command (not a sketch + extrude-cut), so the feature carries "
-    "hole/thread metadata. 'face' is the planar face to drill into and 'points' the positions on "
-    "it, read in the frame 'points_space' names - under the default 'sketch' frame only [x,y,0] "
-    "sits on the face. Several points make ONE patterned hole feature (a bolt circle in one call). "
-    "'placement' instead places ONE hole off existing geometry on 'face'."
+    "Drill holes with the Hole feature, so it carries hole and thread metadata; several 'points' "
+    "make ONE patterned feature."
 )
 
 tool = (
     Tool.create_simple(name="model_hole", description=TOOL_DESCRIPTION)
-    .add_input_property("hole_type", {"type": "string", "enum": list(_TYPES),
-            "description": "Hole style."})
-    .add_input_property("diameter", {"type": "string", "description": "Hole diameter, e.g. '8 mm'."})
+    .add_input_property("hole_type", {"type": "string", "enum": list(_TYPES)})
+    .add_input_property("diameter", {"type": "string", "description": "e.g. '8 mm'."})
     .add_input_property("face", _FACE.schema())
     .add_input_property("points", {"type": "array", "items": {"type": "array", "items": {"type": "number"}},
-            "description": "Positions to drill at (in 'units'), read in the frame 'points_space' names."})
+            "description": "Positions in 'units', in the frame 'points_space' names."})
     .add_input_property(*_POINTS_SPACE.as_property())
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("extent", {"type": "string", "enum": list(_EXTENTS),
             "description": "'blind' needs 'depth'."})
-    .add_input_property("depth", {"type": "string", "description": "Blind hole depth, e.g. '10 mm'."})
-    .add_input_property("cbore_diameter", {"type": "string", "description": "Counterbore diameter."})
-    .add_input_property("cbore_depth", {"type": "string", "description": "Counterbore depth."})
-    .add_input_property("csink_diameter", {"type": "string", "description": "Countersink diameter."})
-    .add_input_property("csink_angle", {"type": "string", "description": "Countersink angle, e.g. '90 deg'."})
-    .add_input_property("tap", {"type": "string", "description": "Thread designation to tap, e.g. 'M5x0.8'."})
+    .add_input_property("depth", {"type": "string", "description": "e.g. '10 mm'."})
+    .add_input_property("cbore_diameter", {"type": "string"})
+    .add_input_property("cbore_depth", {"type": "string"})
+    .add_input_property("csink_diameter", {"type": "string"})
+    .add_input_property("csink_angle", {"type": "string", "description": "e.g. '90 deg'."})
+    .add_input_property("tap", {"type": "string", "description": "e.g. 'M5x0.8'."})
     .add_input_property("thread_type", {"type": "string",
-            "description": "Thread standard for 'tap' when several carry it."})
+            "description": "When several standards carry 'tap'."})
     .add_input_property("modeled", {"type": "boolean",
-            "description": "True = real MODELED thread (needs 'tap'); default cosmetic."})
-    .add_input_property("tip_angle", {"type": "string",
-            "description": "Drill tip angle, e.g. '118 deg'."})
-    .add_input_property("fastener", {"type": "string", "description": "Clearance fastener spec, e.g. 'M6 Socket Head Cap Screw'; sizes the hole, overriding 'diameter'."})
-    .add_input_property("fit", {"type": "string", "enum": list(_FITS), "description": "Clearance fit for 'fastener' (default normal)."})
+            "description": "Default cosmetic; true cuts the helix."})
+    .add_input_property("tip_angle", {"type": "string", "description": "e.g. '118 deg'."})
+    .add_input_property("fastener", {"type": "string",
+            "description": "e.g. 'M6 Socket Head Cap Screw'; overrides 'diameter'."})
+    .add_input_property("fit", {"type": "string", "enum": list(_FITS),
+            "description": "Default normal."})
     .add_input_property("placement", {"type": "string", "enum": list(_PLACEMENTS),
-            "description": "Default 'sketch_points'; else see 'edge'/'point'."})
+            "description": "Default sketch_points."})
     .add_input_property(*_EDGE.as_property())
     .add_input_property("edge_position", {"type": "string", "enum": list(_EDGE_POSITIONS),
-            "description": "Where on 'edge' to place the hole, for placement='on_edge'."})
+            "description": "For placement=on_edge."})
     .add_input_property("point", {"type": "array", "items": {"type": "number"},
-            "description": "plane_offsets: approximate [x,y,z] in the frame of the component that "
-                           "OWNS 'face' (never the frame 'points_space' names)."})
+            "description": "Approximate [x,y,z] in the frame of the component owning 'face'."})
     .add_input_property(*_OFFSET_EDGE_ONE.as_property())
-    .add_input_property("offset_one", {"type": "string", "description": "Distance from 'offset_edge_one', e.g. '10 mm'."})
+    .add_input_property("offset_one", {"type": "string", "description": "e.g. '10 mm'."})
     .add_input_property(*_OFFSET_EDGE_TWO.as_property(brief=True))
-    .add_input_property("offset_two", {"type": "string", "description": "Distance from 'offset_edge_two', e.g. '10 mm'."})
+    .add_input_property("offset_two", {"type": "string", "description": "e.g. '10 mm'."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,

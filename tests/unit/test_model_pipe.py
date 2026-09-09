@@ -644,8 +644,7 @@ def test_the_path_description_states_the_tangent_continuity_rule():
     # seed, while a fillet patch that breaks tangency at the junction stops the chain. Chaining
     # follows tangent continuity, not open-vs-closed, and only the reported count says what ran.
     desc = mp.pipe_tool.to_dict()["inputSchema"]["properties"]["path"]["description"]
-    assert "TANGENT connections" in desc
-    assert "sharp corner stops the chain" in desc
+    assert "TANGENT connections only" in desc
     assert "'path' count is the truth" in desc
     assert "auto-chain" not in desc.lower()
     assert "closed loop" not in desc.lower() and "seed edge alone" not in desc

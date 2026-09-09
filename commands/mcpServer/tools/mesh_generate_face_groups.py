@@ -19,10 +19,8 @@ from ._design_common import run_in_base_feature
 
 app = adsk.core.Application.get()
 
-_FG_MESH = _inputs.MeshBodyRef("mesh", required=True,
-                               description="The mesh body to segment into face groups.")
-_FG_METHOD = _inputs.Choice("method", ["fast", "accurate"], default="accurate",
-                            description="Segmentation method - 'accurate' is slower and cleaner.")
+_FG_MESH = _inputs.MeshBodyRef("mesh", required=True)
+_FG_METHOD = _inputs.Choice("method", ["fast", "accurate"], default="accurate")
 
 
 def _group_ids(mb):
@@ -133,7 +131,7 @@ def handler(mesh: str = "", method: str = "accurate") -> dict:
 
 TOOL_DESCRIPTION = (
     "Segment a MESH body into planar FACE GROUPS - required before "
-    "mesh_to_brep(method='prismatic'). Run this first, then convert."
+    "mesh_to_brep(method='prismatic')."
 )
 
 _FG_SPEC = [_FG_MESH, _FG_METHOD]

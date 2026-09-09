@@ -22,16 +22,15 @@ from ._mesh_common import _node_count, _tri_count
 
 app = adsk.core.Application.get()
 
-_MESH = _inputs.MeshBodyRef("mesh", required=True, description="The mesh body to repair.")
+_MESH = _inputs.MeshBodyRef("mesh", required=True)
 _TYPE = _inputs.Choice("repair_type",
                        ["close_holes", "stitch_and_remove", "wrap", "rebuild", "one_touch_fix"],
-                       required=True, description="Which repair to run.")
+                       required=True)
 _REBUILD = _inputs.Choice("rebuild_method",
                           ["fast", "preserve_sharp_edges", "accurate", "blocky", "adaptive",
-                           "adaptive_preserve_sharp_edges"],
-                          description="Rebuild triangulation method (default fast).")
+                           "adaptive_preserve_sharp_edges"])
 _OFFSET = _inputs.Distance("offset", allow_zero=True,
-                           description="Rebuild offset from the original.")
+                           description="Offset from the original.")
 _UNITS = _inputs.UnitField()
 
 _SPEC = [_MESH, _TYPE, _REBUILD, _OFFSET, _UNITS]
@@ -259,15 +258,14 @@ def handler(mesh: str = "", repair_type: str = "", rebuild_method: str = "", den
 
 
 TOOL_DESCRIPTION = (
-    "Repair a MESH body with the MeshRepair feature - the BRep tools cannot reach a mesh. Re-read "
-    "the body with mesh_get afterwards."
+    "Repair a MESH body - close holes, stitch, wrap, rebuild, or one-touch fix."
 )
 
 tool = (
     _inputs.apply_to_tool(
         Tool.create_simple(name="mesh_repair", description=TOOL_DESCRIPTION), _SPEC)
     .add_input_property("density", {"type": "number",
-                                    "description": "Rebuild triangle density, 8-256 (default 128)."})
+                                    "description": "Rebuild triangle density."})
     .strict_schema()
 )
 item = Item.create_tool_item(

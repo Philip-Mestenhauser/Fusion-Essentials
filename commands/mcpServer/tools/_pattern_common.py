@@ -17,11 +17,10 @@ MAP_BLURB = (
     "_direction_entity - a world-axis key as that component's own origin axis, anything else "
     "lifted into its assembly context")
 
-_BODIES = _inputs.BodyRefList("bodies", required=False,
-                              description="Bodies to pattern (alternative to 'occurrences').")
+_BODIES = _inputs.BodyRefList("bodies", required=False)
 
 _OCCURRENCES = _inputs.OccurrenceRefList("occurrences", required=False,
-                              description="Occurrence(s) to pattern (alternative to 'bodies').")
+                                         description="Or 'bodies'.")
 
 
 def _resolve_input_entities(design, occurrences, bodies):

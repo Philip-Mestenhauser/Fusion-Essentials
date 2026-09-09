@@ -42,20 +42,14 @@ _MOTIONS = {"rigid", "revolute", "slider", "cylindrical", "ball"}
 # neither the axis keyword nor a custom entity. Reporting an axis for either would be a false claim.
 _NO_AXIS_MOTIONS = {"rigid", "ball"}
 
-_AXIS = _inputs.Choice(
-    "axis", ["auto", "x", "y", "z"], default="auto",
-    description="The frame axis the motion runs on, for the types that use one (ball uses none). "
-                "'auto' takes it from the geometry; x/y/z are FRAME axes, NOT world.")
+_AXIS = _inputs.Choice("axis", ["auto", "x", "y", "z"], default="auto",
+                       description="ball uses none.")
 
 
 # require='any': a joint can land on a face, edge, vertex, or construction/sketch point, and
 # _joint_geometry_for does the per-kind validation.
-_HANDLE_ONE = _inputs.GeometryHandle(
-    "handle_one", require="any", required=True,
-    description="The FIRST part's geometry to joint at (whichever part is FREE moves).")
-_HANDLE_TWO = _inputs.GeometryHandle(
-    "handle_two", require="any", required=True,
-    description="The SECOND part's geometry to joint at.")
+_HANDLE_ONE = _inputs.GeometryHandle("handle_one", require="any", required=True)
+_HANDLE_TWO = _inputs.GeometryHandle("handle_two", require="any", required=True)
 
 
 def _joint_input_for(entity):
@@ -321,12 +315,9 @@ def handler(handle_one: str = "", handle_two: str = "", motion: str = "revolute"
 
 
 TOOL_DESCRIPTION = (
-    "Joint two parts AT specific geometry (an offset pin/bore center), not collapsed to part "
-    "origins like an ':origin' snap - joint_create takes names and snap-strings instead. "
-    "handle_one/handle_two are find_geometry handles. The joint ALIGNS the picked keypoints (face "
-    "CENTROID, edge MIDPOINT) and MOVES whichever occurrence is FREE (grounding wins), so a placed "
-    "part gets REPOSITIONED - 'moved_by' names the actual mover, and joint_edit(offset) restores an "
-    "intended offset.\n"
+    "Joint two parts at two find_geometry handles - the FREE occurrence is the one moved. "
+    "'healthy' is null when no compute state answered. joint_create takes names or snap-strings "
+    "instead.\n"
     + _outputs.produces_block(RETURNS)
 )
 
@@ -336,10 +327,10 @@ joint_at_tool = (
     .add_input_property(*_HANDLE_TWO.as_property())
     .add_input_property(*_inputs.joint_motion(
         "motion", options=("rigid", "revolute", "slider", "cylindrical", "ball"),
-        default="revolute", description="Joint motion type (planar/pin_slot not supported here).").as_property())
+        default="revolute", description="").as_property())
     .add_input_property(*_AXIS.as_property())
-    .add_input_property("flip", {"type": "boolean", "description": "Reverse the alignment: true seats two planar faces with OPPOSING normals flush."})
-    .add_input_property("name", {"type": "string", "description": "Optional joint name."})
+    .add_input_property("flip", {"type": "boolean"})
+    .add_input_property("name", {"type": "string"})
     .strict_schema()
 )
 joint_at_item = Item.create_tool_item(tool=joint_at_tool, write="write", handler=handler,

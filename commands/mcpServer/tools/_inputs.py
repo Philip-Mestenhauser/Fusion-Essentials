@@ -44,7 +44,7 @@ class InputKind:
 
     def schema(self, brief=False) -> dict:
         """The JSON-schema property dict for this input (merged with the kind's contract note)."""
-        return {"type": self.json_type, "description": self._full_desc(brief)}
+        return {"type": self.json_type, **self._desc(brief)}
 
     def as_property(self, brief=False):
         """(name, schema) for splatting into Tool.add_input_property(*kind.as_property()).
@@ -55,6 +55,12 @@ class InputKind:
     def _full_desc(self, brief=False) -> str:
         note = "" if brief else self.contract_note()
         return (self.description + (" " + note if note else "")).strip()
+
+    def _desc(self, brief=False) -> dict:
+        """The 'description' entry of the schema - absent when there is nothing to say, so an
+        input with no prose costs the wire nothing."""
+        text = self._full_desc(brief)
+        return {"description": text} if text else {}
 
     def contract_note(self) -> str:
         """One-line 'what this input needs' - assembled into the tool's CONTRACT block."""
@@ -134,7 +140,7 @@ class GeometryHandleList(GeometryHandle):
     MAP_HINT = "several faces/edges by handles (fillet/drill THESE)"
 
     def schema(self, brief=False) -> dict:
-        return {"type": "array", "items": {"type": "string"}, "description": self._full_desc(brief)}
+        return {"type": "array", "items": {"type": "string"}, **self._desc(brief)}
 
     def contract_note(self) -> str:
         label, _ = _GEOMETRY_REQUIREMENTS[self.require]
@@ -181,8 +187,8 @@ class EdgeLoopRef(GeometryHandleList):
 
     def contract_note(self) -> str:
         if self.closed:
-            return "Edge 'handle's forming a CLOSED loop; a single edge is enough (find_geometry)."
-        return "Edge 'handle's forming an OPEN chain on ONE surface body (find_geometry)."
+            return "Edge 'handle's forming a CLOSED loop (one edge suffices)."
+        return "Edge 'handle's forming an OPEN chain on one surface body."
 
     def resolve(self, raw):
         ents, err = super().resolve(raw)        # reuse handle resolution + staleness + edge-kind check
@@ -566,7 +572,7 @@ def _is_mesh(b) -> bool:
 _BODY_KINDS = {
     "solid":   ("a SOLID body",          lambda b: _is_brep(b) and bool(_common.safe(lambda: b.isSolid))),
     "surface": ("an OPEN SURFACE body",  lambda b: _is_brep(b) and not bool(_common.safe(lambda: b.isSolid))),
-    "brep":    ("a SOLID or SURFACE (BRep, non-mesh) body", lambda b: _is_brep(b)),
+    "brep":    ("a BRep (non-mesh) body",   lambda b: _is_brep(b)),
     "mesh":    ("a MESH body",           lambda b: _is_mesh(b)),
     # 'any' re-checks no type: what _resolve_any_body returned is already a body.
     "any":     ("a body",                lambda b: True),
@@ -1032,7 +1038,7 @@ class BodyRef(InputKind):
     def contract_note(self) -> str:
         label, _ = _BODY_KINDS[self.kind]
         lead = "A body" if self.kind == "any" else f"{label[0].upper() + label[1:]}"
-        return f"{lead}: a find_geometry 'handle' or a body name."
+        return f"{lead} 'handle' or name."
 
     def _redirect(self, body, raw, source) -> str:
         """The wrong-kind refusal, worded off the vocabulary that ACTUALLY answered - saying "that
@@ -1081,12 +1087,12 @@ class BodyRefList(BodyRef):
         self.scope_input = scope_input or None
 
     def schema(self, brief=False) -> dict:
-        return {"type": "array", "items": {"type": "string"}, "description": self._full_desc(brief)}
+        return {"type": "array", "items": {"type": "string"}, **self._desc(brief)}
 
     def contract_note(self) -> str:
         label, _ = _BODY_KINDS[self.kind]
-        suffix = "" if self.kind == "any" else f"; each must be {label}"
-        return f"Bodies, each a 'handle' or a name{suffix}."
+        suffix = "" if self.kind == "any" else f", each {label}"
+        return f"Body 'handle's or names{suffix}."
 
     def resolve(self, raw, component=""):
         scoped = bool(self.scope_input) and bool((component or "").strip())
@@ -1201,7 +1207,7 @@ class FeatureRef(InputKind):
     MAP_HINT = "a timeline feature by name (refuses an ambiguous name; 'name@index' picks one)"
 
     def contract_note(self) -> str:
-        return "A timeline feature NAME from design_get(include=['timeline'])."
+        return "A timeline feature name (design_get timeline)."
 
     def _objects(self):
         """(timeline objects, error) for the active design."""
@@ -1253,10 +1259,10 @@ class FeatureRefList(FeatureRef):
     MAP_HINT = "several timeline features by name"
 
     def schema(self, brief=False) -> dict:
-        return {"type": "array", "items": {"type": "string"}, "description": self._full_desc(brief)}
+        return {"type": "array", "items": {"type": "string"}, **self._desc(brief)}
 
     def contract_note(self) -> str:
-        return "A list of timeline feature names from design_get(include=['timeline'])."
+        return "Timeline feature names (design_get timeline)."
 
     def resolve(self, raw):
         if raw in (None, "", []):
@@ -1431,7 +1437,7 @@ class PlaneRef(InputKind):
     MAP_HINT = "a plane: xy/xz/yz alias, construction-plane name, OR planar-face handle"
 
     def contract_note(self) -> str:
-        return "A plane: xy/xz/yz/top/front/right, a construction-plane name, or a planar-face handle."
+        return "xy/xz/yz/top/front/right, a construction-plane name, or a planar-face 'handle'."
 
     def resolve(self, raw):
         s = (raw or "").strip() if isinstance(raw, str) else raw
@@ -1601,12 +1607,10 @@ class SurfaceRef(InputKind):
         self.curved_ops = tuple(curved_ops)
 
     def contract_note(self) -> str:
-        note = "A plane: xy/xz/yz alias, a construction-plane name, or a planar-face handle."
+        note = "xy/xz/yz, a construction-plane name, or a planar-face 'handle'"
         if self.curved_ops:
-            verb = "accepts" if len(self.curved_ops) == 1 else "accept"
-            note += (" " + " / ".join(self.curved_ops) + f" also {verb} a CURVED face handle; "
-                     "the rest take a PLANAR face.")
-        return note
+            note += " (a curved face too for " + "/".join(self.curved_ops) + ")"
+        return note + "."
 
     def resolve(self, raw, operation=None):
         """(surface, error) for ``operation`` - the dim_type/constraint being applied, which
@@ -1821,9 +1825,9 @@ class AxisRef(InputKind):
         # Where a NAME is looked up (the active component only) is in the miss refusal, which reads
         # that component and names it.
         if self.entity_only:
-            return "A world axis x/y/z, a construction-axis name, or a straight-edge/line 'handle'."
+            return "x/y/z, a construction-axis name, or a straight-edge/line 'handle'."
         if self.face_entity:
-            return "A world axis x/y/z, a construction-axis name, or an edge/line/round-face 'handle'."
+            return "x/y/z, a construction-axis name, or an edge/line/round-face 'handle'."
         # The face forms RESOLVE (a planar face to its normal, a round one to its axis), so no
         # refusal ever states them - this note is their only home.
         return ("A world axis x/y/z, a construction-axis name, or an edge/line/face 'handle' "
@@ -1933,7 +1937,7 @@ class Distance(InputKind):
             bits.append("non-zero")
         if not self.allow_negative:
             bits.append("positive")
-        return ("In 'units' (mm default). " + (", ".join(bits) + "." if bits else "")).strip()
+        return ("In 'units'" + ("; " + ", ".join(bits) if bits else "") + ".")
 
     def resolve_scaled(self, raw, scale_factor):
         if raw is None:
@@ -2046,7 +2050,7 @@ class Choice(InputKind):
 
     def schema(self, brief=False) -> dict:
         # the values live in `enum` (validated), not spelled into the description.
-        return {"type": "string", "enum": list(self.options), "description": self._full_desc(brief)}
+        return {"type": "string", "enum": list(self.options), **self._desc(brief)}
 
     def contract_note(self) -> str:
         # the enum carries the option list; note only the default (if any) so we don't duplicate it.
@@ -2208,7 +2212,7 @@ class OccurrenceRef(InputKind):
     MAP_HINT = "an assembly occurrence by entityToken handle (exact) or fullPathName/name (refuses ambiguity)"
 
     def contract_note(self) -> str:
-        return "An occurrence: a 'handle' from design_get(include=['tree']), or its fullPathName/name."
+        return "An occurrence 'handle' (design_get tree) or fullPathName/name."
 
     def resolve(self, raw):
         if raw in (None, "", []):
@@ -2227,10 +2231,10 @@ class OccurrenceRefList(InputKind):
     MAP_HINT = "several occurrences (entityToken handles or fullPathNames/names)"
 
     def schema(self, brief=False) -> dict:
-        return {"type": "array", "items": {"type": "string"}, "description": self._full_desc(brief)}
+        return {"type": "array", "items": {"type": "string"}, **self._desc(brief)}
 
     def contract_note(self) -> str:
-        return "Occurrences, each a 'handle' from design_get(include=['tree']) or a fullPathName/name."
+        return "Occurrence 'handle's (design_get tree) or fullPathNames/names."
 
     def resolve(self, raw):
         if raw in (None, "", []):
@@ -2287,8 +2291,8 @@ class JointOriginRef(InputKind):
 
     def contract_note(self) -> str:
         if self.native:
-            return "A Joint Origin handle/name (assembly_get); the frame is its owning COMPONENT's."
-        return "A Joint Origin: a 'handle' from assembly_get(include=['joint_origins']), or its name."
+            return "A Joint Origin 'handle' (assembly_get) or name; its owning component's frame."
+        return "A Joint Origin 'handle' (assembly_get joint_origins) or name."
 
     def resolve(self, raw):
         s = (raw or "").strip() if isinstance(raw, str) else raw
@@ -2576,8 +2580,8 @@ class TargetRefList(InputKind):
 
     def contract_note(self) -> str:
         return self._contract or (
-            "Bodies (find_geometry 'handle' or name) and/or COMPONENT occurrence names - naming an "
-            "occurrence selects the whole component, not one body.")
+            "Body 'handle's/names and/or component occurrence names (an occurrence selects the "
+            "whole component).")
 
     def _component_occurrence(self, comp):
         """The single occurrence referencing `comp`, or (None, error) on 0 or >1 (never guess)."""
@@ -2827,10 +2831,10 @@ class ProfileRef(InputKind):
     def schema(self, brief=False) -> dict:
         # Both forms _resolve_one_profile takes: a handle/text STRING and the {sketch,
         # profile_index} OBJECT. A bare "string" bars a validating client from the latter.
-        return {"type": ["string", "object"], "description": self._full_desc(brief)}
+        return {"type": ["string", "object"], **self._desc(brief)}
 
     def contract_note(self) -> str:
-        return "A profile 'handle' (stable) or {sketch, profile_index}." + self._text_note()
+        return "A profile 'handle' or {sketch, profile_index}." + self._text_note()
 
     def resolve(self, raw, component=""):
         if raw in (None, "", []):
@@ -2850,12 +2854,10 @@ class ProfileRefList(ProfileRef):
 
     def schema(self, brief=False) -> dict:
         # items carries BOTH element forms ProfileRef.resolve takes.
-        return {"type": "array", "items": {"type": ["string", "object"]},
-                "description": self._full_desc(brief)}
+        return {"type": "array", "items": {"type": ["string", "object"]}, **self._desc(brief)}
 
     def contract_note(self) -> str:
-        return ("Profiles in the order given; 'handle's or {sketch, profile_index}."
-                + self._text_note())
+        return "Profiles in order: 'handle's or {sketch, profile_index}." + self._text_note()
 
     def resolve(self, raw, component=""):
         if raw in (None, "", []):
@@ -2908,7 +2910,7 @@ class SketchRefList(InputKind):
         return {"type": "array", "items": {"type": "string"}, "description": self._full_desc(brief)}
 
     def contract_note(self) -> str:
-        return "Sketch names (sketch_get); each must name exactly one sketch."
+        return "Sketch names, each naming exactly one sketch."
 
     def resolve(self, raw, component=""):
         if raw in (None, "", []):

@@ -1380,7 +1380,7 @@ class TestSurfaceConstraints:
         # blanket 'planar-face' prose would falsify the two constraints that take a cylinder
         desc = sc._SURFACE.as_property()[1]["description"]
         assert "coincident_to_surface" in desc and "perpendicular_to_surface" in desc
-        assert "CURVED" in desc and "PLANAR" in desc
+        assert "curved face too for" in desc and "planar-face" in desc
         assert "line_on_surface" not in desc          # planar-only ops are not listed as curved-OK
 
     def test_a_curved_face_is_still_refused_by_the_planar_only_constraints(self, install,

@@ -40,8 +40,7 @@ def handler() -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Force a full recompute (computeAll) of the active design so downstream features "
-    "rebuild against current values (e.g. after changing text an emboss consumes). "
+    "Force a full recompute so downstream features rebuild against current values. "
     "Reports timeline health afterwards.")
 
 tool = Tool.create_simple(name="design_recompute", description=TOOL_DESCRIPTION).strict_schema()

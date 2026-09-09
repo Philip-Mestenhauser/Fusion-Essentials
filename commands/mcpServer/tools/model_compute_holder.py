@@ -24,12 +24,11 @@ app = adsk.core.Application.get()
 # body = a SOLID body (handle preferred - holder bodies are auto-named); axis + end_datum are raw
 # geometry handles resolved to live entities, then handed to the _holder axis/datum routines (which
 # do the per-kind validation: a cyl/cone/edge axis, a normal planar/edge/vertex datum).
-_BODY = _inputs.BodyRef("body", kind="solid", required=True,
-                        description="The solid holder body to profile.")
+_BODY = _inputs.BodyRef("body", kind="solid", required=True)
 _AXIS = _inputs.GeometryHandle("axis", require="any", required=True,
-                               description="The axis of rotation: a CYLINDRICAL/CONICAL face or a straight EDGE handle.")
+                               description="The axis of revolution.")
 _END = _inputs.GeometryHandle("end_datum", require="any", required=True,
-                              description="An end datum on the axis: a PLANAR face / edge / vertex handle NORMAL to the axis (sets z=0).")
+                              description="Sets z=0 on the axis.")
 
 
 def handler(body: str = "", axis: str = "", end_datum: str = "",
@@ -92,10 +91,7 @@ def handler(body: str = "", axis: str = "", end_datum: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Turn a solid HOLDER model into a CAM tool-holder profile - the headless form of the Add Tool "
-    "Holder command. Returns the holder as (height, lower/upper-diameter) segments in mm plus the "
-    "full library JSON in 'holder_json'. It does NOT add the holder to a tool library; use the "
-    "JSON yourself."
+    "Profile a solid holder body into CAM tool-holder segments, returned with 'holder_json'."
 )
 
 tool = (
@@ -104,10 +100,10 @@ tool = (
     .add_input_property(*_AXIS.as_property())
     .add_input_property(*_END.as_property(brief=True))
     .add_input_property("name", {"type": "string",
-            "description": "Holder name for the JSON (default: the active document name)."})
-    .add_input_property("product_id", {"type": "string", "description": "Optional product ID metadata."})
-    .add_input_property("product_link", {"type": "string", "description": "Optional product page URL metadata."})
-    .add_input_property("vendor", {"type": "string", "description": "Optional vendor metadata."})
+            "description": "Default: the active document name."})
+    .add_input_property("product_id", {"type": "string"})
+    .add_input_property("product_link", {"type": "string"})
+    .add_input_property("vendor", {"type": "string"})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

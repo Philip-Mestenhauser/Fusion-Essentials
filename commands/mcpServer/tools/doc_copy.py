@@ -275,11 +275,8 @@ def handler(document_id: str = "", name: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Copy an existing cloud document (a saved DataFile, by its lineage 'document_id' URN - "
-    "preferred - or by 'name' within a 'source_project') INTO a destination project/folder. "
-    "Cloud-to-cloud: it does NOT touch the active session. The copy PRESERVES external "
-    "references - each referenced component keeps pointing at its ORIGINAL source file. "
-    "'folder' may be nested; create_path=true creates missing destination folders."
+    "Copy a saved cloud document into a destination project/folder. Cloud-to-cloud: the active "
+    "session is not touched."
 )
 
 tool = (
@@ -290,21 +287,19 @@ tool = (
     # document_id is OPTIONAL, not required: the handler also accepts the by-name path
     # ('name' + 'source_project'). One of document_id / name must be given (guarded in the handler).
     .add_input_property("document_id", {"type": "string",
-        "description": "Lineage URN of the document to copy (from data_get)."})
+        "description": "Lineage URN from data_get."})
     .add_input_property("name", {"type": "string",
-        "description": "Document name; requires source_project."})
-    .add_input_property("source_project", {"type": "string",
-        "description": "Source project name (for a 'name' lookup)."})
-    .add_input_property("source_project_id", {"type": "string",
-        "description": "Source project id (alt to source_project)."})
+        "description": "Source name (needs source_project); the copy's name with document_id."})
+    .add_input_property("source_project", {"type": "string"})
+    .add_input_property("source_project_id", {"type": "string"})
     .add_input_property("source_folder", {"type": "string",
-        "description": "Scope the 'name' lookup to this folder path."})
+        "description": "Folder path scoping the 'name' lookup."})
     .add_input_property("project", {"type": "string", "description": "Destination project name."})
-    .add_input_property("project_id", {"type": "string", "description": "Destination project id (alt to name)."})
+    .add_input_property("project_id", {"type": "string"})
     .add_input_property("folder", {"type": "string",
-        "description": "Destination folder path (e.g. 'Parts/WidgetA')."})
+        "description": "Destination folder path, e.g. 'Parts/WidgetA'."})
     .add_input_property("create_path", {"type": "boolean",
-        "description": "Create missing destination folders (default false)."})
+        "description": "Create missing folders. Default false."})
     .strict_schema()
 )
 item = Item.create_tool_item(

@@ -369,7 +369,7 @@ def test_declared_returns_present_in_payload():
 
 
 def test_the_description_publishes_what_it_produces():
-    assert "PRODUCES:" in pp.TOOL_DESCRIPTION
+    assert "Produces:" in pp.TOOL_DESCRIPTION
     assert "design_delete_feature" in pp.TOOL_DESCRIPTION
 
 
@@ -379,8 +379,7 @@ def test_the_path_description_states_the_tangent_continuity_rule():
     # wire may not promise chaining unconditionally, nor claim a closed loop refuses to chain; what
     # a seed actually reached is only knowable from the reported count.
     desc = pp.pattern_path_tool.to_dict()["inputSchema"]["properties"]["path"]["description"]
-    assert "TANGENT connections" in desc
-    assert "sharp corner stops the chain" in desc
+    assert "TANGENT connections only" in desc
     assert "'path' count is the truth" in desc
     assert "auto-chain" not in desc.lower()
     assert "closed loop" not in desc.lower() and "seed edge alone" not in desc

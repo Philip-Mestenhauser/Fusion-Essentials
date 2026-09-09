@@ -405,29 +405,24 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
 
 
 TOOL_DESCRIPTION = (
-    "Read the active assembly's kinematic state as JSON. Per top-level occurrence: name, "
-    "component, ground flags, body count and its joints - include=['poses'] adds world position "
-    "(origin + bodies-only bbox center/size in 'units') and the x_axis/y_axis/z_axis basis. Plus a "
-    "design-level joint list: type, degrees of freedom, the two occurrences each connects, "
-    "value_now (angle_deg / slide_mm) and frame (WORLD origin + axes, whose z_axis is the "
-    "direction a joint OFFSET drives along). Check is_healthy first. Each include= slice the call "
-    "omits is described in the returned note. Every list is capped, and *_truncated marks one that "
-    "hit its cap."
+    "Read the active assembly's kinematic state: per top-level occurrence, identity, ground flags, "
+    "body count and joints, plus the design's joint list. Check is_healthy first; the note names "
+    "the include= slices this call omitted."
 )
 
 tool = (
     Tool.create_simple(name="assembly_get", description=TOOL_DESCRIPTION)
-    .add_input_property(*_inputs.units_property(description="Display units for positions/sizes."))
+    .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("include", {"type": "array",
             "items": {"type": "string", "enum": list(_SLICES)},
-            "description": "Deeper slices to add; omit for the light kinematic state."})
-    .add_input_property("include_joints", {"type": "boolean", "description": "List joints + annotate occurrences with their joints (default true)."})
-    .add_input_property("max_occurrences", {"type": "integer", "description": f"Cap on the 'occurrences' array (default {_MAX_OCCURRENCES_DEFAULT})."})
-    .add_input_property("max_joints", {"type": "integer", "description": f"Cap on the 'joints' array (default {_MAX_JOINTS_DEFAULT})."})
-    .add_input_property("max_joint_origins", {"type": "integer", "description": f"Cap on the 'joint_origins' array (default {_MAX_JOINT_ORIGINS_DEFAULT})."})
-    .add_input_property("max_relations", {"type": "integer", "description": f"Cap on each 'relations' list (default {_MAX_RELATIONS_DEFAULT})."})
-    .add_input_property("max_contacts", {"type": "integer", "description": f"Cap on the 'contacts' list (default {_MAX_CONTACTS_DEFAULT})."})
-    .add_input_property("max_all_occurrences", {"type": "integer", "description": f"Cap on the 'all_occurrences' list (default {_MAX_ALL_OCCURRENCES_DEFAULT})."})
+            "description": "Omit for the light kinematic state."})
+    .add_input_property("include_joints", {"type": "boolean", "description": "Default true."})
+    .add_input_property("max_occurrences", {"type": "integer", "description": f"Default {_MAX_OCCURRENCES_DEFAULT}."})
+    .add_input_property("max_joints", {"type": "integer", "description": f"Default {_MAX_JOINTS_DEFAULT}."})
+    .add_input_property("max_joint_origins", {"type": "integer", "description": f"Default {_MAX_JOINT_ORIGINS_DEFAULT}."})
+    .add_input_property("max_relations", {"type": "integer", "description": f"Default {_MAX_RELATIONS_DEFAULT}."})
+    .add_input_property("max_contacts", {"type": "integer", "description": f"Default {_MAX_CONTACTS_DEFAULT}."})
+    .add_input_property("max_all_occurrences", {"type": "integer", "description": f"Default {_MAX_ALL_OCCURRENCES_DEFAULT}."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

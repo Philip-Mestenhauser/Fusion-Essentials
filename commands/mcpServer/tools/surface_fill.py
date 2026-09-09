@@ -27,8 +27,7 @@ RETURNS = [
 
 # kind="brep" accepts a SOLID or an OPEN SURFACE body and REDIRECTS a mesh - boundaryFillFeatures
 # takes BRep bodies, so a mesh is refused before the transaction opens rather than inside it.
-_TOOLS = _inputs.BodyRefList("tools", kind="brep", required=True,
-    description="The bodies that bound the volume - bodies only, not a construction plane.")
+_TOOLS = _inputs.BodyRefList("tools", kind="brep", required=True)
 _OPERATION = _inputs.boolean_op(options=("new", "join", "cut", "intersect"), default="new")
 _UNITS = _inputs.UnitField()
 
@@ -359,9 +358,7 @@ def handler(tools=None, cells=None, operation: str = "new", remove_tools: bool =
 
 
 TOOL_DESCRIPTION = (
-    "Seal the volume enclosed by a set of surface and/or solid bodies into a solid - Fusion's "
-    "Boundary Fill, which closes a region bounded by SEVERAL separate surfaces. 'cells' picks "
-    "which enclosed volume to keep by index.\n"
+    "Seal the volume enclosed by several surface and/or solid bodies into a solid.\n"
     + _outputs.produces_block(RETURNS)
 )
 

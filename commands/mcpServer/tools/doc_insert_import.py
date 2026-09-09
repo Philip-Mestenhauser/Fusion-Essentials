@@ -50,13 +50,9 @@ _OPTIONS_FACTORY = {
 
 _SKETCH_FORMATS = ("dxf", "svg")
 
-_FORMAT = _inputs.Choice("format", ["step", "iges", "sat", "smt", "f3d", "dxf", "svg"],
-                         description="Taken from the file extension when omitted.")
-_INTO_COMPONENT = _inputs.OccurrenceRef(
-    "into_component",
-    description="Occurrence receiving a solid/DXF import (default: active component).")
-_PLANE = _inputs.PlaneRef("plane", default="xy",
-                          description="DXF only: plane the sketches are created on.")
+_FORMAT = _inputs.Choice("format", ["step", "iges", "sat", "smt", "f3d", "dxf", "svg"])
+_INTO_COMPONENT = _inputs.OccurrenceRef("into_component")
+_PLANE = _inputs.PlaneRef("plane", default="xy")
 
 
 def _resolve_format(path, raw):
@@ -484,26 +480,19 @@ def handler(file_path: str = "", format: str = "", into_component: str = "", ske
 
 
 TOOL_DESCRIPTION = (
-    "Import a CAD file from LOCAL DISK: STEP/IGES/SAT/SMT/F3D as solid geometry into a component, "
-    "DXF as one sketch per 2D layer on a plane, SVG curves into an EXISTING sketch. 'format' comes "
-    "from the file extension; an explicit one contradicting it is refused. new_document=true "
-    "imports to a fresh unsaved document - solid formats only. For SVG at an (x,y) with a scale use "
-    "sketch_insert_svg; for a cloud upload data_upload_file; for a linked cloud reference "
-    "doc_insert_occurrence."
+    "Import a CAD file from LOCAL DISK: solids into a component, DXF as sketches, SVG into a sketch."
 )
 
 tool = (
     Tool.create_simple(name="doc_insert_import", description=TOOL_DESCRIPTION)
-    .add_input_property("file_path", {"type": "string",
-            "description": "Full path to the CAD file on local disk."})
+    .add_input_property("file_path", {"type": "string"})
     .add_input_property(*_FORMAT.as_property())
     .add_input_property(*_INTO_COMPONENT.as_property())
     .add_input_property("sketch", {"type": "string",
-            "description": "SVG only: sketch to import into (default: the most recent sketch)."})
+            "description": "SVG only; default the most recent."})
     .add_input_property(*_sketch_detail.component_scope("sketch_component", narrows="sketch"))
     .add_input_property(*_PLANE.as_property())
-    .add_input_property("new_document", {"type": "boolean",
-            "description": "Import to a new unsaved document (solid formats only)."})
+    .add_input_property("new_document", {"type": "boolean"})
     .add_required_input("file_path")
     .strict_schema()
 )

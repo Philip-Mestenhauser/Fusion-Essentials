@@ -161,11 +161,8 @@ def handler(name: str = "", only_out_of_date: bool = True) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Refresh the active document's external references (X-refs) to their latest cloud version - the "
-    "API equivalent of 'Get Latest', for a host still showing an outdated part. Covers occurrence "
-    "xrefs and DERIVE links (each row's 'kind' says which). Updates every OUT-OF-DATE reference by "
-    "default; 'name' targets one by its source document name, only_out_of_date=false refreshes the "
-    "matched rows regardless. Reports each version before/after."
+    "Refresh the active document's external references and derive links to their latest cloud "
+    "version."
 )
 
 tool = (
@@ -173,7 +170,7 @@ tool = (
     .add_input_property("name", {"type": "string",
             "description": "Source document name of one reference to refresh (omit = all)."})
     .add_input_property("only_out_of_date", {"type": "boolean",
-            "description": "Only refresh references flagged out of date (default true)."})
+            "description": "Default true."})
     .strict_schema()
 )
 

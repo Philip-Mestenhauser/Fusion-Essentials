@@ -232,22 +232,14 @@ def handler(name: str = "", confirm_name: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Delete a MACHINE from the LOCAL machine library by name - the counterpart to cam_create_machine, "
-    "and the only tool here that removes one. 'name' resolves through the same query "
-    "cam_edit_setup(machine=...) assigns by (see cam_get(include=['machines'])); a name several "
-    "machines answer to is refused, not guessed. GUARDED and IRREVERSIBLE: 'confirm_name' must "
-    "EXACTLY match the RESOLVED machine name. A machine reached from the bundled fusion360 library "
-    "is refused - only the Local library is deleted from. The library ASSET is addressed by the "
-    "machine name it HOLDS, not its file name; where several hold that name the file name narrows "
-    "the tie, and 'matched_by' says which read found it."
+    "Delete a machine from the LOCAL machine library by name; 'confirm_name' must match the "
+    "resolved name exactly. Counterpart to cam_create_machine."
 )
 
 tool = (
     Tool.create_simple(name="cam_delete_machine", description=TOOL_DESCRIPTION)
-    .add_input_property("name", {"type": "string",
-            "description": "The machine to delete, as cam_get(include=['machines']) lists it."})
-    .add_input_property("confirm_name", {"type": "string",
-            "description": "The resolved machine name again, case-sensitive (safety confirmation; must match)."})
+    .add_input_property("name", {"type": "string"})
+    .add_input_property("confirm_name", {"type": "string"})
     .strict_schema()
 )
 item = Item.create_tool_item(

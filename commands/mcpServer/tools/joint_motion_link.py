@@ -180,19 +180,17 @@ def handler(joint_one: str = "", joint_two: str = "", ratio: float = 1.0) -> dic
 
 
 TOOL_DESCRIPTION = (
-    "Link two EXISTING joints' motion with a ratio (the Motion Link command) so driving one drives "
-    "the other proportionally - a gear pair, belt/chain drive, or coupled rotation. joint_one/"
-    "joint_two are joint names (see assembly_get); ratio is joint_two's motion per unit of "
-    "joint_one, each in its own display unit. Both joints must permit motion "
-    "(revolute/slider/cylindrical)."
+    "Link two existing joints' motion with a ratio (the Motion Link command): driving one drives "
+    "the other proportionally."
 )
 
 motion_link_tool = (
     Tool.create_simple(name="joint_motion_link", description=TOOL_DESCRIPTION)
-    .add_input_property("joint_one", {"type": "string", "description": "Name of the first joint to link."})
-    .add_input_property("joint_two", {"type": "string", "description": "Name of the second joint to link."})
+    .add_input_property("joint_one", {"type": "string"})
+    .add_input_property("joint_two", {"type": "string"})
     .add_input_property("ratio", {"type": "number",
-            "description": "joint_two motion per ONE unit of joint_one, in each joint's DISPLAY unit - deg for a rotating DOF, mm for a sliding one."})
+            "description": "joint_two motion per unit of joint_one, each in its own display unit "
+                           "(deg or mm)."})
     .strict_schema()
 )
 motion_link_item = Item.create_tool_item(

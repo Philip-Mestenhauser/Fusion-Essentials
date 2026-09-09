@@ -293,7 +293,7 @@ class TestPendingDescribedByWhatWasRead:
 
     def test_the_description_states_the_observation_not_a_cause(self):
         desc = drv.TOOL_DESCRIPTION
-        assert "the tip had not advanced" in desc
+        assert "a NEW tip version carries its content" in desc
         assert "cloud is still processing" not in desc
 
     def test_the_pending_note_states_the_same_observation(self, monkeypatch):

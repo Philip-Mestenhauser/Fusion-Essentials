@@ -213,13 +213,8 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
 
 
 TOOL_DESCRIPTION = (
-    "Create a Joint between two inputs. Each of 'occurrence_one'/'occurrence_two' is a "
-    "find_geometry handle (joints AT that exact face/edge), a Joint Origin name (bare or scoped "
-    "'<occurrence>:<JO name>'), or a snap-string such as 'Boom:1:top'. ':origin' collapses to the "
-    "part origin AND aligns its FULL local frame - use a handle for a real offset. Creating a "
-    "joint MOVES the free part so its snap/JO point lands on the other input's location - do not "
-    "pre-place it. 'axis' is FRAME-relative, an axis of the joint geometry's frame - "
-    "joint_edit(world_axis=...) re-points one that pivots wrong."
+    "Create a Joint between two inputs: the FREE part MOVES so the two inputs coincide - do not "
+    "pre-place it."
 )
 
 tool = (
@@ -227,26 +222,29 @@ tool = (
         name="joint_create",
         description=TOOL_DESCRIPTION,
         input_param_name="occurrence_one",
-        input_param_description="First input: a find_geometry handle, a Joint Origin name, or a snap '<occurrence>:<snap>'.",
+        input_param_description="A find_geometry handle, a Joint Origin name, or a snap "
+                                "'<occurrence>:<snap>'.",
     )
     .add_input_property("occurrence_two", {"type": "string",
-            "description": "Second input: same forms as occurrence_one."})
-    .add_input_property(*_inputs.joint_motion(default="rigid", options=_MOTIONS).as_property())
+            "description": "Same forms as occurrence_one."})
+    .add_input_property(*_inputs.joint_motion(default="rigid", options=_MOTIONS,
+            description="").as_property())
     .add_input_property(*_inputs.frame_axis("axis", default="z",
-            description="Motion axis for the types that need one (FRAME-relative; for pin_slot: the rotation axis).").as_property())
+            description="FRAME-relative, not world; joint_edit(world_axis=...) re-points one that "
+                        "pivots wrong. For pin_slot, the rotation axis.").as_property())
     .add_input_property(*_inputs.frame_axis("slide_axis", default="",
-            description="pin_slot only: the perpendicular SLIDE direction.").as_property())
-    .add_input_property("offset", {"type": "number", "description": "Offset distance in 'units'."})
-    .add_input_property("angle", {"type": "number", "description": "Angle in degrees."})
+            description="pin_slot only.").as_property())
+    .add_input_property("offset", {"type": "number", "description": "In 'units'."})
+    .add_input_property("angle", {"type": "number", "description": "In degrees."})
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("flip", {"type": "boolean", "description": "Reverse the joint direction."})
-    .add_input_property("name", {"type": "string", "description": "Name for the joint."})
-    .add_input_property("min_deg", {"type": "number", "description": "Rotation limit min (degrees)."})
-    .add_input_property("max_deg", {"type": "number", "description": "Rotation limit max (degrees)."})
-    .add_input_property("rest_deg", {"type": "number", "description": "Rotation rest value (degrees)."})
-    .add_input_property("min_mm", {"type": "number", "description": "Slide limit min (in 'units')."})
-    .add_input_property("max_mm", {"type": "number", "description": "Slide limit max (in 'units')."})
-    .add_input_property("rest_mm", {"type": "number", "description": "Slide rest value (in 'units')."})
+    .add_input_property("flip", {"type": "boolean"})
+    .add_input_property("name", {"type": "string"})
+    .add_input_property("min_deg", {"type": "number"})
+    .add_input_property("max_deg", {"type": "number"})
+    .add_input_property("rest_deg", {"type": "number"})
+    .add_input_property("min_mm", {"type": "number", "description": "In 'units'."})
+    .add_input_property("max_mm", {"type": "number", "description": "In 'units'."})
+    .add_input_property("rest_mm", {"type": "number", "description": "In 'units'."})
     .strict_schema()
 )
 

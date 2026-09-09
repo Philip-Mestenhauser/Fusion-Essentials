@@ -600,12 +600,8 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
 
 
 TOOL_DESCRIPTION = (
-    "Edit a CAM operation's PARAMETERS - the feeds/speeds/depths no other CAM tool reaches - plus "
-    "its cutting TOOL, its PRESET, its NAME and its SUPPRESSION. 'operation' names it "
-    "(cam_get(include=['operations'])). Every 'parameters' expression must exist and evaluate or "
-    "the whole call rolls back. The tool inputs take the addressing cam_create_operation takes, "
-    "and also complete a template operation that arrived with no tool. Any one input alone is "
-    "enough; after editing, regenerate with cam_generate."
+    "Edit a CAM operation: its parameters (the feeds/speeds/depths no other CAM tool reaches), its "
+    "cutting tool, preset, name or suppression. Regenerate with cam_generate after."
 )
 
 tool = (
@@ -613,22 +609,18 @@ tool = (
         name="cam_edit_operation",
         description=TOOL_DESCRIPTION,
         input_param_name="operation",
-        input_param_description="The CAM operation name to edit.",
+        input_param_description="Operation name (from cam_get).",
     )
     .add_input_property("parameters", {"type": "object",
-            "description": "Parameters to set: {name: expression} (or a 'name=value, ...' string), by this operation's own parameter names. A locked row another one here unlocks is written after it; one still locked is refused by name."})
+            "description": "{name: expression} (or 'name=value,...'), by this operation's own parameter names."})
     .add_input_property("preset", {"type": "string",
-            "description": "Name of a preset on THIS operation's tool to run it with (cam_get(include=['tool'], operation=...) lists them)."})
+            "description": "A preset on this operation's own tool."})
     .add_input_property("suppressed", {"type": "boolean",
-            "description": "true parks the operation (its toolpath is discarded), false restores it; omit to leave it alone."})
-    .add_input_property("rename", {"type": "string",
-            "description": "New name for the operation; a name another operation already carries is refused before the write."})
-    .add_input_property("tool_scope", {"type": "string", "enum": ["document"],
-            "description": "Set 'document' to take the new cutting tool from this doc's library by tool_index (no url)."})
-    .add_input_property("tool_library_url", {"type": "string",
-            "description": "Shared tool library url (from cam_edit_tools) - omit if tool_scope=document."})
-    .add_input_property("tool_index", {"type": "integer",
-            "description": "Index of the cutting tool to assign, within the chosen library (from cam_edit_tools)."})
+            "description": "true parks the operation and discards its toolpath."})
+    .add_input_property("rename", {"type": "string"})
+    .add_input_property("tool_scope", {"type": "string", "enum": ["document"]})
+    .add_input_property("tool_library_url", {"type": "string"})
+    .add_input_property("tool_index", {"type": "integer"})
     .strict_schema()
 )
 

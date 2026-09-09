@@ -32,16 +32,12 @@ _TYPES = {
     "direction": "DirectionRuledSurfaceType",
 }
 
-_EDGES = _inputs.EdgeLoopRef("edges", closed=False, required=True,
-    description="The edge chain the surface grows from.")
-_TYPE = _inputs.Choice("ruled_type", ["tangent", "normal", "direction"], default="tangent",
-    description="tangent continues that face past the edge, normal stands perpendicular to it, "
-                "direction sweeps along the 'direction' entity.")
-_DISTANCE = _inputs.Distance("distance", required=True, description="How far the surface extends.")
+_EDGES = _inputs.EdgeLoopRef("edges", closed=False, required=True)
+_TYPE = _inputs.Choice("ruled_type", ["tangent", "normal", "direction"], default="tangent")
+_DISTANCE = _inputs.Distance("distance", required=True)
 # The direction entity is handed to createInput ITSELF, so it must be an ENTITY: a face handle would
 # only yield a direction vector, which the call cannot consume - entity_only refuses one up front.
-_DIRECTION = _inputs.AxisRef("direction", entity_only=True,
-    description="Only for ruled_type=direction.")
+_DIRECTION = _inputs.AxisRef("direction", entity_only=True)
 
 
 def _added_bodies(bodies, before_keys):
@@ -270,8 +266,7 @@ def ruled_handler(edges=None, ruled_type="tangent", distance=None, units="mm",
 
 
 _DESC = (
-"Create a RULED surface off an edge chain. The surface leaves ONE of the edge's two faces; which "
-"one is not selectable here."
+"Create a ruled surface off an edge chain."
 )
 
 surface_create_ruled_tool = (
@@ -281,7 +276,7 @@ surface_create_ruled_tool = (
     .add_input_property(*_DISTANCE.as_property())
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("angle_deg", {"type": "number",
-        "description": "Tilt off that direction in degrees (default 0)."})
+        "description": "Tilt off the ruled direction (default 0)."})
     .add_input_property(*_DIRECTION.as_property())
     .add_required_input("edges")
     .add_required_input("distance")

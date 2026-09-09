@@ -29,13 +29,11 @@ _CONTINUITY = {
 }
 
 # boundary: the CLOSED loop a patch fills.
-_BOUNDARY = _inputs.EdgeLoopRef("boundary", closed=True, required=True,
-    description="The loop to fill.")
+_BOUNDARY = _inputs.EdgeLoopRef("boundary", closed=True, required=True)
 # interior_rails: B-Rep EDGES the patch surface must pass through. The API property also accepts
 # sketch curves/points and construction points, but find_geometry mints handles for BRep faces and
 # edges only, so an edge is the one kind this server can reference.
-_INTERIOR_RAILS = _inputs.GeometryHandleList("interior_rails", require="edge", required=False,
-    description="Interior edges the patch is fitted through.")
+_INTERIOR_RAILS = _inputs.GeometryHandleList("interior_rails", require="edge", required=False)
 
 
 def _rails_readback(patch_input, expected):
@@ -230,19 +228,16 @@ def handler(boundary=None, boundaries=None, continuity: str = "connected",
 
 
 TOOL_DESCRIPTION = (
-"Fill CLOSED loop(s) of edges with surface face(s) - cap a hole, bridge a gap. 'boundary' patches "
-"ONE loop (prefer a SINGLE seed edge - its loop is auto-completed); 'boundaries' patches many in "
-"one call, a failing loop reported without aborting the rest."
+"Fill closed edge loop(s) with surface face(s) - cap a hole, bridge a gap."
 )
 
 tool = (
     Tool.create_simple(name="surface_patch", description=TOOL_DESCRIPTION)
     .add_input_property("boundary", _BOUNDARY.schema())
     .add_input_property("boundaries", {"type": "array", "items": {"type": ["string", "array"]},
-            "description": "Several loops at once - each element an edge handle, or a list of "
-            "handles forming one loop."})
+            "description": "One entry per loop: an edge handle, or a list of handles."})
     .add_input_property(*_inputs.Choice("continuity", ["connected", "tangent", "curvature"],
-        default="connected", description="Edge continuity of the patch.").as_property())
+        default="connected").as_property())
     .add_input_property("interior_rails", _INTERIOR_RAILS.schema())
     .add_input_property(*_inputs.boolean_op(options=("new", "new_component"), default="new").as_property())
     .strict_schema()

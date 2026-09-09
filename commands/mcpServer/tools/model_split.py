@@ -29,17 +29,12 @@ RETURNS = [
                           "split=body: the number of resulting bodies; split=face: the net face-count increase"),
 ]
 
-_SPLIT = _inputs.Choice("split", ["body", "face"], default="body",
-                        description="Split the whole body, or specific faces on it.")
-_TARGET = _inputs.BodyRef("target", kind="brep",
-                          description="The body to split (used when split=body).")
-_FACES = _inputs.GeometryHandleList("faces", require="face",
-                                    description="The faces to split (used when split=face).")
+_SPLIT = _inputs.Choice("split", ["body", "face"], default="body")
+_TARGET = _inputs.BodyRef("target", kind="brep")
+_FACES = _inputs.GeometryHandleList("faces", require="face")
 # The cutter, supplied ONE of two ways: a plane (alias/name/planar-face handle) OR a body/surface.
-_PLANE = _inputs.PlaneRef("split_plane",
-                          description="A plane to cut with.")
-_TOOLBODY = _inputs.BodyRef("split_tool_body", kind="brep",
-                            description="A body or surface to cut with.")
+_PLANE = _inputs.PlaneRef("split_plane")
+_TOOLBODY = _inputs.BodyRef("split_tool_body", kind="brep")
 
 app = adsk.core.Application.get()
 
@@ -219,9 +214,7 @@ def handler(split: str = "body", target: str = "", faces=None, split_plane: str 
 
 
 TOOL_DESCRIPTION = (
-    "Split a solid BODY into separate pieces, or split its FACES along a curve - the SplitBody / "
-    "SplitFace feature; 'split' chooses which. The cutter is EITHER 'split_plane' OR "
-    "'split_tool_body' - give exactly one."
+    "Split a body into pieces, or its faces along a curve."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)
@@ -234,7 +227,7 @@ split_tool = (
     .add_input_property(_PLANE.name, _PLANE.schema())
     .add_input_property(_TOOLBODY.name, _TOOLBODY.schema())
     .add_input_property("extend_tool", {"type": "boolean",
-            "description": "Auto-extend the cutter to fully cross the target (default true)."})
+            "description": "Default true."})
     .strict_schema()
 )
 split_item = Item.create_tool_item(tool=split_tool, write="write", handler=handler, run_on_main_thread=True,

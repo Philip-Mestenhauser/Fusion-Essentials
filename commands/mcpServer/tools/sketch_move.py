@@ -101,17 +101,12 @@ def handler(sketch_name: str = "", entities: str = "", units: str = "mm", dx=Non
 
 
 TOOL_DESCRIPTION = (
-    "MOVE existing sketch entities by one transform in the sketch's own frame: translate "
-    "'dx'/'dy', rotate 'rotation_deg' about ('center_x','center_y'), scale by 'scale_factor' about "
-    "the same anchor. 'entities' are '<type>:<index>' refs from sketch_get. The result names any "
-    "entity that stayed put - a constraint can refuse the move for part of a selection. "
-    "sketch_copy leaves the originals."
+    "MOVE existing sketch entities by one transform."
 )
 
 tool = _transform_wire(
     Tool.create_simple(name="sketch_move", description=TOOL_DESCRIPTION)
-    .add_input_property("sketch_name", {"type": "string",
-            "description": "Sketch holding them (default: most recent)."})
+    .add_input_property("sketch_name", {"type": "string"})
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE))
 
 item = Item.create_tool_item(tool=tool, write="write", handler=handler,

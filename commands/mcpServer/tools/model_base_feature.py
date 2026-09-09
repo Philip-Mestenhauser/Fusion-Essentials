@@ -173,22 +173,17 @@ def handler(action: str = "start", base_feature: str = "") -> dict:
     return ok(out)
 
 
-TOOL_DESCRIPTION = ("Manage a base-feature edit scope in a parametric design - a direct-edit "
-            "scope needed for mesh inserts and imported-body edits. action='start' opens one and "
-            "subsequent calls' geometry lands inside it; action='finish' closes the scope this "
-            "session opened (no name needed). For a single mesh/import op use the mesh_* tools "
-            "instead, which open and finish a scope in one call.")
+TOOL_DESCRIPTION = ("Open or close a base-feature direct-edit scope; the mesh_* tools open and "
+            "finish one per call.")
 
 tool = (
     Tool.create_simple(
         name="model_base_feature",
         description=TOOL_DESCRIPTION)
     .add_input_property("action", {"type": "string", "enum": list(_ACTIONS),
-            "description": "Open or close the edit scope (default start)."})
+            "description": "Default start."})
     .add_input_property("base_feature", {"type": "string",
-            "description": "Optional name: on 'start' names the new base "
-            "feature; on 'finish' selects which to finish (omit to finish "
-            "the one in edit)."})
+            "description": "Names the new scope on 'start'; picks one to finish."})
     .strict_schema()
 )
 item = Item.create_tool_item(

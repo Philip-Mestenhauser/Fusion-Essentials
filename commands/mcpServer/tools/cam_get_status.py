@@ -436,22 +436,18 @@ def _status_live(target: str, include_operations: bool) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Read toolpath generation progress - generation runs in the background on its own, so this is "
-    "a plain status read at whatever cadence you need. 'handle' is OPTIONAL: pass the cam_generate "
-    "id (or 'latest') to scope to that launched generation, OR omit it and pass 'target' (a "
-    "setup/operation NAME, or nothing for the whole document) to read a generation launched inline "
-    "or in the UI. The 'readiness' key carries the verdict and live_states.samples the first "
-    "errored item; the note reports an errored item as a blocker rather than as progress."
+    "Read toolpath generation progress; 'readiness' carries the verdict. Pass 'handle' for one "
+    "cam_generate launch, or 'target' for one launched in the UI."
 )
 
 tool = (
     Tool.create_simple(name="cam_get_status", description=TOOL_DESCRIPTION)
     .add_input_property("handle", {"type": "string",
-            "description": "Optional generation handle from cam_generate, or 'latest'. Omit to read live state (see target)."})
+            "description": "From cam_generate, or 'latest'."})
     .add_input_property("target", {"type": "string",
-            "description": "Read an inline/UI generation with no handle: a setup/operation NAME, or omit (or 'document') for the whole document."})
+            "description": "Omit for the whole document."})
     .add_input_property("include_operations", {"type": "boolean",
-            "description": "When complete, include per-operation warnings/errors + empty toolpaths (default true)."})
+            "description": "Default true."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler,

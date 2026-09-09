@@ -19,8 +19,7 @@ from . import _inputs
 
 app = adsk.core.Application.get()
 
-_MESH = _inputs.MeshBodyRef("mesh", required=True,
-                            description="The mesh body to split into its disconnected shells.")
+_MESH = _inputs.MeshBodyRef("mesh", required=True)
 
 _SPEC = [_MESH]
 
@@ -145,8 +144,7 @@ def handler(mesh: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Split a MESH body into its disconnected shells - the way to take one imported scan holding "
-    "several lumps apart. The input body is CONSUMED and 'pieces' names the new auto-named bodies."
+    "Split a MESH body into its disconnected shells; the input body is CONSUMED."
 )
 
 tool = _inputs.apply_to_tool(

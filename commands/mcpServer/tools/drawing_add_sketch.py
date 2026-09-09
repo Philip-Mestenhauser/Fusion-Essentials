@@ -35,6 +35,15 @@ _KINDS = {
 # The curve collections a DrawingSketch carries - the counts the draw is verified against.
 _COLLECTIONS = ("lines", "rectangles", "arcs", "circles", "ellipses")
 
+# kind -> what its points MEAN, in the order its factory takes them. Named in the arity refusal, so
+# a caller who miscounts learns the form there rather than from the wire description.
+_POINT_FORM = {
+    "rectangle": "two opposite corners",
+    "arc": "start, a point on it, end",
+    "ellipse": "center, a major-axis point, a point on it",
+    "circle": "the center, with a numeric 'radius' beside it",
+}
+
 
 def _point(raw):
     """One [x, y] pair as floats, or None when it is not a point."""
@@ -77,8 +86,8 @@ def _plan(geometry):
                 return None, None, (f"geometry[{i}] ('line') needs at least {need} points - a chain of "
                                     f"N points draws N-1 segments. Got {len(points)}.")
         elif len(points) != need:
-            return None, None, (f"geometry[{i}] ('{kind}') needs exactly {need} points. "
-                                f"Got {len(points)}.")
+            return None, None, (f"geometry[{i}] ('{kind}') needs exactly {need} points "
+                                f"({_POINT_FORM[kind]}). Got {len(points)}.")
         radius = spec.get("radius")
         if kind == "circle":
             try:
@@ -202,12 +211,7 @@ def handler(geometry=None, sheet_name: str = "", name: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Draw 2D geometry on a NEW sketch on a sheet of the active 2D drawing document. One call adds "
-    "one sketch and draws every entity in 'geometry' onto it. Coordinates are in the unit the "
-    "drawing STANDARD fixes - mm under ISO, in under ASME, reported as coordinate_unit - not the "
-    "dimension display unit. Open the drawing as the active document first (doc_open, or the Fusion "
-    "UI). Nothing drawn can be moved or deleted individually, so send a sheet's geometry in ONE "
-    "call and check it with drawing_export."
+    "Draw 2D geometry on a NEW sketch on a sheet of the active 2D drawing document."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)
@@ -216,18 +220,17 @@ tool = (
     Tool.create_simple(name="drawing_add_sketch", description=FULL_DESCRIPTION)
     .add_input_property("geometry", {
         "type": "array",
-        "description": "Entities to draw, in order, each {kind, points} with points as [x, y] pairs. "
-                       "line: 2+, one chain. rectangle: 2 corners. arc: 3 (start, on it, end). "
-                       "ellipse: 3 (center, major-axis, a point on it). circle: 1 + 'radius'.",
+        "description": "Entities to draw, in order; 'points' are [x, y] in coordinate_unit - "
+                       "mm under ISO, in under ASME.",
         "items": {"type": "object", "properties": {
             "kind": {"type": "string", "enum": sorted(_KINDS)},
             "points": {"type": "array", "items": {"type": "array"}},
             "radius": {"type": "number"}}}})
     .add_required_input("geometry")
     .add_input_property("sheet_name", {"type": "string",
-            "description": "Sheet to draw on. Omit for the drawing's active sheet."})
+            "description": "Omit for the active sheet."})
     .add_input_property("name", {"type": "string",
-            "description": "Name for the new sketch. Omit to let Fusion name it."})
+            "description": "Omit to let Fusion name it."})
     .strict_schema()
 )
 

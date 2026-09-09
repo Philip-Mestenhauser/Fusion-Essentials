@@ -183,11 +183,8 @@ def handler(folder_id: str = "", confirm_name: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Delete a data-model folder by its 'folder_id' (from data_get(include=['folders'])). "
-    "GUARDED and IRREVERSIBLE: 'confirm_name' must EXACTLY match the folder's current name, "
-    "and a project ROOT is never deleted. A NON-EMPTY folder is a RECURSIVE wipe of its "
-    "whole subtree that bypasses the per-file reference-orphan check: it needs force=true "
-    "AND recursive_confirm=<the folder's name>, and force alone returns a subtree PREVIEW."
+    "Delete a folder on the cloud, IRREVERSIBLY: 'confirm_name' must EXACTLY match the folder's "
+    "current name."
 )
 
 tool = (
@@ -195,14 +192,13 @@ tool = (
         name="data_delete_folder",
         description=TOOL_DESCRIPTION,
         input_param_name="folder_id",
-        input_param_description="Id of the folder to delete (from data_get(include=['folders'])).",
+        input_param_description="From data_get(include=['folders']).",
     )
-    .add_input_property("confirm_name", {"type": "string",
-        "description": "Exact current name of the folder, case-sensitive."})
+    .add_input_property("confirm_name", {"type": "string", "description": "Case-sensitive."})
     .add_input_property("force", {"type": "boolean",
-        "description": "Allow deleting a non-empty folder (default false)."})
+        "description": "Allow a non-empty folder. Default false."})
     .add_input_property("recursive_confirm", {"type": "string",
-        "description": "The folder's name, acknowledging the recursive subtree delete; omit to get a preview."})
+        "description": "The folder's name, acknowledging the subtree delete."})
     .strict_schema()
 )
 item = Item.create_tool_item(

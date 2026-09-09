@@ -126,10 +126,8 @@ def handler(comment: str = "", program: str = "", set_name: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Set the COMMENT field of the active document's NC programs (post/output jobs) - what most "
-    "posts emit near the top of the G-code. Reports before/after per program. "
-    "Works without switching to the Manufacture workspace. "
-    "cam_get(include=['nc_programs']) lists the program names."
+    "Set the COMMENT field of the active document's NC programs - what most posts emit near the "
+    "top of the G-code."
 )
 
 tool = (
@@ -137,12 +135,12 @@ tool = (
         name="cam_set_nc_comment",
         description=TOOL_DESCRIPTION,
         input_param_name="comment",
-        input_param_description="The text to write into the NC program Comment field.",
+        input_param_description="Text for the Comment field.",
     )
     .add_input_property("program", {"type": "string",
-            "description": "Name of one NC program to edit (omit = all programs)."})
+            "description": "Omit = all programs."})
     .add_input_property("set_name", {"type": "string",
-            "description": "Optional: also set each program's Name field to this."})
+            "description": "Also set each program's Name field to this."})
     .strict_schema()
 )
 

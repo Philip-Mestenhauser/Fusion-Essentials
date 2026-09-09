@@ -507,30 +507,21 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "CREATE a CAM milling operation in a setup. 'strategy' is validated against the setup's "
-    "compatible strategies (cam_get(include=['strategies']) lists them); the cutting tool comes "
-    "from this document's library or a shared one (cam_edit_tools). "
-    "Order: create -> cam_select_geometry -> generate=true here "
-    "(or cam_generate); 'generate' defaults to FALSE because generating before the geometry is "
-    "selected yields a warned op with no toolpath. "
-    "cam_create_setup makes the setup first."
+    "Create a CAM milling operation in a setup, with a cutting tool from cam_edit_tools. "
+    "Select its geometry with cam_select_geometry, then cam_generate."
 )
 
 tool = (
     Tool.create_simple(name="cam_create_operation", description=TOOL_DESCRIPTION)
     .add_input_property("setup", {"type": "string", "description": "Setup name (from cam_get)."})
     .add_input_property("strategy", {"type": "string",
-            "description": "Strategy name, e.g. face / adaptive / pocket2d / drill / bore / contour2d."})
-    .add_input_property("tool_scope", {"type": "string", "enum": ["document"],
-            "description": "Set 'document' to take the tool from this doc's library by tool_index (no url)."})
-    .add_input_property("tool_library_url", {"type": "string",
-            "description": "Shared tool library url (from cam_edit_tools) - omit if tool_scope=document."})
-    .add_input_property("tool_index", {"type": "integer",
-            "description": "Tool index within the chosen library (from cam_edit_tools)."})
+            "description": "e.g. face / adaptive / drill / contour2d."})
+    .add_input_property("tool_scope", {"type": "string", "enum": ["document"]})
+    .add_input_property("tool_library_url", {"type": "string"})
+    .add_input_property("tool_index", {"type": "integer"})
     .add_input_property("generate", {"type": "boolean",
-            "description": "Generate the toolpath after creating (default false - select geometry first)."})
-    .add_input_property("name", {"type": "string",
-            "description": "Optional name for the new operation; the payload publishes the name it reads back."})
+            "description": "Default false; select geometry first."})
+    .add_input_property("name", {"type": "string"})
     .strict_schema()
 )
 item = Item.create_tool_item(

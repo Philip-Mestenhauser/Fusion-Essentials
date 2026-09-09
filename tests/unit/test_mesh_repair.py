@@ -441,8 +441,7 @@ class TestVerification:
 
     def test_a_stitch_that_moves_nothing_on_an_open_mesh_is_reported_not_failed(self, monkeypatch):
         # only a HOLE-CLOSING repair can be convicted by an open mesh. stitch_and_remove was never
-        # asked to close anything, so its no-op is reported as measured - which is what the wire
-        # description promises.
+        # asked to close anything, so its no-op is reported as measured in the result note.
         _rig(monkeypatch, mesh=_mesh(is_closed=False, volume=12.0))
         out = payload(mr.handler(mesh="H", repair_type="stitch_and_remove"))
         assert out["changed"] == []

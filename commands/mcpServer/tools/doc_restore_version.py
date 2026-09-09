@@ -216,19 +216,15 @@ def handler(version_number=None, version_id: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Roll the ACTIVE cloud document back to a prior version, named by version_number or version_id "
-    "(from doc_get include=['versions']). PROMOTES that version to latest - history is NOT erased; a "
-    "NEW tip version is created whose content matches the restored one. Confirms the new tip appeared, "
-    "or flags 'pending' when the tip had not advanced within the wait. The in-session document keeps "
-    "showing its open version until reopened."
+    "Promote a prior version of the ACTIVE cloud document to latest - a NEW tip version carries its "
+    "content. Versions come from doc_get include=['versions']."
 )
 
 tool = (
     Tool.create_simple(name="doc_restore_version", description=TOOL_DESCRIPTION)
-    .add_input_property("version_number", {"type": "integer",
-            "description": "Version number to promote to latest."})
+    .add_input_property("version_number", {"type": "integer"})
     .add_input_property("version_id", {"type": "string",
-            "description": "The version's id (versionId), as an alternative to version_number."})
+            "description": "The version's id (versionId)."})
     .strict_schema()
 )
 

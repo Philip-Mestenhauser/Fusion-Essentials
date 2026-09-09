@@ -30,9 +30,7 @@ RETURNS = [
                           absent_when="no_timeline_feature"),
 ]
 
-_FACES = _inputs.GeometryHandleList(
-    "faces", require="face", required=True,
-    description="The faces to delete; deleting every face removes the body.")
+_FACES = _inputs.GeometryHandleList("faces", require="face", required=True)
 
 
 def delete_face_handler(faces=None, heal=False) -> dict:
@@ -191,16 +189,14 @@ def delete_face_handler(faces=None, heal=False) -> dict:
 
 
 _DESC = (
-"Delete faces from their bodies. 'heal'=true fills the opening and a solid stays a solid; "
-"'heal'=false leaves it open, turning a solid into a surface.\n"
+"Delete faces from their bodies; 'heal'=false leaves the opening, turning a solid into a surface.\n"
 + _outputs.produces_block(RETURNS)
 )
 
 surface_delete_face_tool = (
     Tool.create_simple(name="surface_delete_face", description=_DESC)
     .add_input_property("faces", _FACES.schema())
-    .add_input_property("heal", {"type": "boolean",
-        "description": "Heal/fill the opening (default false = leave it open)."})
+    .add_input_property("heal", {"type": "boolean", "description": "Default false."})
     .add_required_input("faces")
     .strict_schema()
 )

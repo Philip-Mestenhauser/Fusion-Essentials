@@ -21,14 +21,11 @@ from . import _outputs
 
 app = adsk.core.Application.get()
 
-_REMOVE_FACES = _inputs.GeometryHandleList("remove_faces", require="face", required=False,
-    description="Faces to remove (open the shell on these); omit for a closed hollow shell.")
+_REMOVE_FACES = _inputs.GeometryHandleList("remove_faces", require="face", required=False)
 _BODY = _inputs.BodyRef("body_name", kind="solid", required=False,
-    description="Solid body to hollow (a handle or name; omit = most recent). Ignored when remove_faces is given.")
-_THICKNESS = _inputs.Distance("thickness", allow_zero=False, allow_negative=False, required=True,
-    description="Wall thickness in 'units'.")
-_DIRECTION = _inputs.Choice("direction", ["inside", "outside", "both"], default="inside",
-    description="Which way the wall is offset from the original surface.")
+    description="Omit for the most recent.")
+_THICKNESS = _inputs.Distance("thickness", allow_zero=False, allow_negative=False, required=True)
+_DIRECTION = _inputs.Choice("direction", ["inside", "outside", "both"], default="inside")
 
 RETURNS = [
     _outputs.ReturnsName("feature", of="shell feature"),
@@ -147,9 +144,7 @@ def handler(body_name: str = "", thickness: float = 1.0, units: str = "mm",
 
 
 TOOL_DESCRIPTION = (
-    "Hollow a solid body into a thin-walled shell (the Shell feature). 'body_name' alone gives a "
-    "CLOSED shell; 'remove_faces' OPENS it on those faces and implies the body. Pair with "
-    "view_section to inspect the resulting wall.\n"
+    "Hollow a solid; 'remove_faces' opens the shell.\n"
     + _outputs.produces_block(RETURNS)
 )
 

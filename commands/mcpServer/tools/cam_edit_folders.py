@@ -182,23 +182,19 @@ def handler(action: str = "list", setup: str = "", name: str = "", folder: str =
 
 
 TOOL_DESCRIPTION = (
-    "Manage a CAM setup's folders: list them, create one, rename one, or move operations into one. "
-    "'setup' is the setup name throughout; only 'list' is read-only. "
-    "Patterns (mirror/linear/rotary) can be read "
-    "and have their parameters edited (via cam_edit_operation) but cannot be created through the API - "
-    "create those in the Manufacture UI."
+    "Manage a CAM setup's folders: list, create, rename, or move operations into one. "
+    "Patterns are created in the Manufacture UI, not through the API."
 )
 
 tool = (
     Tool.create_simple(name="cam_edit_folders", description=TOOL_DESCRIPTION)
-    .add_input_property("action", {"type": "string", "enum": list(_ACTIONS),
-            "description": "list / create / rename / move."})
+    .add_input_property("action", {"type": "string", "enum": list(_ACTIONS)})
     .add_input_property("setup", {"type": "string", "description": "Setup name (from cam_get)."})
     .add_input_property("name", {"type": "string", "description": "New folder name (create)."})
     .add_input_property("folder", {"type": "string", "description": "Target folder (rename / move)."})
     .add_input_property("new_name", {"type": "string", "description": "New name (rename)."})
     .add_input_property("operations", {"type": "array", "items": {"type": "string"},
-            "description": "Operation names to move into the folder (move)."})
+            "description": "Operation names to move in (move)."})
     .strict_schema()
 )
 item = Item.create_tool_item(

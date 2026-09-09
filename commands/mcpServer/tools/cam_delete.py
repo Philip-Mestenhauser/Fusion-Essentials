@@ -56,10 +56,7 @@ def handler(entity: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Delete a CAM entity - a setup, operation, folder, or pattern - by name (the CAM-side delete; "
-    "design_delete_feature / design_delete_occurrence only act on the design timeline, not CAM data). "
-    "'entity' is the item name (from cam_get / cam_edit_folders). An ambiguous name shared across "
-    "items is refused; a delete Fusion declines is reported as an error, not a false success."
+    "Delete a CAM setup, operation, folder or pattern by name (design_delete_* do not reach CAM data)."
 )
 
 tool = (
@@ -67,7 +64,7 @@ tool = (
         name="cam_delete",
         description=TOOL_DESCRIPTION,
         input_param_name="entity",
-        input_param_description="The CAM entity name to delete (setup / operation / folder / pattern).",
+        input_param_description="Setup / operation / folder / pattern name.",
     )
     .strict_schema()
 )

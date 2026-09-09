@@ -191,24 +191,23 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", geometry: str = 
 
 
 TOOL_DESCRIPTION = (
-    "Create an AS-BUILT joint between two occurrences WHERE THEY ALREADY ARE - no joint origins "
-    "needed and neither part moves (unlike joint_create). An as-built joint exposes NO offset/angle "
-    "ModelParameter, so its position cannot be driven by a parameter or an expression - use "
+    "Joint two occurrences WHERE THEY ALREADY ARE - neither part moves; joint_create moves the "
+    "free part instead. An as-built joint exposes NO offset/angle ModelParameter, so use "
     "joint_create when it must be parametric."
 )
 tool = (
     Tool.create_simple(name="joint_create_as_built", description=TOOL_DESCRIPTION)
-    .add_input_property("occurrence_one", {"type": "string", "description": "First occurrence name."})
-    .add_input_property("occurrence_two", {"type": "string", "description": "Second occurrence name."})
-    .add_input_property("geometry", {"type": "string", "description": "Where a non-rigid motion anchors: a find_geometry handle, or '<occurrence>:<snap>'. Omit for rigid."})
+    .add_input_property("occurrence_one", {"type": "string"})
+    .add_input_property("occurrence_two", {"type": "string"})
+    .add_input_property("geometry", {"type": "string",
+            "description": "A find_geometry handle, or '<occurrence>:<snap>'."})
     .add_input_property(*_inputs.joint_motion(default="rigid", options=_MOTIONS,
-            description="Anything but rigid requires 'geometry'.").as_property())
+            description="").as_property())
     .add_input_property(*_inputs.frame_axis("axis", default="z",
-            description="Motion axis for the types that need one (for pin_slot: the rotation axis).").as_property())
+            description="For pin_slot, the rotation axis.").as_property())
     .add_input_property(*_inputs.frame_axis("slide_axis", default="",
-            description="pin_slot only: the perpendicular SLIDE direction.").as_property())
-    .add_input_property("name", {"type": "string",
-            "description": "Optional name, applied after creation and read back."})
+            description="pin_slot only.").as_property())
+    .add_input_property("name", {"type": "string"})
     .strict_schema()
 )
 item = Item.create_tool_item(

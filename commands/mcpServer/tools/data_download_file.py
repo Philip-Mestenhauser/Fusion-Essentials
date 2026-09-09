@@ -120,27 +120,24 @@ def handler(file: str = "", project: str = "", folder: str = "", destination_fol
 
 
 TOOL_DESCRIPTION = (
-    "Download ONE non-Fusion cloud file to a local folder. Fusion-native data is REFUSED: a design "
-    "leaves through design_export, a drawing through drawing_export. The transfer is SYNCHRONOUS and "
-    "FREEZES Fusion until it finishes - small files only. An existing local file is refused unless "
-    "overwrite=true.\n"
+    "Download ONE non-Fusion cloud file to a local folder; the transfer is SYNCHRONOUS and freezes "
+    "Fusion until it finishes.\n"
     + _outputs.produces_block(RETURNS)
 )
 
 tool = (
     Tool.create_simple(name="data_download_file", description=TOOL_DESCRIPTION)
     .add_input_property("file", {"type": "string",
-            "description": "Lineage URN (data_get), or the file's name (which needs 'project')."})
-    .add_input_property("project", {"type": "string",
-            "description": "Project holding the file."})
+            "description": "Lineage URN, or a name plus 'project'."})
+    .add_input_property("project", {"type": "string"})
     .add_input_property("folder", {"type": "string",
-            "description": "Cloud folder path scoping a by-name lookup."})
+            "description": "Cloud path scoping a by-name lookup."})
     .add_input_property("destination_folder", {"type": "string",
-            "description": "LOCAL folder to write into; created if missing."})
+            "description": "LOCAL folder; created if missing."})
     .add_input_property("file_name", {"type": "string",
-            "description": "Local filename, bare. Default: the cloud name."})
+            "description": "Bare filename. Default: the cloud name."})
     .add_input_property("overwrite", {"type": "boolean",
-            "description": "Replace an existing local file (default false)."})
+            "description": "Replace an existing local file. Default false."})
     .strict_schema()
 )
 

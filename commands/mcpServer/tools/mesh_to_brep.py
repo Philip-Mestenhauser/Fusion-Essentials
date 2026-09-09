@@ -19,17 +19,13 @@ from ._design_common import run_in_base_feature
 
 app = adsk.core.Application.get()
 
-_CONVERT_MESH = _inputs.MeshBodyRef("mesh", required=True, description="The mesh body to convert.")
-_CONVERT_METHOD = _inputs.Choice("method", ["prismatic", "faceted", "organic"], default="prismatic",
-                                 description="prismatic merges flat face groups (fewest faces); "
-                                             "faceted is one BRep face per triangle (exact, heavy); "
-                                             "organic needs the Product Design Extension.")
+_CONVERT_MESH = _inputs.MeshBodyRef("mesh", required=True)
+_CONVERT_METHOD = _inputs.Choice("method", ["prismatic", "faceted", "organic"], default="prismatic")
 _CONVERT_RES = _inputs.Choice("resolution", ["by_accuracy", "by_facet_number"], default="by_accuracy",
-                              description="Organic only: resolution driver.")
+                              description="For method='organic'.")
 _CONVERT_ACC = _inputs.Choice("accuracy", ["low", "medium", "high", "precise"], default="medium",
-                              description="Organic + by_accuracy: accuracy level.")
-_CONVERT_OP = _inputs.Choice("operation", ["parametric", "base_feature"], default="parametric",
-                             description="Timeline operation type.")
+                              description="Organic, by_accuracy only.")
+_CONVERT_OP = _inputs.Choice("operation", ["parametric", "base_feature"], default="parametric")
 
 
 def _organic_available():
@@ -212,7 +208,7 @@ tool = (
     _inputs.apply_to_tool(
         Tool.create_simple(name="mesh_to_brep", description=TOOL_DESCRIPTION),
         _CONVERT_SPEC)
-    .add_input_property("face_count", {"type": "integer", "description": "Organic + resolution=by_facet_number: target BRep face count."})
+    .add_input_property("face_count", {"type": "integer", "description": "Organic, by_facet_number only."})
     .strict_schema()
 )
 item = Item.create_tool_item(

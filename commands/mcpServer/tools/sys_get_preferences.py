@@ -380,12 +380,7 @@ def handler(include=None) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Read the APPLICATION's preferences (app.preferences - settings that belong to no document). "
-    "Default: the few that change how OTHER tools behave; 'include' pulls a group in full, and "
-    "'products'/'units_defaults' nest by product name. Every key carries its tier - 'W' means "
-    "sys_set_preferences can set it, 'R' means that tool refuses it and says why. A member that "
-    "will not read reports value null with unreadable true; one this build does not carry reports "
-    "unknown_member true.\n"
+    "Read the APPLICATION's preferences: app.preferences, which belong to no document.\n"
     + _outputs.produces_block(RETURNS)
 )
 
@@ -393,7 +388,7 @@ tool = (
     Tool.create_simple(name="sys_get_preferences", description=TOOL_DESCRIPTION)
     .add_input_property("include", {"type": "array",
             "items": {"type": "string", "enum": list(GROUP_KEYS)},
-            "description": "Groups to pull in full; omit for the default projection."})
+            "description": "Omit for the default projection."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

@@ -109,19 +109,18 @@ def handler(occurrences: str = "", bodies=None, quantity_one: int = 2, spacing_o
 
 
 TOOL_DESCRIPTION = (
-"Pattern component OCCURRENCES or BODIES in a rectangular grid; 'spacing_one'/'spacing_two' are "
-"the distance BETWEEN instances. model_pattern_circular makes a ring, model_pattern_path follows "
-"a curve. Pair with view_screenshot to view."
+"Pattern occurrences or bodies in a rectangular grid."
 )
 tool = (
     Tool.create_simple(name="model_pattern_rectangular", description=TOOL_DESCRIPTION)
     .add_input_property(*_OCCURRENCES.as_property())
     .add_input_property("bodies", _BODIES.schema())
-    .add_input_property("quantity_one", {"type": "integer", "description": "Instance count in direction one (>=1)."})
-    .add_input_property("spacing_one", {"type": "number", "description": "Spacing between instances in direction one (in 'units')."})
+    .add_input_property("quantity_one", {"type": "integer"})
+    .add_input_property("spacing_one", {"type": "number",
+            "description": "Distance between instances."})
     .add_input_property(*_DIR_ONE.as_property())
-    .add_input_property("quantity_two", {"type": "integer", "description": "Instance count in direction two (default 1 = single row)."})
-    .add_input_property("spacing_two", {"type": "number", "description": "Spacing between instances in direction two (in 'units')."})
+    .add_input_property("quantity_two", {"type": "integer"})
+    .add_input_property("spacing_two", {"type": "number"})
     .add_input_property(*_DIR_TWO.as_property())
     .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()

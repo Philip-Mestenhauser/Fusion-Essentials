@@ -115,9 +115,13 @@ def _inputs_by_kind(required):
     return "; ".join(f"{kind} {','.join(keys) or 'points'}" for kind, keys in required.items())
 
 
+# Point ROLES the input names cannot carry: the kinds whose x1,y1 / x2,y2 / cx,cy / radius mean
+# something other than "point 1, point 2, centre, radius".
+_ROLES = (" Roles: center_rectangle x2,y2 = half-extents. conic cx,cy = apex. overall_slot "
+          "x1,y1/x2,y2 = tips, center_point_slot = centre and cap. slot radius = half-width.")
+
 _KIND = _inputs.Choice("kind", list(_KINDS), required=True,
-                       description="Which entity to draw. Inputs by kind: "
-                                   + _inputs_by_kind(_REQUIRED) + ".")
+                       description="Inputs by kind: " + _inputs_by_kind(_REQUIRED) + "." + _ROLES)
 
 
 def _pt(x, y, k):
@@ -753,44 +757,38 @@ def handler(kind: str = "", sketch_name: str = "", units: str = "mm",
 
 
 TOOL_DESCRIPTION = (
-    "Draw one geometry entity on a sketch; coords/sizes in 'units', angles in degrees. "
-    "Both rectangle kinds get horizontal/vertical constraints on their sides; no center/symmetry "
-    "constraint is added - dimension position and size after. Every slot kind takes x1,y1 / "
-    "x2,y2 + radius with DIFFERENT point roles: overall_slot's are the TIPS, center_point_slot's "
-    "the centre and a CAP CENTRE, and the arc slots add cx,cy = the arc centre "
-    "(center_point_arc_slot) or a point ON the arc (three_point_arc_slot). "
-    "Pair with view_screenshot to view what was drawn."
+    "Draw one entity on a sketch; coords in 'units', angles in degrees."
 )
 tool = (
     Tool.create_simple(name="sketch_add_geometry", description=TOOL_DESCRIPTION)
     .add_input_property(*_KIND.as_property())
     .add_required_input("kind")
     .add_input_property("points", {"type": "array",
-            "description": "[x,y] points in 'units': the chain for polyline/closed_path, the curve a spline passes THROUGH, or cv_spline's control polygon.",
+            "description": "[x,y] pairs in 'units'. A cv_spline's are control points.",
             "items": {"type": "array"}})
-    .add_input_property("sketch_name", {"type": "string", "description": "Sketch to draw on (default: most recent)."})
+    .add_input_property("sketch_name", {"type": "string", "description": "Default: most recent."})
     .add_input_property(*COMPONENT_SCOPE)
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("x1", {"type": "number", "description": "X of point 1 / start."})
-    .add_input_property("y1", {"type": "number", "description": "Y of point 1 / start."})
-    .add_input_property("x2", {"type": "number", "description": "X of point 2; center_rectangle: HALF-width from center."})
-    .add_input_property("y2", {"type": "number", "description": "Y of point 2; center_rectangle: HALF-height from center."})
-    .add_input_property("cx", {"type": "number", "description": "Center X; point X for kind='point'; conic APEX X."})
-    .add_input_property("cy", {"type": "number", "description": "Center Y; point Y for kind='point'; conic APEX Y."})
-    .add_input_property("radius", {"type": "number", "description": "Radius; ellipse MAJOR; slot HALF-width (full width = radius*2)."})
-    .add_input_property("minor", {"type": "number", "description": "Ellipse MINOR radius (optional; default = major/2)."})
-    .add_input_property("sweep_deg", {"type": "number", "description": "Arc sweep in degrees (CCW positive)."})
-    .add_input_property("start_deg", {"type": "number", "description": "elliptical_arc start angle in degrees from the major axis (default 0)."})
-    .add_input_property("rho", {"type": "number", "description": "Conic rho (how far the curve pulls toward the apex)."})
-    .add_input_property("degree", {"type": "integer", "description": "cv_spline degree - 3 or 5 (default 3)."})
-    .add_input_property("sides", {"type": "integer", "description": "Polygon side count (>=3)."})
-    .add_input_property("arc_radius", {"type": "number", "description": "center_point_arc_slot: the arc radius. Overrides the x1,y1-to-cx,cy distance, which then sets direction only."})
-    .add_input_property("slot_length", {"type": "number", "description": "overall_slot: the tip-to-tip length; center_point_slot: the centre-to-cap-centre HALF length. Overrides the x2,y2 distance, which then sets direction only."})
-    .add_input_property("angle_deg", {"type": "number", "description": "Slot angle in degrees."})
-    .add_input_property("create_width_dimension", {"type": "boolean", "description": "Slot kinds: dimension the full width."})
-    .add_input_property("create_radius_dimension", {"type": "boolean", "description": "center_point_arc_slot: dimension arc_radius."})
-    .add_input_property("create_angle_dimension", {"type": "boolean", "description": "center_point_arc_slot: dimension angle_deg."})
-    .add_input_property("is_construction", {"type": "boolean", "description": "Draw as CONSTRUCTION geometry (reference, not a profile edge). Default false."})
+    .add_input_property("x1", {"type": "number"})
+    .add_input_property("y1", {"type": "number"})
+    .add_input_property("x2", {"type": "number"})
+    .add_input_property("y2", {"type": "number"})
+    .add_input_property("cx", {"type": "number"})
+    .add_input_property("cy", {"type": "number"})
+    .add_input_property("radius", {"type": "number"})
+    .add_input_property("minor", {"type": "number"})
+    .add_input_property("sweep_deg", {"type": "number"})
+    .add_input_property("start_deg", {"type": "number"})
+    .add_input_property("rho", {"type": "number"})
+    .add_input_property("degree", {"type": "integer"})
+    .add_input_property("sides", {"type": "integer"})
+    .add_input_property("arc_radius", {"type": "number", "description": "Overrides the start-to-centre distance."})
+    .add_input_property("slot_length", {"type": "number", "description": "overall_slot tip-to-tip, center_point_slot HALF length. Overrides x2,y2."})
+    .add_input_property("angle_deg", {"type": "number"})
+    .add_input_property("create_width_dimension", {"type": "boolean"})
+    .add_input_property("create_radius_dimension", {"type": "boolean"})
+    .add_input_property("create_angle_dimension", {"type": "boolean"})
+    .add_input_property("is_construction", {"type": "boolean"})
     .strict_schema()
 )
 item = Item.create_tool_item(

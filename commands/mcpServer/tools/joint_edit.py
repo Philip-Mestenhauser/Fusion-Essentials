@@ -362,38 +362,38 @@ def handler(joint_name: str = "", input_one: str = "", input_two: str = "",
 
 
 TOOL_DESCRIPTION = (
-"Edit an existing joint's DEFINITION in place: 'joint_name' selects it, and any subset of the "
-"other inputs changes it. To DRIVE a joint to a pose use joint_drive, not this."
+"Edit an existing joint's DEFINITION in place; joint_drive poses it to a value instead."
 )
 tool = (
     Tool.create_simple(name="joint_edit", description=TOOL_DESCRIPTION)
-    .add_input_property("joint_name", {"type": "string", "description": "Name of the joint to edit."})
+    .add_input_property("joint_name", {"type": "string"})
     .add_input_property("input_one", {"type": "string",
-            "description": "New first input: Joint Origin name OR '<occurrence>:<snap>'."})
-    .add_input_property("input_two", {"type": "string",
-            "description": "New second input: Joint Origin name OR '<occurrence>:<snap>'."})
-    .add_input_property(*_inputs.joint_motion(default="rigid", options=_MOTIONS).as_property())
+            "description": "A Joint Origin name or '<occurrence>:<snap>'."})
+    .add_input_property("input_two", {"type": "string"})
+    .add_input_property(*_inputs.joint_motion(default="rigid", options=_MOTIONS,
+            description="").as_property())
     .add_input_property(*_inputs.frame_axis("axis", default="z",
-            description="Motion axis for the types that need one (FRAME-relative; for pin_slot: the rotation axis).").as_property())
+            description="FRAME-relative, not world; for pin_slot the rotation axis.").as_property())
     .add_input_property(*_inputs.frame_axis("slide_axis", default="",
-            description="pin_slot only: the perpendicular SLIDE direction.").as_property())
+            description="pin_slot only.").as_property())
     .add_input_property(*_inputs.frame_axis("world_axis", default="",
-            description="Re-point the motion to a TRUE WORLD axis - fixes a joint pivoting about the wrong world axis because the snap frame isn't world-aligned. Re-applies the current motion type when joint_type is omitted.").as_property())
+            description="Re-point the motion to a TRUE WORLD axis.").as_property())
     .add_input_property("flip", {"type": "boolean",
-            "description": "SET the joint direction flag: true flips the joint, false unflips it. "
-                           "Not a toggle - a second flip=true changes nothing."})
-    .add_input_property("offset", {"type": "number", "description": "The joint ANCHOR offset (the offset ModelParameter, in 'units') along the joint FRAME'S Z axis - NOT a slider's slide value (joint_drive poses that)."})
-    .add_input_property("angle", {"type": "number", "description": "Joint angle between the inputs (degrees)."})
-    .add_input_property(*_inputs.units_property(description="Units for 'offset'."))
+            "description": "Sets the flag - not a toggle."})
+    .add_input_property("offset", {"type": "number",
+            "description": "In 'units'; the anchor offset along the joint frame's Z, not a slide "
+                           "value (joint_drive poses that)."})
+    .add_input_property("angle", {"type": "number", "description": "In degrees."})
+    .add_input_property(*_inputs.UNITS.as_property())
     # rotation_deg is intentionally NOT exposed: the handler still accepts the kwarg and returns a
     # helpful redirect if passed, but advertising a parameter whose only behavior is to error wastes
     # context. To pose a joint, use joint_drive.
-    .add_input_property("min_deg", {"type": "number", "description": "Rotation limit min (deg)."})
-    .add_input_property("max_deg", {"type": "number", "description": "Rotation limit max (deg)."})
-    .add_input_property("rest_deg", {"type": "number", "description": "Rotation rest value (deg)."})
-    .add_input_property("min_mm", {"type": "number", "description": "Slide limit min ('units')."})
-    .add_input_property("max_mm", {"type": "number", "description": "Slide limit max ('units')."})
-    .add_input_property("rest_mm", {"type": "number", "description": "Slide rest value ('units')."})
+    .add_input_property("min_deg", {"type": "number"})
+    .add_input_property("max_deg", {"type": "number"})
+    .add_input_property("rest_deg", {"type": "number"})
+    .add_input_property("min_mm", {"type": "number", "description": "In 'units'."})
+    .add_input_property("max_mm", {"type": "number", "description": "In 'units'."})
+    .add_input_property("rest_mm", {"type": "number", "description": "In 'units'."})
     .strict_schema()
 )
 item = Item.create_tool_item(

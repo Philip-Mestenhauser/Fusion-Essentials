@@ -36,17 +36,14 @@ _REFINEMENTS = {
 }
 
 _EXPORT_TARGET = _inputs.BodyRef("target", kind="any", required=False,
-                                 description="What to export; omit = the whole design.")
-_EXPORT_FORMAT = _inputs.Choice("format", options=list(_FORMATS), default="3mf",
-                                description="Mesh file format to write.")
-_EXPORT_REFINE = _inputs.Choice("refinement", options=list(_REFINEMENTS), default="medium",
-                                description="Mesh density where the format supports it.")
+                                 description="Omit = the whole design.")
+_EXPORT_FORMAT = _inputs.Choice("format", options=list(_FORMATS), default="3mf")
+_EXPORT_REFINE = _inputs.Choice("refinement", options=list(_REFINEMENTS), default="medium")
 # STLExportOptions.unitType is sticky session state: an export that never assigns it writes the unit
 # of the last explicit assignment made anywhere in the session, across documents. So the omitted
 # case still ASSIGNS the default (mm, the unit mesh_insert defaults to) rather than leaving it alone.
 _EXPORT_UNITS = _inputs.Choice("stl_units", options=list(_export.STL_UNIT_MEMBERS), default="mm",
-                               description="format=stl only: the units baked into the file - pass "
-                                           "the same to mesh_insert to re-import at size.")
+                               description="format=stl only; baked into the file.")
 
 
 # ── mesh_export target resolution (broad: body handle/name, component/occurrence, whole design) ──
@@ -394,9 +391,7 @@ def handler(format: str = "3mf", file_path: str = "", target: str = "",
 # ── tool registration ────────────────────────────────────────────────────────────────────────
 
 TOOL_DESCRIPTION = (
-    "Export geometry to a MESH file on local disk - for neutral BRep formats use "
-    "design_export. The design is not modified. Re-import a written file as a mesh "
-    "body with mesh_insert; upload it to the cloud with data_upload_file."
+    "Export geometry to a MESH file on local disk; design_export writes neutral BRep formats."
 )
 
 _EXPORT_SPEC = [_EXPORT_FORMAT, _EXPORT_REFINE, _EXPORT_UNITS, _EXPORT_TARGET]
@@ -405,10 +400,10 @@ tool = (
         Tool.create_simple(name="mesh_export", description=TOOL_DESCRIPTION),
         _EXPORT_SPEC)
     .add_input_property("file_path", {"type": "string",
-            "description": "Local output path - a file, or a DIRECTORY when split_by_component=true. Extension appended if missing."})
+            "description": "Output path; a DIRECTORY when split_by_component."})
     .add_required_input("file_path")
     .add_input_property("split_by_component", {"type": "boolean",
-            "description": "One file per top-level occurrence, into directory 'file_path'."})
+            "description": "One file per top-level occurrence."})
     .strict_schema()
 )
 # DeliverablesExist re-stats every claimed deliverable (single file_path or split-mode files[]) - a

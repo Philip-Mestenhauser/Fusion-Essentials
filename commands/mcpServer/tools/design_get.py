@@ -928,51 +928,36 @@ def _normalize_include(include):
 
 
 TOOL_DESCRIPTION = (
-    "Read the active DESIGN by zoom level. Default (no 'include'): modelling mode, a content "
-    "fingerprint, and timeline_healthy - TIMELINE errors/warnings ONLY; stale references show as "
-    "is_out_of_date on tree nodes, and the whole-document verdict is workspace_orient.is_healthy. "
-    "'include' pulls one deeper slice - 'tree' is light nodes ('tree_handles' adds the handle a "
-    "body-taking tool accepts), 'mode' the full capability map, 'materials'/'appearances' the "
-    "catalog to assign FROM. Lists are capped; *_truncated means the note names the narrowing."
+    "Read the active design: modelling mode, contents and timeline health by default; 'include' "
+    "pulls one deeper slice."
 )
 
 tool = (
     Tool.create_simple(name="design_get", description=TOOL_DESCRIPTION)
     .add_input_property("include", {"type": "array",
             "items": {"type": "string", "enum": list(_SLICES + _DEFAULT_NAMES)},
-            "description": "Deeper slices to add; 'default' keeps the orientation slice beside them."})
+            "description": "'default' keeps the orientation slice beside a deeper one."})
     .add_input_property("max_depth", {"type": "integer",
-            "description": f"Tree depth when include=tree (default {_TREE_DEFAULT_DEPTH}, "
-                           f"max {_TREE_MAX_DEPTH})."})
+            "description": f"include=tree. Default {_TREE_DEFAULT_DEPTH}, max {_TREE_MAX_DEPTH}."})
     .add_input_property("component", {"type": "string",
-            "description": "Start the tree at this component/occurrence name (include=tree)."})
-    .add_input_property("tree_bodies", {"type": "boolean",
-            "description": "Add each tree node's body records (name, handle, is_solid, visible) "
-                           "when include=tree."})
+            "description": "Start the tree at this component/occurrence."})
+    .add_input_property("tree_bodies", {"type": "boolean"})
     .add_input_property("tree_handles", {"type": "boolean",
-            "description": "Add each tree node's handle + full_path, and an xref node's source_id + "
-                           "source_url (include=tree)."})
+            "description": "Adds each node's handle + full_path."})
     .add_input_property("include_suppressed", {"type": "boolean",
-            "description": "Include suppressed timeline objects when include=timeline (default true)."})
-    .add_input_property("group", {"type": "string",
-            "description": "Only this timeline group when include=timeline."})
+            "description": "include=timeline. Default true."})
+    .add_input_property("group", {"type": "string"})
     .add_input_property("timeline_params", {"type": "boolean",
-            "description": "Add each timeline row's own model parameters (name/role/expression/"
-                           "value). Default false."})
+            "description": "Adds each row's own model parameters."})
     .add_input_property("library", {"type": "string",
-            "description": "One material library's entries, by exact name from the census the "
-                           "catalog returns when this is omitted."})
+            "description": "One catalog library, by exact name from the census."})
     .add_input_property("name_filter", {"type": "string",
-            "description": "Catalog entries, or include=tree TOP-LEVEL nodes, whose name contains "
-                           "this text."})
+            "description": "Catalog entries or tree TOP-LEVEL nodes containing this."})
     .add_input_property("max_results", {"type": "integer",
-            "description": f"Rows per page: catalog entries (default 50, cap 200), include=tree "
-                           f"children per LEVEL (default {_TREE_CHILDREN_DEFAULT}), or "
-                           f"include=timeline rows (default {_TIMELINE_MAX_ITEMS})."})
-    .add_input_property("attribute_group", {"type": "string",
-            "description": "Attribute group to read; required by include=attributes."})
-    .add_input_property("attribute_key", {"type": "string",
-            "description": "One key within that group; empty means every key in it."})
+            "description": f"Catalog 50 (max 200); tree children per level "
+                           f"{_TREE_CHILDREN_DEFAULT}; timeline {_TIMELINE_MAX_ITEMS}."})
+    .add_input_property("attribute_group", {"type": "string"})
+    .add_input_property("attribute_key", {"type": "string"})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

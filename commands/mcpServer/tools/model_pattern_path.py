@@ -34,8 +34,7 @@ RETURNS = [
 ]
 
 _DISTANCE_TYPE = _inputs.Choice("distance_type", tuple(_DISTANCE_TYPES), default="spacing")
-_DISTANCE = _inputs.Distance("distance", allow_zero=False, allow_negative=False, required=True,
-    description="Gap between instances, or the total run - see 'distance_type'.")
+_DISTANCE = _inputs.Distance("distance", allow_zero=False, allow_negative=False, required=True)
 
 
 def _start_point(raw):
@@ -146,9 +145,7 @@ def handler(occurrences: str = "", bodies=None, path=None, quantity: int = 2, di
 
 
 TOOL_DESCRIPTION = (
-"Pattern component OCCURRENCES or BODIES along a PATH - a curve, where model_pattern_rectangular "
-"gives straight rows and model_pattern_circular a ring. 'quantity' counts the instances including "
-"the original. Pair with view_screenshot to view.\n"
+"Pattern occurrences or bodies along a path.\n"
 + _outputs.produces_block(RETURNS)
 )
 
@@ -157,14 +154,13 @@ pattern_path_tool = (
     .add_input_property(*_OCCURRENCES.as_property())
     .add_input_property("bodies", _BODIES.schema())
     .add_input_property("path", {"type": ["string", "array"], "items": {"type": "string"},
-            "description": "The curve to follow: a find_geometry edge handle (chains across TANGENT connections; a sharp corner stops the chain - the 'path' count is the truth), a JSON list of edge handles (used exactly), or 'sketch:<name>'."})
-    .add_input_property("quantity", {"type": "integer", "description": "Instance count (>=2)."})
+            "description": "An edge 'handle' (chains across TANGENT connections only; the 'path' "
+                           "count is the truth), or 'sketch:<name>'."})
+    .add_input_property("quantity", {"type": "integer"})
     .add_input_property(*_DISTANCE.as_property())
     .add_input_property(*_DISTANCE_TYPE.as_property())
-    .add_input_property("start_point", {"type": "number",
-            "description": "Where the run starts along the path: 0 (start) to 1 (end). Default 0."})
-    .add_input_property("symmetric", {"type": "boolean",
-            "description": "Spread symmetrically about the original (default false)."})
+    .add_input_property("start_point", {"type": "number"})
+    .add_input_property("symmetric", {"type": "boolean"})
     .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )

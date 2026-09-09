@@ -29,14 +29,12 @@ _SOLVERS = {
 "rect": "Arrange2DRectangularSolverType",
 }
 
-_SOLVER = _inputs.Choice("solver", list(_SOLVERS), default="true_shape",
-                        description="true_shape nests actual outlines (tightest); rectangular nests bounding boxes.")
+_SOLVER = _inputs.Choice("solver", list(_SOLVERS), default="true_shape")
 
 
 # Occurrences to arrange, via the shared OccurrenceRefList kind (fullPathName-preferring,
 # ambiguity-refusing - no silent wrong-instance grab).
-_SHAPES = _inputs.OccurrenceRefList("shapes", required=False,
-                              description="Occurrence(s) to arrange within the boundary.")
+_SHAPES = _inputs.OccurrenceRefList("shapes", required=False)
 
 
 def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_shape",
@@ -159,22 +157,19 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
 
 
 TOOL_DESCRIPTION = (
-"ARRANGE (nest/pack) component occurrences within a 2D boundary taken from a sketch profile - "
-"the Arrange command. Pair with view_screenshot (top view) to see the layout."
+"Nest component occurrences inside a 2D boundary taken from a sketch profile."
 )
 
 tool = (
     Tool.create_simple(name="model_arrange", description=TOOL_DESCRIPTION)
     .add_input_property("boundary_sketch", {"type": "string",
-            "description": "Name of the sketch whose profile is the boundary envelope."})
+            "description": "Sketch whose profile is the boundary."})
     .add_input_property("boundary_component", {"type": "string",
-            "description": "The component holding 'boundary_sketch', when two components carry that "
-                           "name. A component name, or an occurrence fullPathName/handle from "
-                           "design_get(include=['tree'])."})
+            "description": "Component holding 'boundary_sketch'."})
     .add_input_property(*_SHAPES.as_property())
     .add_input_property(*_SOLVER.as_property())
     .add_input_property("spacing", {"type": "number",
-            "description": "Minimum clearance between parts, in 'units'."})
+            "description": "Clearance between parts, in 'units'."})
     .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )

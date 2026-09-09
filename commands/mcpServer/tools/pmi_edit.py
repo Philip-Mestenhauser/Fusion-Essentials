@@ -22,18 +22,12 @@ _ACTION = _inputs.Choice(
     options=["set_text", "rename", "show", "hide", "set_text_point", "set_leader_point",
              "set_plane", "set_alignment", "set_extension", "set_flags", "set_values",
              "set_display", "suppress", "unsuppress", "mark_up_to_date", "convert_imported"],
-    description="mark_up_to_date dismisses the stale flag; convert_imported makes an imported "
-                "dimension/note editable.")
-_PLANE = _inputs.Choice(
-    "plane", options=sorted(_pmi.PLANE_TYPES),
-    description="set_plane: face/custom_face take plane_face.")
-_PLANE_FACE = _inputs.GeometryHandle(
-    "plane_face", require="face",
-    description="The face for plane=face (ADJACENT) or custom_face.")
-_ALIGN = _inputs.Choice("align", options=sorted(_pmi.H_ALIGN),
-                        description="set_alignment: horizontal text alignment.")
-_VALIGN = _inputs.Choice("valign", options=sorted(_pmi.V_ALIGN),
-                         description="set_alignment: vertical text alignment.")
+    description="mark_up_to_date clears the stale flag; convert_imported makes imported PMI "
+                "editable.")
+_PLANE = _inputs.Choice("plane", options=sorted(_pmi.PLANE_TYPES))
+_PLANE_FACE = _inputs.GeometryHandle("plane_face", require="face")
+_ALIGN = _inputs.Choice("align", options=sorted(_pmi.H_ALIGN))
+_VALIGN = _inputs.Choice("valign", options=sorted(_pmi.V_ALIGN))
 
 
 def _require_created(ann, what):
@@ -396,42 +390,38 @@ def handler(action=None, annotation="", component="", text="", new_name="", text
 
 
 TOOL_DESCRIPTION = (
-"Edit an existing PMI annotation, addressed by its name from pmi_get ('component' disambiguates a "
-"name used in more than one component). 'action' picks the edit: leader-note formatting, "
-"hole-callout overrides, rename/visibility/suppression, imported-PMI conversion. Every action "
-"reads the result back - a set that did not take is an error, not a false success."
+"Edit one PMI annotation, named from pmi_get: 'action' picks the edit and the inputs it reads."
 )
 
 tool = (
     Tool.create_simple(name="pmi_edit", description=TOOL_DESCRIPTION)
     .add_input_property("action", _ACTION.schema())
     .add_input_property("annotation", {"type": "string",
-        "description": "The PMI's name (from pmi_get). Exact match, case-insensitive."})
-    .add_input_property("component", {"type": "string",
-        "description": "Component to look in - required only when the name exists in several."})
+        "description": "A PMI name from pmi_get."})
+    .add_input_property("component", {"type": "string"})
     .add_input_property("text", {"type": "string",
-        "description": "set_text: the new content ({symbol} tokens; newlines break lines)."})
-    .add_input_property("new_name", {"type": "string", "description": "rename: the new name."})
+        "description": "{symbol} markup; newlines break lines."})
+    .add_input_property("new_name", {"type": "string"})
     .add_input_property("text_point", {
         "type": "array", "items": {"type": "number"},
-        "description": "set_text_point: [x,y,z] model space in 'units'."})
+        "description": "[x,y,z] in 'units'."})
     .add_input_property("leader_point", {
         "type": "array", "items": {"type": "number"},
-        "description": "set_leader_point: [x,y,z] ON the annotated geometry ('units')."})
+        "description": "[x,y,z] in 'units'."})
     .add_input_property("plane", _PLANE.schema())
     .add_input_property("plane_face", _PLANE_FACE.schema())
     .add_input_property("align", _ALIGN.schema())
     .add_input_property("valign", _VALIGN.schema())
     .add_input_property("perpendicular", {"type": "boolean",
-        "description": "set_alignment: text perpendicular to the leader line."})
+        "description": "Text perpendicular to the leader line."})
     .add_input_property("leader_extension", {"type": "number",
-        "description": "set_extension: leader length in 'units'; under 2.5mm is refused."})
+        "description": "In 'units'."})
     .add_input_property("flags", {"type": "object",
-        "description": "set_flags: booleans, e.g. {threaded: true, through: true}; an unknown key names the legal set."})
+        "description": "hole_note booleans, e.g. {threaded: true}."})
     .add_input_property("values", {"type": "object",
-        "description": "set_values: {diameter: 6.2} or {diameter: {value, tolerance: {type, ...}}}; an unknown key names the legal set."})
+        "description": "hole_note overrides: {diameter: 6.2} or {diameter: {value, tolerance}}."})
     .add_input_property("display", {"type": "object",
-        "description": "set_display: {precision, units, leading_zeros, trailing_zeros, unit_abbreviation, secondary: {...}}."})
+        "description": "Keys: precision, units, leading_zeros, trailing_zeros, unit_abbreviation, secondary{}."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_required_input("action")
     .add_required_input("annotation")

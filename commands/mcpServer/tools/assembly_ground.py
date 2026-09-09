@@ -86,17 +86,13 @@ def handler(occurrence: str = "", ground_to_parent=None) -> dict:
 
 
 TOOL_DESCRIPTION = (
-"Ground an occurrence via isGroundToParent - the STATELESS rigid-to-parent lock: true RE-LOCKS the "
-"part at its TIMELINE placement, DISCARDING any free move (the snap is reported as position_reset); "
-"false frees it to move/joint. The UI Ground/Fix flag (isGrounded) is NOT settable here - the "
-"platform treats it as legacy - so assembly_get's grounded_occurrences (which lists only that flag) "
-"stays EMPTY for agent-grounded builds; read the per-occurrence ground_to_parent flag instead. "
-"To fix a part at a moved position: leave it FREE and assembly_move + capture."
+"Lock an occurrence to its parent (isGroundToParent): true re-locks it at its TIMELINE placement, "
+"DISCARDING any free move; false frees it to move or joint."
 )
 tool = (
     Tool.create_simple(name="assembly_ground", description=TOOL_DESCRIPTION)
-    .add_input_property("occurrence", {"type": "string", "description": "Occurrence name (or full path) to change."})
-    .add_input_property("ground_to_parent", {"type": "boolean", "description": "Set the parent lock on (true) or off (false)."})
+    .add_input_property("occurrence", {"type": "string", "description": "Occurrence name or full path."})
+    .add_input_property("ground_to_parent", {"type": "boolean"})
     .strict_schema()
 )
 item = Item.create_tool_item(

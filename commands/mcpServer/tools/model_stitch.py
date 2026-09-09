@@ -18,11 +18,9 @@ from ._surface_common import _OPERATION_KEYS, _feature_operation, _result_body_r
 
 app = adsk.core.Application.get()
 
-_STITCH_BODIES = _inputs.SurfaceBodyRefList("bodies", required=True,
-    description="The SURFACE bodies to stitch (>=2; an open surface each, not a solid - run "
-                "model_unstitch on a solid first).")
+_STITCH_BODIES = _inputs.SurfaceBodyRefList("bodies", required=True)
 _STITCH_TOLERANCE = _inputs.Distance("tolerance", allow_zero=False, allow_negative=False, required=False,
-    description="Gap-closing tolerance in 'units' (default ~0.01 mm).")
+    description="Gap to close (default 0.01 mm).")
 
 
 def handler(bodies=None, tolerance=None, units="mm", operation="new") -> dict:
@@ -117,8 +115,7 @@ def handler(bodies=None, tolerance=None, units="mm", operation="new") -> dict:
 
 
 TOOL_DESCRIPTION = (
-"Join SURFACE bodies into a SOLID - iff they form a closed, watertight boundary within 'tolerance'. "
-"Read 'became_solid': gaps beyond tolerance leave the result a surface, reported false."
+"Stitch surface bodies into a solid; 'became_solid' reports whether they closed."
 )
 
 tool = (
@@ -127,7 +124,7 @@ tool = (
     .add_input_property("tolerance", _STITCH_TOLERANCE.schema())
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property(*_inputs.boolean_op(
-        default="new", description="Only used if the result closes into a solid.").as_property())
+        default="new", description="Applies once the result is a solid.").as_property())
     .add_required_input("bodies")
     .strict_schema()
 )

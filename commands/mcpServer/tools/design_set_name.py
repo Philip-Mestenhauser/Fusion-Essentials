@@ -153,18 +153,14 @@ def handler(target: str = "", new_name: str = "") -> dict:
 
 
 _DESC = (
-"Rename a body, mesh body, or component - the browser name every other tool refers to it by. An "
-"OCCURRENCE target renames its COMPONENT, and every instance of that component follows. Fusion "
-"DEDUPES a name a sibling already holds ('Plate' lands as 'Plate (1)'), so use the 'name' the "
-"result publishes, not what you asked for.\n"
+"Rename a body or component; an occurrence renames its COMPONENT.\n"
 + _outputs.produces_block(RETURNS)
 )
 
 tool = (
     Tool.create_simple(name="design_set_name", description=_DESC)
     .add_input_property(*_TARGET.as_property())
-    .add_input_property("new_name", {"type": "string",
-            "description": "The new name. Deduped by Fusion if a sibling already holds it."})
+    .add_input_property("new_name", {"type": "string"})
     .strict_schema()
 )
 item = Item.create_tool_item(

@@ -144,17 +144,16 @@ def handler(file_path: str = "", target_component: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Import an STL / OBJ / 3MF from a LOCAL path as a MESH body into the active "
-    "(or named) component. Convert it with mesh_to_brep to use the BRep/CAM tools on it."
+    "Import an STL / OBJ / 3MF from a LOCAL path as a MESH body."
 )
 
 tool = (
     Tool.create_simple(name="mesh_insert", description=TOOL_DESCRIPTION)
-    .add_input_property("file_path", {"type": "string", "description": "Full path to a .stl / .obj / .3mf file (required)."})
-    .add_input_property("target_component", {"type": "string", "description": "Component name to import into (default: active component)."})
+    .add_input_property("file_path", {"type": "string", "description": "Local path to the mesh file."})
+    .add_input_property("target_component", {"type": "string", "description": "Default: the active component."})
     .add_input_property("units", {"type": "string", "enum": list(_MESH_UNIT_TABLE),
-            "description": "Units the file is authored in (default mm); area/volume are reported in it."})
-    .add_input_property("name", {"type": "string", "description": "Optional name for the imported body (single-body imports only)."})
+            "description": "The unit the file is authored in; stats are reported in it. Default mm."})
+    .add_input_property("name", {"type": "string", "description": "Renames the imported body; single-body imports only."})
     .add_required_input("file_path")
     .strict_schema()
 )

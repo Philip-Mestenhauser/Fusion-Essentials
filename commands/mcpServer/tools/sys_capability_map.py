@@ -120,13 +120,8 @@ def handler() -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "GETTING STARTED / overview / start here / help: LIST every tool FAMILY this server has - each with a "
-    "one-line summary, its entry-point tool, and tool count. The BREADTH map: answers 'what CAN this "
-    "server do?' for a cold agent that doesn't yet know which capabilities exist (surface? mesh? "
-    "config?). Then call workspace_orient for the active document's state. Read live from the "
-    "running server - never stale. Pair with sys_find_tool to search WITHIN a family. Factual "
-    "index - no workflow advice. Takes no arguments. Also publishes 'capabilities': each capability "
-    "NAME beside the tool whose read answers it, to plan against before acting."
+    "Start here for help: an overview of every tool FAMILY, its entry tool and tool count, plus "
+    "each capability name beside the tool whose read answers it. Then workspace_orient."
 )
 
 tool = Tool.create_simple(name="sys_capability_map", description=TOOL_DESCRIPTION).strict_schema()

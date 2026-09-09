@@ -25,16 +25,14 @@ app = adsk.core.Application.get()
 
 # to_object: extrude UP TO a face (handle) instead of a blind distance.
 _TO_OBJECT = _inputs.GeometryHandle("to_object", require="face", required=False,
-    description="Extrude up to THIS face instead of by 'distance'.")
+    description="Extrude up to this face.")
 # target_bodies: scope a cut/join/intersect to these bodies so it doesn't bleed through others.
-_TARGET_BODIES = _inputs.BodyRefList("target_bodies", required=False,
-    description="Bodies a cut/join/intersect may affect; qualify a name across components as '<occurrence>/<body>'.")
+_TARGET_BODIES = _inputs.BodyRefList("target_bodies", required=False)
 
 # extent: the depth STYLE. 'distance' is the legacy default (distance/symmetric/taper_deg); the other
 # three map to measured ExtrudeFeatureInput setters, each reading its own inputs below.
 _EXTENTS = ("distance", "through_all", "to_face", "two_side")
-_EXTENT = _inputs.Choice("extent", _EXTENTS, default="distance",
-    description="Depth style; each reads its own inputs below.")
+_EXTENT = _inputs.Choice("extent", _EXTENTS, default="distance")
 
 # profile_index may carry a profile HANDLE (entityToken from sketch_get) - resolved via ProfileRef.
 # _inputs.is_handle distinguishes a handle from an int/list/'all' selector.
@@ -902,32 +900,28 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
 
 
 TOOL_DESCRIPTION = (
-"Extrude a closed sketch profile into a 3D solid. Build the profile with sketch_create / "
-"sketch_add_geometry first; sketch_get returns the profile handles 'profile_index' takes."
+"Extrude a closed sketch profile into a solid; sketch_get returns profile handles."
 )
 
 extrude_tool = (
     Tool.create_simple(name="model_extrude", description=TOOL_DESCRIPTION)
     .add_input_property("sketch_name", {"type": "string",
-            "description": "Sketch holding the profile (omit = most recent sketch)."})
+            "description": "Omit for the most recent sketch."})
     .add_input_property("profile_index", {"type": ["integer", "string", "array"],
-            "description": "Region(s): an index (default 0), a list [0,2,3], '0,2,3', 'all', or ONE profile 'handle' (a LIST of handles is refused). A sketch TEXT extrudes as itself: 'text:<i>' or '<sketch>/text:<i>', alone."})
+            "description": "An index (default 0), a list, 'all', one profile 'handle', or 'text:<i>'."})
     .add_input_property("distance", {"type": ["number", "string"],
-            "description": "Extrude depth in 'units' (negative reverses), OR a parameter EXPRESSION string ('StockZ/2', '25 mm'; carries its own units). Side one for two_side; sign-only direction for through_all."})
-    .add_input_property("distance2", {"type": ["number", "string"],
-            "description": "Side two's distance in 'units', or a parameter expression (two_side only)."})
+            "description": "Depth in 'units' (negative reverses), or a parameter expression."})
+    .add_input_property("distance2", {"type": ["number", "string"]})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property(*_inputs.boolean_op(default="new").as_property())
     .add_input_property(*_EXTENT.as_property())
-    .add_input_property("symmetric", {"type": "boolean",
-            "description": "Extrude both sides of the plane by 'distance' each (extent=distance), or both directions (extent=through_all)."})
-    .add_input_property("taper_deg", {"type": "number",
-            "description": "Draft/taper angle in degrees - extent=distance only (one-sided or symmetric)."})
+    .add_input_property("symmetric", {"type": "boolean"})
+    .add_input_property("taper_deg", {"type": "number"})
     .add_input_property("to_object", _TO_OBJECT.schema())
     .add_input_property("target_bodies", _TARGET_BODIES.schema())
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("as_surface", {"type": "boolean",
-            "description": "Extrude into a SURFACE wall (no end caps) instead of a solid; auto-applied when the sketch has no closed profile. Every result reports 'is_solid'."})
+            "description": "Make a SURFACE wall (no end caps)."})
     .strict_schema()
 )
 extrude_item = Item.create_tool_item(tool=extrude_tool, write="write", handler=handler, run_on_main_thread=True,

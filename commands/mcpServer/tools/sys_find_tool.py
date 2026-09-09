@@ -94,18 +94,16 @@ def handler(query: str = "", include_kinds: bool = True) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "SEARCH this server's tools by keyword when you do not know which tool does a job. 'query' "
-    "matches tool names, descriptions, and input names. Returns ranked matches (name + inputs + "
-    "one-line summary) plus the reusable input reference types. For the BREADTH view (what tool "
-    "families exist) see sys_capability_map."
+    "Search this server's tools by keyword when you don't know the name; "
+    "sys_capability_map lists the families."
 )
 
 tool = (
     Tool.create_simple(name="sys_find_tool", description=TOOL_DESCRIPTION)
     .add_input_property("query", {"type": "string",
-            "description": "Keywords to match tool names/descriptions/inputs + input-kind names/docs."})
+            "description": "Keywords matched against tool names, descriptions and inputs."})
     .add_input_property("include_kinds", {"type": "boolean",
-            "description": "Also search the _inputs.py input-kinds (default true)."})
+            "description": "Also search the input kinds (default true)."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=False)

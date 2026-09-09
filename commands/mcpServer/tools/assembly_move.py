@@ -17,8 +17,7 @@ from . import _inputs
 from .design_move_occurrence import _POSITION_TOL_CM, _corner
 
 # rotate_axis is an AxisRef: a world axis x/y/z, OR a straight-edge handle the rotation runs along.
-_ROTATE_AXIS = _inputs.AxisRef("rotate_axis", default="z",
-                               description="Axis to rotate about (for rotate_deg).")
+_ROTATE_AXIS = _inputs.AxisRef("rotate_axis", default="z", description="For rotate_deg.")
 
 
 def _occurrence_joint_names(occ):
@@ -186,27 +185,22 @@ def handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: float = 
 
 
 TOOL_DESCRIPTION = (
-"Move an occurrence by editing its transform - a free reposition with NO joint created (use "
-"joint_create/assembly_constrain for a maintained relationship). 'rotate_deg' + 'rotate_axis' "
-"rotate about an axis through the current position. The new pose is TRANSIENT, jointed or not - a "
-"later joint creation ANYWHERE or a recompute silently REVERTS an uncaptured move, so "
-"assembly_capture_position bakes the pose into the timeline. A pattern/mirror FEATURE also "
-"re-derives its instances every recompute, overwriting a free move of that occurrence - position "
-"those through the owning feature instead."
+"Move an occurrence by editing its transform - a free reposition, no joint. The pose is TRANSIENT "
+"until assembly_capture_position bakes it in."
 )
 tool = (
     Tool.create_simple(name="assembly_move", description=TOOL_DESCRIPTION)
-    .add_input_property("occurrence", {"type": "string", "description": "Occurrence name (or full path) to move."})
-    .add_input_property("dx", {"type": "number", "description": "Translation X in 'units'."})
-    .add_input_property("dy", {"type": "number", "description": "Translation Y in 'units'."})
-    .add_input_property("dz", {"type": "number", "description": "Translation Z in 'units'."})
-    .add_input_property("rotate_deg", {"type": "number", "description": "Optional rotation in degrees about 'rotate_axis'."})
+    .add_input_property("occurrence", {"type": "string", "description": "Occurrence name or full path."})
+    .add_input_property("dx", {"type": "number", "description": "In 'units'."})
+    .add_input_property("dy", {"type": "number", "description": "In 'units'."})
+    .add_input_property("dz", {"type": "number", "description": "In 'units'."})
+    .add_input_property("rotate_deg", {"type": "number", "description": "Degrees about 'rotate_axis', through the current origin."})
     .add_input_property("rotate_axis", _ROTATE_AXIS.schema())
-    .add_input_property("rotate_x", {"type": "number", "description": "Multi-axis: degrees about world X (composed X->Y->Z)."})
-    .add_input_property("rotate_y", {"type": "number", "description": "Multi-axis: degrees about world Y."})
-    .add_input_property("rotate_z", {"type": "number", "description": "Multi-axis: degrees about world Z."})
+    .add_input_property("rotate_x", {"type": "number", "description": "Degrees about world X (composed X->Y->Z)."})
+    .add_input_property("rotate_y", {"type": "number"})
+    .add_input_property("rotate_z", {"type": "number"})
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("quiet", {"type": "boolean", "description": "Suppress the jointed_warning when moving a JOINTED occurrence."})
+    .add_input_property("quiet", {"type": "boolean"})
     .strict_schema()
 )
 item = Item.create_tool_item(

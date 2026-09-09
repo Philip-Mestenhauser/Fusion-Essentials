@@ -32,15 +32,13 @@ _FORMATS = {
     "dwg": (".dwg", "createDWGExportOptions", True),
 }
 
-_FORMAT = _inputs.Choice("format", list(_FORMATS), default="pdf",
-                         description="Output format for the active drawing.")
+_FORMAT = _inputs.Choice("format", list(_FORMATS), default="pdf")
 
 # dwg_variant -> the DWGFormats member name. The member is read off the live enum by NAME so no
 # integer value is written here.
 _DWG_MEMBERS = {"simplified": "SimplifiedDWGFormat", "autocad": "AutoCADDWGFormat"}
 
-_DWG_VARIANT = _inputs.Choice("dwg_variant", list(_DWG_MEMBERS), default="autocad", required=False,
-                              description="format=dwg only: which DWG flavour to write.")
+_DWG_VARIANT = _inputs.Choice("dwg_variant", list(_DWG_MEMBERS), default="autocad", required=False)
 
 # input name -> the ONE format whose export options carry that setting: PDFExportOptions holds
 # sheetRange/sheetsToExport/useLineWeights, DXFExportOptions exportSplinesAsSplines, DWGExportOptions
@@ -216,10 +214,8 @@ def handler(format: str = "pdf", file_path: str = "", sheet_range: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Export the active 2D drawing document to a PDF, DXF or DWG file on local disk. Exports "
-    "whichever drawing is the active document, so open the drawing first (drawing_create makes one; "
-    "doc_open opens it by file_id, no Fusion UI step first), then export. This tool does not open "
-    "a drawing by id. WRITES a file to disk (does not modify the drawing)."
+    "Export the active 2D drawing to a PDF, DXF or DWG file on local disk - open the drawing "
+    "first (doc_open by file_id)."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)
@@ -228,18 +224,14 @@ tool = (
     Tool.create_simple(name="drawing_export", description=FULL_DESCRIPTION)
     .add_input_property(*_FORMAT.as_property())
     .add_input_property("file_path", {"type": "string",
-            "description": "Local output path; the format's extension is appended if missing."})
+            "description": "Local output path."})
     .add_input_property("sheet_range", {"type": "string",
-            "description": "format=pdf only: sheets to export, e.g. '1-3' or '1-2,5'. Omit for all "
-                           "sheets. Run a sheet_range export FIRST: issued soon after another "
-                           "export of the same drawing it can block the main thread and the file "
-                           "never lands."})
-    .add_input_property("line_weights", {"type": "boolean",
-            "description": "format=pdf only: render line weights (default true)."})
+            "description": "Sheets, e.g. '1-3'; omit for all. Run it FIRST: after another export "
+                           "of the same drawing it can block the main thread and the file never "
+                           "lands."})
+    .add_input_property("line_weights", {"type": "boolean", "description": "Default true."})
     .add_input_property(*_DWG_VARIANT.as_property())
-    .add_input_property("splines_as_splines", {"type": "boolean",
-            "description": "format=dxf only: write splines as splines rather than approximating "
-                           "them (default false)."})
+    .add_input_property("splines_as_splines", {"type": "boolean"})
     .strict_schema()
 )
 

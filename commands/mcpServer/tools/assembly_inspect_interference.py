@@ -189,17 +189,15 @@ def handler(include_coincident_faces: bool = False) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Check the active assembly for interference - parts overlapping in solid space - and report each "
-    "interfering pair by occurrence name with its overlap volume (cm^3), in measured.interferences. "
-    "Complements assembly_get, which checks joint wiring rather than physical overlap. Coincident/flush "
-    "faces are excluded by default. passed=true when nothing interferes.\n"
+    "Check the active assembly for solid overlap - each interfering pair with its overlap volume "
+    "(cm^3). passed=true when nothing interferes.\n"
     + _outputs.produces_block(RETURNS)
 )
 
 interference_tool = (
     Tool.create_simple(name="assembly_inspect_interference", description=TOOL_DESCRIPTION)
     .add_input_property("include_coincident_faces", {"type": "boolean",
-            "description": "Include parts that merely TOUCH flush (default false - flush mates are usually intended)."})
+            "description": "Flush touches count as interference. Default false."})
     .strict_schema()
 )
 interference_item = Item.create_tool_item(tool=interference_tool, write="read", handler=handler, run_on_main_thread=True)

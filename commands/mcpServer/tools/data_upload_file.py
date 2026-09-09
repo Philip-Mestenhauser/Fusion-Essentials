@@ -133,11 +133,8 @@ def handler(file_path: str = "", project: str = "", project_id: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Upload a local CAD file into a project, optionally into a nested 'folder' path "
-    "(e.g. 'Imports/STEP'). Neutral formats (STEP, IGES) are translated into a Fusion "
-    "design during cloud processing. ASYNCHRONOUS: this returns once the upload has "
-    "started - poll data_get_upload_status(handle=upload_handle) for the real state. "
-    "The destination path must exist unless create_path=true.\n"
+    "Upload a local CAD file into a project. ASYNCHRONOUS: it returns once the upload has "
+    "started.\n"
     + _outputs.produces_block(RETURNS)
 )
 
@@ -146,14 +143,14 @@ tool = (
         name="data_upload_file",
         description=TOOL_DESCRIPTION,
         input_param_name="file_path",
-        input_param_description="Full path to the local CAD file to upload.",
+        input_param_description="Full path to the local file.",
     )
     .add_input_property("project", {"type": "string", "description": "Destination project name."})
-    .add_input_property("project_id", {"type": "string", "description": "Destination project id (alt to name)."})
+    .add_input_property("project_id", {"type": "string", "description": "Alt to 'project'."})
     .add_input_property("folder", {"type": "string",
-        "description": "Destination folder path (e.g. 'Imports/STEP')."})
+        "description": "Destination path, e.g. 'Imports/STEP'."})
     .add_input_property("create_path", {"type": "boolean",
-        "description": "Create missing folders in the destination path (default false)."})
+        "description": "Create missing folders. Default false."})
     .strict_schema()
 )
 item = Item.create_tool_item(

@@ -151,12 +151,7 @@ def handler(file_id: str = "", is_cam_template: bool = False,
 
 
 TOOL_DESCRIPTION = (
-    "Open a Fusion document by data-model id: 'file_id' = a lineage id (latest version), a versionId "
-    "(that version), or a fusionWebURL/source_url. Switches the active document; handles configured "
-    "designs. Async - call workspace_orient afterward to confirm it's active. REQUIRED: "
-    "force_api_open=true for a NORMAL document, OR is_cam_template=true for a multi-reference "
-    "CAM/Manufacture template (API-opening those has crashed Fusion, so the tool REFUSES it and "
-    "instructs a UI open). With neither it opens nothing; is_cam_template wins."
+    "Open a saved cloud document by its data-model id; it becomes the active document."
 )
 
 tool = (
@@ -164,12 +159,12 @@ tool = (
         name="doc_open",
         description=TOOL_DESCRIPTION,
         input_param_name="file_id",
-        input_param_description="A DataFile lineage/versioned URN, or a Fusion web URL (fusionWebURL/source_url).",
+        input_param_description="A lineage or versioned URN, or a Fusion web URL.",
     )
     .add_input_property("force_api_open", {"type": "boolean",
-            "description": "Declare a NORMAL document and open it via the API. Default false."})
+            "description": "For a NORMAL document."})
     .add_input_property("is_cam_template", {"type": "boolean",
-            "description": "Declare a multi-reference CAM template: the API open is refused and a UI open instructed. Default false."})
+            "description": "For a multi-reference CAM template; a UI open is instructed."})
     .strict_schema()
 )
 

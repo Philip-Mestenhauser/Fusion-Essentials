@@ -223,20 +223,15 @@ def handler(milestone_name: str = "", description: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Save the ACTIVE document as a NAMED MILESTONE - a version marked in the data panel and the "
-    "Fusion web client, findable by name later. It is a real save: it creates a NEW cloud version "
-    "and that version IS the milestone, so the document must have unsaved changes - an unmodified "
-    "one is REFUSED. The milestone MARK lags the new version by several seconds, so the result "
-    "usually reports 'pending' - re-read with doc_get include=['versions'].\n"
+    "Save the ACTIVE document as a NAMED MILESTONE - a new cloud version marked, findable by name.\n"
     + _outputs.produces_block(RETURNS)
 )
 
 tool = (
     Tool.create_simple(name="doc_save_milestone", description=TOOL_DESCRIPTION)
-    .add_input_property("milestone_name", {"type": "string",
-            "description": "Milestone name as shown in the data panel."})
+    .add_input_property("milestone_name", {"type": "string"})
     .add_input_property("description", {"type": "string",
-            "description": "Version description (the AI-agent marker is prepended)."})
+            "description": "The AI-agent marker is prepended."})
     .add_required_input("milestone_name")
     .strict_schema()
 )

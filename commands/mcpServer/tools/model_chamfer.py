@@ -17,9 +17,7 @@ from ._edge_common import _BODY, _CORNER_TYPES, _EDGES, _EDGE_FILTER_DESC, _FACE
 
 app = adsk.core.Application.get()
 
-_CORNER_TYPE = _inputs.Choice("corner_type", list(_CORNER_TYPES),
-    description="How a vertex where several chamfered edges meet is modelled. Omit for Fusion's "
-                "default.")
+_CORNER_TYPE = _inputs.Choice("corner_type", list(_CORNER_TYPES))
 
 
 def _angle_spec(angle_deg, distance_two):
@@ -63,8 +61,7 @@ def handler(body_name: str = "", distance: float = 1.0, units: str = "mm",
 
 
 TOOL_DESCRIPTION = (
-"Bevel (chamfer) edges - the machinist's default deburr/edge-break. Target with 'edges' handles "
-"from find_geometry, 'faces' handles (every edge of those faces), or 'body_name' + 'edge_filter'."
+"Bevel (chamfer) edges; model_fillet rounds instead."
 )
 
 tool = (
@@ -73,13 +70,9 @@ tool = (
     .add_input_property(*_FACES.as_property())
     .add_input_property("body_name", _BODY.schema())
     .add_input_property("distance", {"type": ["number", "string"],
-        "description": "Chamfer distance in 'units' (the first/only distance), OR a parameter "
-                       "EXPRESSION string ('WallT/2', '3 mm'; carries its own units)."})
-    .add_input_property("distance_two", {"type": "number", "description": "Second distance for an ASYMMETRIC two-distance chamfer (in 'units'); omit/0 = equal-distance."})
-    .add_input_property("angle_deg", {"type": "number",
-        "description": "Distance-and-angle chamfer in DEGREES: one leg measures 'distance', the "
-                       "other distance*tan(angle). Which face takes the 'distance' leg is not "
-                       "selectable - check the result. Excludes 'distance_two'."})
+        "description": "In 'units', or a parameter expression ('WallT/2')."})
+    .add_input_property("distance_two", {"type": "number"})
+    .add_input_property("angle_deg", {"type": "number"})
     .add_input_property(*_CORNER_TYPE.as_property())
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("edge_filter", {"type": "string", "enum": ["all", "convex", "concave"],

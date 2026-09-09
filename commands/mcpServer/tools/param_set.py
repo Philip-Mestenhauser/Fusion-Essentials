@@ -62,11 +62,7 @@ def handler(name: str = "", expression: str = "", create: bool = False,
 
 
 TOOL_DESCRIPTION = (
-"Set a design parameter's expression (value), returning the before/after. 'expression' is "
-"interpreted like the Parameters dialog: a number/expression ('2 in', 'StockX/2', a reference to "
-"other parameters), or a quoted text value for text parameters (\"'Roughing'\"). Function "
-"ARGUMENTS separate with ';' not ',' - if(StockX>=2 in; 10 mm; 5 mm) - and conditionals nest "
-"while units mix freely within one expression. Use param_get to discover names first."
+"Set a design parameter's expression, returning the before/after. Discover names with param_get."
 )
 
 tool = (
@@ -74,14 +70,13 @@ tool = (
         name="param_set",
         description=TOOL_DESCRIPTION,
         input_param_name="name",
-        input_param_description="The parameter name to set.",
+        input_param_description="The parameter to set.",
     )
     .add_input_property("expression", {"type": "string",
-            "description": "New value/expression (e.g. '2 in', 'StockX/2', \"'text'\")."})
-    .add_input_property("create", {"type": "boolean",
-            "description": "Create it as a USER parameter if it does not exist."})
+            "description": "e.g. '2 in', 'StockX/2', \"'text'\"; function args use ';': if(a>=2 in; 10 mm; 5 mm)."})
+    .add_input_property("create", {"type": "boolean"})
     .add_input_property("unit", {"type": "string",
-            "description": "Unit for a created parameter (mm default; '' for unitless); create=true only."})
+            "description": "For a created parameter ('' unitless, default mm)."})
     .strict_schema()
 )
 

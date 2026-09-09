@@ -43,9 +43,7 @@ def handler(name: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Bring an open document to the foreground (make it the active document). A shared name "
-    "is REFUSED, not guessed - address it by lineage URN / web URL, or by the 'open:N' "
-    "index doc_get publishes, which is the only handle for an UNSAVED same-name doc.")
+    "Bring an open document to the foreground (make it the active document).")
 
 tool = (
     Tool.create_with_string_input(

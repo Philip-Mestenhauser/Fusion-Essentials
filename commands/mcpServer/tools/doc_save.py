@@ -72,8 +72,8 @@ def handler(description: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Save the ACTIVE document in place - a new cloud version of the same file (the plain "
-    "'Save'; a never-saved doc needs doc_save_as, which takes a name+folder).")
+    "Save the ACTIVE document in place as a new cloud version; a never-saved one needs "
+    "doc_save_as.")
 
 tool = (
     Tool.create_simple(

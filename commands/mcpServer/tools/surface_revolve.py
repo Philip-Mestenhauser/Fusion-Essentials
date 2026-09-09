@@ -124,18 +124,17 @@ def handler(sketch_name: str = "", curves=None, axis: str = "z",
 
 
 TOOL_DESCRIPTION = (
-"Revolve an OPEN profile about an x/y/z axis into a SHEET body (isSolid false). A closed boundary "
-"becomes a shell, NOT a capped solid; use model_revolve for a solid."
+"Revolve an open profile into a sheet body; model_revolve makes a solid."
 )
 
 tool = (
     Tool.create_simple(name="surface_revolve", description=TOOL_DESCRIPTION)
     .add_input_property("sketch_name", {"type": "string",
-            "description": "The sketch to use (omit = most recent)."})
+            "description": "Omit for the most recent sketch."})
     .add_input_property("curves", _CURVES.schema())
-    .add_input_property(*_inputs.frame_axis("axis", default="z", description="Component origin axis to revolve about.").as_property())
-    .add_input_property("angle_deg", {"type": "number", "description": "Sweep angle in degrees (360 = full, default)."})
-    .add_input_property("symmetric", {"type": "boolean", "description": "Split the angle both ways (default false)."})
+    .add_input_property(*_inputs.frame_axis("axis", default="z", description="Component origin axis.").as_property())
+    .add_input_property("angle_deg", {"type": "number", "description": "Default 360 (full)."})
+    .add_input_property("symmetric", {"type": "boolean"})
     .add_input_property(*_inputs.boolean_op(options=("new", "join"), default="new").as_property())
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .strict_schema()

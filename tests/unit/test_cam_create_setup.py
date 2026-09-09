@@ -127,7 +127,7 @@ class TestModelSelection:
         # The wire claim and the walk are one fact - a wire string promising SOLID bodies while the
         # walk returns every BRep body is the mismatch a caller cannot see. The claim rides on the
         # 'models' input, the value it describes.
-        assert "omit = every root-component body" in cs._MODELS.schema()["description"]
+        assert "= every root-component body" in cs._MODELS.schema()["description"]
         assert "solid" not in cs._MODELS.schema()["description"].lower()
         assert "solid" not in cs.TOOL_DESCRIPTION.lower()
 

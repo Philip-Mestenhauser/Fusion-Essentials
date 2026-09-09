@@ -29,9 +29,8 @@ _MAX = 500
 
 _PATH_MODES = ("along_path", "fit_on_path")
 _MODE = _inputs.Choice("mode", ["multi_line"] + list(_PATH_MODES), default="multi_line",
-                       description="Layout of NEW text: a box at (x,y), or along 'path'.")
-_ALIGN = _inputs.Choice("align", ["left", "center", "right"], default="left",
-                        description="Horizontal alignment of NEW text.")
+                       description="NEW text: a box at (x,y), or along 'path'.")
+_ALIGN = _inputs.Choice("align", ["left", "center", "right"], default="left")
 
 _ALIGN_MEMBERS = {"left": "LeftHorizontalAlignment", "center": "CenterHorizontalAlignment",
                   "right": "RightHorizontalAlignment"}
@@ -95,8 +94,8 @@ def _font_failure(exc, font_name, what):
     msg = f"Could not {what} with font '{font_name}': {exc}."
     if "font" in str(exc).lower():
         msg += (" Fusion named the font as the problem and no API lists the legal names - pass a "
-                "font name that exists on this machine, or omit 'font_name' to keep the current "
-                "font.")
+                "font name that exists on this machine, spelled with its own capitals ('Arial', "
+                "not 'arial'), or omit 'font_name' to keep the current font.")
     return msg
 
 
@@ -787,13 +786,7 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
 
 
 TOOL_DESCRIPTION = (
-"Set the displayed string of sketch text (e.g. an engraved label), or add new text with "
-"create=true. Editing: 'sketch_name' limits the change to one sketch and 'index' to one text in "
-"it (omit both to update EVERY sketch text); 'parameter' binds the string to a user parameter "
-"instead of a literal, so param_set drives the label. Creating: 'mode' boxes the text at (x,y), or runs "
-"it along the curve named by 'path' - along_path keeps normal glyph spacing, fit_on_path "
-"stretches the string over the whole curve, and a CLOSED path wraps it around. A create reports "
-"the landed text's measured width. Read sketch names and curve ids with sketch_get."
+"Set the displayed string of sketch text, or add new text with create=true."
 )
 
 tool = (
@@ -804,36 +797,30 @@ tool = (
         input_param_description="The new string to display.",
     )
     .add_input_property("sketch_name", {"type": "string",
-            "description": "Only update texts in the sketch with this name (omit = all)."})
+            "description": "Omit this AND 'index' to update EVERY sketch text."})
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("index", {"type": "integer",
-            "description": "0-based text to update within a sketch (default all)."})
-    .add_input_property("create", {"type": "boolean",
-            "description": "CREATE new text instead of editing. Default false."})
+            "description": "0-based within the sketch (default all)."})
+    .add_input_property("create", {"type": "boolean"})
     .add_input_property("height", {"type": "number",
-            "description": "Text height in 'units' (new text defaults to 5). On an EDIT it RESIZES the text."})
-    .add_input_property("x", {"type": "number", "description": "Text X in 'units' (multi_line); 'align' says which edge it is."})
-    .add_input_property("y", {"type": "number", "description": "Text Y in 'units' (multi_line): the BOTTOM of the box."})
-    .add_input_property(*_inputs.units_property(
-        description="Scales 'height' on create AND edit; the unit reported sizes come back in."))
+            "description": "In 'units'; create defaults to 5, an EDIT RESIZES."})
+    .add_input_property("x", {"type": "number", "description": "In 'units'; 'align' says which edge."})
+    .add_input_property("y", {"type": "number", "description": "In 'units'; the box BOTTOM."})
+    .add_input_property(*_inputs.units_property(description="Scales an EDIT's height too."))
     .add_input_property(*_MODE.as_property())
-    .add_input_property("path", {"type": "string",
-            "description": "Curve the text follows, '<type>:<index>' from the same sketch."})
-    .add_input_property("above_path", {"type": "boolean",
-            "description": "Text above the path rather than below. Default true."})
+    .add_input_property("path", {"type": "string"})
+    .add_input_property("above_path", {"type": "boolean"})
     .add_input_property(*_ALIGN.as_property())
     .add_input_property("character_spacing", {"type": "number",
-            "description": "Percent change from default character spacing."})
+            "description": "Percent change from the default."})
     .add_input_property("angle_deg", {"type": "number",
-            "description": "Rotation of new text, degrees from the sketch x-axis."})
-    .add_input_property("flip_h", {"type": "boolean", "description": "Mirror new text horizontally."})
-    .add_input_property("flip_v", {"type": "boolean", "description": "Mirror new text vertically."})
+            "description": "Degrees from the sketch x-axis."})
+    .add_input_property("flip_h", {"type": "boolean"})
+    .add_input_property("flip_v", {"type": "boolean"})
     .add_input_property("parameter", {"type": "string",
-            "description": "BIND the string to this existing user parameter instead of storing a "
-                           "literal: param_set on it then restrings the text. Edit only, and "
-                           "excludes 'text'."})
+            "description": "Bind the string to this user parameter; param_set then restrings it."})
     .add_input_property("font_name", {"type": "string",
-            "description": "Font to use, on create AND edit. Case-sensitive: 'Arial' works, 'arial' is refused. Omit to keep the current."})
+            "description": "Omit to keep the current font."})
     .strict_schema()
 )
 

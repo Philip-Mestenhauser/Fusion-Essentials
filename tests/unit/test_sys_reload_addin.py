@@ -123,16 +123,19 @@ class TestPurgeAddinModules:
 
 class TestStaleCachedSchemaWarning:
     """One warning sentence about a stale CLIENT schema corrupting json-array arguments
-    (scalars still pass) after a reload - live-proven, so it belongs on the wire, not just in a
-    comment."""
+    (scalars still pass), delivered on the reload response - the moment the caller decides what to
+    do while the server restarts, and live-proven."""
 
-    def test_description_warns_about_stale_client_schema_corrupting_arrays(self):
-        desc = ra.TOOL_DESCRIPTION
-        assert "json-array" in desc
-        assert "comma-mangled" in desc
-        assert "reconnect" in desc.lower()
+    def test_the_reload_response_warns_about_a_stale_client_schema(self, monkeypatch):
+        _install_event(monkeypatch)
+        monkeypatch.setattr(ra.threading, "Timer",
+                            lambda *a, **k: types.SimpleNamespace(start=lambda: None))
+        text = ra.handler()["content"][0]["text"]
+        assert "json-array" in text
+        assert "comma-mangles" in text
+        assert "reconnect" in text.lower()
         # the claim distinguishes scalar (safe) from array (unsafe) - not a blanket "reconnect always".
-        assert "scalar" in desc.lower()
+        assert "scalar" in text.lower()
 
 
 class TestReloadResponseTeachesReconnect:

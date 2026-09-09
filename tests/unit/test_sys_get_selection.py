@@ -149,4 +149,4 @@ class TestDeclaredHandleOutput:
         assert out["selections"][0]["handle"] == "TOK2|@face:2.000000,2.000000,2.000000"
         # RETURNS contract: the declared 'handle' output key really is present in a list item.
         assert sel.RETURNS[0].assert_present(out) == ""
-        assert "PRODUCES" in out["note"]
+        assert "Produces" in out["note"]

@@ -21,16 +21,11 @@ from ._edge_common import _BODY, _EDGES, _EDGE_FILTER_DESC, _apply, _size_hint
 app = adsk.core.Application.get()
 
 _FILLET_TYPE = _inputs.Choice("fillet_type", ["constant", "variable", "chord_length", "rule"],
-                              default="constant",
-                              description="Which fillet shape the feature builds.")
+                              default="constant")
 _TOPOLOGY = _inputs.Choice("topology", ["rounds_and_fillets", "rounds_only", "fillets_only"],
-                           default="rounds_and_fillets",
-                           description="Rule fillet: convex edges (rounds), concave ones (fillets), "
-                                       "or both.")
-_RULE_FACES = _inputs.GeometryHandleList("faces", require="face", required=False,
-    description="Rule fillet: every edge of these faces is rounded.")
-_RULE_FACES_TWO = _inputs.GeometryHandleList("second_faces", require="face", required=False,
-    description="Rule fillet: round only the edges BETWEEN 'faces' and these faces.")
+                           default="rounds_and_fillets")
+_RULE_FACES = _inputs.GeometryHandleList("faces", require="face", required=False)
+_RULE_FACES_TWO = _inputs.GeometryHandleList("second_faces", require="face", required=False)
 
 
 def _variable_radius_spec(end_radius, positions, radii):
@@ -234,8 +229,7 @@ def handler(body_name: str = "", radius: float = 1.0, units: str = "mm",
 
 
 TOOL_DESCRIPTION = (
-    "Round (fillet) edges where a RADIUS is the design intent; model_chamfer bevels instead. "
-    "Target with 'edges' handles from find_geometry, or 'body_name' + 'edge_filter'."
+    "Round (fillet) edges; model_chamfer bevels instead."
 )
 
 tool = (
@@ -243,23 +237,15 @@ tool = (
     .add_input_property("edges", _EDGES.schema())
     .add_input_property("body_name", _BODY.schema())
     .add_input_property("radius", {"type": ["number", "string"],
-        "description": "Fillet radius in 'units' (the START radius of a variable-radius fillet), OR "
-                       "a parameter EXPRESSION string ('WallT/2', '3 mm'; carries its own units)."})
+        "description": "In 'units', or a parameter expression ('WallT/2')."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("edge_filter", {"type": "string", "enum": ["all", "convex", "concave"],
         "description": _EDGE_FILTER_DESC})
     .add_input_property(*_FILLET_TYPE.as_property())
-    .add_input_property("end_radius", {"type": "number",
-        "description": "Variable-radius: the radius at the far end of the edge chain."})
-    .add_input_property("positions", {"type": "array", "items": {"type": "number"},
-        "description": "Variable-radius: fractions 0 to 1 along the edge chain, one per intermediate "
-                       "radius; same length as 'radii'."})
-    .add_input_property("radii", {"type": "array", "items": {"type": "number"},
-        "description": "Variable-radius: the intermediate radii in 'units', paired by index with "
-                       "'positions'."})
-    .add_input_property("chord_length", {"type": "number",
-        "description": "Chord-length: the straight-line distance across the rounded corner, in "
-                       "'units'."})
+    .add_input_property("end_radius", {"type": "number"})
+    .add_input_property("positions", {"type": "array", "items": {"type": "number"}})
+    .add_input_property("radii", {"type": "array", "items": {"type": "number"}})
+    .add_input_property("chord_length", {"type": "number"})
     .add_input_property(*_RULE_FACES.as_property())
     .add_input_property(*_RULE_FACES_TWO.as_property(brief=True))
     .add_input_property(*_TOPOLOGY.as_property())

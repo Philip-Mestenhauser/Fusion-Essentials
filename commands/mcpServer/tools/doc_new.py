@@ -39,9 +39,8 @@ def handler() -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Create and open a new, empty Fusion design document; it becomes the active "
-    "document. It is unsaved (no cloud id) until doc_save_as. Start modelling with "
-    "sketch_create."
+    "Create and open a new, empty design document; it becomes active and stays unsaved until "
+    "doc_save_as. Start modelling with sketch_create."
 )
 
 tool = Tool.create_simple(

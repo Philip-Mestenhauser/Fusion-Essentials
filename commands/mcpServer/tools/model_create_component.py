@@ -21,8 +21,7 @@ app = adsk.core.Application.get()
 
 # parent: nest the new component INSIDE an existing occurrence's component (occurrences.addNewComponent
 # on the PARENT component - verified live). Omitted = the root component (the back-compat default).
-_PARENT = _inputs.OccurrenceRef("parent", required=False,
-    description="Nest the new component INSIDE this occurrence; omit for root.")
+_PARENT = _inputs.OccurrenceRef("parent", required=False)
 
 
 def _ensure_multi_component_intent(design):
@@ -145,23 +144,22 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
 
 
 TOOL_DESCRIPTION = (
-"Create a new EMPTY component occurrence - one component per part, so the parts are independently "
-"jointable and groundable. A fresh one-component PART design is auto-promoted to HYBRID. Added at "
-"ROOT unless 'parent' nests it. Placement COMPOSES with sketch coordinates: after placing, sketch "
-"in component-local coords; doing both double-offsets."
+"Create a new EMPTY component occurrence, at root unless 'parent' nests it. Its placement composes "
+"with the component-local coordinates you then sketch in."
 )
 
 tool = (
     Tool.create_simple(name="model_create_component", description=TOOL_DESCRIPTION)
-    .add_input_property("name", {"type": "string", "description": "Optional name for the new component."})
-    .add_input_property("x", {"type": "number", "description": "Occurrence placement X in 'units' (default 0)."})
-    .add_input_property("y", {"type": "number", "description": "Occurrence placement Y in 'units' (default 0)."})
-    .add_input_property("z", {"type": "number", "description": "Occurrence placement Z in 'units' (default 0)."})
+    .add_input_property("name", {"type": "string"})
+    .add_input_property("x", {"type": "number", "description": "Placement X, in 'units'."})
+    .add_input_property("y", {"type": "number"})
+    .add_input_property("z", {"type": "number"})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("activate", {"type": "boolean",
-            "description": "Make the new component the active edit target (default false)."})
-    .add_input_property("rotate_deg", {"type": "number", "description": "Optionally orient: rotate this many degrees about 'rotate_axis' (default 0)."})
-    .add_input_property(*_inputs.frame_axis("rotate_axis", default="z", description="World axis for the orientation rotation.").as_property())
+            "description": "Make it the active edit target (default false)."})
+    .add_input_property("rotate_deg", {"type": "number",
+            "description": "Orientation about 'rotate_axis'."})
+    .add_input_property(*_inputs.frame_axis("rotate_axis", default="z").as_property())
     .add_input_property(*_PARENT.as_property())
     .strict_schema()
 )

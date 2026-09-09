@@ -21,9 +21,8 @@ from ._mesh_common import _node_count, _tri_count
 
 app = adsk.core.Application.get()
 
-_MESH = _inputs.MeshBodyRef("mesh", required=True, description="The mesh body to hollow.")
-_THICKNESS = _inputs.Distance("thickness", required=True, allow_zero=False, allow_negative=False,
-                              description="Wall thickness the hollow leaves behind.")
+_MESH = _inputs.MeshBodyRef("mesh", required=True)
+_THICKNESS = _inputs.Distance("thickness", required=True, allow_zero=False, allow_negative=False)
 _UNITS = _inputs.UnitField()
 
 _SPEC = [_MESH, _THICKNESS, _UNITS]
@@ -187,8 +186,7 @@ def handler(mesh: str = "", thickness=None, units: str = "mm") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Hollow a MESH body with the MeshShell feature - the BRep model_shell cannot reach a mesh. It "
-    "rewrites the SAME body in place, so there is no new body to name; re-read it with mesh_get."
+    "Hollow a MESH body in place - the BRep model_shell cannot reach a mesh."
 )
 
 tool = _inputs.apply_to_tool(

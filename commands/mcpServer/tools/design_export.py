@@ -41,14 +41,13 @@ _FORMATS = {
     "dxf": (".dxf", None, False),
 }
 
-_FORMAT = _inputs.Choice("format", options=list(_FORMATS), default="step",
-                         description="Output format.")
+_FORMAT = _inputs.Choice("format", options=list(_FORMATS), default="step")
 
 # STL-only: bake units into the file (unitType) and pick binary vs ASCII (isBinaryFormat). stl_units
 # is ALWAYS assigned - an untouched unitType takes the unit of the LAST EXPLICIT assignment made
 # anywhere in the session, across documents. stl_binary omitted leaves the factory value alone.
 _STL_UNITS = _inputs.Choice("stl_units", options=list(_export.STL_UNIT_MEMBERS), default="mm",
-    description="format=stl only: the unit baked into the file. Always assigned.")
+    description="Baked into the file; always assigned.")
 
 # There is deliberately NO dxf_units input: the FIRST read of DXFSketchExportOptions.units kills the
 # call UNCATCHABLY - no try/except runs and the transaction rolls back with "3 : Distance unit is
@@ -56,9 +55,7 @@ _STL_UNITS = _inputs.Choice("stl_units", options=list(_export.STL_UNIT_MEMBERS),
 
 # format=dxf inputs: a whole SKETCH by name, or a planar FACE's projected outline (find_geometry
 # handle). Exactly one of these is required when format=dxf; both are ignored otherwise.
-_DXF_FACE = _inputs.GeometryHandle("dxf_face", require="planar_face", required=False,
-    description="format=dxf only: the face whose outline is written (via a scratch sketch that is "
-                "removed again).")
+_DXF_FACE = _inputs.GeometryHandle("dxf_face", require="planar_face", required=False)
 
 # MEASURED against an occurrence, a body proxy and their component: these six factories take a
 # COMPONENT (or the root) and RAISE "3 : invlid argument geometry" on the other two, while stl, obj
@@ -666,43 +663,34 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Export a body, component/occurrence, or the WHOLE design (omit 'target') to a neutral CAD file "
-    "on local disk - STEP / IGES / SAT / SMT / USD / Fusion-Archive (f3d) / STL / 3MF / OBJ. "
-    "format=dxf is a different shape: a 2D export of a SKETCH ('dxf_sketch') or a planar FACE's "
-    "outline ('dxf_face'), for which 'target' and split_by_component do not apply. Pair with "
-    "data_upload_file to round-trip the file into the cloud. WRITES a file to disk, leaving the "
-    "design unchanged."
+    "Export a body, component/occurrence or the whole design (omit 'target') to a CAD file on "
+    "local disk."
 )
 
 tool = (
     Tool.create_simple(name="design_export", description=TOOL_DESCRIPTION)
     .add_input_property(_FORMAT.name, _FORMAT.schema())
     .add_input_property("file_path", {"type": "string",
-            "description": "Local output path - a file, or a DIRECTORY when split_by_component=true."})
+            "description": "Output path; a DIRECTORY when split_by_component."})
     .add_input_property("target", {"type": "string",
-            "description": "What to export: a find_geometry handle, or a body/component/occurrence NAME; omit for the WHOLE design. A name its instances share exports the COMPONENT - pass a fullPathName (Bracket:2) for ONE instance."})
+            "description": "A find_geometry handle or a body/component/occurrence name; a shared "
+                           "name exports the COMPONENT, a fullPathName (Bracket:2) one instance."})
     .add_input_property("split_by_component", {"type": "boolean",
-            "description": "Write each top-level occurrence to its own file in directory 'file_path'."})
-    .add_input_property("include_invisible_bodies", {"type": "boolean",
-            "description": "Include hidden bodies (default: visible only)."})
-    .add_input_property("include_invisible_components", {"type": "boolean",
-            "description": "Include hidden components/occurrences (default: visible only)."})
-    .add_input_property("stl_binary", {"type": "boolean",
-            "description": "format=stl only: true=binary, false=ASCII. Omit for the API default."})
+            "description": "One file per top-level occurrence."})
+    .add_input_property("include_invisible_bodies", {"type": "boolean"})
+    .add_input_property("include_invisible_components", {"type": "boolean"})
+    .add_input_property("stl_binary", {"type": "boolean"})
     .add_input_property(_STL_UNITS.name, _STL_UNITS.schema())
-    .add_input_property("dxf_sketch", {"type": "string",
-            "description": "format=dxf only: the NAME of the sketch to write whole. It is written in the design's default length unit."})
+    .add_input_property("dxf_sketch", {"type": "string"})
     .add_input_property("dxf_component", {"type": "string",
-            "description": "The component holding 'dxf_sketch', when two components carry that "
-                           "name: a component name, or an occurrence fullPathName/handle from "
-                           "design_get(include=['tree'], tree_handles=true)."})
+            "description": "Narrows 'dxf_sketch' to one component."})
     .add_input_property(_DXF_FACE.name, _DXF_FACE.schema())
     .add_input_property("dxf_export_construction", {"type": "boolean",
-            "description": "format=dxf only: include construction geometry (default true)."})
+            "description": "Default true."})
     .add_input_property("dxf_export_points", {"type": "boolean",
-            "description": "format=dxf only: include sketch points (default true)."})
+            "description": "Default true."})
     .add_input_property("dxf_export_projected", {"type": "boolean",
-            "description": "format=dxf only: include projected geometry (default true). The dxf_face path is ALL projected geometry, so false there writes an empty file."})
+            "description": "Default true."})
     .strict_schema()
 )
 

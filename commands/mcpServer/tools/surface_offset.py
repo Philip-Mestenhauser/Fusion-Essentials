@@ -21,8 +21,7 @@ app = adsk.core.Application.get()
 
 _OFFSET_OPS = ("new", "new_body", "new_component")
 
-_OFFSET_FACES = _inputs.GeometryHandleList("faces", require="face", required=True,
-    description="The faces to offset (need not be one body).")
+_OFFSET_FACES = _inputs.GeometryHandleList("faces", require="face", required=True)
 
 
 def handler(faces=None, distance: float = 0.0, units: str = "mm",
@@ -111,12 +110,12 @@ def handler(faces=None, distance: float = 0.0, units: str = "mm",
 
 
 TOOL_DESCRIPTION = (
-"Offset faces by a distance into ANOTHER surface (positive = along the face normal)."
+"Offset faces into another surface body."
 )
 tool = (
     Tool.create_simple(name="surface_offset", description=TOOL_DESCRIPTION)
     .add_input_property("faces", _OFFSET_FACES.schema())
-    .add_input_property("distance", {"type": "number", "description": "Offset distance in 'units' (positive = along the normal; 0 = a COINCIDENT copy of the face)."})
+    .add_input_property("distance", {"type": "number", "description": "In 'units'; positive = along the face normal, 0 = a coincident copy."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("chaining", {"type": "boolean", "description": "Expand across tangent-connected faces (default false)."})
     .add_input_property(*_inputs.boolean_op(options=("new", "new_component"), default="new").as_property())

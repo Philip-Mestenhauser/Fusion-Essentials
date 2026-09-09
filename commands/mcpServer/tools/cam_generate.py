@@ -269,21 +269,15 @@ def handler(target: str = "", skip_valid: bool = True) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Launch CAM toolpath (re)generation and return IMMEDIATELY with a handle; generation runs in "
-    "the background at its own pace (often minutes) - check cam_get_status(handle) at any cadence "
-    "until completed=true. Be in the MANUFACTURE workspace first: "
-    "out-of-date state isn't re-evaluated against changed geometry until Manufacture is active, so from "
-    "Design skip_valid=true can wrongly skip stale ops - after swapping a part, enter Manufacture or "
-    "pass skip_valid=false.\n"
+    "Launch CAM toolpath (re)generation from the MANUFACTURE workspace.\n"
     + _outputs.produces_block(RETURNS)
 )
 
 tool = (
     Tool.create_simple(name="cam_generate", description=TOOL_DESCRIPTION)
-    .add_input_property("target", {"type": "string",
-            "description": "Setup/folder/operation NAME to generate; omit (or 'document') for the whole document."})
+    .add_input_property("target", {"type": "string"})
     .add_input_property("skip_valid", {"type": "boolean",
-            "description": "Only regenerate out-of-date operations (default true); false forces all in scope."})
+            "description": "Default true; skips valid operations."})
     .strict_schema()
 )
 item = Item.create_tool_item(

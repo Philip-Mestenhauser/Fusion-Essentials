@@ -21,13 +21,10 @@ from ._design_common import run_in_base_feature
 
 app = adsk.core.Application.get()
 
-_CUT_MESH = _inputs.MeshBodyRef("mesh", required=True, description="The mesh body to cut.")
-_CUT_PLANE = _inputs.PlaneRef("plane", required=True, description="The cutting plane.")
-_CUT_TYPE = _inputs.Choice("cut_type", ["trim", "split_body", "split_faces"], default="trim",
-                           description="trim keeps one side; split_body makes two mesh bodies; "
-                                       "split_faces cuts the triangulation in place.")
-_CUT_FILL = _inputs.Choice("fill", ["none", "minimal", "uniform"], default="minimal",
-                           description="How the cut opening is filled.")
+_CUT_MESH = _inputs.MeshBodyRef("mesh", required=True)
+_CUT_PLANE = _inputs.PlaneRef("plane", required=True)
+_CUT_TYPE = _inputs.Choice("cut_type", ["trim", "split_body", "split_faces"], default="trim")
+_CUT_FILL = _inputs.Choice("fill", ["none", "minimal", "uniform"], default="minimal")
 
 # The cut types that re-triangulate the SAME mesh instead of adding a body, so the target's own
 # triangle count is what gates them; split_body is gated on the body count.
@@ -401,8 +398,7 @@ def handler(mesh: str = "", plane: str = "", cut_type: str = "trim",
 
 
 TOOL_DESCRIPTION = (
-    "Cut a MESH body with a plane - trim it, split it into two bodies, or "
-    "split the triangulation in place."
+    "Cut a MESH body with a plane - trim, split into two bodies, or split the triangulation."
 )
 
 _CUT_SPEC = [_CUT_MESH, _CUT_PLANE, _CUT_TYPE, _CUT_FILL]
@@ -411,7 +407,7 @@ tool = (
         Tool.create_simple(name="mesh_plane_cut", description=TOOL_DESCRIPTION),
         _CUT_SPEC)
     .add_input_property("flip", {"type": "boolean",
-            "description": "Keep/cut the OTHER side of the plane (default false)."})
+            "description": "Keeps the other side of the plane."})
     .strict_schema()
 )
 item = Item.create_tool_item(

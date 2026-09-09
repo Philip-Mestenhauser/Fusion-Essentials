@@ -33,10 +33,8 @@ RETURNS = [
 # text - which carries no Profile of its own - is stamped as itself. scope_input names this tool's
 # 'component' input, the remedy when two components carry one sketch name.
 _PROFILES = _inputs.ProfileRefList("profiles", required=True, allow_text=True,
-    scope_input="component",
-    description="The closed profile(s) or sketch text(s) to stamp.")
-_FACES = _inputs.GeometryHandleList("faces", require="face", required=True,
-    description="The face(s) to stamp onto - all on ONE body.")
+    scope_input="component")
+_FACES = _inputs.GeometryHandleList("faces", require="face", required=True)
 # EmbossFeatureInput carries NO operation property and createInput takes no operation argument, so
 # the SIGN of depth is the whole raise-vs-engrave surface: a positive depth ADDS material. The
 # volume-direction gate below refuses any call whose effect disagrees with the sign asked for.
@@ -187,8 +185,7 @@ def handler(profiles=None, faces=None, depth: float = 0.0, units: str = "mm",
 
 
 TOOL_DESCRIPTION = (
-    "Stamp sketch profile(s) or sketch text(s) onto solid face(s): nameplates, part marking, "
-    "logos, ribs. 'depth' is signed - positive raises, negative engraves.\n"
+    "Stamp sketch profiles or text onto faces; a negative 'depth' engraves.\n"
     + _outputs.produces_block(RETURNS)
 )
 

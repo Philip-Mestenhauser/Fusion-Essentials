@@ -648,11 +648,15 @@ class TestEnumValues:
 
 
 class TestTheWireDescribesWhatHappens:
-    def test_the_refusal_promise_covers_only_the_pre_assignment_guards(self):
+    def test_the_refusal_promise_covers_only_the_pre_assignment_guards(self, monkeypatch):
         # a read-back mismatch happens AFTER setattr, so it cannot be sold as "nothing was written"
-        desc = setp.TOOL_DESCRIPTION
-        assert "REFUSED BEFORE writing" in desc
-        assert "read-back that differs from the request is an error" in desc
+        p = _make_prefs(values={"display": {"generalPrecision": 3}},
+                        frozen={"display": ("generalPrecision",)})
+        monkeypatch.setattr(setp, "app", FakeApplication(preferences=p))
+        assert "Nothing was written" not in _message(
+            setp.handler(member="display.generalPrecision", value=4))
+        assert "Nothing was written" in _message(
+            setp.handler(member="network.proxyHost", value="x"))
 
 
 class TestEnumFamiliesAreDeclared:

@@ -75,9 +75,8 @@ def handler(name: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Delete a USER parameter, GUARDED. Refuses if another parameter/feature "
-    "references it (reports the consumers), and reports if the delete introduces a timeline "
-    "error. Only user parameters can be deleted (not model/feature params).")
+    "Delete a USER parameter. A parameter another expression references is refused, naming the "
+    "consumers.")
 
 tool = (
     Tool.create_with_string_input(

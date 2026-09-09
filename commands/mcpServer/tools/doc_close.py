@@ -116,10 +116,8 @@ def handler(name: str = "", save_changes: bool = False,
 
 
 TOOL_DESCRIPTION = (
-    "Close an open document, or every one of them (close_all). 'name' omitted = the ACTIVE "
-    "doc; a shared name is REFUSED, not guessed. save_changes=false (the default) DISCARDS "
-    "unsaved edits. app.documents includes referenced/dependency docs with no visible tab - "
-    "close_all closes those too.")
+    "Close an open document, or every one (close_all). Unsaved edits are DISCARDED unless "
+    "save_changes=true.")
 
 tool = (
     Tool.create_simple(
@@ -127,11 +125,10 @@ tool = (
         description=TOOL_DESCRIPTION,
     )
     .add_input_property("name", {"type": "string",
-            "description": "Doc to close: a name, a URN / web URL, or 'open:N' (doc_get); omit = active."})
-    .add_input_property("save_changes", {"type": "boolean",
-            "description": "Save unsaved edits before closing (default false = discard)."})
+            "description": "A name, a URN / web URL, or 'open:N' (doc_get); omit = active."})
+    .add_input_property("save_changes", {"type": "boolean"})
     .add_input_property("close_all", {"type": "boolean",
-            "description": "Close every open document (default false)."})
+            "description": "Also closes referenced documents that have no tab."})
     .strict_schema()
 )
 item = Item.create_tool_item(

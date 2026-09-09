@@ -893,8 +893,8 @@ class TestSurfaceDims:
         # the only string an agent reads about this input must match what resolve() actually does:
         # blanket 'planar-face' prose would falsify point_to_surface, which takes a cylinder
         desc = sd._SURFACE.as_property()[1]["description"]
-        assert "point_to_surface" in desc and "CURVED" in desc and "PLANAR" in desc
-        assert "line_to_surface also accept" not in desc   # it is the planar-only one
+        assert "curved face too for point_to_surface" in desc and "planar-face" in desc
+        assert "line_to_surface" not in desc              # it is the planar-only one
 
     def test_a_line_not_parallel_to_the_surface_surfaces_the_api_sentence_alone(self, monkeypatch):
         # the API names its own fault ("line is not parallel to the planar surface"); the operand

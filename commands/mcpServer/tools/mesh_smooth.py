@@ -21,7 +21,7 @@ from ._mesh_common import _node_count, _tri_count
 
 app = adsk.core.Application.get()
 
-_MESH = _inputs.MeshBodyRef("mesh", required=True, description="The mesh body to smooth.")
+_MESH = _inputs.MeshBodyRef("mesh", required=True)
 
 _SPEC = [_MESH]
 
@@ -174,16 +174,15 @@ def handler(mesh: str = "", smoothness=None) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Smooth a MESH body with the MeshSmooth feature - relaxes scan noise and faceting. Smoothness "
-    "0.5 collapses a coarse mesh to a near-point, so start low."
+    "Smooth a MESH body - relaxes scan noise and faceting."
 )
 
 tool = (
     _inputs.apply_to_tool(
         Tool.create_simple(name="mesh_smooth", description=TOOL_DESCRIPTION), _SPEC)
     .add_input_property("smoothness", {"type": "number",
-                                       "description": "Smoothing strength, 0 to 1 (unitless). "
-                                                      "Omit for the API default."})
+                                       "description": "Unitless strength. Omit for the API "
+                                                      "default."})
     .strict_schema()
 )
 item = Item.create_tool_item(

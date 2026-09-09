@@ -136,19 +136,14 @@ def handler(sketch_name: str = "", entities: str = "", target_sketch: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "COPY existing sketch entities, placing the copies through a transform: 'dx'/'dy', "
-    "'rotation_deg' and 'scale_factor' about ('center_x','center_y'). 'entities' are "
-    "'<type>:<index>' refs from sketch_get; 'target_sketch' copies into another sketch. Returns "
-    "the NEW curves' refs in the receiving sketch. sketch_move relocates the originals instead."
+    "COPY sketch entities, transformed."
 )
 
 tool = _transform_wire(
     Tool.create_simple(name="sketch_copy", description=TOOL_DESCRIPTION)
-    .add_input_property("sketch_name", {"type": "string",
-            "description": "Sketch holding them (default: most recent)."})
+    .add_input_property("sketch_name", {"type": "string"})
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
-    .add_input_property("target_sketch", {"type": "string",
-            "description": "Sketch to copy INTO (default: the same sketch)."})
+    .add_input_property("target_sketch", {"type": "string"})
     .add_input_property(*_sketch_detail.component_scope("target_component",
                                                         narrows="target_sketch")))
 

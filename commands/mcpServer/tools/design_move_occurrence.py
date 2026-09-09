@@ -16,10 +16,9 @@ from . import _geom
 from . import _inputs
 from . import _outputs
 
-_OCCURRENCE = _inputs.OccurrenceRef("occurrence", required=True,
-        description="The instance to re-parent.")
+_OCCURRENCE = _inputs.OccurrenceRef("occurrence", required=True)
 _INTO_COMPONENT = _inputs.OccurrenceRef("into_component", required=True,
-        description="Occurrence whose component receives it.")
+        description="Receives the instance.")
 
 RETURNS = [
     _outputs.ReturnsName("full_path", of="moved occurrence",
@@ -171,16 +170,14 @@ def handler(occurrence: str = "", into_component: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-"Re-parent a component instance: move an occurrence INTO the component of another occurrence, "
-"restructuring an assembly without rebuilding parts. The part keeps its WORLD position; only its "
-"place in the browser tree changes - and every path beneath it changes with it.\n"
+"Re-parent an occurrence into another occurrence's component.\n"
 + _outputs.produces_block(RETURNS)
 )
 
 tool = (
     Tool.create_simple(name="design_move_occurrence", description=TOOL_DESCRIPTION)
     .add_input_property(*_OCCURRENCE.as_property())
-    .add_input_property(*_INTO_COMPONENT.as_property())
+    .add_input_property(*_INTO_COMPONENT.as_property(brief=True))
     .strict_schema()
 )
 item = Item.create_tool_item(

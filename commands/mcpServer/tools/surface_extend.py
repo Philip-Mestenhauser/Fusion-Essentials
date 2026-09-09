@@ -32,8 +32,7 @@ _EXTEND_ALIGNMENTS = {
 "align_edges": "AlignEdges",
 }
 
-_EXTEND_EDGES = _inputs.EdgeLoopRef("edges", closed=False, required=True,
-    description="The edges to extend.")
+_EXTEND_EDGES = _inputs.EdgeLoopRef("edges", closed=False, required=True)
 
 
 def handler(edges=None, distance: float = 0.0, units: str = "mm",
@@ -114,15 +113,15 @@ def handler(edges=None, distance: float = 0.0, units: str = "mm",
 
 
 TOOL_DESCRIPTION = (
-"Extend an OPEN surface outward from its OUTER open edges by 'distance'."
+"Extend an open surface outward from its open edges."
 )
 tool = (
     Tool.create_simple(name="surface_extend", description=TOOL_DESCRIPTION)
     .add_input_property("edges", _EXTEND_EDGES.schema())
-    .add_input_property("distance", {"type": "number", "description": "Extend distance in 'units' (non-zero)."})
+    .add_input_property("distance", {"type": "number", "description": "In 'units'; non-zero."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property(*_inputs.Choice("extend_type", ["natural", "tangent", "perpendicular"],
-        default="natural", description="How the surface is extended.").as_property())
+        default="natural").as_property())
     .add_input_property("chaining", {"type": "boolean", "description": "Follow the connected edge chain (default true)."})
     .add_input_property(*_inputs.Choice("extend_alignment", ["free_edges", "align_edges"],
         description="Alignment of the extended side edges.").as_property())

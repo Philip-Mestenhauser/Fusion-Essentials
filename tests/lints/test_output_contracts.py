@@ -61,6 +61,8 @@ class TestDeclaredOutputs:
                     descs.append(d)
             blob = "\n".join(descs)
             for o in mod.RETURNS:
-                if o.produces_note() not in blob:
-                    offenders.append(f"{name}: PRODUCES line for '{o.key}' not in any description")
+                # The Produces line names each key and its consumers, as produces_block writes it.
+                who = (" -> " + "/".join(o.consumers)) if o.consumers else ""
+                if f"{o.key}{who}" not in blob:
+                    offenders.append(f"{name}: Produces entry for '{o.key}' not in any description")
         assert not offenders, "\n".join(offenders)

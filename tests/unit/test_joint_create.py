@@ -837,10 +837,10 @@ class TestAxisIsAdvertisedFrameRelative:
     def test_edit_axis_input_says_the_same_thing(self):
         assert "FRAME-relative" in self._axis_property(jedit.tool)
 
-    def test_create_description_names_the_frame_and_the_fix(self):
-        desc = joint.TOOL_DESCRIPTION
-        assert "FRAME-relative" in desc
-        assert "joint_edit(world_axis=" in desc      # the tool that re-points it
+    def test_the_create_axis_input_names_the_frame_and_the_fix(self):
+        axis = self._axis_property(joint.tool)
+        assert "FRAME-relative" in axis
+        assert "joint_edit(world_axis=" in axis      # the tool that re-points it
 
 
 _UNREADABLE_FLAG = object()

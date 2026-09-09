@@ -28,8 +28,7 @@ _TEMPLATES = {
     "generic_fff": "GenericFFF",
     "generic_lathe": "GenericLathe",
 }
-_TEMPLATE = _inputs.Choice("template", options=list(_TEMPLATES), default="generic_3_axis",
-                           description="The machine template the new machine is built from.")
+_TEMPLATE = _inputs.Choice("template", options=list(_TEMPLATES), default="generic_3_axis")
 
 # resolve_machine's no-match error opens with this - the ONE outcome that proves the name is FREE.
 # Any other resolver answer (a hit, an ambiguity refusal, a library error) means the name is not
@@ -180,19 +179,15 @@ def handler(name: str = "", template: str = "generic_3_axis", vendor: str = "") 
 
 
 TOOL_DESCRIPTION = (
-    "Create a MACHINE in the LOCAL machine library from a Fusion machine template - the answer when "
-    "cam_edit_setup(machine=...) finds no match. 'name' becomes the machine's name "
-    "(Machine.description) and model, what an assignment resolves by; a name that already reaches a "
-    "Local/Fusion360 machine (its name, model, or 'vendor model') is refused up front. "
-    "Next: cam_edit_setup(setup=..., machine='<name>')."
+    "Create a MACHINE in the LOCAL machine library from a Fusion machine template, so "
+    "cam_edit_setup(machine=...) can assign it by name."
 )
 
 tool = (
     Tool.create_simple(name="cam_create_machine", description=TOOL_DESCRIPTION)
-    .add_input_property("name", {"type": "string",
-            "description": "The new machine's name - written to Machine.description and Machine.model."})
+    .add_input_property("name", {"type": "string"})
     .add_input_property(*_TEMPLATE.as_property())
-    .add_input_property("vendor", {"type": "string", "description": "Machine vendor to record (optional)."})
+    .add_input_property("vendor", {"type": "string"})
     .strict_schema()
 )
 item = Item.create_tool_item(

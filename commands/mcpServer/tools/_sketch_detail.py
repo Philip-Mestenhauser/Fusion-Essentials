@@ -652,20 +652,20 @@ def scope_remedy(input_name="component"):
 # The vocabulary half of the scope's description: what it accepts. Shared by every spelling of the
 # input, so a second scope on one tool cannot drift from the first. WHY it exists, and the
 # design_get pointer that mints an occurrence path, are in scope_component's refusals.
-_SCOPE_VOCABULARY = "a component name, or an occurrence fullPathName/handle."
+_SCOPE_VOCABULARY = "a component name or an occurrence path/handle."
 
 # The ONE wire declaration of that input: tool.add_input_property(*_sketch_detail.COMPONENT_SCOPE),
 # resolved through scoped_sketch / scoped_or_recent_sketch below.
 COMPONENT_SCOPE = ("component", {"type": "string", "description":
-                   "Component holding the sketch: " + _SCOPE_VOCABULARY})
+                   "The sketch's component: " + _SCOPE_VOCABULARY})
 
 
 def component_scope(input_name, narrows=""):
     """(name, schema) for that same scope under a DIFFERENT input name - for a tool whose own
     'component' already names something else, or that scopes a SECOND sketch reference.
     ``narrows`` names the sketch input this scope applies to."""
-    lead = (f"Component holding '{narrows}': " if narrows
-            else "Component holding the sketch: ")
+    lead = (f"The component of '{narrows}': " if narrows
+            else "The sketch's component: ")
     return input_name, {"type": "string", "description": lead + _SCOPE_VOCABULARY}
 
 

@@ -140,19 +140,17 @@ def handler(sketch_name: str = "", curves=None, distance: float = 0.0,
 
 
 TOOL_DESCRIPTION = (
-"Extrude an OPEN profile into a SHEET body (isSolid false). A closed boundary becomes a "
-"tube/wall, NOT a capped solid; use model_extrude for a solid. Feed the sheet to "
-"surface_trim/extend/patch/thicken."
+"Extrude an open profile into a sheet body; model_extrude makes a capped solid."
 )
 
 tool = (
     Tool.create_simple(name="surface_extrude", description=TOOL_DESCRIPTION)
     .add_input_property("sketch_name", {"type": "string",
-            "description": "The sketch to use (omit = most recent)."})
+            "description": "Omit for the most recent sketch."})
     .add_input_property("curves", _CURVES.schema())
-    .add_input_property("distance", {"type": "number", "description": "Depth in 'units' (non-zero; negative reverses)."})
+    .add_input_property("distance", {"type": "number", "description": "Depth in 'units' (negative reverses)."})
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("symmetric", {"type": "boolean", "description": "Extrude both sides (default false)."})
+    .add_input_property("symmetric", {"type": "boolean"})
     .add_input_property(*_inputs.boolean_op(options=("new", "join"), default="new").as_property())
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .strict_schema()

@@ -152,20 +152,14 @@ def handler(name: str = "", confirm_name: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Delete a TEMPLATE from the LOCAL toolpath template library by name - the counterpart to "
-    "cam_save_template, and the only tool here that removes one. 'name' is matched EXACTLY "
-    "(case-insensitively) against the Local library's templates (see "
-    "cam_get(include=['templates'], template_location='local')); a name several templates answer "
-    "to is refused, not guessed, and a template in any other location is not reached. GUARDED and "
-    "IRREVERSIBLE: 'confirm_name' must EXACTLY match the RESOLVED template name."
+    "Delete a template from the LOCAL toolpath template library by name; 'confirm_name' must match "
+    "the resolved name exactly. Counterpart to cam_save_template."
 )
 
 tool = (
     Tool.create_simple(name="cam_delete_template", description=TOOL_DESCRIPTION)
-    .add_input_property("name", {"type": "string",
-            "description": "The template to delete, as cam_get(include=['templates'], template_location='local') lists it."})
-    .add_input_property("confirm_name", {"type": "string",
-            "description": "The resolved template name again, case-sensitive (safety confirmation; must match)."})
+    .add_input_property("name", {"type": "string"})
+    .add_input_property("confirm_name", {"type": "string"})
     .strict_schema()
 )
 item = Item.create_tool_item(

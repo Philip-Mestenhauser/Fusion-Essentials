@@ -250,26 +250,20 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
 
 
 TOOL_DESCRIPTION = (
-    "Show or hide CAM toolpaths (the displayed blue paths) to inspect one operation's path at a time. "
-    "'action': 'show'/'hide'/'isolate' one operation (by 'operation' name; isolate = show only it); "
-    "'show_folder' (show every op in a 'folder' or setup, hide the rest); 'hide_all'; 'list' (ops "
-    "+ state). 'fit' fits the camera to the scene after showing (show/isolate). Toolpaths render "
-    "only in the Manufacture workspace; pair with view_screenshot. show/isolate/show_folder also "
-    "ACTIVATE the operation's own setup (the payload reports setup_activated) - a later CAM call "
-    "lands in that setup unless it names its own."
+    "Show or hide CAM toolpaths to inspect one operation's path at a time. They render only in the "
+    "MANUFACTURE workspace; pair with view_screenshot."
 )
 
 tool = (
     Tool.create_simple(name="cam_show_toolpath", description=TOOL_DESCRIPTION)
-    .add_input_property("action", {"type": "string", "enum": list(_ACTIONS),
-            "description": "What to do with the displayed toolpaths."})
+    .add_input_property("action", {"type": "string", "enum": list(_ACTIONS)})
     .add_required_input("action")
     .add_input_property("operation", {"type": "string",
             "description": "Operation name (show/hide/isolate)."})
     .add_input_property("folder", {"type": "string",
             "description": "Folder or setup name (show_folder)."})
     .add_input_property("fit", {"type": "boolean",
-            "description": "Fit the camera after showing the toolpath (show/isolate)."})
+            "description": "Fit the camera after showing."})
     .strict_schema()
 )
 

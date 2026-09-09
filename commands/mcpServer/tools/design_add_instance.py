@@ -24,10 +24,8 @@ from . import _outputs
 # several of its instances is not an ambiguity to refuse, since instancing a component that already
 # has instances is this tool's job.
 _COMPONENT = _inputs.TargetRef("component", allow=("occurrence", "component"), required=True,
-        collapse_ambiguous_occurrences=True,
-        description="Component to instance again: one of its occurrences, or the component name.")
-_INTO_COMPONENT = _inputs.OccurrenceRef("into_component",
-        description="Occurrence to nest the instance in; omit for root.")
+        collapse_ambiguous_occurrences=True)
+_INTO_COMPONENT = _inputs.OccurrenceRef("into_component")
 
 RETURNS = [
     _outputs.ReturnsName("full_path", of="new instance",
@@ -195,11 +193,8 @@ def handler(component: str = "", into_component: str = "", x: float = 0.0, y: fl
 
 
 TOOL_DESCRIPTION = (
-"Place another INSTANCE of a component that already exists in this design - it SHARES the "
-"original's geometry, so an edit shows in all of them. Fusion numbers the instance itself, so the "
-"result publishes the name and path that LANDED, read back off the assembly - refer to those, "
-"never to a guessed ':2'. Position it later with assembly_move / joint_create. For an EMPTY new "
-"component see model_create_component; for a part from another document, doc_insert_occurrence.\n"
+"Place another INSTANCE of a component already in this design - it SHARES the original's "
+"geometry; placement coords in 'units', angles in degrees.\n"
 + _outputs.produces_block(RETURNS)
 )
 
@@ -207,14 +202,14 @@ tool = (
     Tool.create_simple(name="design_add_instance", description=TOOL_DESCRIPTION)
     .add_input_property(*_COMPONENT.as_property())
     .add_input_property(*_INTO_COMPONENT.as_property())
-    .add_input_property("x", {"type": "number", "description": "Placement X in 'units' (default 0)."})
-    .add_input_property("y", {"type": "number", "description": "Placement Y in 'units' (default 0)."})
-    .add_input_property("z", {"type": "number", "description": "Placement Z in 'units' (default 0)."})
+    .add_input_property("x", {"type": "number"})
+    .add_input_property("y", {"type": "number"})
+    .add_input_property("z", {"type": "number"})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("rotate_deg", {"type": "number",
-            "description": "Orient: rotate this many degrees about 'rotate_axis' (default 0)."})
+            "description": "About 'rotate_axis'."})
     .add_input_property(*_inputs.frame_axis("rotate_axis", default="z",
-            description="World axis for the orientation rotation.").as_property())
+            description="World axis.").as_property())
     .strict_schema()
 )
 item = Item.create_tool_item(

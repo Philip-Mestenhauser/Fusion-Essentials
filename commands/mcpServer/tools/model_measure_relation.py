@@ -40,19 +40,8 @@ _DEFAULT_TOL_DEG = 0.5
 # or planar faces.
 _A = _inputs.TargetRef("entity_a", required=True, allow=("body", "face", "edge", "occurrence", "component"))
 _B = _inputs.TargetRef("entity_b", required=True, allow=("body", "face", "edge", "occurrence", "component"))
-_REL = _inputs.Choice("relation", list(_RELATIONS), required=True, description=(
-    "The relation to assert. "
-    "coaxial: axes parallel within tolerance_deg AND their axis lines within 'tolerance' apart "
-    "(angle=0 alone is only parallel, NOT coaxial). "
-    "parallel / perpendicular: the two directions (a cylinder axis or a planar-face normal) within "
-    "tolerance_deg of 0 / 90 deg. "
-    "flush: two planar faces coplanar. "
-    "clearance: minimum distance >= 'tolerance'. touching: minimum distance <= 'tolerance'. "
-    "concentric: two CIRCULAR entities (a circular/arc edge, or a cylindrical face) whose CENTER "
-    "POINTS coincide within 'tolerance'."))
-_TOL = _inputs.Distance("tolerance", allow_zero=True, allow_negative=False, description=(
-    "Linear tolerance for the offset/gap part (coaxial/flush offset, clearance/touching distance). "
-    "Omit for a per-relation default of 0.1 mm."))
+_REL = _inputs.Choice("relation", list(_RELATIONS), required=True)
+_TOL = _inputs.Distance("tolerance", allow_zero=True, allow_negative=False)
 
 
 # ── pure vector math (plain tuples in cm; no adsk objects, so it is unit-testable) ────────────────
@@ -533,11 +522,7 @@ def handler(entity_a: str = "", entity_b: str = "", relation: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Assert a named geometric RELATION between two entities and get pass/fail WITH the evidence - "
-    "the measured angle / axis offset / min distance and the tolerance it judged against, never a "
-    "bare boolean. Each entity is a find_geometry handle (a cylindrical face gives an axis, a "
-    "planar face a normal, a circular edge a center) or a body/occurrence/component name. For the "
-    "raw distance or angle instead, use model_measure_between.\n"
+    "Judge a geometric relation between two entities.\n"
     + _outputs.produces_block(RETURNS)
 )
 
@@ -547,9 +532,7 @@ tool = (
     .add_input_property(*_B.as_property())
     .add_input_property(*_REL.as_property())
     .add_input_property(*_TOL.as_property())
-    .add_input_property("tolerance_deg", {"type": "number",
-            "description": "Angular tolerance in DEGREES for coaxial/parallel/perpendicular/flush "
-                           "(default 0.5). Ignored by clearance/touching."})
+    .add_input_property("tolerance_deg", {"type": "number"})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_required_input("entity_a")
     .add_required_input("entity_b")

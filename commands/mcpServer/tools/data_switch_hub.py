@@ -106,17 +106,14 @@ def handler(action: str = "list", hub: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "SWITCH the active Autodesk data hub (to LIST hubs, use data_get(include=['hubs'])). The "
-    "assignment is verified by re-reading the active hub, and errors if the re-read does not show "
-    "the target. A switch CLOSES every open document and URNs are hub-scoped, so save first and "
-    "re-resolve projects/URNs with data_get."
+    "SWITCH the active Autodesk data hub; a switch that takes closes every open document. List "
+    "hubs with data_get(include=['hubs'])."
 )
 
 tool = (
     Tool.create_simple(name="data_switch_hub", description=TOOL_DESCRIPTION)
-    .add_input_property(*_inputs.Choice("action", list(_ACTIONS), default="list",
-            description="To list, prefer data_get(include=['hubs']).").as_property())
-    .add_input_property("hub", {"type": "string", "description": "The hub name (case-insensitive) or id to activate."})
+    .add_input_property(*_inputs.Choice("action", list(_ACTIONS), default="list").as_property())
+    .add_input_property("hub", {"type": "string", "description": "Hub name or id."})
     .strict_schema()
 )
 

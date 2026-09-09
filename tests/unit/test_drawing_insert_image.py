@@ -171,9 +171,11 @@ class TestRotation:
         assert env.images._inserts == []      # no unrotated image left on the sheet
 
     def test_the_rotation_input_states_degrees_about_the_position(self):
+        # the caller works in degrees while the API takes radians, and the turn is about the
+        # image's own position, not the sheet's origin - both on the input that takes the number
         props = ins.tool.to_dict()["inputSchema"]["properties"]
         assert "Degrees" in props["rotate_deg"]["description"]
-        assert "rotate_deg" in ins.tool.to_dict()["description"]
+        assert "position" in props["rotate_deg"]["description"]
 
 
 class TestImageFormats:
@@ -214,10 +216,13 @@ class TestImageFormats:
         assert res["isError"] is True
         assert str(p) in res["message"]
 
-    def test_the_path_input_names_the_extensions_the_guard_enforces(self):
+    def test_no_wire_string_promises_an_extension_the_guard_refuses(self):
+        # the measured set is named in the refusal a wrong extension meets
+        # (test_an_unmeasured_extension_is_refused_naming_the_measured_set), so the input must not
+        # carry a second, driftable copy of it
         desc = ins.tool.to_dict()["inputSchema"]["properties"]["image_path"]["description"]
         for ext in self.MEASURED:
-            assert ext in desc
+            assert ext not in desc
 
 
 class TestSheetUnits:
@@ -262,18 +267,17 @@ class TestCoordinateUnit:
         assert out["coordinate_unit"] is None
         assert out["sheet_units"] == "mm"
 
-    def test_the_description_reports_the_unit_without_asserting_a_rule_for_position(self):
+    def test_no_wire_string_asserts_a_unit_rule_for_the_position(self):
         # An image position is standard-keyed - millimetres under ISO, inches under ASME, from a
         # corner origin - and the tool holds that rule in its bound, not on the wire: the caller
         # meets it at the failure moment, in an off-sheet refusal that names the unit, the
         # converted figure and the sheet's extent (pinned by TestOffSheetPosition::
-        # test_an_asme_anchor_is_bounded_in_inches_against_the_millimetre_extent). So the
-        # description spends its words on the coordinate_unit pointer and on keeping sheet_units,
-        # the dimension display unit, from being read as the coordinate label.
+        # test_an_asme_anchor_is_bounded_in_inches_against_the_millimetre_extent).
         desc = ins.tool.to_dict()["description"]
-        assert "reports the sheet's coordinate_unit" in desc
-        assert "does not describe a sheet coordinate" in desc
         assert "mm under ISO" not in desc and "under ASME" not in desc
+        # the frame the numbers are in rides on the inputs that take them, naming no one unit
+        props = ins.tool.to_dict()["inputSchema"]["properties"]
+        assert "coordinate unit" in props["x"]["description"]
 
     def test_neither_axis_input_asserts_a_unit_for_the_position(self):
         props = ins.tool.to_dict()["inputSchema"]["properties"]
@@ -430,12 +434,16 @@ class TestOffSheetPosition:
         assert res["isError"] is True
         assert "Image file not found" in res["message"] and "must be numbers" in res["message"]
 
-    def test_the_description_states_the_refusal_the_guard_enforces(self):
-        desc = ins.tool.to_dict()["description"]
-        # the description must not sell an unconditional refusal the ASME/unreadable paths do not
-        # deliver - it names the condition and the field that reports which way it went
-        assert "REFUSED where it can be bounded" in desc
-        assert "position_bounds_checked" in desc
+    def test_the_payload_states_the_refusal_the_guard_enforces(self, env, image_file):
+        # no wire string may sell an unconditional refusal the ASME/unreadable paths do not
+        # deliver: the payload names which way THIS call went, and the note says so when it could
+        # not bound the anchor at all
+        assert "REFUSED" not in ins.tool.to_dict()["description"]
+        assert _payload(ins.handler(image_path=image_file, x=60, y=100))[
+            "position_bounds_checked"] is True
+        env.install(width_raises="the sheet proxy will not report a width")
+        out = _payload(ins.handler(image_path=image_file, x=60, y=100))
+        assert out["position_bounds_checked"] is False and "NOT bounds-checked" in out["note"]
 
 
 class TestPathReadBack:

@@ -400,21 +400,17 @@ def handler(target: str = "", color: str = "", opacity=None, name: str = "") -> 
 
 
 _DESC = (
-"Set the color/appearance of a FACE, body, occurrence, or component (all its bodies) as a "
-"revertible override - a FACE handle colors that one face. 'opacity' is read back off what "
-"actually renders, since opacity is inherited from parent components. Pair with view_screenshot "
-"to verify."
+"Set the color and/or opacity of a face, body, occurrence or component as a revertible override."
 )
 
 tool = (
     Tool.create_simple(name="appearance_set", description=_DESC)
     .add_input_property(*_TARGET.as_property())
     .add_input_property("color", {"type": "string",
-            "description": "Color as '#RRGGBB', 'RRGGBB', or 'r,g,b' (0-255 each)."})
+            "description": "'#RRGGBB', 'RRGGBB', or 'r,g,b' (0-255 each)."})
     .add_input_property("opacity", {"type": "integer",
-            "description": "Opacity override as a percent: 0 invisible, 100 opaque."})
-    .add_input_property("name", {"type": "string",
-            "description": "Optional name for the created appearance."})
+            "description": "A percent: 0 invisible, 100 opaque."})
+    .add_input_property("name", {"type": "string"})
     .strict_schema()
 )
 item = Item.create_tool_item(

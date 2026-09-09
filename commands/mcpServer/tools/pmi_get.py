@@ -29,11 +29,8 @@ _KINDS = ("note", "hole_note", "imported_dimension", "imported_note", "imported_
           "imported_geometric_tolerance", "imported_surface_texture", "imported_graphical",
           "imported_folder")
 
-_GEOMETRY = _inputs.GeometryHandleList(
-    "geometry", require="any",
-    description="Narrow to the PMI attached to THESE faces/edges/vertices (find_geometry handles).")
-_KIND_FILTER = _inputs.Choice("kind", options=list(_KINDS),
-                              description="Narrow to one PMI kind.")
+_GEOMETRY = _inputs.GeometryHandleList("geometry", require="any")
+_KIND_FILTER = _inputs.Choice("kind", options=list(_KINDS))
 
 
 def _normalize_include(include):
@@ -369,26 +366,22 @@ def handler(include=None, geometry=None, kind="", component="", max_results=None
 
 
 TOOL_DESCRIPTION = (
-"Read the design's PMI (Product Manufacturing Information - 3D annotations attached to model "
-"faces/edges): Fusion-authored leader notes and hole/thread callouts, plus PMI imported with a "
-"STEP/model (dimensions, GD&T frames, datums, surface textures, folders). Default: counts by kind "
-"+ light records (name, kind, component, visibility; text on Fusion-authored kinds only), bounded "
-"by max_results. include=['segments'|'detail'] deepens - the returned note says what each adds - "
-"and kind=/component=/geometry= narrow. Author/change PMI with pmi_create / pmi_edit / pmi_delete."
+"Read the design's PMI - Product Manufacturing Information, the 3D annotations on model geometry, "
+"authored and imported alike: counts by kind plus light records, 'include' deepens. Author PMI "
+"with pmi_create."
 )
 
 tool = (
     Tool.create_simple(name="pmi_get", description=TOOL_DESCRIPTION)
     .add_input_property("include", {
-        "type": "array", "items": {"type": "string", "enum": list(_SLICES)},
-        "description": "Deeper slices to include (default none)."})
+        "type": "array", "items": {"type": "string", "enum": list(_SLICES)}})
     .add_input_property("geometry", _GEOMETRY.schema())
     .add_input_property("kind", _KIND_FILTER.schema())
     .add_input_property("component", {"type": "string",
-        "description": "Narrow to one component's PMI (exact name)."})
+        "description": "One component's exact name."})
     .add_input_property("max_results", {
         "type": "integer",
-        "description": f"Cap on returned records (default {_MAX_RESULTS_DEFAULT}, max {_MAX_RESULTS_CAP})."})
+        "description": f"Default {_MAX_RESULTS_DEFAULT}, max {_MAX_RESULTS_CAP}."})
     .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )

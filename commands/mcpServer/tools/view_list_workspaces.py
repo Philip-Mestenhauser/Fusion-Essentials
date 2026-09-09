@@ -43,9 +43,8 @@ def handler() -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "List the Fusion workspaces the user can switch to (e.g. Design, "
-    "Manufacture, Render), each with its id, visible name, product type, and "
-    "whether it is active. The targets for view_switch_workspace."
+    "List the Fusion workspaces, each with its id, visible name, product type and whether it is "
+    "active - the targets view_switch_workspace takes."
 )
 
 tool = Tool.create_simple(

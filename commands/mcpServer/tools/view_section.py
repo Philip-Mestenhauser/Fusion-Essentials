@@ -21,11 +21,9 @@ from . import _view_common
 
 app = adsk.core.Application.get()
 
-# PlaneRef for a bare-plane cut (origin alias | construction name | planar-face handle). The shared
-# plane-shapes text comes from the kind's contract note; only the tool-specific nuance lives here.
-_PLANE = _inputs.PlaneRef("plane",
-                          description="The cut plane (when not using 'through'; with 'through', an "
-                          "origin alias is used, default xz/front).")
+# PlaneRef for a bare-plane cut (origin alias | construction name | planar-face handle) - the shapes
+# it accepts are the kind's own contract note.
+_PLANE = _inputs.PlaneRef("plane")
 
 _ACTIONS = ("cut", "list", "clear")
 _PLANES = {
@@ -240,29 +238,24 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
 
 
 TOOL_DESCRIPTION = (
-    "Cut the active model with a live Section Analysis so you can SEE INSIDE. Cut by 'plane' OR by "
-    "'through' (an occurrence, cut through its center); 'clear' removes ALL sections. "
-    "NON-DESTRUCTIVE: a cutaway view, not a geometry edit. Pair with view_set (orient/isolate) and "
-    "view_screenshot; typical: cut -> view_screenshot -> clear."
+    "Cut the model with a live Section Analysis to see inside - a cutaway view, not a geometry "
+    "edit; 'clear' removes every section in the design."
 )
 
 tool = (
     Tool.create_simple(name="view_section", description=TOOL_DESCRIPTION)
-    .add_input_property("action", {"type": "string", "enum": list(_ACTIONS),
-            "description": "What to do with this design's section analyses."})
+    .add_input_property("action", {"type": "string", "enum": list(_ACTIONS)})
     .add_required_input("action")
     .add_input_property(*_PLANE.as_property())
     .add_input_property("through", {"type": "string",
-            "description": "Occurrence name to cut through its center (alternative to a bare plane)."})
+            "description": "Occurrence to cut through its center."})
     .add_input_property("offset", {"type": "number",
-            "description": "Offset the cut along the plane normal (+/-), in 'units'. Default 0."})
+            "description": "Along the plane normal, in 'units'."})
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("flip", {"type": "boolean",
-            "description": "Cut the opposite side (default false)."})
-    .add_input_property("show_hatch", {"type": "boolean",
-            "description": "Show the section hatch on cut faces (default true)."})
+    .add_input_property("flip", {"type": "boolean"})
+    .add_input_property("show_hatch", {"type": "boolean", "description": "Default true."})
     .add_input_property("auto_view", {"type": "boolean",
-            "description": "Aim the camera at the exposed cut face after cutting. False keeps your camera, which may sit on the solid side where the model looks uncut. Default true."})
+            "description": "Aims at the exposed cut face. Default true."})
     .strict_schema()
 )
 

@@ -134,10 +134,8 @@ def handler(document_id: str = "", confirm_name: str = "", force: bool = False) 
 
 
 TOOL_DESCRIPTION = (
-    "Delete a cloud document (a saved DataFile) by its lineage 'document_id' URN. "
-    "GUARDED and IRREVERSIBLE: 'confirm_name' must EXACTLY match the file's current "
-    "name. Also refuses a file that is currently OPEN, or one REFERENCED by other "
-    "files, unless force=true. Get the URN and name from data_get or doc_get."
+    "Delete a document on the cloud, IRREVERSIBLY, by its lineage URN: 'confirm_name' must EXACTLY "
+    "match the file's current name."
 )
 
 tool = (
@@ -145,12 +143,11 @@ tool = (
         name="data_delete_file",
         description=TOOL_DESCRIPTION,
         input_param_name="document_id",
-        input_param_description="Lineage id (URN) of the document to delete.",
+        input_param_description="The file's lineage URN (data_get, doc_get).",
     )
-    .add_input_property("confirm_name", {"type": "string",
-        "description": "Exact current name of the file, case-sensitive."})
+    .add_input_property("confirm_name", {"type": "string", "description": "Case-sensitive."})
     .add_input_property("force", {"type": "boolean",
-        "description": "Delete even if referenced by other files (default false)."})
+        "description": "Delete despite references. Default false."})
     .strict_schema()
 )
 item = Item.create_tool_item(

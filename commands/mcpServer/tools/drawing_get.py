@@ -145,20 +145,16 @@ def handler(include=None, sheet: str = "") -> dict:
 
 TOOL_DESCRIPTION = (
     "Read the ACTIVE 2D drawing: standard, units, and a sheet listing with per-sheet facts and a "
-    "1-based export_index (the address drawing_export and drawing_edit_sheet take). "
-    "include=['views'] adds each sheet's view rows (index + type); a view's viewCurves are "
-    "populated but expose no readable geometry, and placed dimensions have no read API. 'sheet' "
-    "scopes to one sheet by name. The document must be the active one (doc_activate first)."
+    "1-based export_index."
 )
 
 tool = (
     Tool.create_simple(name="drawing_get", description=TOOL_DESCRIPTION)
     .add_input_property("include", {"type": "array",
             "items": {"type": "string", "enum": list(_SLICES)},
-            "description": "Deeper slice to add; omit for the orientation read."})
+            "description": "Omit for the orientation read."})
     .add_input_property("sheet", {"type": "string",
-            "description": "Scope to ONE sheet by name (case-insensitive exact; a miss lists "
-                           "the sheets). Omit for all sheets."})
+            "description": "One sheet by name; omit for all."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

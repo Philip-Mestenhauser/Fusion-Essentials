@@ -178,17 +178,13 @@ def handler(feature: str = "") -> dict:
 
 
 _DESC = (
-"Delete one timeline feature by name (from design_get(include=['timeline'])) - e.g. a botched "
-"pattern/mirror, which removes every instance it created. Timeline indices SHIFT after each "
-"delete, so in a batch re-read the timeline before each 'name@index' rather than reusing a cached "
-"position. Undo in Fusion if unintended."
+"Delete one timeline feature by name; a pattern/mirror delete takes every instance it created."
 )
 
 tool = (
     Tool.create_simple(name="design_delete_feature", description=_DESC)
     .add_input_property("feature", {"type": "string",
-            "description": "Timeline object name to delete (from design_get(include=['timeline'])); an ambiguous "
-            "name is refused - use the 'name@index' form the error lists (e.g. 'Extrude1@4')."})
+            "description": "Timeline object name, from design_get(include=['timeline'])."})
     .strict_schema()
 )
 item = Item.create_tool_item(

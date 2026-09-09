@@ -139,22 +139,19 @@ def handler(views=None, width: int = _WIDTH_DEFAULT, height: int = _HEIGHT_DEFAU
 
 
 TOOL_DESCRIPTION = (
-    "Capture SEVERAL views of the model in ONE call - front/top/right/iso etc. as separate "
-    "labelled images. The camera is restored afterward (read-only). Prefer this over "
-    "view_screenshot when judging a 3D layout."
+    "Capture SEVERAL views of the model in ONE call, as separate labelled images - the shape to "
+    "reach for when judging a 3D layout. The camera is put back afterward."
 )
 
 tool = (
     Tool.create_simple(name="view_screenshot_multi", description=TOOL_DESCRIPTION)
     .add_input_property("views", {"type": "array",
             "items": {"type": "string", "enum": list(_VIEWS) + ["all"]},
-            "description": "Views to capture, in order; ['all'] for the six orthographic views; omit for a front/top/right/iso default."})
-    .add_input_property("width", {"type": "integer", "description": f"Width of each image in px (default {_WIDTH_DEFAULT})."})
-    .add_input_property("height", {"type": "integer", "description": f"Height of each image in px (default {_HEIGHT_DEFAULT})."})
-    .add_input_property("transparent_background", {"type": "boolean",
-            "description": "Render the background transparent."})
-    .add_input_property("anti_aliased", {"type": "boolean",
-            "description": "Anti-alias the rendered images."})
+            "description": "['all'] = the six orthographic views; omit for front/top/right/iso."})
+    .add_input_property("width", {"type": "integer", "description": f"Default {_WIDTH_DEFAULT} px."})
+    .add_input_property("height", {"type": "integer", "description": f"Default {_HEIGHT_DEFAULT} px."})
+    .add_input_property("transparent_background", {"type": "boolean"})
+    .add_input_property("anti_aliased", {"type": "boolean"})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

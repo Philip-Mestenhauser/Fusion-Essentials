@@ -19,7 +19,7 @@ from ._design_common import run_in_base_feature
 
 app = adsk.core.Application.get()
 
-_REMESH_MESH = _inputs.MeshBodyRef("mesh", required=True, description="The mesh body to remesh.")
+_REMESH_MESH = _inputs.MeshBodyRef("mesh", required=True)
 
 
 def handler(mesh: str = "", density: float = 0.0) -> dict:
@@ -124,15 +124,14 @@ def handler(mesh: str = "", density: float = 0.0) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Regenerate a cleaner, more uniform triangulation of a MESH body (repair / "
-    "even density)."
+    "Regenerate a cleaner, more uniform triangulation of a MESH body."
 )
 
 tool = (
     Tool.create_simple(name="mesh_remesh", description=TOOL_DESCRIPTION)
     .add_input_property(_REMESH_MESH.name, _REMESH_MESH.schema())
     .add_required_input(_REMESH_MESH.name)
-    .add_input_property("density", {"type": "number", "description": "Optional relative target density (>0). Read back after the set; refused if this build does not take it."})
+    .add_input_property("density", {"type": "number", "description": "Relative target density, positive. Omit for the API default."})
     .strict_schema()
 )
 item = Item.create_tool_item(

@@ -37,9 +37,7 @@ _TARGETS = _inputs.TargetRefList("bodies", required=False)
 _PARAM_READ = "cam_get(include=['parameters'], setup=...)"
 
 # The stock the setup machines from: Setup.stockMode is the knob this input assigns.
-_STOCK_MODE = _inputs.Choice("stock_mode", options=list(STOCK_MODES), required=False,
-                             description="The stock the setup machines from - 'previous_setup' "
-                                         "takes what the preceding setup left.")
+_STOCK_MODE = _inputs.Choice("stock_mode", options=list(STOCK_MODES), required=False)
 
 # WCS geometry-binding, {key: (mode_param, mode_value, cad_param, handle-requirement)}: each key
 # drives one CadObjectParameterValue plus the choice-mode it needs. A bound WCS follows that
@@ -471,34 +469,26 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
 
 
 TOOL_DESCRIPTION = (
-    "Edit a CAM SETUP: its machine, its model/fixture/stock selections, its WCS, any other setup "
-    "parameter, or its name. A job needs a 'machine' before posting; browse names with "
-    "cam_get(include=['machines']). 'stock_mode' picks what the setup machines from; 'stock' "
-    "switches it to from-solid stock with those bodies and 'fixtures' auto-enables fixtures. "
-    "Select the COMPONENT occurrence, not the body inside, so a swapped part keeps the selection. "
-    "Regenerate toolpaths with cam_generate."
+    "Edit a CAM SETUP: its machine, its model/fixture/stock selections (bodies or occurrence names, "
+    "each REPLACED), its WCS, any other setup parameter, or its name. Browse machines with "
+    "cam_get(include=['machines'])."
 )
 
 tool = (
     Tool.create_simple(name="cam_edit_setup", description=TOOL_DESCRIPTION)
     .add_input_property("setup", {"type": "string", "description": "Setup name (from cam_get)."})
     .add_input_property("parameters", {"type": "object",
-            "description": "Setup parameters to set: {name: expression} (or 'name=value,...'). e.g. {'wcs_origin_boxPoint': \"'top center'\", 'stockZHigh': '2.5'}. One it takes no write to is refused by name."})
-    .add_input_property("models", {"type": "array", "items": {"type": "string"},
-            "description": "What to machine: bodies (handles/names) or component occurrence names - REPLACES the model set."})
-    .add_input_property("fixtures", {"type": "array", "items": {"type": "string"},
-            "description": "Fixtures: bodies (handles/names) or a fixture component occurrence name - REPLACES the fixture set."})
-    .add_input_property("stock", {"type": "array", "items": {"type": "string"},
-            "description": "Solid stock: bodies (handles/names) or a stock component occurrence name - REPLACES the stock set."})
+            "description": "{name: expression} (or 'name=value,...'), by this setup's own parameter names."})
+    .add_input_property("models", {"type": "array", "items": {"type": "string"}})
+    .add_input_property("fixtures", {"type": "array", "items": {"type": "string"}})
+    .add_input_property("stock", {"type": "array", "items": {"type": "string"}})
     .add_input_property(*_STOCK_MODE.as_property())
     .add_input_property("machine", {"type": "string",
-            "description": "Machine to assign: 'vendor|model' (or a bare model) from the machine library."})
-    .add_input_property("machine_strip_simulation", {"type": "boolean",
-            "description": "With 'machine': strip the simulation model from the resolved copy before assigning."})
+            "description": "'vendor|model', or a bare model."})
+    .add_input_property("machine_strip_simulation", {"type": "boolean"})
     .add_input_property("wcs", {"type": "object",
-            "description": "Bind the WCS: {origin/z_axis/x_axis: a find_geometry handle OR a Joint Origin (handle/name from assembly_get)}. Binds as a live reference - bound_entities reads back what took."})
-    .add_input_property("rename", {"type": "string",
-            "description": "New name for the setup; a name another setup already carries is refused before the write."})
+            "description": "{origin/z_axis/x_axis: a find_geometry handle or a Joint Origin handle/name}."})
+    .add_input_property("rename", {"type": "string"})
     .strict_schema()
 )
 item = Item.create_tool_item(

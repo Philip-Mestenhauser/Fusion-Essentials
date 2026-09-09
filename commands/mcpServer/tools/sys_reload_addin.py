@@ -184,7 +184,9 @@ def handler() -> dict:
         "text": (
                 "Reload scheduled. Make your next tool call after ~3 seconds - the connection "
                 "reconnects automatically (a cheap confirmation read: sys_capability_map). "
-                "Do not poll /health from a shell."
+                "Do not poll /health from a shell. A client still holding the pre-reload schema "
+                "comma-mangles a json-array argument for a property that cache lacks (a scalar "
+                "still passes) - reconnect before calling a tool whose inputs changed."
             ),
         }],
     "isError": False,
@@ -193,13 +195,8 @@ def handler() -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Reload the Fusion-Essentials add-in to pick up code changes (developer tool) - use it after "
-    "editing any tool, so its code and MCP schema take effect. This restarts the MCP server: the "
-    "call returns first, the server goes offline for ~1-2 seconds, then re-fetch the tool list "
-    "before further calls. CAUTION: a client still holding the pre-reload cached schema can "
-    "silently corrupt a json-array argument for any property absent from that cache (a scalar "
-    "still passes; an array gets comma-mangled) - reconnect before calling a tool whose inputs "
-    "changed."
+    "Reload the add-in to pick up code changes. This restarts the MCP server: re-fetch the tool "
+    "list before further calls."
 )
 
 tool = Tool.create_simple(name="sys_reload_addin", description=TOOL_DESCRIPTION).strict_schema()

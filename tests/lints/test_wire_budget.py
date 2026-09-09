@@ -25,15 +25,15 @@ from conftest import load_mcp_server, register_all_tools
 
 # The per-entry hard ceiling, in TRANSPORT bytes: the fleet's heaviest entry as measured, plus ~2%.
 # It bites on whichever entry is nearest it, so no single tool can fatten unnoticed.
-PER_TOOL_BUDGET_BYTES = 6_150
+PER_TOOL_BUDGET_BYTES = 5_190
 
 # The fleet limits, in COMPACT bytes, each its own measured statistic plus ~2%: the MEAN per
 # registered tool, and the NEAREST-RANK P90 (_rank_index - a size some entry really measures, never
 # an interpolation between two, so the ceiling and the number it is compared against are the same
 # statistic). Recalibrating either is the owner's decision - a red bar is answered by slimming the
 # entries the failure names, not by raising the number.
-FLEET_BYTES_PER_TOOL = 1_440
-FLEET_P90_BUDGET_BYTES = 2_541
+FLEET_BYTES_PER_TOOL = 890
+FLEET_P90_BUDGET_BYTES = 1_480
 
 # The PROSE allowance per entry, in COMPACT bytes: what its descriptions - the tool's own and every
 # input's - may add beyond the entry's bare structure, as a base for the tool line plus a share per
@@ -42,24 +42,14 @@ FLEET_P90_BUDGET_BYTES = 2_541
 PROSE_BASE_BYTES = 200
 PROSE_BYTES_PER_INPUT = 40
 
-# Families whose descriptions have not been cut to that allowance yet, each naming the ledger row
-# that cuts it. A family's diet lands by removing its entry; the test below refuses an entry whose
-# family is already under the allowance, so this table only shrinks.
-_DIET_PENDING = {
-    "appearance": "WIRE-DIET-1", "assembly": "WIRE-DIET-1", "cam": "WIRE-DIET-1",
-    "data": "WIRE-DIET-1", "design": "WIRE-DIET-1", "doc": "WIRE-DIET-1",
-    "drawing": "WIRE-DIET-1", "find": "WIRE-DIET-1", "joint": "WIRE-DIET-1",
-    "mesh": "WIRE-DIET-1", "model": "WIRE-DIET-1", "param": "WIRE-DIET-1",
-    "pmi": "WIRE-DIET-1", "save": "WIRE-DIET-1", "sketch": "WIRE-DIET-1",
-    "surface": "WIRE-DIET-1", "sys": "WIRE-DIET-1", "view": "WIRE-DIET-1",
-    "workspace": "WIRE-DIET-1",
-}
-
 
 @pytest.fixture(scope="module")
 def wire_tools():
-    """The tools/list entries exactly as the REAL server sends them, all tools registered."""
+    """The tools/list entries exactly as the REAL server sends them, all tools registered - the
+    FULL wire: the bare-wire marker is an experiment switch, and a budget measured with it on
+    would pass anything."""
     mcp_server = load_mcp_server()
+    mcp_server.BARE_WIRE_MARKER = mcp_server.BARE_WIRE_MARKER + ".never"
     srv = mcp_server.SimpleMCPServer()
     for item in register_all_tools():
         srv.register(item)
@@ -137,41 +127,43 @@ def test_the_fleet_p90_stays_under_its_ceiling(wire_tools):
 
 
 def _bare(node):
-    """`node` with every 'description' key removed - the entry's structure alone."""
+    """`node` with every prose 'description' removed - the entry's structure alone. A schema
+    PROPERTY named 'description' (its value a dict) is structure and stays."""
     if isinstance(node, dict):
-        return {k: _bare(v) for k, v in node.items() if k != "description"}
+        return {k: _bare(v) for k, v in node.items()
+                if not (k == "description" and isinstance(v, str))}
     if isinstance(node, list):
         return [_bare(v) for v in node]
     return node
+
+
+def _without_produces(entry):
+    """`entry` with the trailing 'Produces:' line cut from its description - that line is the
+    RETURNS declaration rendered, structure like an enum, not prose."""
+    desc = entry.get("description") or ""
+    cut = desc.rfind("\nProduces: ")
+    if cut < 0:
+        return entry
+    return {**entry, "description": desc[:cut]}
 
 
 def _prose_over(entry):
     """(prose bytes, allowance, family) for one entry: its COMPACT size less its bare structure,
     against PROSE_BASE_BYTES plus PROSE_BYTES_PER_INPUT per declared input."""
     props = (entry.get("inputSchema") or {}).get("properties") or {}
+    entry = _without_produces(entry)
     prose = _compact_bytes(entry) - _compact_bytes(_bare(entry))
     return prose, PROSE_BASE_BYTES + PROSE_BYTES_PER_INPUT * len(props), entry["name"].split("_")[0]
 
 
-def test_each_dieted_tools_prose_stays_within_its_input_allowance(wire_tools):
+def test_each_tools_prose_stays_within_its_input_allowance(wire_tools):
     over = []
     for e in wire_tools:
-        prose, allow, family = _prose_over(e)
-        if family not in _DIET_PENDING and prose > allow:
+        prose, allow, _family = _prose_over(e)
+        if prose > allow:
             over.append(f"{e['name']}: {prose:,} prose bytes against {allow:,}")
     assert not over, ("description prose over the per-input allowance ("
                       f"{PROSE_BASE_BYTES} + {PROSE_BYTES_PER_INPUT} per input, compact bytes):\n  "
                       + "\n  ".join(sorted(over))
                       + "\n  cut the input descriptions to what their type and enum cannot say; "
                       "move teaching to the error an agent meets when it matters.")
-
-
-def test_every_pending_family_still_has_a_tool_over_the_allowance(wire_tools):
-    still_over = set()
-    for e in wire_tools:
-        prose, allow, family = _prose_over(e)
-        if prose > allow:
-            still_over.add(family)
-    done = sorted(f for f in _DIET_PENDING if f not in still_over)
-    assert not done, ("_DIET_PENDING only shrinks - every tool of these families is under the "
-                      "allowance, remove their entries: " + ", ".join(done))

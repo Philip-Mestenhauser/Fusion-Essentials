@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 187  |  **description breadcrumbs:** 400  |  **note/error breadcrumbs:** 472
+**Tools:** 187  |  **description breadcrumbs:** 265  |  **note/error breadcrumbs:** 472
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -14,11 +14,11 @@ close orphans, factor duplicated guards into shared helpers.
 - none - every named breadcrumb resolves to a real tool.
 
 ### Orphans (no breadcrumb leads here - reachable only via workspace_orient / search)
-**Read/Acquire (5)** - higher concern, a check-your-work tool nothing points to:
-  `cam_compare_operations`, `cam_inspect_toolpaths`, `drawing_get`, `model_compute_holder`, `sys_get_api_doc`
+**Read/Acquire (6)** - higher concern, a check-your-work tool nothing points to:
+  `cam_compare_operations`, `cam_inspect_toolpaths`, `drawing_get`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`
 
-**Edit (46)** - usually leaf actions, scan for genuine gaps:
-  `assembly_edit_contacts`, `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_configure`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_update`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_generate_face_groups`, `mesh_plane_cut`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
+**Edit (57)** - usually leaf actions, scan for genuine gaps:
+  `assembly_edit_contacts`, `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_configure`, `design_remove_feature`, `design_set_name`, `doc_insert_derive`, `doc_insert_import`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_insert_image`, `drawing_update`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_generate_face_groups`, `mesh_plane_cut`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_sweep`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
 - **50x** across 50 module(s): "No active design. Create or open a document first (see doc_new)."
@@ -35,18 +35,18 @@ close orphans, factor duplicated guards into shared helpers.
 - **4x** across 1 module(s): "setMotionData reported success on '"
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
-- `doc_new`  <- 83  (desc 1, note 82)
-- `find_geometry`  <- 53  (desc 26, note 27)
-- `view_screenshot`  <- 42  (desc 13, note 29)
-- `design_delete_feature`  <- 38  (desc 17, note 21)
-- `design_get`  <- 38  (desc 13, note 25)
-- `cam_get`  <- 30  (desc 17, note 13)
-- `sketch_get`  <- 30  (desc 13, note 17)
-- `data_get`  <- 26  (desc 12, note 14)
-- `doc_open`  <- 24  (desc 7, note 17)
-- `assembly_get`  <- 23  (desc 10, note 13)
-- `sketch_create`  <- 23  (desc 8, note 15)
-- `model_inspect`  <- 19  (desc 4, note 15)
+- `doc_new`  <- 82  (desc 0, note 82)
+- `find_geometry`  <- 41  (desc 14, note 27)
+- `design_delete_feature`  <- 37  (desc 16, note 21)
+- `view_screenshot`  <- 34  (desc 5, note 29)
+- `design_get`  <- 33  (desc 8, note 25)
+- `cam_get`  <- 24  (desc 11, note 13)
+- `data_get`  <- 24  (desc 10, note 14)
+- `doc_open`  <- 22  (desc 5, note 17)
+- `sketch_create`  <- 22  (desc 7, note 15)
+- `sketch_get`  <- 22  (desc 5, note 17)
+- `model_inspect`  <- 18  (desc 3, note 15)
+- `assembly_get`  <- 16  (desc 3, note 13)
 
 ## The guidance surface (every note the agent can be told)
 

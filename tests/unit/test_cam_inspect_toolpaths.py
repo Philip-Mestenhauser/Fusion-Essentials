@@ -529,8 +529,7 @@ class TestSuppressedScoping:
         # decides whether to count them - a slim that drops the measured clause goes red here.
         desc = mod.tool.to_dict()["inputSchema"]["properties"]["include_suppressed"]["description"]
         assert "flips hasToolpath to False" in desc
-        assert "unsuppressing does not bring the toolpath back" in desc
-        assert "until cam_generate regenerates it" in desc
+        assert "only cam_generate brings it back" in desc
 
     def test_the_note_says_nothing_about_exclusions_when_suppressed_are_counted(self, wire):
         wire(_cam(self._template(), verdict=False))

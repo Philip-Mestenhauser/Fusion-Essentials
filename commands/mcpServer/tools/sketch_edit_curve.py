@@ -24,7 +24,10 @@ app = adsk.core.Application.get()
 
 _ACTIONS = ("trim", "extend", "break", "split", "fillet", "chamfer", "offset")
 _ACTION = _inputs.Choice("action", list(_ACTIONS), required=True,
-                         description="Which edit to apply to the curve.")
+                         description="What the pick point selects - trim: the nearest segment. "
+                                     "extend: the nearest end. break: the crossings either side. "
+                                     "split: the point itself. fillet/chamfer: the corner between "
+                                     "the two. offset: the chain and the side.")
 
 _TWO_CURVE = ("fillet", "chamfer")
 
@@ -282,13 +285,8 @@ def handler(action: str = "", sketch_name: str = "", entity_one: str = "", entit
 
 
 TOOL_DESCRIPTION = (
-    "Edit an EXISTING sketch curve in place. trim removes the "
-    "segment nearest the pick point; extend lengthens the end nearest it; break cuts at the "
-    "crossings either side of it; split cuts at it; fillet arcs between two OPEN curves; chamfer "
-    "joins two LINES; offset copies the end-connected chain. 'entity_one'/'entity_two' are "
-    "'<type>:<index>' ids from sketch_get. x1,y1 (and x2,y2) is the pick point, in 'units' and in "
-    "the sketch's own local frame. Returns each resulting curve's NEW id and names any feature the "
-    "edit broke."
+    "Edit an EXISTING sketch curve in place. x1,y1 (and x2,y2) is the pick point, in 'units' in "
+    "the sketch's own frame."
 )
 
 tool = (
@@ -296,17 +294,15 @@ tool = (
     .add_input_property(*_ACTION.as_property())
     .add_required_input("action")
     .add_input_property("sketch_name", {"type": "string",
-            "description": "Sketch to edit (default: most recent)."})
+            "description": "Default: most recent."})
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
-    .add_input_property("entity_one", {"type": "string",
-            "description": "Curve to edit, '<type>:<index>'."})
-    .add_input_property("entity_two", {"type": "string",
-            "description": "Second curve (fillet/chamfer)."})
-    .add_input_property("x1", {"type": "number", "description": "Pick X on entity_one."})
-    .add_input_property("y1", {"type": "number", "description": "Pick Y on entity_one."})
-    .add_input_property("x2", {"type": "number", "description": "Pick X on entity_two."})
-    .add_input_property("y2", {"type": "number", "description": "Pick Y on entity_two."})
-    .add_input_property("radius", {"type": "number", "description": "Fillet arc radius."})
+    .add_input_property("entity_one", {"type": "string"})
+    .add_input_property("entity_two", {"type": "string"})
+    .add_input_property("x1", {"type": "number"})
+    .add_input_property("y1", {"type": "number"})
+    .add_input_property("x2", {"type": "number"})
+    .add_input_property("y2", {"type": "number"})
+    .add_input_property("radius", {"type": "number"})
     .add_input_property("distance", {"type": "number",
             "description": "Chamfer setback one; offset distance."})
     .add_input_property("distance_two", {"type": "number",

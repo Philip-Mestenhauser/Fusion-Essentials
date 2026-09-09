@@ -35,10 +35,9 @@ _DATUM_MEMBERS = {
 }
 
 _STRATEGY = _inputs.Choice("strategy", list(_drawing_common.DIMENSION_STRATEGIES),
-                           default="baseline",
-                           description="Placement strategy.")
+                           default="baseline")
 _DATUM = _inputs.Choice("datum", list(_DATUM_MEMBERS), default="bottom_left",
-                        description="Corner dimensions measure from.")
+                        description="Corner to measure from.")
 
 _NO_READBACK_NOTE = (
     "The dimensions themselves are NOT readable: adsk.drawing has no dimension entity, so they "
@@ -158,9 +157,7 @@ def handler(view: int = None, strategy: str = "baseline", datum: str = "bottom_l
 
 TOOL_DESCRIPTION = (
     "Auto-dimension one view on the active drawing's active sheet - the API's only route to "
-    "dimensions (there is no manual dimension, note or leader). Open the drawing and make it active "
-    "first. A view is addressed by INDEX only; calling this without 'view' reports how many the "
-    "sheet has. drawing_export shows what was placed, doc_save keeps it."
+    "dimensions."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)
@@ -168,7 +165,7 @@ FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)
 tool = (
     Tool.create_simple(name="drawing_dimension", description=FULL_DESCRIPTION)
     .add_input_property("view", {"type": "integer",
-            "description": "0-based view index on the active sheet."})
+            "description": "0-based index on the active sheet."})
     .add_input_property(*_STRATEGY.as_property())
     .add_input_property(*_DATUM.as_property())
     .strict_schema()

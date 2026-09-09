@@ -32,9 +32,7 @@ _TARGET = _inputs.TargetRef("target")
 # frame: the Joint Origin the oriented box is measured in. NATIVE selector - this READS the frame's
 # axis vectors rather than handing the JO to a joint, so it stays on the object the owning component
 # carries instead of an assembly proxy. required=True is about the resolve, not the schema.
-_FRAME = _inputs.JointOriginRef(
-    "frame", native=True, required=True,
-    description="Measure the bounding box in this Joint Origin's part-space frame.")
+_FRAME = _inputs.JointOriginRef("frame", native=True, required=True)
 
 _ACCURACY = {
     "low": adsk.fusion.CalculationAccuracy.LowCalculationAccuracy,
@@ -525,10 +523,7 @@ def handler(target: str = "", include=None, units: str = "mm", accuracy: str = "
 
 
 TOOL_DESCRIPTION = (
-    "Measure a target - size, mass, or mesh stats - in one read. 'target' is a find_geometry handle "
-    "or an occurrence/component/body name, or '' for the WHOLE design. Default: the bounding box "
-    "(X/Y/Z extents + center in 'units'). A MESH target reports triangle/vertex counts + watertight "
-    "instead. For the distance or angle BETWEEN two entities, use model_measure_between."
+    "Measure a target: the bounding box by default, mass or mesh stats through 'include'."
 )
 
 tool = (
@@ -536,14 +531,11 @@ tool = (
     .add_input_property(*_TARGET.as_property())
     .add_input_property("include", {"type": "array",
             "items": {"type": "string", "enum": list(_SLICES + _DEFAULT_NAMES)},
-            "description": "Deeper detail to add; 'default' keeps the bounding box beside it."})
+            "description": "'default' keeps the bounding box beside it."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("accuracy", {"type": "string", "enum": ["low", "medium", "high", "very_high"],
-            "description": "Physical-properties accuracy when include=['mass'] (default medium)."})
-    .add_input_property("per_body", {"type": "boolean",
-            "description": "With include=['mass']: a row per BREP body (name, is_solid, mass, "
-                           "volume, lump_count; mesh bodies are not listed) AND a mass + CoM row "
-                           "per occurrence in the subtree (a row with children aggregates them)."})
+            "description": "Default medium."})
+    .add_input_property("per_body", {"type": "boolean"})
     .add_input_property(*_FRAME.as_property())
     .strict_schema()
 )

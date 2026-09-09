@@ -21,13 +21,12 @@ app = adsk.core.Application.get()
 
 _OP_TYPES = {"milling": "MillingOperation", "turning": "TurningOperation"}
 
-_OP_TYPE = _inputs.Choice("operation_type", options=list(_OP_TYPES), default="milling",
-                          description="The machining operation type for the setup.")
+_OP_TYPE = _inputs.Choice("operation_type", options=list(_OP_TYPES), default="milling")
 # models: bodies (handle/name) OR component occurrences (name); omitted -> all root bodies.
 # Setup.models accepts an Occurrence, a BRepBody or a MeshBody. Measured: an OCCURRENCE keeps that
 # selection when the component's contents are replaced, and the setup stays valid.
 _MODELS = _inputs.TargetRefList("models", required=False,
-                                description="Bodies OR component occurrences to machine (omit = every root-component body).")
+                                description="Omit = every root-component body.")
 
 
 def setup_name_clash(cam, want, current=""):
@@ -121,20 +120,14 @@ def handler(operation_type: str = "milling", models=None, name: str = "") -> dic
 
 
 TOOL_DESCRIPTION = (
-    "Create a CAM (Manufacture) SETUP on the active part - the prerequisite for any CAM job, since "
-    "the other CAM tools (cam_apply_template, cam_generate) need a setup to act on. "
-    "Selecting the COMPONENT occurrence (not the body inside) keeps the setup's selection when its "
-    "contents are swapped - the shop-template pattern. After this, add "
-    "toolpaths with cam_apply_template (use a COMPATIBLE template - milling vs turning) then "
-    "cam_generate."
+    "Create a CAM (Manufacture) setup, then add toolpaths with cam_create_operation."
 )
 
 tool = (
     Tool.create_simple(name="cam_create_setup", description=TOOL_DESCRIPTION)
     .add_input_property(_OP_TYPE.name, _OP_TYPE.schema())
     .add_input_property(_MODELS.name, _MODELS.schema())
-    .add_input_property("name", {"type": "string",
-            "description": "Optional name for the new setup; the payload publishes the name it reads back."})
+    .add_input_property("name", {"type": "string"})
     .strict_schema()
 )
 

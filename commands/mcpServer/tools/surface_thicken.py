@@ -25,8 +25,7 @@ _THICKEN_TYPES = {
 "rounded": "RoundedThickenType",
 }
 
-_THICKEN_FACES = _inputs.GeometryHandleList("faces", require="face", required=True,
-    description="The faces (or patch-body faces) to thicken.")
+_THICKEN_FACES = _inputs.GeometryHandleList("faces", require="face", required=True)
 
 
 def handler(faces=None, thickness: float = 0.0, units: str = "mm",
@@ -158,13 +157,12 @@ def handler(faces=None, thickness: float = 0.0, units: str = "mm",
 
 
 TOOL_DESCRIPTION = (
-"Thicken faces into a SOLID wall - the surface->solid bridge. To close a watertight set of "
-"surfaces instead, use model_stitch."
+"Thicken faces into a solid wall."
 )
 tool = (
     Tool.create_simple(name="surface_thicken", description=TOOL_DESCRIPTION)
     .add_input_property("faces", _THICKEN_FACES.schema())
-    .add_input_property("thickness", {"type": "number", "description": "Wall thickness in 'units' (non-zero)."})
+    .add_input_property("thickness", {"type": "number", "description": "In 'units'; non-zero."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("symmetric", {"type": "boolean", "description": "Thicken both sides (default false)."})
     .add_input_property(*_inputs.boolean_op(options=("new", "join", "cut"), default="new").as_property())

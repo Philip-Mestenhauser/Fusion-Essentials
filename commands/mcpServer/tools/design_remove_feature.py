@@ -18,10 +18,8 @@ from . import _assert
 # RemoveFeatures.add takes ONE item, "a single body (solid or surface) or component occurrence", so
 # both kinds are singular, neither is schema-required, and kind="brep" refuses a mesh body with its
 # redirect instead of letting it reach add().
-_BODY = _inputs.BodyRef("body", kind="brep", required=False,
-                        description="The body to remove.")
-_OCCURRENCE = _inputs.OccurrenceRef("occurrence", required=False,
-                                    description="The component instance to remove.")
+_BODY = _inputs.BodyRef("body", kind="brep", required=False)
+_OCCURRENCE = _inputs.OccurrenceRef("occurrence", required=False)
 
 # removeFeatures.add() in a DIRECT-modelling design raises "3 : RemoveFeature is not supported in
 # Direct Modeling.", so the guard refuses before the mutation.
@@ -188,9 +186,7 @@ def handler(body: str = "", occurrence: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-"Remove ONE body or component occurrence from the design as a Remove FEATURE on the timeline - "
-"reversible by suppressing or deleting that feature, unlike design_delete_occurrence / "
-"design_delete_feature, which erase the item itself."
+"Remove ONE body or occurrence as a timeline Remove FEATURE."
 )
 
 tool = (

@@ -11,7 +11,7 @@ from . import _common
 from . import _inputs
 
 _OCCURRENCE = _inputs.OccurrenceRef("occurrence",
-        description="Occurrence to activate; '' or 'root' is the root.")
+        description="'' or 'root' is the root.")
 
 # A read that DECLINED, kept apart from the None the design answers at the root: safe() collapses
 # both to None, and only one of them confirms anything.
@@ -81,9 +81,8 @@ def handler(occurrence: str = "") -> dict:
     })
 
 
-TOOL_DESCRIPTION = ("Make an existing component the active edit target, or return to the root. "
-            "Subsequent sketch_create / model_extrude / sketch_dimension / sketch_constrain build "
-            "into the active component. This changes the edit target, not geometry.")
+TOOL_DESCRIPTION = ("Make an existing component the active edit target - new features build "
+            "into it.")
 
 tool = (
     Tool.create_simple(

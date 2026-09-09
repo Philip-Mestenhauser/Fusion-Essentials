@@ -171,37 +171,30 @@ def handler(project: str = "", project_id: str = "", folder: str = "", recursive
 
 
 TOOL_DESCRIPTION = (
-    "Read the CLOUD data model (Autodesk/Fusion Team) by scope. No 'project': the active hub + its "
-    "projects. project=<name|id>: that project's FILES (name, lineage URN, version, openable "
-    "fusionWebURL), 'folder'=<path> scoping to one. include=['folders'] with a project: the folder "
-    "TREE instead, rooted at 'folder' when one is given; include=['hubs']: all hubs. 'file'=<lineage "
-    "URN, or a name plus its project>: ONE file's full record, including its read-only link state. "
-    "Every call is a NETWORK read; results are capped ('truncated', 'time_truncated'), and "
-    "folder_budget / time_budget_s size the walk. For the open-document SESSION use doc_get."
+    "Read the CLOUD data model by scope: hubs and projects, one project's files, its folder tree, "
+    "or ONE file's record. Open documents are doc_get."
 )
 
 tool = (
     Tool.create_simple(name="data_get", description=TOOL_DESCRIPTION)
-    .add_input_property("project", {"type": "string", "description": "Project name (case-insensitive) to scope to."})
-    .add_input_property("project_id", {"type": "string", "description": "Project id (alternative to name)."})
+    .add_input_property("project", {"type": "string"})
+    .add_input_property("project_id", {"type": "string"})
     .add_input_property("folder", {"type": "string",
-            "description": "Folder PATH to scope to, e.g. 'Parts/Fixtures' - the file listing, or "
-                           "the root of the tree with include=['folders']."})
-    .add_input_property("recursive", {"type": "boolean",
-            "description": "Descend into subfolders (default true)."})
+            "description": "Folder PATH, e.g. 'Parts/Fixtures'."})
+    .add_input_property("recursive", {"type": "boolean", "description": "Default true."})
     .add_input_property("include", {"type": "array",
             "items": {"type": "string", "enum": list(_SLICES)},
-            "description": "Switches the read: the hub list, or the folder tree instead of the files."})
+            "description": "'folders' reads the folder tree."})
     .add_input_property("max_depth", {"type": "integer",
-            "description": f"With include=['folders']: depth cap (default {_MAX_DEPTH_DEFAULT})."})
+            "description": f"Folder tree, default {_MAX_DEPTH_DEFAULT}."})
     .add_input_property("folder_budget", {"type": "integer",
-            "description": "With include=['folders']: how many folder fetches the walk may spend "
-                           f"(default {_FOLDER_BUDGET_DEFAULT}, max {_FOLDER_BUDGET_MAX})."})
+            "description": "Folder fetches the walk may spend (default "
+                           f"{_FOLDER_BUDGET_DEFAULT}, max {_FOLDER_BUDGET_MAX})."})
     .add_input_property("time_budget_s", {"type": "number",
-            "description": "Seconds the walk may spend before it reports time_truncated (default "
-                           f"{_TIME_BUDGET_DEFAULT}, max {_TIME_BUDGET_MAX})."})
+            "description": f"Seconds the walk may spend (default {_TIME_BUDGET_DEFAULT}, "
+                           f"max {_TIME_BUDGET_MAX})."})
     .add_input_property("file", {"type": "string",
-            "description": "ONE file: its lineage URN (or web URL), or its name - a name needs 'project'."})
+            "description": "Lineage URN, web URL, or a name plus 'project'."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

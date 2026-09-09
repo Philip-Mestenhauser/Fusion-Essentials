@@ -50,10 +50,9 @@ RETURNS = [
 
 # The solid-body kind is this tool's own policy, not an API constraint - setToNonUniform accepts a
 # collection holding a sketch at input level - but the volume read-back needs a closed body.
-_BODIES = _inputs.BodyRefList("bodies", kind="solid", required=True,
-    description="The solid bodies to resize.")
+_BODIES = _inputs.BodyRefList("bodies", kind="solid", required=True)
 _ANCHOR = _inputs.GeometryHandle("anchor", require="vertex", required=False,
-    description="The point the scale holds fixed; omit for the active component's origin.")
+    description="Held fixed; omit for the component origin.")
 
 app = adsk.core.Application.get()
 
@@ -339,22 +338,17 @@ def handler(bodies=None, factor=None, x_factor=None, y_factor=None, z_factor=Non
 
 
 TOOL_DESCRIPTION = (
-    "Resize solid bodies about an anchor point that stays put (the Scale feature) - fit a part to a "
-    "new envelope, or add a shrink allowance. Pass 'factor' to scale uniformly, or ALL THREE of "
-    "'x_factor'/'y_factor'/'z_factor' to scale per axis. Omit 'anchor' to scale about the active "
-    "component's origin.\n"
+    "Resize solid bodies about an anchor point that stays put.\n"
     + _outputs.produces_block(RETURNS)
 )
 
 _FACTOR_SCHEMA = {"type": ["number", "string"],
-                  "description": "Uniform scale factor, greater than zero. A parameter expression "
-                                 "must be UNITLESS: one carrying a unit ('5 mm') is refused."}
+                  "description": "Uniform, greater than zero; an expression must be unitless."}
 
 
 def _axis_schema(axis):
-    return {"type": ["number", "string"],
-            "description": f"Scale along {axis}, greater than zero and unitless (as 'factor'). All "
-                           "three axes or none."}
+    """The per-axis factor schema; 'axis' names which one in the handler's own refusals."""
+    return {"type": ["number", "string"]}
 
 
 scale_tool = (

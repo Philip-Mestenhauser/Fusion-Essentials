@@ -185,8 +185,7 @@ def handler(a: str = "", b: str = "", mode: str = "distance", units: str = "mm")
 
 
 TOOL_DESCRIPTION = (
-    "Measure the distance or angle BETWEEN two targets. A distance of 0 is touching. model_inspect "
-    "measures ONE target; model_measure_relation returns a pass/fail verdict instead of a number."
+    "Measure the distance or angle between two targets; a distance of 0 is touching."
 )
 
 tool = (
@@ -194,7 +193,7 @@ tool = (
     .add_input_property(*_A.as_property())
     .add_input_property(*_B.as_property())
     .add_input_property("mode", {"type": "string", "enum": list(_MODES),
-            "description": "'distance' (default - minimum gap + closest points) or 'angle' (degrees)."})
+            "description": "Default distance."})
     .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )

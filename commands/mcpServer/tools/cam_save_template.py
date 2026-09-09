@@ -173,11 +173,7 @@ def handler(template_name: str = "", operations: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Bundle a subset of a setup's operations into a NEW toolpath template in the "
-    "library. 'operations' is a comma-separated list of operation names within "
-    "'setup'. Saves into 'folder' (a top-level folder name under 'location', created "
-    "if missing). Optional 'description'. Always creates a new template. Verify with "
-    "cam_get(include=['templates'])."
+    "Bundle some of a setup's operations into a NEW toolpath template."
 )
 
 tool = (
@@ -187,11 +183,14 @@ tool = (
         input_param_name="template_name",
         input_param_description="Name for the new template.",
     )
-    .add_input_property("operations", {"type": "string", "description": "Comma-separated operation names to bundle."})
-    .add_input_property("setup", {"type": "string", "description": "Setup containing the operations."})
+    .add_input_property("operations", {"type": "string",
+            "description": "Comma-separated names within 'setup'."})
+    .add_input_property("setup", {"type": "string",
+            "description": "Setup holding the operations."})
     .add_input_property(*_LOCATION.as_property())
-    .add_input_property("folder", {"type": "string", "description": "Top-level destination folder name (created if missing)."})
-    .add_input_property("description", {"type": "string", "description": "Optional template description."})
+    .add_input_property("folder", {"type": "string",
+            "description": "Top-level folder name; created if missing."})
+    .add_input_property("description", {"type": "string"})
     .strict_schema()
 )
 item = Item.create_tool_item(

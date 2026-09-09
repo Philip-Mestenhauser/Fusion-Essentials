@@ -21,8 +21,7 @@ app = adsk.core.Application.get()
 
 # face_entity hands a cylindrical/conical FACE through: createInput's axis takes the entity that
 # DEFINES the axis, and a face resolved to a direction vector would drop the axis POSITION.
-_CIRC_AXIS = _inputs.AxisRef("axis", face_entity=True, default="z",
-                             description="What to turn about.")
+_CIRC_AXIS = _inputs.AxisRef("axis", face_entity=True, default="z")
 
 
 def handler(occurrences: str = "", bodies=None, quantity: int = 4, total_angle_deg: float = 360.0,
@@ -83,17 +82,16 @@ def handler(occurrences: str = "", bodies=None, quantity: int = 4, total_angle_d
 
 
 TOOL_DESCRIPTION = (
-"Pattern component OCCURRENCES or BODIES evenly around an axis. model_pattern_rectangular makes "
-"rows, model_pattern_path follows a curve. Pair with view_screenshot to view."
+"Pattern occurrences or bodies evenly around an axis."
 )
 tool = (
     Tool.create_simple(name="model_pattern_circular", description=TOOL_DESCRIPTION)
     .add_input_property(*_OCCURRENCES.as_property())
     .add_input_property("bodies", _BODIES.schema())
-    .add_input_property("quantity", {"type": "integer", "description": "Number of instances including the original (>=2)."})
-    .add_input_property("total_angle_deg", {"type": "number", "description": "Total angle to spread over in degrees (360 = full ring)."})
+    .add_input_property("quantity", {"type": "integer"})
+    .add_input_property("total_angle_deg", {"type": "number", "description": "360 = a full ring."})
     .add_input_property(*_CIRC_AXIS.as_property())
-    .add_input_property("symmetric", {"type": "boolean", "description": "Spread symmetrically about the original (default false)."})
+    .add_input_property("symmetric", {"type": "boolean"})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler,

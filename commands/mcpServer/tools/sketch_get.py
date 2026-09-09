@@ -109,24 +109,19 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
 
 
 TOOL_DESCRIPTION = (
-    "Read sketches by zoom level: a summary list of the design's sketches (paged by max_results; "
-    "'truncated' means the note names the narrowing), or ONE sketch's overview - entity "
-    "counts, is_fully_constrained, and a 'profiles' list (area, centroid, loop_count, and a "
-    "'handle' to pass as a ProfileRef to model_extrude / model_revolve / model_loft - pick a region "
-    "by area/position, not a guessed index). The overview also carries 'frame' - where sketch (0,0) "
-    "sits in world plus the unit +X/+Y/normal directions - the map from these sketch-LOCAL "
-    "coordinates to world. Entity ids match sketch_constrain's."
+    "Read the design's sketches, or ONE sketch's overview: counts, constrained state, and profile "
+    "handles for model_extrude."
 )
 tool = (
     Tool.create_simple(name="sketch_get", description=TOOL_DESCRIPTION)
     .add_input_property("sketch_name", {"type": "string",
-            "description": "Omit for the summary list (paged); give a name for that sketch's overview (counts + profiles)."})
+            "description": "Omit for the paged summary list."})
     .add_input_property("max_results", {"type": "integer",
-            "description": f"Summary-list rows per read (default {_LIST_CAP}); raise it for the rows past a 'truncated' page."})
+            "description": f"Summary rows per read (default {_LIST_CAP})."})
     .add_input_property("component", {"type": "string",
-            "description": "Component to read within; with no 'sketch_name', only its sketches are listed. A component name, or an occurrence fullPathName/handle."})
+            "description": "Component to read within: a name or occurrence fullPathName/handle."})
     .add_input_property("include_entities", {"type": "boolean",
-            "description": "Also return the full per-entity/constraint/dimension X-ray (default false - heavier)."})
+            "description": "Adds the full entity X-ray."})
     .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )

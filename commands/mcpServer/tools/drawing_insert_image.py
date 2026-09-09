@@ -232,12 +232,7 @@ def handler(image_path: str = "", x=None, y=None, scale=None, rotate_deg=None) -
 
 
 TOOL_DESCRIPTION = (
-    "Place an image file from local disk onto the active drawing's active sheet. Open the drawing "
-    "and make it active first. 'x'/'y' are sheet coordinates; the result reports the sheet's "
-    "coordinate_unit beside sheet_units, which is the dimension display unit and does not describe "
-    "a sheet coordinate. 'scale' multiplies the image's natural size and 'rotate_deg' turns the "
-    "image about that position. An off-sheet position is REFUSED where it can be bounded; "
-    "position_bounds_checked reports which. drawing_export shows the result, doc_save keeps it."
+    "Place an image file from local disk onto the active drawing's active sheet."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)
@@ -245,15 +240,15 @@ FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)
 tool = (
     Tool.create_simple(name="drawing_insert_image", description=FULL_DESCRIPTION)
     .add_input_property("image_path", {"type": "string",
-            "description": "Local path of the image file to place (%s)." % ", ".join(_IMAGE_EXTS)})
+            "description": "Local path of the image file."})
     .add_input_property("x", {"type": "number",
             "description": "Sheet x position, in the sheet's own coordinate unit."})
     .add_input_property("y", {"type": "number",
             "description": "Sheet y position, in the sheet's own coordinate unit."})
     .add_input_property("scale", {"type": "number",
-            "description": "Size multiplier, greater than 0 (default: the API's own)."})
+            "description": "Multiplies the image's natural size."})
     .add_input_property("rotate_deg", {"type": "number",
-            "description": "Degrees to rotate the image about its position (default: the API's own)."})
+            "description": "Degrees, about the image's position."})
     .strict_schema()
 )
 

@@ -33,10 +33,8 @@ RETURNS = [
 # faces to taper (any BRep face); the pull direction is a PlaneRef - exactly the planar-face/plane
 # the DraftFeatureInput.plane accepts. AxisRef is the WRONG kind here: a draft's direction is a plane
 # normal, not an edge/world axis.
-_FACES = _inputs.GeometryHandleList("faces", require="face", required=True,
-                                    description="The faces to taper (from find_geometry).")
-_PULL = _inputs.PlaneRef("pull_direction", required=True,
-                         description="The pull direction, as a plane the faces taper relative to.")
+_FACES = _inputs.GeometryHandleList("faces", require="face", required=True)
+_PULL = _inputs.PlaneRef("pull_direction", required=True)
 
 app = adsk.core.Application.get()
 
@@ -139,8 +137,7 @@ def handler(faces=None, pull_direction: str = "", angle_deg: float = 0.0,
 
 
 TOOL_DESCRIPTION = (
-    "Taper (draft) faces relative to a pull direction - the Draft feature a molded or cast part "
-    "needs so it releases from its tooling. 'angle_deg' sign plus 'flip' set which way it leans."
+    "Taper (draft) faces relative to a pull plane."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)
@@ -149,14 +146,11 @@ draft_tool = (
     Tool.create_simple(name="model_draft", description=FULL_DESCRIPTION)
     .add_input_property(_FACES.name, _FACES.schema())
     .add_input_property(_PULL.name, _PULL.schema())
-    .add_input_property("angle_deg", {"type": "number",
-            "description": "Draft angle in DEGREES (non-zero, magnitude < 90)."})
-    .add_input_property("symmetric", {"type": "boolean",
-            "description": "Split faces at the pull plane and taper both sides equally (default false)."})
+    .add_input_property("angle_deg", {"type": "number"})
+    .add_input_property("symmetric", {"type": "boolean"})
     .add_input_property("tangent_chain", {"type": "boolean",
-            "description": "Also draft faces tangent to the selected ones (default true)."})
-    .add_input_property("flip", {"type": "boolean",
-            "description": "Flip the pull direction (default false)."})
+            "description": "Default true."})
+    .add_input_property("flip", {"type": "boolean"})
     .strict_schema()
 )
 draft_item = Item.create_tool_item(tool=draft_tool, write="write", handler=handler, run_on_main_thread=True,

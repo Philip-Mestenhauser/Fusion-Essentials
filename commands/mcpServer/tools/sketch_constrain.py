@@ -210,17 +210,15 @@ _CURVED_SURFACE_OK = ("coincident_to_surface", "perpendicular_to_surface")
 _SURFACE = _inputs.SurfaceRef("surface", curved_ops=_CURVED_SURFACE_OK,
                               description="The *_to_surface operand.")
 _DISTANCE = _inputs.Distance("distance", allow_zero=False,
-                             description="Offset distance, or rectangular_pattern spacing in direction one.")
+                             description="Offset, or pattern spacing one.")
 _DISTANCE_TWO = _inputs.Distance("distance_two", allow_zero=False,
-                                 description="rectangular_pattern spacing in direction two; "
-                                             "defaults to 'distance'.")
+                                 description="Pattern spacing two (default: 'distance').")
 
 # rectangular_pattern spacing meaning, measured: with 3 instances and a 9 mm distance, 'spacing'
 # puts the centres 9 mm apart, while 'extent' spreads 9 instances across a 9 mm TOTAL span.
 _DISTANCE_TYPES = {"spacing": "SpacingPatternDistanceType", "extent": "ExtentPatternDistanceType"}
 _DISTANCE_TYPE = _inputs.Choice("distance_type", list(_DISTANCE_TYPES), default="spacing",
-                                description="rectangular_pattern: 'distance' is the gap "
-                                            "between instances, or the whole pattern's span.")
+                                description="spacing = gap between instances, extent = whole span.")
 
 # autoConstrain's result option. Option 3 may ADJUST the sketch geometry within tolerance to reach a
 # fully constrained solve, and returns null when the sketch is not eligible for that adjustment.
@@ -228,8 +226,7 @@ _RESULT_OPTIONS = {"option1": "Option1AutoConstrainResultType",
                    "option2": "Option2AutoConstrainResultType",
                    "option3": "Option3AutoConstrainResultType"}
 _RESULT_OPTION = _inputs.Choice("result_option", list(_RESULT_OPTIONS), default="option1",
-                                description="auto: option1 thorough, option2 faster, option3 "
-                                            "may MOVE geometry within tolerance.")
+                                description="option3 may MOVE geometry within tolerance.")
 
 # autoConstrain's four dimensioning knobs. The bindings say a preference "may be ignored if not
 # applicable to the geometry", so each is published as REQUESTED, never as applied. Each family's
@@ -261,13 +258,13 @@ _STRATEGY_KNOBS = (
 )
 _STRATEGY_CHOICES = (
     _inputs.Choice("dimension_strategy", list(_LAYOUT_STRATEGIES),
-                   description="auto: dimension layout."),
+                   description="Dimension layout."),
     _inputs.Choice("inter_loop_strategy", list(_INTER_LOOP_STRATEGIES),
-                   description="auto: layout BETWEEN loops; multi-loop sketches only."),
+                   description="Layout BETWEEN loops."),
     _inputs.Choice("symmetric_strategy", list(_SYMMETRIC_STRATEGIES),
-                   description="auto: layout across symmetric geometry."),
+                   description="Layout across symmetric geometry."),
     _inputs.Choice("linear_diameter_dims", list(_LINEAR_DIAMETER),
-                   description="auto: centerline diameter dimensions on circles."),
+                   description="Centerline diameter dimensions on circles."),
 )
 
 # Knobs that exist only on ONE constraint's input object - the property is simply absent on the
@@ -887,31 +884,28 @@ def handler(constraint: str = "", sketch_name: str = "", entity_one: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Apply a geometric CONSTRAINT to sketch entities. Entities are '<type>:<index>' refs within "
-    "'sketch_name', from sketch_get(include_entities=true). constraint='auto' takes no entity refs. "
-    "The offset and pattern kinds CREATE curves - re-read sketch_get for the new refs. Remove one "
-    "with sketch_delete_entity(target='constraint:<index>')."
+    "Apply a geometric constraint between sketch entities, referenced '<type>:<index>'."
 )
 
 tool = (
     Tool.create_simple(name="sketch_constrain", description=TOOL_DESCRIPTION)
-    .add_input_property(*_inputs.Choice("constraint", list(_CONSTRAINTS),
-            description="The relationship to apply.").as_property())
-    .add_input_property("sketch_name", {"type": "string", "description": "The sketch to constrain."})
+    .add_input_property(*_inputs.Choice("constraint", list(_CONSTRAINTS)).as_property())
+    .add_input_property("sketch_name", {"type": "string"})
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
-    .add_input_property("entity_one", {"type": "string", "description": "First entity ref. A point slot takes an anchor ('circle:0:center'); fix/unfix also take 'text:<i>'."})
-    .add_input_property("entity_two", {"type": "string", "description": "Second entity ref."})
-    .add_input_property("symmetry_line", {"type": "string", "description": "Axis line for 'symmetry'."})
-    .add_input_property("entities", {"type": "string", "description": "Comma-separated refs for polygon/offset/pattern."})
+    .add_input_property("entity_one", {"type": "string",
+            "description": "Point slots take an anchor: 'circle:0:center'."})
+    .add_input_property("entity_two", {"type": "string"})
+    .add_input_property("symmetry_line", {"type": "string"})
+    .add_input_property("entities", {"type": "string"})
     .add_input_property(*_SURFACE.as_property())
     .add_input_property(*_DISTANCE.as_property())
     .add_input_property(*_DISTANCE_TWO.as_property(brief=True))
-    .add_input_property("quantity", {"type": "integer", "description": "Pattern count, including the original."})
-    .add_input_property("quantity_two", {"type": "integer", "description": "rectangular_pattern count in direction two."})
-    .add_input_property("angle", {"type": "number", "description": "circular_pattern total angle in degrees."})
+    .add_input_property("quantity", {"type": "integer", "description": "Includes the original."})
+    .add_input_property("quantity_two", {"type": "integer"})
+    .add_input_property("angle", {"type": "number", "description": "circular_pattern total angle, degrees."})
     .add_input_property(*_DISTANCE_TYPE.as_property())
-    .add_input_property("symmetric", {"type": "boolean", "description": "Mirror the pattern about its original."})
-    .add_input_property("suppressed", {"type": "array", "items": {"type": "boolean"}, "description": "Pattern instances to drop; the ORIGINAL does not count, and rectangular runs row-column."})
+    .add_input_property("symmetric", {"type": "boolean"})
+    .add_input_property("suppressed", {"type": "array", "items": {"type": "boolean"}})
     .add_input_property(*_RESULT_OPTION.as_property())
     .add_input_property(*_STRATEGY_CHOICES[0].as_property())
     .add_input_property(*_STRATEGY_CHOICES[1].as_property())

@@ -28,15 +28,9 @@ _KIND_ACTIONS = {
 }
 _ACTIONS = ("suppress", "unsuppress", "delete", "set_occurrences", "reverse", "set_values")
 
-_KIND = _inputs.Choice(
-    "kind", list(_relations.KINDS), required=True,
-    description="Which relation to act on.")
-_ACTION = _inputs.Choice(
-    "action", list(_ACTIONS), required=True,
-    description="suppress/unsuppress and delete apply to every kind; reverse and set_values "
-                "re-couple a motion link; set_occurrences is refused, naming the path that works.")
-_OCCURRENCES = _inputs.OccurrenceRefList(
-    "occurrences", description="set_occurrences: the members you want.")
+_KIND = _inputs.Choice("kind", list(_relations.KINDS), required=True)
+_ACTION = _inputs.Choice("action", list(_ACTIONS), required=True)
+_OCCURRENCES = _inputs.OccurrenceRefList("occurrences")
 
 
 def _flag(obj, prop):
@@ -273,24 +267,19 @@ def handler(kind: str = "", name: str = "", action: str = "", occurrences=None,
 
 
 TOOL_DESCRIPTION = (
-    "Edit or remove an existing assembly relation - a rigid group, a motion link, or an assembly "
-    "constraint - by name (from assembly_get(include=['relations']); a repeated name is refused, "
-    "not guessed). 'suppress'/'unsuppress' park one without deleting it, reporting any feature the "
-    "change breaks; 'delete' removes it IRREVERSIBLY and re-lists to confirm. Create relations with "
-    "assembly_rigid_group / joint_motion_link / assembly_constrain."
+    "Edit or remove an existing assembly relation; create one with assembly_rigid_group / "
+    "joint_motion_link / assembly_constrain."
 )
 
 tool = (
     Tool.create_simple(name="assembly_edit_relations", description=TOOL_DESCRIPTION)
     .add_input_property(*_KIND.as_property())
-    .add_input_property("name", {"type": "string",
-            "description": "The relation's name, from assembly_get(include=['relations'])."})
+    .add_input_property("name", {"type": "string"})
     .add_input_property(*_ACTION.as_property())
     .add_input_property(*_OCCURRENCES.as_property())
-    .add_input_property("include_children", {"type": "boolean",
-            "description": "set_occurrences: accepted so the refused call is answered, not schema-rejected."})
+    .add_input_property("include_children", {"type": "boolean"})
     .add_input_property("ratio", {"type": "number",
-            "description": "set_values: joint_two's motion per ONE unit of joint_one, in each joint's DISPLAY unit - deg for a rotating DOF, mm for a sliding one. The SIGN sets the direction."})
+            "description": "set_values: joint_two per ONE unit of joint_one, in each joint's DISPLAY unit (deg or mm); the SIGN sets direction."})
     .strict_schema()
 )
 item = Item.create_tool_item(

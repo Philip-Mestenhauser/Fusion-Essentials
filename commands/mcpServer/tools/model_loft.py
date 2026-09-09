@@ -23,13 +23,9 @@ app = adsk.core.Application.get()
 # scope_input: a {sketch, profile_index} element addresses a sketch BY NAME, and Fusion numbers
 # sketches per component from 1, so a name two components carry is refused with the remedy spelled
 # as this tool's own 'component' input.
-_LOFT_PROFILES = _inputs.ProfileRefList("profiles", required=True, scope_input="component",
-    description=">=2 profiles.")
-_LOFT_RAILS = _inputs.GeometryHandleList("rails", require="any", required=False,
-    description="Guide curves - body-edge handles, or '<sketch>/<type>:<index>' sketch curves. "
-                "Not with 'centerline'.")
-_LOFT_CENTERLINE = _inputs.GeometryHandle("centerline", require="any", required=False,
-    description="A body-edge handle or '<sketch>/<type>:<index>' sketch curve. Not with 'rails'.")
+_LOFT_PROFILES = _inputs.ProfileRefList("profiles", required=True, scope_input="component")
+_LOFT_RAILS = _inputs.GeometryHandleList("rails", require="any", required=False)
+_LOFT_CENTERLINE = _inputs.GeometryHandle("centerline", require="any", required=False)
 
 # LoftCenterLineOrRails.addRail takes a SketchCurve (measured: addRail(SketchArc) returns a
 # LoftCenterLineOrRail), but find_geometry mints handles for BRep faces/edges/vertices only - so a
@@ -248,8 +244,7 @@ def handler(profiles=None, rails=None, centerline="", operation="new",
 
 
 TOOL_DESCRIPTION = (
-"Loft a body through an ORDERED list of >=2 profiles, optionally shaped by 'rails' or a "
-"'centerline'. Pair with model_stitch to close a surface loft."
+"Loft through an ordered list of profiles; model_stitch closes a surface loft."
 )
 
 tool = (
@@ -258,10 +253,8 @@ tool = (
     .add_input_property("rails", _LOFT_RAILS.schema())
     .add_input_property("centerline", _LOFT_CENTERLINE.schema())
     .add_input_property(*_inputs.boolean_op(default="new").as_property())
-    .add_input_property("as_surface", {"type": "boolean",
-            "description": "Force a SURFACE loft."})
-    .add_input_property("is_closed", {"type": "boolean",
-            "description": "Close the loft ring back through the first profile."})
+    .add_input_property("as_surface", {"type": "boolean"})
+    .add_input_property("is_closed", {"type": "boolean"})
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_required_input("profiles")
     .strict_schema()

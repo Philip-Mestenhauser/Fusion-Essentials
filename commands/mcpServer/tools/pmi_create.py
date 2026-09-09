@@ -26,20 +26,11 @@ RETURNS = [
 ]
 
 _KIND = _inputs.Choice("kind", options=["note", "hole_note"], required=True)
-_GEOMETRY = _inputs.GeometryHandleList(
-    "geometry", require="any", required=True,
-    description="note: exactly ONE face/edge/vertex. hole_note: the face(s) of the "
-                "hole(s)/boss(es).")
-_PLANE = _inputs.Choice(
-    "plane", options=sorted(_pmi.PLANE_TYPES),
-    description="face/custom_face take plane_face.")
-_PLANE_FACE = _inputs.GeometryHandle(
-    "plane_face", require="face",
-    description="The face for plane=face (must be ADJACENT) or custom_face.")
-_ALIGN = _inputs.Choice("align", options=sorted(_pmi.H_ALIGN),
-                        description="Horizontal text alignment.")
-_VALIGN = _inputs.Choice("valign", options=sorted(_pmi.V_ALIGN),
-                         description="Vertical text alignment.")
+_GEOMETRY = _inputs.GeometryHandleList("geometry", require="any", required=True)
+_PLANE = _inputs.Choice("plane", options=sorted(_pmi.PLANE_TYPES))
+_PLANE_FACE = _inputs.GeometryHandle("plane_face", require="face")
+_ALIGN = _inputs.Choice("align", options=sorted(_pmi.H_ALIGN))
+_VALIGN = _inputs.Choice("valign", options=sorted(_pmi.V_ALIGN))
 
 
 def _resolve_note_entity(ents):
@@ -61,7 +52,8 @@ def _set_plane(note_in, plane_v, plane_face):
         done = (bool(note_in.setAnnotationPlane(ptype, plane_face)) if plane_face is not None
                 else bool(note_in.setAnnotationPlane(ptype)))
     except Exception as e:
-        return f"setAnnotationPlane({plane_v}) failed: {e}"
+        return (f"setAnnotationPlane({plane_v}) failed: {e}. plane=face needs plane_face (an "
+                "ADJACENT face); custom_face needs plane_face.")
     if not done:
         return (f"setAnnotationPlane({plane_v}) declined - face/custom_face need plane_face "
                 "(face: an ADJACENT face), circular_edge/cylinder_axis need matching geometry.")
@@ -236,12 +228,8 @@ def _create_hole_note(d, ents, text, align, valign, perpendicular, ext_cm, flags
 
 
 TOOL_DESCRIPTION = (
-"Create a PMI annotation - a 3D note attached to model geometry, shown in the viewport and "
-"exported with the model. kind='note': a leader-line note on ONE face/edge/vertex, whose 'text' "
-"embeds GD&T/modifier symbols as {symbol} tokens (e.g. '{flatness}0.05') and breaks lines on "
-"newlines. kind='hole_note': a callout reading dia/depth/counterbore/thread off the hole/boss "
-"faces, with 'text' appended after it. A second note on already-annotated geometry is flagged "
-"out-of-date by the platform. Read the result back with pmi_get.\n"
+"Create a PMI annotation: kind='note' a leader note on ONE face/edge/vertex, kind='hole_note' a "
+"callout off the hole/boss faces, 'text' appended.\n"
 + _outputs.produces_block(RETURNS)
 )
 
@@ -250,29 +238,28 @@ tool = (
     .add_input_property("kind", _KIND.schema())
     .add_input_property("geometry", _GEOMETRY.schema())
     .add_input_property("text", {"type": "string",
-        "description": "Note content ({symbol} tokens; newlines break lines)."})
+        "description": "{symbol} markup ('{flatness}0.05'); newlines break lines."})
     .add_input_property("name", {"type": "string",
-        "description": "Name (default: Fusion's own numbering)."})
+        "description": "Default: Fusion's numbering."})
     .add_input_property("text_point", {
         "type": "array", "items": {"type": "number"},
-        "description": "[x,y,z] text anchor in 'units', projected onto the annotation plane."})
+        "description": "[x,y,z] in 'units', projected onto the annotation plane."})
     .add_input_property("leader_point", {
         "type": "array", "items": {"type": "number"},
-        "description": "[x,y,z] leader landing ON the annotated geometry ('units')."})
+        "description": "[x,y,z] in 'units'."})
     .add_input_property("plane", _PLANE.schema())
     .add_input_property("plane_face", _PLANE_FACE.schema())
     .add_input_property("align", _ALIGN.schema())
     .add_input_property("valign", _VALIGN.schema())
-    .add_input_property("perpendicular", {"type": "boolean",
-        "description": "Text perpendicular to the leader line."})
+    .add_input_property("perpendicular", {"type": "boolean"})
     .add_input_property("leader_extension", {"type": "number",
-        "description": "Leader line extension length in 'units'; under 2.5mm is refused."})
+        "description": "In 'units'."})
     .add_input_property("flags", {"type": "object",
-        "description": "hole_note booleans, e.g. {threaded: true, through: true}; an unknown key names the legal set."})
+        "description": "hole_note booleans, e.g. {threaded: true}."})
     .add_input_property("values", {"type": "object",
-        "description": "hole_note overrides: {diameter: 6.2} or {diameter: {value, tolerance: {type, ...}}}; an unknown key names the legal set."})
+        "description": "hole_note overrides: {diameter: 6.2} or {diameter: {value, tolerance}}."})
     .add_input_property("display", {"type": "object",
-        "description": "hole_note display: {precision, units, leading_zeros, trailing_zeros, unit_abbreviation, secondary: {...}}."})
+        "description": "Keys: precision, units, leading_zeros, trailing_zeros, unit_abbreviation, secondary{}."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_required_input("kind")
     .add_required_input("geometry")

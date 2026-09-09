@@ -59,49 +59,14 @@ class TestHandlerGuard:
 
 
 class TestBulkMutationConstraint:
-    """The description is the ONLY place a caller learns that a script has no per-item failure
-    isolation - the tool cannot detect a bulk mutation, so the constraint has to be stated with the
-    reason a half-failed batch reports nothing about WHICH item failed."""
+    """A script runs before any error of ours can reach the caller, so the requirements it must be
+    WRITTEN against stay on the wire; each rule's reason is delivered on the failure that needs it."""
 
-    def test_description_states_one_mutation_per_call_with_its_reason(self):
-        desc = ses.TOOL_DESCRIPTION
+    def test_the_wire_states_the_three_requirements_a_script_is_written_against(self):
+        desc = ses.tool.input_schema["properties"]["script"]["description"]
         assert "ONE mutation per call" in desc
-        assert "isolation" in desc                       # the reason, not a bare rule
-        assert "WHICH item failed" in desc
-
-    def test_description_states_the_uncaught_rule_and_refuses_to_promise_more(self):
-        # Two measured facts, and the reason one-mutation-per-call is safe: on a DESIGN document an
-        # UNCAUGHT raise of either kind always takes the whole script (and its printed output) down,
-        # and catching an error guarantees NOTHING - one caught API error left its mutation standing
-        # while another rolled three back. Both "a plain Python error can leave earlier mutations
-        # committed" and "a caught exception lets the earlier mutations commit" are wrong; neither
-        # may reappear.
-        desc = ses.TOOL_DESCRIPTION
-        assert "UNCAUGHT" in desc and "always rolls the WHOLE script back" in desc
-        assert "DESIGN document" in desc                  # the rollback promise is SCOPED, not global
-        assert "NO GUARANTEE" in desc and "even when caught" in desc
-        assert "plain Python error can leave earlier mutations committed" not in desc
-        assert "lets execution continue" not in desc
-
-    def test_description_scopes_the_rollback_promise_off_drawing_documents(self):
-        # The rollback claim is measured BOTH ways on drawing documents - one rig left the ghost
-        # sheet an aborted script added, another cleaned it up. So the wire may promise neither
-        # outcome there. One sentence carries the rule; the description is a scarce surface and the
-        # evidence + the re-read advice live on the failure result instead.
-        desc = ses.TOOL_DESCRIPTION
-        assert "DRAWING document" in desc
-        assert "NOT GUARANTEED" in desc
-        assert "always rolls the WHOLE script back on a DRAWING" not in desc
-        assert "leaves the sheet" not in desc             # never the opposite always-claim either
-        assert "Re-read the sheets" not in desc           # the advice belongs on the result
-
-    def test_description_carries_the_measured_products_trap(self):
-        # Measured on a DRAWING document: a script that reads a document's .products dies at the
-        # executeTextCommand level, and app.activeProduct is the route in. The caller cannot recover
-        # this after the fact - the call it kills is the one that would have taught it.
-        desc = ses.TOOL_DESCRIPTION
-        assert ".products" in desc and "app.activeProduct" in desc
-        assert "measured killing the call" in desc
+        assert "run(context)" in desc
+        assert "modal UI" in desc
 
     def test_description_prefers_a_typed_tool_and_claims_no_channel_death(self):
         # The silence once blamed on this channel was Fusion's own stdout shim overflowing, which
@@ -178,6 +143,16 @@ class _TextCommandApp(FakeApplication):
 
     def log(self, text):
         self._logged.append(text)
+
+
+class _RaisingApp(_TextCommandApp):
+    """A channel whose Python.Run raises - the write path's own failure."""
+
+    def executeTextCommand(self, command):
+        self._commands.append(command)
+        if command.startswith("Python.Run"):
+            raise RuntimeError("3 : boom inside run")
+        return ""
 
 
 @pytest.fixture
@@ -344,3 +319,77 @@ class TestRunSentinelCut:
     def test_a_traceback_without_a_sentinel_is_handled_whole(self):
         tb = "Traceback (most recent call last):\n  File \"s\", line 1\nValueError: boom"
         assert "ValueError: boom" in ses._extract_script_error(tb)
+
+
+class TestDesignFailureAdvice:
+    """A failure that could have MUTATED a design is where the rollback rules matter: what an
+    uncaught raise did, what catching one does not promise, and that no item can be named."""
+
+    def test_a_mutating_failure_on_a_design_carries_the_rollback_rules(self, monkeypatch):
+        # Two measured facts: an UNCAUGHT raise takes the whole script down, and catching one
+        # guarantees NOTHING - one caught API error left its mutation standing while another rolled
+        # three back. "A caught exception lets the earlier mutations commit" is wrong either way.
+        monkeypatch.setattr(ses._drawing_common, "active_drawing", lambda: None)
+        text = ses._error_result("Traceback ... boom", mutated=True)["content"][0]["text"]
+        assert "UNCAUGHT" in text and "always rolls the WHOLE script back" in text
+        assert "NO GUARANTEE" in text and "even when caught" in text
+        assert "WHICH item" in text                    # the reason for one mutation per call
+        assert "lets execution continue" not in text
+
+    def test_a_drawing_failure_promises_neither_outcome(self, monkeypatch):
+        # The rollback claim is measured BOTH ways on a drawing - one rig left the ghost sheet an
+        # aborted script added, another cleaned it up. So the DESIGN promise is scoped off a
+        # drawing, and the drawing's own advice claims neither outcome.
+        monkeypatch.setattr(ses._drawing_common, "active_drawing", lambda: object())
+        text = ses._error_result("Traceback ... boom", mutated=True)["content"][0]["text"]
+        assert "not guaranteed either way" in text
+        assert "always rolls the WHOLE script back" not in text
+        assert "leaves the sheet" not in text
+
+    def test_a_failing_write_path_script_reaches_the_design_rules(self, monkeypatch):
+        app = _RaisingApp()
+        monkeypatch.setattr(ses, "app", app)
+        monkeypatch.setattr(ses._drawing_common, "active_drawing", lambda: None)
+        res = ses.handler(_SCRIPT, read_only=False)
+        assert res["isError"] is True
+        assert "always rolls the WHOLE script back" in res["content"][0]["text"]
+
+    def test_a_failing_read_only_script_promises_nothing_about_rollback(self, run_script):
+        # read_only blocks the design change, so there is no mutation to have been rolled back.
+        _, res = run_script(raises="3 : Cannot modify the design from a read-only context")
+        assert "always rolls the WHOLE script back" not in res["content"][0]["text"]
+
+
+class TestProductsReadOnADrawing:
+    """Measured on a DRAWING: a script reading a document's .products dies at the channel, so the
+    call that would have taught the caller never returns. A refusal is the only delivery left."""
+
+    _READS_PRODUCTS = "def run(context):\n    p = context.products\n"
+
+    def test_a_products_read_is_refused_on_a_drawing_before_anything_runs(self, monkeypatch):
+        app = _TextCommandApp()
+        monkeypatch.setattr(ses, "app", app)
+        monkeypatch.setattr(ses._drawing_common, "active_drawing", lambda: object())
+        res = ses.handler(self._READS_PRODUCTS)
+        assert res["isError"] is True
+        text = res["content"][0]["text"]
+        assert ".products" in text and "app.activeProduct" in text
+        assert app._commands == []                  # refused before the channel was touched
+        assert "Re-read the sheets" not in text     # nothing ran, so nothing to re-read
+
+    def test_the_same_script_runs_on_a_design_document(self, monkeypatch):
+        app = _TextCommandApp()
+        monkeypatch.setattr(ses, "app", app)
+        monkeypatch.setattr(ses._drawing_common, "active_drawing", lambda: None)
+        res = ses.handler(self._READS_PRODUCTS, read_only=False)
+        assert res["isError"] is False
+        assert any(c.startswith('Python.Run "') for c in app._commands)
+
+
+class TestNoOutputTeachesPrint:
+    def test_a_success_that_printed_nothing_says_how_a_value_comes_back(self, run_script):
+        # A script that RETURNS a value instead of printing one reports success with nothing in it;
+        # this is the only moment the caller can be told which way values travel.
+        _, res = run_script(reply=json.dumps({"message": "", "success": True}))
+        assert res["isError"] is False
+        assert "print()" in res["content"][0]["text"]

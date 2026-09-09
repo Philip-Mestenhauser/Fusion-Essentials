@@ -237,30 +237,22 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
 
 
 TOOL_DESCRIPTION = (
-"Revolve a closed sketch profile about an axis into a 3D solid (a turned/lathe part) - the "
-"companion to model_extrude. The profile must NOT CROSS the axis: a full-width section "
-"self-intersects and is refused, so sketch one half and revolve that. An 'axis' handle at a "
-"CYLINDRICAL, conical or toroidal face turns about that face's OWN axis line, so an off-origin "
-"axis works."
+"Revolve a sketch profile about an axis; sketch one half - the profile must not cross the axis."
 )
 
 revolve_tool = (
     Tool.create_simple(name="model_revolve", description=TOOL_DESCRIPTION)
-    .add_input_property("sketch_name", {"type": "string",
-            "description": "Sketch holding the profile (omit = most recent sketch)."})
+    .add_input_property("sketch_name", {"type": "string"})
     .add_input_property("profile_index", {"type": ["integer", "string"],
-            "description": "Which region to revolve: a 0-based index (default 0), OR a profile 'handle' from sketch_get (targets one region of a multi-profile sketch)."})
+            "description": "An index (default 0), or a profile 'handle'."})
     .add_input_property("axis", {"type": "string",
-            "description": _AXIS.schema()["description"] + " Or 'line:<index>' for a straight line "
-            "in the profile's own sketch."})
-    .add_input_property("angle_deg", {"type": "number",
-            "description": "Revolve angle in degrees (360 = full revolve, default)."})
-    .add_input_property("second_angle_deg", {"type": "number",
-            "description": "Also revolve this many degrees the OTHER direction (asymmetric two-sided revolve; ignored when symmetric)."})
+            "description": _AXIS.schema()["description"] + " Or 'line:<i>' for a line in the "
+            "profile's sketch."})
+    .add_input_property("angle_deg", {"type": "number", "description": "Default 360."})
+    .add_input_property("second_angle_deg", {"type": "number"})
     .add_input_property(*_inputs.boolean_op(default="new").as_property())
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
-    .add_input_property("symmetric", {"type": "boolean",
-            "description": "Split the angle both ways about the profile plane (default false)."})
+    .add_input_property("symmetric", {"type": "boolean"})
     .strict_schema()
 )
 revolve_item = Item.create_tool_item(tool=revolve_tool, write="write", handler=handler, run_on_main_thread=True,

@@ -23,11 +23,8 @@ from ._data_common import _b64url_decode, _resolve_data_file
 
 # --- target component / occupant resolution (via the shared OccurrenceRef kind) ---
 
-_INTO_COMPONENT = _inputs.OccurrenceRef("into_component",
-        description="Occurrence whose component to insert into (default: root component).")
-_REMOVE_EXISTING = _inputs.OccurrenceRef("remove_existing",
-        description="Existing occurrence to delete first: its joints go with it, and a feature that "
-                    "referenced its geometry stays in the timeline carrying reference failures.")
+_INTO_COMPONENT = _inputs.OccurrenceRef("into_component")
+_REMOVE_EXISTING = _inputs.OccurrenceRef("remove_existing")
 
 
 def _bound_version(design, lineage):
@@ -169,12 +166,8 @@ def handler(document_id: str = "", into_component: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Insert a SAVED cloud document into the active design as a new component occurrence - the API "
-    "equivalent of Insert into Current Design. It comes in as an external reference linked to the "
-    "source and tracking its version, and needs source and host in a shared project. Place it with "
-    "x/y/z (in 'units') and an optional rotate_deg about rotate_axis, or refine with joint_create. "
-    "Inserts the source's last SAVED cloud version, so save the source first - a joint pose only "
-    "DRIVEN there never reaches it (capture with assembly_capture_position)."
+    "Insert a SAVED cloud document into the active design as a linked external-reference "
+    "occurrence, placed at x/y/z. It comes in at the source's last SAVED cloud version."
 )
 
 tool = (
@@ -182,16 +175,16 @@ tool = (
         name="doc_insert_occurrence",
         description=TOOL_DESCRIPTION,
         input_param_name="document_id",
-        input_param_description="Lineage URN (or web URL) of the saved cloud document to insert.",
+        input_param_description="Lineage URN or web URL, from data_get.",
     )
     .add_input_property(*_INTO_COMPONENT.as_property())
     .add_input_property(*_REMOVE_EXISTING.as_property())
-    .add_input_property("x", {"type": "number", "description": "Placement X in 'units'."})
-    .add_input_property("y", {"type": "number", "description": "Placement Y in 'units'."})
-    .add_input_property("z", {"type": "number", "description": "Placement Z in 'units'."})
+    .add_input_property("x", {"type": "number"})
+    .add_input_property("y", {"type": "number"})
+    .add_input_property("z", {"type": "number"})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("rotate_deg", {"type": "number", "description": "Rotation about 'rotate_axis', in degrees."})
-    .add_input_property(*_inputs.frame_axis("rotate_axis", default="z", description="World axis for orientation.").as_property())
+    .add_input_property(*_inputs.frame_axis("rotate_axis", default="z").as_property())
     .strict_schema()
 )
 

@@ -79,20 +79,15 @@ def handler(require: str = "", max_results: int = _SELECTION_CAP) -> dict:
 _REQUIRE_KINDS = ("face", "edge", "vertex", "body", "component")
 
 TOOL_DESCRIPTION = (
-    "Read the user's CURRENT selection in Fusion and describe each selected entity so you can "
-    "intuit what they meant. Returns one record per selected entity: its type (face/edge/vertex/"
-    "body/component), owning body and component, geometry hints, a DIRECTION unit vector where "
-    "meaningful ('direction' + 'direction_kind': a face's normal or axis, an edge's direction or "
-    "axis), and the click point. Optionally set 'require' to flag a mismatch. 'truncated' flags "
-    "when 'max_results' capped the list.\n"
+    "Read the user's CURRENT selection in Fusion.\n"
     + _outputs.produces_block(RETURNS)
 )
 tool = (
     Tool.create_simple(name="sys_get_selection", description=TOOL_DESCRIPTION)
     .add_input_property(*_inputs.Choice("require", list(_REQUIRE_KINDS),
-            description="Optional expected kind to validate the selection against.").as_property())
+            description="Flags a mismatch; nothing is filtered.").as_property())
     .add_input_property("max_results", {"type": "integer",
-            "description": f"Cap on the 'selections' array returned (default {_SELECTION_CAP}, max {_SELECTION_CEILING})."})
+            "description": f"Default {_SELECTION_CAP}, max {_SELECTION_CEILING}."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler,

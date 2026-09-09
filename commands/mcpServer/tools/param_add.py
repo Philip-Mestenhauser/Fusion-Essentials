@@ -94,11 +94,8 @@ def handler(name: str = "", expression: str = "", unit: str = "mm",
 
 
 TOOL_DESCRIPTION = (
-    "Add ONE or MANY user parameters. Single: name + expression (+ unit/comment/favorite). "
-    "BATCH: 'params' = a list of {name, expression, unit?, comment?, favorite?} dicts to "
-    "add many in ONE call (prefer this over many calls; 'name' is then omitted). Each add "
-    "that introduces a NEW timeline error is rolled back. Use param_set to change an "
-    "existing one.")
+    "Add ONE user parameter (name + expression), or MANY with 'params'. Change an existing one "
+    "with param_set.")
 
 # NOTE: built with create_simple + a PLAIN name property (not create_with_string_input, which marks
 # its input REQUIRED) - batch mode legitimately omits 'name', so the schema must not demand it.
@@ -108,16 +105,15 @@ tool = (
         description=TOOL_DESCRIPTION,
     )
     .add_input_property("name", {"type": "string",
-            "description": "New parameter name (single add; omit when using 'params')."})
+            "description": "Single add; omit with 'params'."})
     .add_input_property("expression", {"type": "string",
-            "description": "Value/expression, e.g. '25 mm', 'PartX/2', \"'text'\"; function args use ';' - max(a; b)."})
+            "description": "e.g. '25 mm', 'PartX/2', \"'text'\"; function args use ';': max(a; b)."})
     .add_input_property("unit", {"type": "string",
-            "description": "Unit: mm/cm/in/deg, '' for unitless, or 'Text' for a text parameter (default mm)."})
-    .add_input_property("comment", {"type": "string", "description": "Optional comment."})
-    .add_input_property("favorite", {"type": "boolean",
-            "description": "Show in the favorites list (default false)."})
+            "description": "mm/cm/in/deg, '' unitless, 'Text' for text (default mm)."})
+    .add_input_property("comment", {"type": "string"})
+    .add_input_property("favorite", {"type": "boolean"})
     .add_input_property("params", {"type": "array",
-            "description": "BATCH: list of {name, expression, unit?, comment?, favorite?} dicts.",
+            "description": "{name, expression, unit?, comment?, favorite?} per entry.",
             "items": {"type": "object"}})
     .strict_schema()
 )

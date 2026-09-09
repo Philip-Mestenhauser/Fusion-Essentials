@@ -18,8 +18,7 @@ from . import _inputs
 
 app = adsk.core.Application.get()
 
-_MESH = _inputs.MeshBodyRef("mesh", required=True,
-    description="The mesh body to delete (find_geometry handle, preferred, or a mesh name).")
+_MESH = _inputs.MeshBodyRef("mesh", required=True)
 
 _SPEC = [_MESH]
 

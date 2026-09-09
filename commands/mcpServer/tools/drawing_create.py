@@ -106,39 +106,29 @@ _ENUM_INPUTS = (
 # instead), so a non-default request is refused rather than dropped by a best-effort setter.
 _UNREACHABLE_INPUTS = {"center_line": ("CenterLineDisplayTypes", "CenterLineOptions"),
                        "center_mark": ("CenterMarkDisplayTypes", "CenterMarkOptions")}
-_STANDARD = _inputs.Choice("standard", ["iso", "asme"], default="iso",
-                           description="ISO (first-angle) or ASME (third-angle).")
+_STANDARD = _inputs.Choice("standard", ["iso", "asme"], default="iso")
 _UNITS = _inputs.Choice("units", ["mm", "inch"], default="mm",
                         description="Dimension display units.")
-_CONTENT = _inputs.Choice("content", ["full", "visible"], default="full",
-                          description="Full assembly, or visible-only.")
+_CONTENT = _inputs.Choice("content", ["full", "visible"], default="full")
 _SHEET_SIZE = _inputs.Choice("sheet_size",
                              ["default", "a4", "a3", "a2", "a1", "a0", "a", "b", "c", "d", "e", "custom"],
-                             default="default",
-                             description="Sheet size preset, or 'custom' with custom_width_mm/"
-                                         "custom_height_mm.")
-_ORIENTATION = _inputs.Choice("orientation", ["landscape", "portrait"], default="landscape",
-                              description="Sheet orientation.")
-_SHEET_SCOPE = _inputs.Choice("sheet_scope", ["all_levels", "first_level"], default="all_levels",
-                              description="All levels, or first-level only.")
+                             default="default")
+_ORIENTATION = _inputs.Choice("orientation", ["landscape", "portrait"], default="landscape")
+_SHEET_SCOPE = _inputs.Choice("sheet_scope", ["all_levels", "first_level"], default="all_levels")
 _AUTO_DIMENSION = _inputs.Choice("auto_dimension",
                                  ["default", "off"] + list(_drawing_common.DIMENSION_STRATEGIES),
                                  default="default",
-                                 description="'off' disables it; else sets placement.")
+                                 description="'off' disables it.")
 _VIEW_STYLE = _inputs.Choice("view_style",
                              ["default", "visible", "hidden", "shaded_hidden", "shaded_edges"],
-                             default="default",
-                             description="View rendering style.")
-_CREATION_MODE = _inputs.Choice("creation_mode", ["automatic", "manual"], default="automatic",
-                             description="'manual' needs a template_file.")
+                             default="default")
+_CREATION_MODE = _inputs.Choice("creation_mode", ["automatic", "manual"], default="automatic")
 _PARTS_LIST_LOCATION = _inputs.Choice("parts_list_location",
                              ["default", "top_left", "top_right", "bottom_left", "bottom_right"],
-                             default="default",
-                             description="BOM table corner.")
+                             default="default")
 _HOLE_ANNOTATIONS = _inputs.Choice("hole_annotations",
                              ["default", "both", "hole", "thread", "none"],
-                             default="default",
-                             description="Hole/thread callout style.")
+                             default="default")
 _CENTER_LINE = _inputs.Choice("center_line", ["default", "off", "cylindrical", "holes"], default="default",
                              description="Refused unless 'default': no enum exists.")
 _CENTER_MARK = _inputs.Choice("center_mark",
@@ -146,8 +136,7 @@ _CENTER_MARK = _inputs.Choice("center_mark",
                              default="default",
                              description="Refused unless 'default': no enum exists.")
 _TANGENT_EDGES = _inputs.Choice("tangent_edges", ["default", "off", "full_length", "shortened"],
-                             default="default",
-                             description="Tangent-edge display.")
+                             default="default")
 
 
 def _source_datafile(design):
@@ -583,10 +572,9 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
 
 
 TOOL_DESCRIPTION = (
-    "Create a 2D drawing from the active design via Fusion's automatic generator. The source design "
-    "must be cloud-saved. The result is a CLOUD file, NOT opened - doc_open the returned file_id, "
-    "then drawing_export for the PDF, no UI step. Per-view placement/scale is not API-controllable. "
-    "A client TIMEOUT is not a verdict: the create can still land, so re-check with data_get before "
+    "Create a 2D drawing from the active design via Fusion's automatic generator. The result is a "
+    "CLOUD file, NOT opened - doc_open the file_id, then drawing_export for the PDF, no UI step. A "
+    "client TIMEOUT is not a verdict: the create can still land, so re-check with data_get before "
     "retrying or a retry mints a second drawing."
 )
 
@@ -597,38 +585,31 @@ tool = (
     .add_input_property(*_STANDARD.as_property())
     .add_input_property(*_UNITS.as_property())
     .add_input_property(*_CONTENT.as_property())
-    .add_input_property("isometric", {"type": "boolean",
-            "description": "Add an isometric view (default true)."})
+    .add_input_property("isometric", {"type": "boolean", "description": "Default true."})
     .add_input_property(*_SHEET_SIZE.as_property())
     .add_input_property(*_ORIENTATION.as_property())
     .add_input_property(*_SHEET_SCOPE.as_property())
     .add_input_property("sheet_types", {"type": "array",
             "items": {"type": "string", "enum": list(_SHEET_TYPE_ATTR)},
-            "description": "Enabled sheet kinds (others disabled)."})
+            "description": "Kinds to enable; others off."})
     .add_input_property(*_AUTO_DIMENSION.as_property())
-    .add_input_property("omit_fasteners", {"type": "boolean",
-            "description": "Auto-detect and omit fastener components."})
-    .add_input_property("fastener_keywords", {"type": "string",
-            "description": "Comma-separated fastener-omission keywords."})
+    .add_input_property("omit_fasteners", {"type": "boolean"})
+    .add_input_property("fastener_keywords", {"type": "string"})
     .add_input_property(*_VIEW_STYLE.as_property())
     .add_input_property("parts_list", {"type": "boolean",
-            "description": "Include a parts list (BOM) on assembly sheets."})
+            "description": "On assembly sheets."})
     .add_input_property(*_PARTS_LIST_LOCATION.as_property())
     .add_input_property(*_CREATION_MODE.as_property())
     .add_input_property("template_file", {"type": "string",
-            "description": "DataFile id/URL of a drawing template; empty = scratch."})
-    .add_input_property("custom_width_mm", {"type": "number",
-            "description": "Sheet width in mm (sheet_size='custom')."})
-    .add_input_property("custom_height_mm", {"type": "number",
-            "description": "Sheet height in mm (sheet_size='custom')."})
+            "description": "DataFile id/URL; empty = scratch."})
+    .add_input_property("custom_width_mm", {"type": "number", "description": "In mm."})
+    .add_input_property("custom_height_mm", {"type": "number", "description": "In mm."})
     .add_input_property(*_HOLE_ANNOTATIONS.as_property())
     .add_input_property(*_CENTER_LINE.as_property())
     .add_input_property(*_CENTER_MARK.as_property())
     .add_input_property(*_TANGENT_EDGES.as_property())
-    .add_input_property("show_interference_edges", {"type": "boolean",
-            "description": "Show interference edges."})
-    .add_input_property("show_thread_edges", {"type": "boolean",
-            "description": "Show thread edges."})
+    .add_input_property("show_interference_edges", {"type": "boolean"})
+    .add_input_property("show_thread_edges", {"type": "boolean"})
     .strict_schema()
 )
 

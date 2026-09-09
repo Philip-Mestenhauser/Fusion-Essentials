@@ -19,8 +19,8 @@ from . import _geom
 from . import _inputs
 from . import _assert
 
-_TARGET = _inputs.BodyRef("target", required=True, description="The target body (kept/modified).")
-_TOOLS = _inputs.BodyRefList("tools", required=True, description="The tool bodies to combine into the target.")
+_TARGET = _inputs.BodyRef("target", required=True)
+_TOOLS = _inputs.BodyRefList("tools", required=True)
 
 app = adsk.core.Application.get()
 
@@ -218,9 +218,7 @@ def handler(target: str = "", tools=None, operation: str = "join",
 
 
 TOOL_DESCRIPTION = (
-"Boolean-combine solid BODIES - the Combine feature. 'operation' subtracts, fuses or intersects "
-"'tools' into 'target'. This is the body-on-body boolean; model_extrude / model_revolve's "
-"cut and join act on a profile instead."
+"Boolean-combine solid bodies: join, cut or intersect 'tools' into 'target', the body that survives."
 )
 
 combine_tool = (
@@ -229,9 +227,9 @@ combine_tool = (
     .add_input_property("tools", _TOOLS.schema())
     .add_input_property(*_inputs.boolean_op(options=("join", "cut", "intersect"), default="join").as_property())
     .add_input_property("keep_tools", {"type": "boolean",
-            "description": "Keep the tool bodies after combining (default false = consume)."})
+            "description": "Default false (the tools are consumed)."})
     .add_input_property("new_component", {"type": "boolean",
-            "description": "Put the combined result in a NEW component instead of modifying in place (default false)."})
+            "description": "Default false."})
     .strict_schema()
 )
 combine_item = Item.create_tool_item(tool=combine_tool, write="write", handler=handler, run_on_main_thread=True,

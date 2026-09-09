@@ -21,7 +21,7 @@ from ._data_common import _resolve_data_file
 app = adsk.core.Application.get()
 
 _INTO_COMPONENT = _inputs.OccurrenceRef("into_component",
-        description="Occurrence whose component receives the derive (default: root component).")
+        description="Default: the root component.")
 
 # Insert > Derive (Component.features.deriveFeatures) has no Direct-modeling equivalent - confirmed
 # against the live API surface (deriveFeatures is a parametric feature collection).
@@ -479,12 +479,8 @@ RETURNS = [
 
 
 TOOL_DESCRIPTION = (
-    "Insert a DERIVE of another document's design into a component of the active document - a "
-    "one-way linked copy: it updates from the source; edits here never travel back. Whole source by "
-    "default; scope with source_components / source_bodies (source-side names) and omit parts with "
-    "exclude_components / exclude_bodies. Needs a parametric design and the source document already "
-    "OPEN (doc_open), and derives its last SAVED cloud version. For a linked INSTANCE use "
-    "doc_insert_occurrence; refresh with doc_update_xref.\n"
+    "Insert a one-way linked DERIVE of an OPEN document's design into a component, at its last "
+    "SAVED cloud version.\n"
     + _outputs.produces_block(RETURNS)
 )
 
@@ -493,23 +489,19 @@ tool = (
         name="doc_insert_derive",
         description=TOOL_DESCRIPTION,
         input_param_name="document_id",
-        input_param_description="Lineage URN (or web URL) of the saved cloud document to derive from.",
+        input_param_description="Lineage URN or web URL, from data_get.",
     )
     .add_input_property(*_INTO_COMPONENT.as_property())
-    .add_input_property("source_components", {"type": "array", "items": {"type": "string"},
-            "description": "Component names in the SOURCE to derive; omit for the whole source."})
-    .add_input_property("source_bodies", {"type": "array", "items": {"type": "string"},
-            "description": "Body names in the SOURCE - a name, or 'Component/Body'."})
-    .add_input_property("exclude_components", {"type": "array", "items": {"type": "string"},
-            "description": "Source component names to EXCLUDE."})
-    .add_input_property("exclude_bodies", {"type": "array", "items": {"type": "string"},
-            "description": "Source body names to EXCLUDE."})
+    .add_input_property("source_components", {"type": "array", "items": {"type": "string"}})
+    .add_input_property("source_bodies", {"type": "array", "items": {"type": "string"}})
+    .add_input_property("exclude_components", {"type": "array", "items": {"type": "string"}})
+    .add_input_property("exclude_bodies", {"type": "array", "items": {"type": "string"}})
     .add_input_property("include_parameters", {"type": "boolean",
-            "description": "Import the source's component user parameters. Default true."})
+            "description": "Default true."})
     .add_input_property("include_favorite_parameters", {"type": "boolean",
-            "description": "Import the source's FAVORITE user parameters. Default true."})
+            "description": "Default true."})
     .add_input_property("place_at_origin", {"type": "boolean",
-            "description": "Place derived objects at the destination origin. Default true."})
+            "description": "Default true."})
     .strict_schema()
 )
 

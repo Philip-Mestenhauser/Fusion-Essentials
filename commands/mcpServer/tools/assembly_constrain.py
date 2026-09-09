@@ -222,27 +222,22 @@ def handler(occurrence_one: str = "", occurrence_two: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Constrain component occurrences' geometry - Constrain Components (flush / coincident / "
-    "concentric / at an angle, INFERRED from the geometry). Fusion locates a part with a SET of "
-    "relationships solved TOGETHER, so prefer 'relationships' = a list of {snap_one, snap_two, "
-    "flip?, offset?} pairs added to ONE constraint - e.g. a part's bottom flush onto another's top "
-    "plus two side faces flush to fully fix it. Mating faces 'rest on' each other with flip=true. "
-    "Or selection mode: omit the snaps, pass 'occurrence_one'/'occurrence_two', and select one "
-    "entity on each in Fusion first. 'moved' names each part it repositioned."
+    "Constrain occurrences' geometry: the relationship (flush / coincident / concentric / angle) is "
+    "INFERRED, and a SET solves together."
 )
 tool = (
     Tool.create_simple(name="assembly_constrain", description=TOOL_DESCRIPTION)
     .add_input_property("relationships", {"type": "array",
-            "description": "List of {snap_one, snap_two, flip?, offset?, angle_deg?} pairs added to ONE constraint, solved together.",
+            "description": "{snap_one, snap_two, flip?, offset?, angle_deg?} pairs added to ONE constraint.",
             "items": {"type": "object"}})
-    .add_input_property("snap_one", {"type": "string", "description": "Single-relationship shorthand: '<occurrence>:<snap>'."})
-    .add_input_property("snap_two", {"type": "string", "description": "Autonomous geometry: '<occurrence>:<snap>' for the second occurrence."})
-    .add_input_property("occurrence_one", {"type": "string", "description": "First occurrence name (selection mode)."})
-    .add_input_property("occurrence_two", {"type": "string", "description": "Second occurrence name (selection mode)."})
-    .add_input_property("offset", {"type": "number", "description": "Offset distance in 'units' (for flush/coincident)."})
-    .add_input_property("angle_deg", {"type": "number", "description": "Angle in degrees (for an angle constraint)."})
-    .add_input_property("flipped", {"type": "boolean", "description": "Reverse the constraint direction (default false)."})
-    .add_input_property(*_inputs.units_property(description="Units for 'offset'."))
+    .add_input_property("snap_one", {"type": "string", "description": "One relationship: '<occurrence>:<snap>'."})
+    .add_input_property("snap_two", {"type": "string", "description": "The second '<occurrence>:<snap>'."})
+    .add_input_property("occurrence_one", {"type": "string"})
+    .add_input_property("occurrence_two", {"type": "string"})
+    .add_input_property("offset", {"type": "number", "description": "In 'units'."})
+    .add_input_property("angle_deg", {"type": "number", "description": "Overrides 'offset' - an angle constraint."})
+    .add_input_property("flipped", {"type": "boolean", "description": "true rests mating faces ON each other."})
+    .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )
 item = Item.create_tool_item(

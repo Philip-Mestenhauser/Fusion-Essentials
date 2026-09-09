@@ -42,13 +42,12 @@ class TestProducesNote:
 
 
 class TestProducesBlock:
-    def test_block_has_header_and_one_bullet_per_output(self):
+    def test_block_is_one_line_of_keys_and_consumers(self):
         spec = [out.ReturnsHandle("handle", consumers=["joint_at_geometry"]),
                 out.ReturnsValue("match_count", "how many matched")]
         block = out.produces_block(spec)
-        assert block.startswith("PRODUCES:")
-        assert block.count("\n- ") == 2          # one ASCII bullet line per output
-        assert "handle:" in block and "match_count:" in block
+        assert block == "Produces: handle -> joint_at_geometry, match_count."
+        assert "how many matched" not in block       # the label lives in the payload, not the wire
 
 
 class TestAssertPresentTopLevel:

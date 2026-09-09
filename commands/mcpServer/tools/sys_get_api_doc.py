@@ -186,22 +186,20 @@ def handler(searchPattern: str = "", apiCategory: str = "all",
 
 
 TOOL_DESCRIPTION = (
-    "Search the LIVE Fusion API documentation (classes, methods, properties, enum values) by regex, "
-    "returning names, signatures, and docstrings - read from the adsk.* modules in the running "
-    "process, so they always match the installed version. Use it BEFORE writing a "
-    "sys_execute_script to confirm exact signatures and behaviour."
+    "Regex-search the LIVE Fusion API for classes, methods, properties and enums; "
+    "use it before a sys_execute_script."
 )
 
 tool = (
     Tool.create_simple(name="sys_get_api_doc", description=TOOL_DESCRIPTION)
     .add_input_property("searchPattern", {"type": "string",
-            "description": "Case-insensitive regex matched against API names (and docstrings when apiCategory is description/all)."})
+            "description": "Case-insensitive regex; docstrings too under description/all."})
     .add_input_property("apiCategory", {"type": "string", "enum": ["class", "member", "description", "all"],
-            "description": "What to search: class names, member names, docstring text, or all (default)."})
+            "description": "Default all."})
     .add_input_property("filter", {"type": "string",
-            "description": "Optional scope: 'adsk.<namespace>' or 'adsk.<namespace>.<Class>' (e.g. 'adsk.cam', 'adsk.fusion.Extrude')."})
+            "description": "Scope: 'adsk.cam' or 'adsk.fusion.Extrude'."})
     .add_input_property("max_results", {"type": "integer",
-            "description": f"Cap on classes and on members returned (default/max {_MAX_RESULTS})."})
+            "description": f"Cap per kind (default/max {_MAX_RESULTS})."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

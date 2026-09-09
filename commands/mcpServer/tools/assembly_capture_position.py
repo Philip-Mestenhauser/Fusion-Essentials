@@ -15,10 +15,8 @@ from ._assembly_common import _constraint_moves, _constraint_positions
 _CAPTURE_ACTIONS = ("capture", "revert", "status", "delete", "discard_pending")
 _CAPTURE_ACTION = _inputs.Choice(
     "action", options=list(_CAPTURE_ACTIONS), default="status",
-    description="capture records the current pending position as a new marker; discard_pending "
-                "throws the uncaptured move away (back to the last captured position); revert "
-                "discards the latest captured marker; delete removes one captured marker by "
-                "'marker' name; status reports the pending flag and lists the captured markers.")
+    description="revert drops the latest captured marker; discard_pending drops an uncaptured "
+                "move.")
 
 
 def _capture_markers(snaps):
@@ -242,17 +240,13 @@ def handler(action: str = "status", marker: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-"Capture / revert / delete / report the assembly's flexible POSITION in the timeline. Fusion keeps "
-"geometry history (timeline features) separate from assembly positions - a pose only enters the "
-"timeline as an explicit captured Position marker, so a moved jointed component's pose (by hand or "
-"via joint_drive, both setting the same pending-position flag) is TRANSIENT until captured. See "
-"'action' for what each verb does."
+"Capture the assembly's current pose into the timeline as a Position marker - a pose is TRANSIENT "
+"until captured."
 )
 tool = (
     Tool.create_simple(name="assembly_capture_position", description=TOOL_DESCRIPTION)
     .add_input_property("action", _CAPTURE_ACTION.schema())
-    .add_input_property("marker", {"type": "string",
-        "description": "delete: the captured position's name (exact, case-insensitive; from action='status')."})
+    .add_input_property("marker", {"type": "string"})
     .strict_schema()
 )
 item = Item.create_tool_item(

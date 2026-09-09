@@ -102,17 +102,14 @@ def handler(target: str = "", max_results: int = _MESH_ROWS_DEFAULT,
 
 
 TOOL_DESCRIPTION = (
-    "List the MESH bodies in a component or the whole design, with counts, "
-    "area/volume and the is_closed flag. The BRep tools cannot see meshes, so this is how "
-    "you find them; convert with mesh_to_brep or edit with mesh_reduce / mesh_remesh. "
-    "'volume' reads 0.0 on a mesh that is not watertight, and is null only when the field "
-    "could not be read."
+    "List the MESH bodies in a component or the whole design - the BRep tools cannot see them. "
+    "Convert with mesh_to_brep."
 )
 
 tool = (
     Tool.create_simple(name="mesh_get", description=TOOL_DESCRIPTION)
-    .add_input_property("target", {"type": "string", "description": "Component/occurrence name to scan, or '' for the whole design."})
-    .add_input_property("max_results", {"type": "integer", "description": f"Cap on the 'meshes' array returned (default {_MESH_ROWS_DEFAULT}, max {_MESH_ROWS_CEILING})."})
+    .add_input_property("target", {"type": "string", "description": "Component/occurrence name; '' scans the whole design."})
+    .add_input_property("max_results", {"type": "integer", "description": f"Default {_MESH_ROWS_DEFAULT}, max {_MESH_ROWS_CEILING}."})
     .add_input_property(_MEASURE_UNITS.name, _MEASURE_UNITS.schema())
     .strict_schema()
 )

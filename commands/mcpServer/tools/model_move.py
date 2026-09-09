@@ -44,24 +44,16 @@ RETURNS = [
     _outputs.ReturnsValue("displacement", "the measured geometry displacement proving the move took"),
 ]
 
-_MODE = _inputs.Choice("mode", (_TRANSLATE, _ALONG, _ROTATE, _POINT_TO_POINT), default=_TRANSLATE,
-    description="Which move to record.")
-_BODIES = _inputs.BodyRefList("bodies", kind="brep",
-    description="The bodies to move.")
-_FACES = _inputs.GeometryHandleList("faces", require="face",
-    description="REFUSED - a move feature cannot move faces. Use model_offset_face to push or "
-                "pull one.")
-_DX = _inputs.Distance("dx", allow_zero=True, description="Translation X.")
-_DY = _inputs.Distance("dy", allow_zero=True, description="Translation Y.")
-_DZ = _inputs.Distance("dz", allow_zero=True, description="Translation Z.")
-_DISTANCE = _inputs.Distance("distance", allow_zero=False, required=True,
-    description="How far to move along 'axis'.")
-_AXIS = _inputs.AxisRef("axis", entity_only=True,
-    description="Direction to move along, or the axis to rotate about.")
-_FROM = _inputs.GeometryHandle("from_point", require="vertex",
-    description="The vertex the move starts from.")
-_TO = _inputs.GeometryHandle("to_point", require="vertex",
-    description="The vertex the move ends at.")
+_MODE = _inputs.Choice("mode", (_TRANSLATE, _ALONG, _ROTATE, _POINT_TO_POINT), default=_TRANSLATE)
+_BODIES = _inputs.BodyRefList("bodies", kind="brep")
+_FACES = _inputs.GeometryHandleList("faces", require="face")
+_DX = _inputs.Distance("dx", allow_zero=True)
+_DY = _inputs.Distance("dy", allow_zero=True)
+_DZ = _inputs.Distance("dz", allow_zero=True)
+_DISTANCE = _inputs.Distance("distance", allow_zero=False, required=True)
+_AXIS = _inputs.AxisRef("axis", entity_only=True)
+_FROM = _inputs.GeometryHandle("from_point", require="vertex")
+_TO = _inputs.GeometryHandle("to_point", require="vertex")
 
 app = adsk.core.Application.get()
 
@@ -364,11 +356,7 @@ def handler(mode: str = "translate", bodies=None, faces=None, dx=None, dy=None, 
 
 
 TOOL_DESCRIPTION = (
-    "Move BODIES as a feature in the TIMELINE, so the move replays on every recompute. A move "
-    "feature cannot move faces - use model_offset_face to push or pull one; to reposition a "
-    "component OCCURRENCE with no timeline feature, use assembly_move. 'mode' picks the inputs: "
-    "translate -> dx/dy/dz; along_entity -> axis + distance; rotate -> axis + angle_deg; "
-    "point_to_point -> from_point + to_point.\n"
+    "Move bodies as a timeline feature; assembly_move moves an occurrence.\n"
     + _outputs.produces_block(RETURNS)
 )
 
@@ -382,8 +370,7 @@ move_tool = (
     .add_input_property(*_DZ.as_property())
     .add_input_property(*_DISTANCE.as_property())
     .add_input_property(*_AXIS.as_property())
-    .add_input_property("angle_deg", {"type": "number",
-            "description": "Rotation in DEGREES about 'axis' (non-zero)."})
+    .add_input_property("angle_deg", {"type": "number"})
     .add_input_property(*_FROM.as_property())
     .add_input_property(*_TO.as_property(brief=True))
     .add_input_property(*_inputs.UNITS.as_property())

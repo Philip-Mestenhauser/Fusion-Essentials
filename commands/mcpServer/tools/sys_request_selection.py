@@ -344,25 +344,16 @@ def handler(what: str = "any", clear_current: bool = True,
 
 
 TOOL_DESCRIPTION = (
-    "Hand control to the USER to pick an entity in Fusion, then HOLD the call until they do or it "
-    "times out - no poll loop needed. Use when the user must identify an entity you cannot "
-    "unambiguously name. ANNOUNCE FIRST: tell the user in chat WHAT to click and that Fusion will "
-    "wait BEFORE calling - the hold shows no prompt inside Fusion, so an unannounced hold just "
-    "times out unanswered. On a pick: the same per-entity records sys_get_selection returns. On "
-    "timeout: ok (isError=false) with status='timeout' - nothing was picked.\n"
+    "Hand the pick to the USER: holds the call, and by default clears their current selection.\n"
     + _outputs.produces_block(RETURNS)
 )
 tool = (
     Tool.create_simple(name="sys_request_selection", description=TOOL_DESCRIPTION)
-    .add_input_property(*_inputs.Choice("what", list(_KIND_HINTS), default="any",
-            description="Kind hint for the prompt.").as_property())
-    .add_input_property("clear_current", {"type": "boolean",
-            "description": "Clear the existing selection first (default true)."})
+    .add_input_property(*_inputs.Choice("what", list(_KIND_HINTS), default="any").as_property())
+    .add_input_property("clear_current", {"type": "boolean"})
     .add_input_property("wait_seconds", {"type": "number",
-            "description": f"Hold the call until a pick, or this many seconds (default "
-            f"{_DEFAULT_WAIT_SECONDS:g}, max {_MAX_WAIT_SECONDS:g}). Keep it UNDER your MCP "
-            "client's per-call timeout, or the client errors while the server waits on. "
-            "0 = fire-and-return; poll with sys_get_selection."})
+            "description": f"Default {_DEFAULT_WAIT_SECONDS:g}, max {_MAX_WAIT_SECONDS:g}; "
+            "0 = fire-and-return."})
     .writes()
     # The automatic write guard is bypassed: its wrap touches adsk.* off the main thread, so
     # expect_document is checked inside _begin_request instead, through _write_guard's own functions.

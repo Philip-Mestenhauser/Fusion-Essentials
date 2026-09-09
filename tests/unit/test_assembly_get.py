@@ -2183,7 +2183,7 @@ def jo_design(monkeypatch):
 def _promised_default(input_name):
     """The default one max_* input's WIRE description states, as an int."""
     text = ap.tool.to_dict()["inputSchema"]["properties"][input_name]["description"]
-    match = re.search(r"default (\d+)", text)
+    match = re.search(r"[Dd]efault (\d+)", text)
     assert match, f"{input_name} states no default: {text!r}"
     return int(match.group(1))
 

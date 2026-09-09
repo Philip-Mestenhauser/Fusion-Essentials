@@ -34,15 +34,12 @@ _SECTION_TYPES = {
 _WALL_EPS = 1e-9
 
 _OPERATION = _inputs.boolean_op(default="new")
-_SECTION_TYPE = _inputs.Choice("section_type", tuple(_SECTION_TYPES), default="circular",
-    description="Cross-section shape driven along the path.")
+_SECTION_TYPE = _inputs.Choice("section_type", tuple(_SECTION_TYPES), default="circular")
 _SECTION_SIZE = _inputs.Distance("section_size", allow_zero=False, allow_negative=False,
-    required=True, description="Size of the cross-section.")
+    required=True)
 _WALL_THICKNESS = _inputs.Distance("wall_thickness", allow_zero=False, allow_negative=False,
-    required=False, description="Wall thickness; giving it makes the pipe hollow. Omit it with "
-                                "hollow=true to take the API's own wall, reported back measured.")
-_TARGET_BODIES = _inputs.BodyRefList("target_bodies", required=False,
-    description="Bodies a cut/intersect may affect (prevents cut bleed-through into other bodies).")
+    required=False)
+_TARGET_BODIES = _inputs.BodyRefList("target_bodies", required=False)
 
 RETURNS = [
     _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"],
@@ -331,25 +328,22 @@ def handler(path=None, section_size=None, section_type: str = "circular", operat
 
 
 TOOL_DESCRIPTION = (
-"Build a pipe/tube along a path in one feature - solid, or HOLLOW with a wall thickness. "
-"model_sweep is the drawn-profile version.\n\n"
+"Build a pipe along a path.\n"
 + _outputs.produces_block(RETURNS)
 )
 
 pipe_tool = (
     Tool.create_simple(name="model_pipe", description=TOOL_DESCRIPTION)
     .add_input_property("path", {"type": ["string", "array"], "items": {"type": "string"},
-            "description": "The path: a find_geometry edge handle (chains across TANGENT connections; a sharp corner stops the chain - the 'path' count is the truth), a JSON list of connected edge handles (used exactly), or 'sketch:<name>'."})
+            "description": "An edge 'handle' (chains across TANGENT connections only; the 'path' "
+                           "count is the truth), or 'sketch:<name>'."})
     .add_input_property(*_SECTION_SIZE.as_property())
     .add_input_property(*_SECTION_TYPE.as_property())
     .add_input_property(*_OPERATION.as_property())
-    .add_input_property("hollow", {"type": "boolean",
-            "description": "Make the pipe a hollow tube (default false). Implied by 'wall_thickness'."})
+    .add_input_property("hollow", {"type": "boolean"})
     .add_input_property(*_WALL_THICKNESS.as_property(brief=True))
-    .add_input_property("path_fraction", {"type": "number",
-            "description": "Fraction of the path covered from its start, over 0 and at most 1 (default: all of it). A ratio - 'units' does not apply."})
-    .add_input_property("path_fraction_reverse", {"type": "number",
-            "description": "Fraction covered the OTHER way round a CLOSED path; needs 'path_fraction' and at most 1 minus it."})
+    .add_input_property("path_fraction", {"type": "number"})
+    .add_input_property("path_fraction_reverse", {"type": "number"})
     .add_input_property("target_bodies", _TARGET_BODIES.schema())
     .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()

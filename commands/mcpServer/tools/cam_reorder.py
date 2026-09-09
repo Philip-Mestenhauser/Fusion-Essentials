@@ -153,19 +153,16 @@ def handler(entity: str = "", position: str = "after", reference: str = "") -> d
 
 
 TOOL_DESCRIPTION = (
-    "REORDER a CAM item in the machining sequence: move 'entity' to 'before' or "
-    "'after' 'reference' (both are item names from cam_get(include=['operations']) / cam_edit_folders). Works on SETUPS, "
-    "operations, folders and patterns, anywhere in the tree; two items of different kinds share no "
-    "ordered list. An illegal move (e.g. out of its setup) is reported as "
-    "an error, not a false success."
+    "Reorder a CAM item in the machining sequence: move 'entity' before or after 'reference' "
+    "(both are names from cam_get / cam_edit_folders). Works on setups, operations, folders and "
+    "patterns."
 )
 
 tool = (
     Tool.create_simple(name="cam_reorder", description=TOOL_DESCRIPTION)
-    .add_input_property("entity", {"type": "string", "description": "The CAM item to move (setup/operation/folder/pattern name)."})
-    .add_input_property("position", {"type": "string", "enum": list(_POSITIONS),
-            "description": "'before' or 'after' the reference."})
-    .add_input_property("reference", {"type": "string", "description": "The item to move relative to."})
+    .add_input_property("entity", {"type": "string"})
+    .add_input_property("position", {"type": "string", "enum": list(_POSITIONS)})
+    .add_input_property("reference", {"type": "string"})
     .strict_schema()
 )
 item = Item.create_tool_item(

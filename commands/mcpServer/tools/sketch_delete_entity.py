@@ -263,9 +263,7 @@ def handler(sketch_name: str = "", target: str = "", component: str = "") -> dic
 
 
 TOOL_DESCRIPTION = (
-    "Delete ONE sketch entity, constraint, dimension or text from a named sketch. 'target' is "
-    "'<type>:<index>' - indexes come from sketch_get(include_entities=true), and a text's index is "
-    "the one sketch_set_text edits by."
+    "Delete ONE sketch entity, constraint, dimension or text, named as '<type>:<index>'."
 )
 
 tool = (
@@ -273,12 +271,10 @@ tool = (
         name="sketch_delete_entity",
         description=TOOL_DESCRIPTION,
         input_param_name="sketch_name",
-        input_param_description="The sketch holding the entity (a name several sketches carry is refused).",
+        input_param_description="The sketch holding it.",
     )
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
-    .add_input_property("target", {"type": "string",
-            "description": "What to delete as '<type>:<index>' (e.g. 'circle:0'); 0-based, in "
-                           "creation order. An unknown type is refused with the list."})
+    .add_input_property("target", {"type": "string"})
     .add_required_input("target")
     .strict_schema()
 )

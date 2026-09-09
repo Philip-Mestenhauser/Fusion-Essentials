@@ -26,14 +26,14 @@ MAP_BLURB = (
 
 # Edge-handle-list input (closes the 'fillet THESE specific edges' gap; takes precedence over edge_filter).
 _EDGES = _inputs.GeometryHandleList("edges", require="edge",
-                                    description="The edges to work on; overrides 'edge_filter'.")
+                                    description="Overrides 'edge_filter'.")
 # Body input: a find_geometry handle (precise) OR a name; resolved/kind-checked by BodyRef.
 _BODY = _inputs.BodyRef("body_name", kind="solid", required=False,
-                        description="Body whose edges to work on (omit = most recent).")
+                        description="Omit = most recent.")
 # Face-scoped targeting: the EDGES of the named faces. A chamfer has no rule-fillet twin, so the
 # face set is expanded to its edges here rather than handed to a rule API.
 _FACES = _inputs.GeometryHandleList("faces", require="face", required=False,
-    description="Work on every edge of these faces; overrides 'edge_filter', excludes 'edges'.")
+    description="Every edge of these faces; excludes 'edges'.")
 
 # option key -> the API's OWN ChamferCornerTypes member spelling, lowercase 't' in BlendCornertype
 # included: no BlendCornerType member exists, so a "corrected" name would getattr-raise and be
@@ -44,8 +44,7 @@ _CORNER_TYPES = {"chamfer": "ChamferCornerType", "miter": "MiterCornerType",
 # edge_filter caveat (shared by both tools): convex/concave classify each edge by its LOCAL dihedral
 # only, so on a plate with holes every hole rim matches exactly like the outer perimeter - the filter
 # cannot mean "outer edges only". The 'edges' handle list is the precise path when the set matters.
-_EDGE_FILTER_DESC = ("REQUIRED when 'edges' is omitted: which of the body's edges to take, by "
-    "per-edge dihedral. Pass 'edges' handles to isolate a specific set.")
+_EDGE_FILTER_DESC = "Required without 'edges': the body's edges by dihedral."
 
 # How close to parallel two out-of-material normals may read and still meet smoothly, which is
 # neither convex nor concave. Vectors carry 12 decimals: at 6 the dot quantizes in steps of 1e-6,

@@ -31,8 +31,7 @@ RETURNS = [
     _outputs.ReturnsValue("file_path", "an NC/G-code file written to disk", in_list=True),
 ]
 
-_UNITS_CHOICE = _inputs.Choice("units", options=["document", "inch", "mm"], default="document",
-                               description="Output units for the NC file (default: document units).")
+_UNITS_CHOICE = _inputs.Choice("units", options=["document", "inch", "mm"], default="document")
 
 # NC-program output parameters live on the NCProgramInput/NCProgram CAMParameters collection - the
 # UI's Name / Comment / Output-folder fields - not on the .cps post OPTIONS in .postParameters.
@@ -55,9 +54,7 @@ _POST_MAX_ASSETS = {"cloud": 400, "hub": 400, "fusion": 900}
 _NAMES_LISTED = 30
 
 _POST_SCOPE_CHOICE = _inputs.Choice(
-    "post_scope", options=["local", "cloud", "hub", "fusion"], default="local",
-    description="Where to resolve 'post' from: the local .cps folder (default), cloud, the hub team "
-                "post library (network-slow), or fusion - the posts this installation ships.")
+    "post_scope", options=["local", "cloud", "hub", "fusion"], default="local")
 
 
 def _post_library():
@@ -778,34 +775,25 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
 
 
 TOOL_DESCRIPTION = (
-    "Create (or reuse) an NC Program for the chosen toolpaths, then post it to a G-code / NC file on "
-    "disk - the final CAM step. A program already named 'program_name' is UPDATED and re-posted, not "
-    "duplicated; naming one with scope/setups/post/output_folder all omitted posts it AS-IS from its "
-    "stored configuration. 'scope': omit (or 'document') for the whole document, or a "
-    "setup/folder/operation NAME; 'setups' instead names SEVERAL setups for one program (the two "
-    "are exclusive). Only VALID toolpaths post (out-of-date/errored ops are omitted) - run "
-    "cam_generate first.\n"
+    "Create (or reuse) an NC Program and post it to a G-code / NC file on disk - the final CAM "
+    "step. 'scope' or 'setups' picks the toolpaths; only VALID ones post - run cam_generate "
+    "first.\n"
     + _outputs.produces_block(RETURNS)
 )
 
 tool = (
     Tool.create_simple(name="cam_post", description=TOOL_DESCRIPTION)
-    .add_input_property("scope", {"type": "string",
-            "description": "Setup/folder/operation NAME to post; omit (or 'document') for the whole document."})
+    .add_input_property("scope", {"type": "string"})
     .add_input_property("post", {"type": "string",
-            "description": "Post processor: for post_scope=local a full .cps path or a name in the personal/installed post folder; for cloud/hub/fusion a post NAME in that library."})
+            "description": "post_scope=local: a .cps path or a name in the post folder. Otherwise a post NAME in that library."})
     .add_input_property(_POST_SCOPE_CHOICE.name, _POST_SCOPE_CHOICE.schema())
-    .add_input_property("output_folder", {"type": "string",
-            "description": "Directory where the NC file(s) will be written (created if it does not exist)."})
+    .add_input_property("output_folder", {"type": "string"})
     .add_input_property("program_name", {"type": "string",
-            "description": "NC Program name or number (also the browser name; an existing program with this name is reused)."})
+            "description": "An existing program with this name is reused."})
     .add_input_property(_UNITS_CHOICE.name, _UNITS_CHOICE.schema())
-    .add_input_property("program_comment", {"type": "string",
-            "description": "Optional comment embedded in the NC program header."})
-    .add_input_property("overwrite", {"type": "boolean",
-            "description": "Required true to reconfigure (scope/setups/post/output_folder) an existing program whose stored operations differ from the request (default false)."})
-    .add_input_property("setups", {"type": "array", "items": {"type": "string"},
-            "description": "Setup NAMES this one program holds - the multi-setup form of 'scope'; pass one or the other, not both."})
+    .add_input_property("program_comment", {"type": "string"})
+    .add_input_property("overwrite", {"type": "boolean"})
+    .add_input_property("setups", {"type": "array", "items": {"type": "string"}})
     .strict_schema()
 )
 

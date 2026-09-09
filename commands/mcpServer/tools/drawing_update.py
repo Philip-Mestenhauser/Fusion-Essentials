@@ -107,11 +107,8 @@ def handler() -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Refresh the active 2D drawing's out-of-date references to the latest source design - the API "
-    "equivalent of the 'Refresh' button, regenerating the views after the source design was edited "
-    "and saved. Operates on whichever drawing is the active document (doc_open it and make it "
-    "active first). The refresh does NOT save: call doc_save afterward to persist a new version, "
-    "then drawing_export for the PDF."
+    "Refresh the active 2D drawing's out-of-date references to the latest saved source design, "
+    "regenerating its views. Does NOT save - doc_save afterward."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)

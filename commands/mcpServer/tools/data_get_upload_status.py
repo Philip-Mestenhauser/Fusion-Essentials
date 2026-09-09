@@ -109,21 +109,18 @@ def handler(handle: str = "", file_name: str = "", folder: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Poll a data_upload_file upload for its ACTUAL state - never guess from re-listing data_get. "
-    "'handle' = the upload_handle from data_upload_file (or 'latest'); or 'file_name' (+ optional "
-    "'folder') for the most recent match. 'state' is 'uploading', 'processing' (transfer done, cloud "
-    "still finishing), 'complete' (file_id/version_id/fusion_web_url included) or 'failed'. "
-    "NON-BLOCKING: it returns the current state immediately."
+    "Poll a data_upload_file upload: 'state' is uploading, processing, complete (file_id included) "
+    "or failed."
 )
 
 tool = (
     Tool.create_simple(name="data_get_upload_status", description=TOOL_DESCRIPTION)
     .add_input_property("handle", {"type": "string",
-            "description": "upload_handle from data_upload_file, or 'latest' for the most recent upload."})
+            "description": "An upload_handle, or 'latest'."})
     .add_input_property("file_name", {"type": "string",
-            "description": "The uploaded file's name, as an alternative to 'handle'."})
+            "description": "Alt to 'handle': the uploaded file's name."})
     .add_input_property("folder", {"type": "string",
-            "description": "With 'file_name': the destination folder used at upload time."})
+            "description": "With 'file_name': its destination folder."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

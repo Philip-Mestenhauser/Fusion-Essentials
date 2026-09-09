@@ -200,11 +200,12 @@ class TestCreate:
         assert "declined" in msg and "xy" in msg
         assert rig.notes._added is None                 # nothing was added
 
-    def test_a_raising_set_annotation_plane_names_the_plane_and_the_cause(self, rig):
+    def test_a_raising_set_annotation_plane_names_the_plane_the_cause_and_the_remedy(self, rig):
         rig.notes._input = FakePMILeaderLineNoteInput(plane_raises="needs an adjacent face")
         rig.stub_geometry([_face(rig.comp)])
         msg = error_message(pc.handler(kind="note", geometry=["a"], text="X", plane="face"))
         assert "setAnnotationPlane(face) failed" in msg and "adjacent face" in msg
+        assert "plane_face" in msg                      # the remedy the wire no longer carries
 
     def test_an_accepted_plane_reaches_the_input_with_the_mapped_member(self, rig):
         rig.stub_geometry([_face(rig.comp)])

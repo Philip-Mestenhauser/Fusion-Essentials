@@ -281,28 +281,25 @@ def handler(target: str = "", kind: str = "", radius: float = None,
 
 
 TOOL_DESCRIPTION = (
-    "Scan a part's faces/edges/vertices and return handles to them (entity tokens), each with kind, "
-    "world position, and shape data (radius, axis, area, outward normal, plus a planar face's "
-    "'frame' - its plane in world space, for computing a point ON the face). A 'target' matching "
-    "several occurrences scans all of them, so pass an exact fullPathName for one instance; a body "
-    "name several components hold is refused. 'kind'/'radius'/'nearest_to' filter and sort the "
-    "matches. Handles are short-lived - use them in the next call(s), and re-run find_geometry if "
-    "one is rejected as stale.\n"
+    "Scan a part's faces/edges/vertices and return the short-lived handles other tools consume, "
+    "each with kind, world position and shape data.\n"
     + _outputs.produces_block(RETURNS)
 )
 
 find_tool = (
     Tool.create_simple(name="find_geometry", description=TOOL_DESCRIPTION)
-    .add_input_property("target", {"type": "string", "description": "Occurrence/component/body name, '<occurrence-or-component>:<body>' to pick one instance, or '' for the whole design."})
+    .add_input_property("target", {"type": "string", "description":
+            "Occurrence/component/body; a shared name scans every match. '' = whole design."})
     .add_input_property(*_inputs.Choice("kind",
         ["cylinder_face", "planar_face", "cone_face", "sphere_face", "torus_face",
-         "circular_edge", "line_edge", "arc_edge", "vertex"],
-        description="Geometry kind to find (omit = faces+edges).").as_property())
-    .add_input_property("radius", {"type": "number", "description": "Keep only cylinder faces / circular edges with this radius (in 'units', 5% tol)."})
-    .add_input_property("nearest_to", {"type": "array", "items": {"type": "number"}, "description": "[x,y,z] world point (in 'units') to sort matches by distance to."})
+         "circular_edge", "line_edge", "arc_edge", "vertex"]).as_property())
+    .add_input_property("radius", {"type": "number",
+            "description": "In 'units', 5% tolerance."})
+    .add_input_property("nearest_to", {"type": "array", "items": {"type": "number"},
+            "description": "[x,y,z] world point in 'units' to sort by."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("max_results", {"type": "integer", "description":
-            f"Cap on matches returned (default {_MAX_RESULTS_DEFAULT}, max {_MAX_RESULTS_CEILING})."})
+            f"Default {_MAX_RESULTS_DEFAULT}, max {_MAX_RESULTS_CEILING}."})
     .strict_schema()
 )
 find_item = Item.create_tool_item(tool=find_tool, write="read", handler=handler, run_on_main_thread=True)

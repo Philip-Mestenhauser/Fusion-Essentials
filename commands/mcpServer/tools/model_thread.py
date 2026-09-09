@@ -26,15 +26,12 @@ RETURNS = [
     _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"]),
 ]
 
-_FACES = _inputs.GeometryHandleList("faces", require="cylinder_face", required=True,
-    description="The cylinder(s) to thread.")
+_FACES = _inputs.GeometryHandleList("faces", require="cylinder_face", required=True)
 _LENGTH = _inputs.Distance("length", allow_zero=False, allow_negative=False,
-    description="Thread only this much of the cylinder, from the 'location' end.")
-_OFFSET = _inputs.Distance("offset", allow_zero=True, allow_negative=False,
-    description="Gap from that end to the thread start; needs 'length'.")
+    description="Thread only this much, from the 'location' end.")
+_OFFSET = _inputs.Distance("offset", allow_zero=True, allow_negative=False)
 _LOCATION = _inputs.Choice("location", ("high", "low"), default="high",
-    description="Which end a partial thread runs from: 'high' is the end the cylinder's axis "
-                "points toward, 'low' the opposite end.")
+    description="'high' is where the axis points.")
 
 _LOCATION_ATTRS = {"high": "HighEndThreadLocation", "low": "LowEndThreadLocation"}
 
@@ -286,10 +283,7 @@ def handler(faces=None, designation: str = "", modeled: bool = False, left_hande
 
 
 TOOL_DESCRIPTION = (
-    "Thread an EXISTING cylindrical face - external on a shaft or boss, internal in a bore "
-    "(model_hole taps the holes it drills). Bore-vs-shaft is read off each face, and one call "
-    "cannot mix the two. The default thread is cosmetic - the call-out is recorded and the geometry "
-    "stays a plain cylinder; modeled=true cuts the real helix.\n"
+    "Thread an existing cylindrical face; model_hole taps its holes.\n"
     + _outputs.produces_block(RETURNS)
 )
 
@@ -297,18 +291,16 @@ thread_tool = (
     Tool.create_simple(name="model_thread", description=TOOL_DESCRIPTION)
     .add_input_property(*_FACES.as_property())
     .add_input_property("designation", {"type": "string",
-            "description": "Thread call-out, e.g. 'M8x1.25'."})
+            "description": "e.g. 'M8x1.25'."})
     .add_input_property("modeled", {"type": "boolean",
-            "description": "True cuts the real helix; default is cosmetic."})
-    .add_input_property("left_handed", {"type": "boolean",
-            "description": "True for a left-hand thread."})
+            "description": "Default cosmetic; true cuts the helix."})
+    .add_input_property("left_handed", {"type": "boolean"})
     .add_input_property(*_LENGTH.as_property())
     .add_input_property(*_OFFSET.as_property())
     .add_input_property(*_LOCATION.as_property())
     .add_input_property("thread_type", {"type": "string",
-            "description": "Thread standard to take the call-out from, when several carry it."})
-    .add_input_property("thread_class", {"type": "string",
-            "description": "Fit class within that standard, e.g. '6g'. Default: the first offered."})
+            "description": "When several standards carry it."})
+    .add_input_property("thread_class", {"type": "string"})
     .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )

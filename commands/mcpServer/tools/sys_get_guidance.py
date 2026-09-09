@@ -14,11 +14,9 @@ from ..mcp_primitives.registry import register
 
 _SECTION = _inputs.Choice(
     "section", loader.SECTION_IDS,
-    description="Which section's rules to return. Omit for the index.")
+    description="Omit for the index.")
 
-_RECIPE = _inputs.Choice(
-    "recipe", loader.RECIPE_IDS,
-    description="Which recipe to return whole - its ordered steps and its bar for done.")
+_RECIPE = _inputs.Choice("recipe", loader.RECIPE_IDS)
 
 INDEX_NOTE = (
     "The one design-guidance document this server packages. Call again with section=<id> for a "
@@ -108,12 +106,8 @@ def handler(section=None, recipe=None) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Read this server's packaged CAD DESIGN GUIDANCE: task-agnostic practice for building a part "
-    "or an assembly, plus RECIPES - ordered feature sequences with a bar for what done looks "
-    "like. Three reads, one per call. No arguments: the index - every section, and every recipe's "
-    "id with the situation it fits. 'section': that section's rules, each saying when it applies, "
-    "what to do, and the tool to read the result back through, plus the ids of its recipes. "
-    "'recipe': one recipe whole - its steps, what to read back after each, and its bar."
+    "Read this server's packaged CAD DESIGN GUIDANCE: no argument gives the index, 'section' its "
+    "rules, 'recipe' one recipe whole. One per call."
 )
 
 tool = (

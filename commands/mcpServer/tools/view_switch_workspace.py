@@ -90,16 +90,14 @@ def handler(workspace: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Switch the active Fusion workspace ('workspace' takes an id, a visible "
-    "name, or an alias). Switching to Manufacture is required for some CAM UI "
-    "actions, though CAM data can be read without switching (see cam_get)."
+    "Switch the active Fusion workspace; view_list_workspaces lists the targets."
 )
 
 tool = Tool.create_with_string_input(
     name="view_switch_workspace",
     description=TOOL_DESCRIPTION,
     input_param_name="workspace",
-    input_param_description="Workspace id, visible name, or alias (design/manufacture/cam).",
+    input_param_description="Id, visible name, or alias (design/manufacture/cam).",
 ).strict_schema()
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler, run_on_main_thread=True,

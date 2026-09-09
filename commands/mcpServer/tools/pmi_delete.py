@@ -84,17 +84,14 @@ def handler(annotation="", component="") -> dict:
 
 
 TOOL_DESCRIPTION = (
-"Delete ONE PMI annotation by its name from pmi_get (component= disambiguates a name that exists "
-"in several components). The deletion is verified: the name is re-resolved afterwards to confirm "
-"the annotation is gone. Deleting imported PMI removes that record permanently for this design."
+"Delete ONE PMI annotation by its name from pmi_get. Imported PMI is not re-creatable here."
 )
 
 tool = (
     Tool.create_simple(name="pmi_delete", description=TOOL_DESCRIPTION)
     .add_input_property("annotation", {"type": "string",
-        "description": "The PMI's name (from pmi_get). Exact match, case-insensitive."})
-    .add_input_property("component", {"type": "string",
-        "description": "Component to look in - required only when the name exists in several."})
+        "description": "A PMI name from pmi_get."})
+    .add_input_property("component", {"type": "string"})
     .add_required_input("annotation")
     .strict_schema()
 )

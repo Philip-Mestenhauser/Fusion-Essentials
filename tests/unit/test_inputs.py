@@ -475,8 +475,8 @@ class TestEdgeLoopRef:
     def test_contract_note_states_closed_vs_open(self):
         closed = inp.EdgeLoopRef("boundary", closed=True).contract_note()
         opened = inp.EdgeLoopRef("edges", closed=False).contract_note()
-        assert "CLOSED loop" in closed and "single edge" in closed
-        assert "OPEN chain" in opened and "ONE surface body" in opened
+        assert "CLOSED loop" in closed and "one edge suffices" in closed
+        assert "OPEN chain" in opened and "one surface body" in opened
 
 
 # ── BodyRef: name OR handle, dispatched WITHOUT a length heuristic ──────────────────────────────
@@ -1874,7 +1874,7 @@ class TestBodyBrepKind:
         _install_kind_bodies(handle_map={"H": m})
         val, err = inp.BodyRef("target", kind="brep").resolve("H")
         assert val is None
-        assert "must be a SOLID or SURFACE" in err and "MESH body" in err and "mesh_to_brep" in err
+        assert "must be a BRep (non-mesh) body" in err and "MESH body" in err and "mesh_to_brep" in err
 
 
 # ── the wrong-kind redirect names the vocabulary the caller ACTUALLY used ────────────────────────
@@ -3887,7 +3887,7 @@ class TestTargetRefList:
         # Both spellings SUCCEED, so no error carries the difference: naming an occurrence selects
         # the component, naming a body selects that body. The note is the only home.
         note = inp.TargetRefList("models").contract_note()
-        assert "occurrence selects the whole component, not one body" in note
+        assert "an occurrence selects the whole component" in note
         assert inp.TargetRefList("models", contract="Just these.").contract_note() == "Just these."
 
     def test_body_handles_pass_through(self):
@@ -4366,8 +4366,8 @@ class TestJointOriginRefNativeSelector:
         assert "one row per instance and this input reads the same component frame from each" in err
 
     def test_the_contract_note_states_the_component_frame_only_for_the_native_selector(self):
-        assert "owning COMPONENT" in inp.JointOriginRef("jo", native=True).contract_note()
-        assert "owning COMPONENT" not in inp.JointOriginRef("jo").contract_note()
+        assert "owning component's frame" in inp.JointOriginRef("jo", native=True).contract_note()
+        assert "owning component" not in inp.JointOriginRef("jo").contract_note()
 
 
 # ── the shared collection walks: an unreadable member costs its own row, not the census ──

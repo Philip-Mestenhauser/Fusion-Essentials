@@ -195,21 +195,15 @@ def handler(member: str = "", value=None) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "SET one APPLICATION preference (app.preferences), verified by a read-back. 'member' is the "
-    "path sys_get_preferences reports it at; 'value' must match the current value's type (or an "
-    "enum member NAME). REFUSED BEFORE writing when the member is tier 'R', its current value "
-    "cannot be read, or the value is not one it takes; a read-back that differs from the request "
-    "is an error naming all three values. No undo, no version history.\n"
+    "SET one APPLICATION preference, by the path sys_get_preferences reports. No undo.\n"
     + _outputs.produces_block(RETURNS)
 )
 
 tool = (
     Tool.create_simple(name="sys_set_preferences", description=TOOL_DESCRIPTION)
-    .add_input_property("member", {"type": "string",
-            "description": "The path sys_get_preferences reports the member at, e.g. "
-                           "'display.generalPrecision' or 'products.Design.isAutoProjectGeometry'."})
+    .add_input_property("member", {"type": "string"})
     .add_input_property("value", {"type": ["boolean", "integer", "number", "string"],
-            "description": "The new value, or an enum member NAME for an enum member."})
+            "description": "An enum member NAME may be given as text."})
     .strict_schema()
 )
 item = Item.create_tool_item(

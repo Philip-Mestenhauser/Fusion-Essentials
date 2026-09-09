@@ -265,28 +265,17 @@ def handler(scope: str = "", max_results: int = _ROWS_CAP,
 
 
 TOOL_DESCRIPTION = (
-    "Check whether CAM toolpaths are generated and up to date, and name the operations that are "
-    "not. 'scope': omit for the whole document, or ONE setup/folder/pattern/operation NAME, nested "
-    "children included. measured.states tallies one bucket per counted operation and "
-    "measured.not_valid rows each operation outside 'valid' with its error line. The tally and the "
-    "'passed' verdict are separate reads over separate sets and CAN disagree - tolerance_used names "
-    "the set each one covered and the workspace state the per-operation reads were taken in. "
-    "cam_generate regenerates out-of-date operations; "
-    "validity is only trustworthy in the Manufacture workspace.\n"
+    "Check whether CAM toolpaths are generated and up to date.\n"
     + _outputs.produces_block(RETURNS)
 )
 
 tool = (
     Tool.create_simple(name="cam_inspect_toolpaths", description=TOOL_DESCRIPTION)
-    .add_input_property("scope", {"type": "string",
-            "description": "Setup/folder/pattern/operation NAME to check; omit for the whole document."})
-    .add_input_property("max_results", {"type": "integer",
-            "description": f"Cap on the measured.not_valid rows (default {_ROWS_CAP}, ceiling {_ROWS_MAX})."})
+    .add_input_property("scope", {"type": "string"})
+    .add_input_property("max_results", {"type": "integer"})
     .add_input_property("include_suppressed", {"type": "boolean",
-            "description": "Count suppressed operations too (default false - active only). "
-                           "Suppressing one flips hasToolpath to False, and unsuppressing does not "
-                           "bring the toolpath back: it carries none until cam_generate "
-                           "regenerates it."})
+            "description": "Default false; suppressing flips hasToolpath to False and only "
+                           "cam_generate brings it back."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

@@ -139,23 +139,18 @@ def handler(file: str = "", project: str = "", folder: str = "", target_folder: 
 
 
 TOOL_DESCRIPTION = (
-    "Move ONE cloud file into another EXISTING folder of its own project. The destination must "
-    "already exist - this tool creates nothing (use data_create_folder). Verified by re-resolving "
-    "the file and reading its parent folder back. A file already there returns moved=false, not an "
-    "error."
+    "Move ONE cloud file into an EXISTING folder of its own project; it creates nothing."
 )
 
 tool = (
     Tool.create_simple(name="data_move_file", description=TOOL_DESCRIPTION)
     .add_input_property("file", {"type": "string",
-            "description": "Lineage URN (data_get), or the file's name (which needs 'project')."})
-    .add_input_property("project", {"type": "string",
-            "description": "Project holding the file."})
+            "description": "Lineage URN, or a name plus 'project'."})
+    .add_input_property("project", {"type": "string"})
     .add_input_property("folder", {"type": "string",
-            "description": "Cloud folder path scoping a by-name lookup."})
+            "description": "Cloud path scoping a by-name lookup."})
     .add_input_property("target_folder", {"type": "string",
-            "description": "Destination folder path in the file's project, e.g. 'Parts/Fixtures'; "
-                           "'/' is the project root."})
+            "description": "Destination path in the file's project; '/' is its root."})
     .strict_schema()
 )
 

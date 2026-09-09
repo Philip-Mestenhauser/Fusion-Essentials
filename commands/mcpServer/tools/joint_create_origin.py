@@ -23,31 +23,30 @@ _ANCHORS = ("coordinates", "sketch_line", "sketch_point", "geometry", "bbox_cent
 _KEYPOINTS = {"start": 0, "middle": 1, "end": 2, "center": 3}
 
 _ANCHOR_CHOICE = _inputs.Choice("anchor", list(_ANCHORS), default="coordinates")
-_TARGET_CHOICE = _inputs.Choice("target", list(_TARGETS), default="at")
-_KEYPOINT_CHOICE = _inputs.Choice("keypoint", list(_KEYPOINTS), default="start",
-                                  description="Where on the line/edge to locate the frame.")
+_TARGET_CHOICE = _inputs.Choice("target", list(_TARGETS), default="at",
+                                description="'origin' ignores x/y/z.")
+_KEYPOINT_CHOICE = _inputs.Choice("keypoint", list(_KEYPOINTS), default="start")
 
 # anchor='geometry': a BRep face/edge/vertex HANDLE from find_geometry - the frame's orientation
 # comes from that real geometry (a planar face's normal, a cylinder/edge's axis, a hole edge).
 # anchor='face_center' reuses this same 'geometry' handle, requiring a PLANAR face.
-_GEOM = _inputs.GeometryHandle("geometry", require="any",
-                               description="geometry: a face/edge/vertex; face_center: a PLANAR face.")
+_GEOM = _inputs.GeometryHandle("geometry", require="any")
 
 # anchor='bbox_center': the thing whose WORLD bounding-box center becomes the origin. TargetRef resolves
 # a body (handle or name), an occurrence (fullPathName), or a component - and refuses an ambiguous name.
-_BBOX_TARGET = _inputs.TargetRef("bbox_target", allow=("body", "occurrence", "component"),
-                                 description="bbox_center: whose world bounding-box CENTER becomes the origin.")
+_BBOX_TARGET = _inputs.TargetRef(
+    "bbox_target", allow=("body", "occurrence", "component"),
+    description="bbox_center: its box center, read ONCE - a later resize does not move the frame.")
 
 # anchor='bbox_center': the axis the frame's Z is aligned to (world x/y/z, or a handle/name at a
 # straight edge, sketch line or construction axis the axis runs along). 'flip' reverses it 180 deg.
-_ORIENT_AXIS = _inputs.AxisRef("orient_axis", default="z",
-                               description="bbox_center: the axis the frame's Z aligns to.")
+_ORIENT_AXIS = _inputs.AxisRef("orient_axis", default="z")
 
 # The component whose jointOrigins collection RECEIVES the origin: adding through
 # sub.component.jointOrigins lands a JO whose parentComponent IS the sub-component, which is what
 # lets a JO serve as the sub-component side of a joint. Omitted = root.
 _COMPONENT = _inputs.OccurrenceRef("component", required=False,
-    description="Occurrence whose component receives the origin; omit for root.")
+                                   description="Omit for root.")
 
 
 def _vec(v):
@@ -543,13 +542,8 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
 
 
 TOOL_DESCRIPTION = (
-    "Create a Joint Origin (a reusable coordinate frame anchor). 'anchor' picks the placement: "
-    "coordinates (x,y,z or target='origin'; world-aligned, held by parametric offsetX/Y/Z named in "
-    "the result), sketch_line (Z along the line), sketch_point (position only), geometry (planar "
-    "face Z=normal, cylinder/cone face or edge axis, or vertex), bbox_center (Z along "
-    "'orient_axis'), face_center (Z = the face normal). Returns frame_axes. Lands on the root "
-    "unless 'component' names the occurrence to receive it, and does not track a later resize. "
-    "Feed it to joint_create / joint_at_geometry by name or handle."
+    "Create a Joint Origin, a reusable coordinate frame; feed it to joint_create or "
+    "joint_at_geometry by name."
 )
 
 tool = (
@@ -558,21 +552,18 @@ tool = (
     .add_input_property("geometry", _GEOM.schema())
     .add_input_property(*_TARGET_CHOICE.as_property())
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("x", {"type": "number", "description": "X coordinate."})
-    .add_input_property("y", {"type": "number", "description": "Y coordinate."})
-    .add_input_property("z", {"type": "number", "description": "Z coordinate."})
-    .add_input_property("sketch_name", {"type": "string",
-            "description": "Sketch holding the anchor line/point."})
+    .add_input_property("x", {"type": "number"})
+    .add_input_property("y", {"type": "number"})
+    .add_input_property("z", {"type": "number"})
+    .add_input_property("sketch_name", {"type": "string"})
     .add_input_property(*_sketch_detail.component_scope("sketch_component",
                                                         narrows="sketch_name"))
-    .add_input_property("entity_index", {"type": "integer",
-            "description": "Index within the sketch."})
+    .add_input_property("entity_index", {"type": "integer"})
     .add_input_property(*_KEYPOINT_CHOICE.as_property())
     .add_input_property(*_BBOX_TARGET.as_property())
     .add_input_property(*_ORIENT_AXIS.as_property())
-    .add_input_property("flip", {"type": "boolean",
-            "description": "Flip the oriented Z axis 180 deg."})
-    .add_input_property("name", {"type": "string", "description": "Name for the joint origin."})
+    .add_input_property("flip", {"type": "boolean"})
+    .add_input_property("name", {"type": "string"})
     .add_input_property(*_COMPONENT.as_property())
     .strict_schema()
 )

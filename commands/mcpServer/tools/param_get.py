@@ -128,25 +128,18 @@ def handler(name: str = "", include_model_parameters: bool = False,
 
 
 TOOL_DESCRIPTION = (
-"Read the active design's parameters - name, expression, value, unit, comment. 'value' is in the "
-"parameter's own 'unit'; 'value_units' names it and 'value_internal' is the raw cm/radians figure. "
-"The AUTHORED user parameters by default (ones named adsk_* are counted in generated_skipped, not "
-"listed); include_model_parameters=true adds feature/model ones, or 'name' fetches a single "
-"parameter. Lists are capped - 'truncated' means the note names the narrowing. Change one with "
-"param_set."
+"Read the active design's parameters - name, expression, value, unit, comment. The authored user "
+"parameters by default, or 'name' fetches one. Change one with param_set."
 )
 
 tool = (
     Tool.create_simple(name="param_get", description=TOOL_DESCRIPTION)
     .add_input_property("name", {"type": "string",
-            "description": "Optional single parameter name to fetch."})
-    .add_input_property("include_model_parameters", {"type": "boolean",
-            "description": "Include feature/model parameters (default false)."})
+            "description": "One parameter to fetch."})
+    .add_input_property("include_model_parameters", {"type": "boolean"})
     .add_input_property("include_generated", {"type": "boolean",
-            "description": f"List the {_GENERATED_PREFIX}*-named parameters too (default false - "
-                           "they are counted in generated_skipped)."})
-    .add_input_property("favorites_only", {"type": "boolean",
-            "description": "Only parameters whose 'favorite' flag reads true (default false)."})
+            "description": f"Also list the {_GENERATED_PREFIX}*-named parameters."})
+    .add_input_property("favorites_only", {"type": "boolean"})
     .strict_schema()
 )
 

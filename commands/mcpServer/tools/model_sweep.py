@@ -26,8 +26,7 @@ app = adsk.core.Application.get()
 # scope_input: the {sketch, profile_index} form addresses a sketch BY NAME, and Fusion numbers
 # sketches per component from 1, so a name two components carry is refused, naming 'component'.
 _PROFILE = _inputs.ProfileRef("profile", required=True, scope_input="component")
-_TARGET_BODIES = _inputs.BodyRefList("target_bodies", required=False,
-    description="Bodies a cut/intersect may affect (prevents cut bleed-through into other bodies).")
+_TARGET_BODIES = _inputs.BodyRefList("target_bodies", required=False)
 
 # orientation keyword -> adsk.fusion.SweepOrientationTypes attribute.
 _ORIENTATIONS = {
@@ -255,23 +254,19 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
 
 
 TOOL_DESCRIPTION = (
-"Sweep a sketch profile along a path into a 3D solid - a cross-section driven along a curve "
-"(handrails, cables, moulding). Companion to model_extrude / model_revolve; model_pipe is the "
-"undrawn-section version. Every result reports 'is_solid'.\n\n"
+"Sweep a profile along a path.\n"
 + _outputs.produces_block(RETURNS)
 )
 
 sweep_tool = (
     Tool.create_simple(name="model_sweep", description=TOOL_DESCRIPTION)
-    .add_input_property("profile", {"type": ["string", "object"],
-            "description": "The cross-section: a profile 'handle' from sketch_get (robust), or a {sketch, profile_index} selector. An open-curve sketch (no closed region) sweeps into a SURFACE."})
+    .add_input_property("profile", {"type": ["string", "object"]})
     .add_input_property("path", {"type": ["string", "array"], "items": {"type": "string"},
-            "description": "The sweep path: a find_geometry edge handle (chains across TANGENT connections; a sharp corner stops the chain - the 'path' count is the truth), a JSON list of connected edge handles (used exactly), or 'sketch:<name>'."})
+            "description": "An edge 'handle' (chains across TANGENT connections only; the 'path' "
+                           "count is the truth), or 'sketch:<name>'."})
     .add_input_property(*_inputs.boolean_op(default="new").as_property())
-    .add_input_property("orientation", {"type": "string", "enum": ["perpendicular", "parallel"],
-            "description": "How the profile is oriented along the path: perpendicular (default) keeps it normal to the path; parallel keeps it parallel to its start plane."})
-    .add_input_property("as_surface", {"type": "boolean",
-            "description": "Sweep into an open SURFACE (no end caps) instead of a solid; auto-applied when the profile sketch has only an open path."})
+    .add_input_property("orientation", {"type": "string", "enum": ["perpendicular", "parallel"]})
+    .add_input_property("as_surface", {"type": "boolean"})
     .add_input_property("target_bodies", _TARGET_BODIES.schema())
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .strict_schema()

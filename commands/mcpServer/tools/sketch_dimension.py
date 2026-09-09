@@ -23,9 +23,7 @@ _DIM_TYPES = ("distance", "horizontal_distance", "vertical_distance", "radius", 
               "offset", "linear_diameter", "concentric_circle", "tangent_distance",
               "ellipse_major_radius", "ellipse_minor_radius", "point_to_surface", "line_to_surface")
 _DISTANCE_TYPES = ("distance", "horizontal_distance", "vertical_distance")  # sign is a signed placement
-_DIM_TYPE = _inputs.Choice("dim_type", list(_DIM_TYPES), default="distance",
-                          description="'angle' takes the wedge FACING THE SKETCH ORIGIN; 'offset' "
-                                      "ROTATES the second line parallel (it MOVES geometry).")
+_DIM_TYPE = _inputs.Choice("dim_type", list(_DIM_TYPES), default="distance")
 
 # dim_type -> ('<type>:<index>' ref kinds legal as entity_one, same for entity_two or None), read
 # off the ARGUMENT TYPES the installed SketchDimensions bindings declare. Surfaced in the refusal,
@@ -483,26 +481,22 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
 
 
 TOOL_DESCRIPTION = (
-"Add a DIMENSIONAL constraint to a sketch and optionally drive its value (sketch_constrain does "
-"the geometric half). 'entity_one'/'entity_two' are '<type>:<index>' refs from sketch_get; "
-"point:0 is ALWAYS the sketch ORIGIN. To pin a POSITION, anchor on an entity's OWN point rather "
-"than a bare 'point:N': append ':start'/':end'/':mid' or ':center', e.g. 'line:0:end'. 'value' "
-"drives it by expression; omit to keep the measured value and drive it later with param_set."
+"Add a DIMENSIONAL constraint and optionally drive its value."
 )
 
 tool = (
     Tool.create_simple(name="sketch_dimension", description=TOOL_DESCRIPTION)
     .add_input_property(*_DIM_TYPE.as_property())
     .add_required_input("dim_type")
-    .add_input_property("sketch_name", {"type": "string", "description": "Sketch to dimension (omit = most recent)."})
+    .add_input_property("sketch_name", {"type": "string"})
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
-    .add_input_property("entity_one", {"type": "string", "description": "First entity ref '<type>:<index>', optional anchor ':start/:end/:mid/:center'. A BARE ref measures from the entity's own START point; a circle or ellipse from its CENTRE."})
-    .add_input_property("entity_two", {"type": "string", "description": "Second entity ref; same anchor forms as entity_one."})
-    .add_input_property("value", {"type": "string", "description": "Driven expression (e.g. '25 mm', 'StockX/2'); omit to keep measured."})
+    .add_input_property("entity_one", {"type": "string", "description": "Bare ref = the entity's START point (circle/ellipse: CENTRE); anchor ':start'/':end'/':mid'/':center'."})
+    .add_input_property("entity_two", {"type": "string"})
+    .add_input_property("value", {"type": "string", "description": "Expression like '25 mm' or 'StockX/2'; omit to keep measured."})
     .add_input_property(*_SURFACE.as_property())
-    .add_input_property("is_driving", {"type": "boolean", "description": "false makes a DRIVEN (reference) dimension - it cannot take a 'value'. Default true."})
-    .add_input_property("tangent_side_one", {"type": "boolean", "description": "tangent_distance: the tangent side of entity_one nearer entity_two; ignored for a line or point. Default true."})
-    .add_input_property("tangent_side_two", {"type": "boolean", "description": "tangent_distance: true = the tangent side of entity_two nearer entity_one. Default true."})
+    .add_input_property("is_driving", {"type": "boolean"})
+    .add_input_property("tangent_side_one", {"type": "boolean"})
+    .add_input_property("tangent_side_two", {"type": "boolean"})
     .strict_schema()
 )
 

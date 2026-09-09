@@ -13,6 +13,8 @@ def server():
     """The REAL SimpleMCPServer with every tool registered, so the asserts bite the
     production _handle_tools_list, not a re-implementation of it."""
     mcp_server = load_mcp_server()
+    # The FULL wire: the bare-wire marker is an experiment switch, not a shape to lint.
+    mcp_server.BARE_WIRE_MARKER = mcp_server.BARE_WIRE_MARKER + ".never"
     srv = mcp_server.SimpleMCPServer()
     for item in register_all_tools():
         srv.register(item)

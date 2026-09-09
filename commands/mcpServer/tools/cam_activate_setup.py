@@ -73,12 +73,9 @@ def activate_setup_handler(setup: str = "") -> dict:
 
 _activate_tool = Tool.create_with_string_input(
     name="cam_activate_setup",
-    description=(
-        "Activate a CAM setup by name and fit the view so it's ready to capture with view_screenshot. "
-        "Use to review each setup in turn. Changes the active setup."
-    ),
+    description="Activate a CAM setup and fit the view for view_screenshot.",
     input_param_name="setup",
-    input_param_description="The setup name to activate.",
+    input_param_description="Setup name (from cam_get).",
 ).strict_schema()
 activate_setup_item = Item.create_tool_item(
     tool=_activate_tool, write="write", handler=activate_setup_handler, run_on_main_thread=True,

@@ -141,13 +141,10 @@ _LOOP_TYPE = {"all": "AllLoops", "outside": "OnlyOutsideLoops", "inside": "OnlyI
 _SIDE_TYPE = {"always_outside": "AlwaysOutsideSideType", "always_inside": "AlwaysInsideSideType",
               "start_outside": "StartOutsideSideType", "start_inside": "StartInsideSideType"}
 
-LOOP_TYPE = _inputs.Choice("loop_type", list(_LOOP_TYPE),
-                           description="face/silhouette/sketch: which loops to cut.")
-SIDE_TYPE = _inputs.Choice("side_type", list(_SIDE_TYPE),
-                           description="face/silhouette/sketch: loop cut order.")
+LOOP_TYPE = _inputs.Choice("loop_type", list(_LOOP_TYPE))
+SIDE_TYPE = _inputs.Choice("side_type", list(_SIDE_TYPE))
 SURFACE_TARGET = _inputs.Choice("surface_target", list(_SURFACE_TARGET_PARAM),
-                                description="surfaces: which surface set of the strategy the faces "
-                                            "are. Defaults to drive.")
+                                description="Defaults to drive.")
 
 # pocket_recognition search criteria -> the PocketRecognitionSelection property each sets.
 _POCKET_FILTER_LENGTHS = (("min_hole_diameter", "minimumHoleDiameter"),
@@ -161,10 +158,9 @@ _POCKET_FILTER_KEYS = ("holes",) + tuple(k for k, _ in _POCKET_FILTER_LENGTHS)
 # does not read cannot reach the schema, and every length is stated in the call's own 'units'.
 _POCKET_FILTER_PROPERTIES = dict(
     [("holes", {"type": "boolean", "description": "count holes as pockets"})]
-    + [(key, {"type": "number", "description": "in 'units'"})
-       for key, _prop in _POCKET_FILTER_LENGTHS])
+    + [(key, {"type": "number"}) for key, _prop in _POCKET_FILTER_LENGTHS])
 # The gate _apply_pocket_filter enforces, stated on the key it constrains rather than in prose.
-_POCKET_FILTER_PROPERTIES["min_hole_diameter"]["description"] += "; needs holes=true"
+_POCKET_FILTER_PROPERTIES["min_hole_diameter"]["description"] = "needs holes=true"
 
 # Which selection kind each optional knob belongs to - the property simply does not exist on the
 # other classes, so passing one is a caller error, not something to drop silently.
@@ -181,10 +177,8 @@ _KNOB_SELECTIONS = {"is_open": (_CHAIN,), "reverted": (_CHAIN,),
 # The geometry inputs the body/sketch kinds resolve through, one instance each for the schema and
 # the resolver. Both take scope_input because Fusion's own defaults make those names shared - it
 # numbers sketches per component from 1 and names every component's first body 'Body1'.
-BODIES = _inputs.BodyRefList("bodies", scope_input="component",
-                             description="silhouette/pocket_recognition: what to machine.")
-SKETCHES = _inputs.SketchRefList("sketches", scope_input="component",
-                                 description="sketch: what to machine.", required=True)
+BODIES = _inputs.BodyRefList("bodies", scope_input="component")
+SKETCHES = _inputs.SketchRefList("sketches", scope_input="component", required=True)
 
 
 # ── seams (patched in tests) ─────────────────────────────────────────────────
@@ -932,45 +926,37 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
 
 
 TOOL_DESCRIPTION = (
-    "SELECT the machining geometry on a CAM operation. 'selection' picks the family, and the family "
-    "fixes the input. EDGE 'handles': chain (Fusion walks the chain) / groove (turning groove "
-    "positions) / chamfer (turning chamfer edges). FACE 'handles': pocket / face / holes "
-    "(min/max_diameter) / surfaces (surface_target "
-    "picks the set) / thread (turning) / probe / orientation (3+2: the normals become tool axes). "
-    "'bodies': silhouette / pocket_recognition (omit for the setup's own models). 'sketches': sketch "
-    "(whole sketches, not one curve). A chain routes to the strategy's drive input (swarf rails, "
-    "deburr edges, drive curves, a 3D boundary), engaging its mode. loop_type/side_type suit "
-    "face/silhouette/sketch and pocket_filter pocket_recognition; a knob on another kind is REFUSED. "
-    "top/bottom_mode and _offset set heights. 'generate' LAUNCHES regeneration - see cam_get_status."
+    "Select the machining geometry on a CAM operation; 'selection' picks the family and fixes "
+    "which input carries it."
 )
 
 tool = (
     Tool.create_simple(name="cam_select_geometry", description=TOOL_DESCRIPTION)
-    .add_input_property("operation", {"type": "string", "description": "Operation name (cam_get(include=['operations']))."})
-    .add_input_property("selection", {"type": "string", "enum": list(_SELECTIONS),
-            "description": "The geometry family."})
-    .add_input_property("handles", {"type": "array", "items": {"type": "string"},
-            "description": "find_geometry handles; 'selection' fixes whether they must be EDGES "
-                           "or FACES."})
+    .add_input_property("operation", {"type": "string",
+            "description": "Operation name (from cam_get)."})
+    .add_input_property("selection", {"type": "string", "enum": list(_SELECTIONS)})
+    .add_input_property("handles", {"type": "array", "items": {"type": "string"}})
     .add_input_property(*BODIES.as_property())
     .add_input_property(*SKETCHES.as_property())
     .add_input_property(*_sketch_detail.component_scope("component", narrows="sketches / bodies"))
     .add_input_property("is_open", {"type": "boolean", "description": "Chain: open profile (default closed)."})
-    .add_input_property("reverted", {"type": "boolean", "description": "Chain: flip side/direction."})
+    .add_input_property("reverted", {"type": "boolean"})
     .add_input_property(*LOOP_TYPE.as_property())
     .add_input_property(*SIDE_TYPE.as_property())
     .add_input_property("pocket_filter", {"type": "object", "additionalProperties": False,
             "properties": _POCKET_FILTER_PROPERTIES,
-            "description": "pocket_recognition search criteria."})
-    .add_input_property("min_diameter", {"type": "number", "description": "holes: min cylinder dia. (in 'units'); filters the PASSED handles only, never discovers - pass every candidate face."})
-    .add_input_property("max_diameter", {"type": "number", "description": "holes: max cylinder dia. (in 'units')."})
+            "description": "Lengths in 'units'."})
+    .add_input_property("min_diameter", {"type": "number",
+            "description": "In 'units'; filters the handles passed, never discovers them."})
+    .add_input_property("max_diameter", {"type": "number", "description": "In 'units'."})
     .add_input_property(*SURFACE_TARGET.as_property())
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("top_mode", {"type": "string", "description": "top height mode, e.g. 'from stock top'."})
-    .add_input_property("top_offset", {"type": "string", "description": "top height offset, e.g. '0 mm'."})
-    .add_input_property("bottom_mode", {"type": "string", "description": "bottom height mode, e.g. 'from contour'."})
-    .add_input_property("bottom_offset", {"type": "string", "description": "bottom height offset, e.g. '-10 mm'."})
-    .add_input_property("generate", {"type": "boolean", "description": "Launch regeneration after (default true; async - read cam_get_status)."})
+    .add_input_property("top_mode", {"type": "string", "description": "e.g. 'from stock top'."})
+    .add_input_property("top_offset", {"type": "string"})
+    .add_input_property("bottom_mode", {"type": "string", "description": "e.g. 'from contour'."})
+    .add_input_property("bottom_offset", {"type": "string"})
+    .add_input_property("generate", {"type": "boolean",
+            "description": "Default true; async - read cam_get_status."})
     .strict_schema()
 )
 item = Item.create_tool_item(

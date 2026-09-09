@@ -146,7 +146,7 @@ class TestMeshGet:
         assert len(out["meshes"]) == 50
         assert out["truncated"] is True and out["count"] == 51
         promised = mo.tool.to_dict()["inputSchema"]["properties"]["max_results"]["description"]
-        assert len(out["meshes"]) == int(re.search(r"default (\d+)", promised).group(1))
+        assert len(out["meshes"]) == int(re.search(r"[Dd]efault (\d+)", promised).group(1))
 
     def test_a_zero_max_results_falls_back_to_the_default_not_the_ceiling(self):
         # The constant's SECOND use site: the 'default' argument handed to clamp_rows. The test
@@ -160,7 +160,7 @@ class TestMeshGet:
         assert len(out["meshes"]) == 50
         assert out["truncated"] is True and out["count"] == 120
         promised = mo.tool.to_dict()["inputSchema"]["properties"]["max_results"]["description"]
-        assert len(out["meshes"]) == int(re.search(r"default (\d+)", promised).group(1))
+        assert len(out["meshes"]) == int(re.search(r"[Dd]efault (\d+)", promised).group(1))
 
     def test_a_caller_cannot_lift_the_cap_past_the_ceiling(self):
         # every row crosses the wire: max_results is clamped into 1..200, so an oversized
@@ -274,15 +274,16 @@ class TestMeshMeasure:
         assert out["area"] is None
 
 
-class TestMeshGetDescription:
+class TestMeshGetNote:
 
-    def test_the_description_states_the_measured_open_mesh_volume(self):
-        # the description is the only thing an agent knows about the field before the first call,
-        # so it carries the same 0.0-vs-null split the payload note does.
-        desc = mo.tool.to_dict()["description"]
-        assert "reads 0.0 on a mesh that is not watertight" in desc
-        assert "null only when the field could not be read" in desc
-        assert "'volume' is null for a mesh that is not watertight" not in desc
+    def test_the_note_states_the_measured_open_mesh_volume(self):
+        # the note rides beside the number an agent reads, so it carries the 0.0-vs-null split the
+        # field has: 0.0 is an ANSWER (nothing enclosed), null is a field that did not read.
+        _wire(MakeComp("Comp", mesh_bodies=[MeshBody("Open", is_closed=False, volume=0.0)]))
+        note = payload(mo.handler(target=""))["note"]
+        assert "reads 0.0 on a mesh that is not watertight" in note
+        assert "could not be read at all" in note
+        assert "'volume' is null for a mesh that is not watertight" not in note
 
 
 class TestAreaVolumeSignal:

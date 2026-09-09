@@ -124,8 +124,10 @@ class TestViewsSlice:
         assert "ALL a view exposes" not in note and "ONLY its type" not in note
 
     def test_the_description_does_not_claim_type_is_all_a_view_exposes(self):
+        # the viewCurves fact now rides on the note (test_the_note_says_what_a_view_carries_beyond
+        # _its_type), so what the description must not do is make the opposite claim
         assert "ALL a view exposes" not in dg.TOOL_DESCRIPTION
-        assert "viewCurves" in dg.TOOL_DESCRIPTION
+        assert "ONLY its type" not in dg.TOOL_DESCRIPTION
 
     def test_the_view_walk_is_capped_and_says_so(self, install):
         base, _ = self._typed()

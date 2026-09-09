@@ -225,10 +225,7 @@ def handler(target: str = "", material: str = "") -> dict:
 
 
 _DESC = (
-"Assign a PHYSICAL material (density-bearing) to a body (BRep or MESH), occurrence, component, or "
-"the whole design (empty target), so model_inspect's mass is trustworthy - an unassigned MESH "
-"silently carries default steel density. This is NOT color; appearance_set does cosmetic color. "
-"'material' is matched by EXACT name across the document and every loaded material library.\n"
+"Assign a PHYSICAL (density-bearing) material; appearance_set does color.\n"
 + _outputs.produces_block(RETURNS)
 )
 
@@ -236,7 +233,7 @@ tool = (
     Tool.create_simple(name="model_set_material", description=_DESC)
     .add_input_property(*_TARGET.as_property())
     .add_input_property("material", {"type": "string",
-            "description": "Physical material name, e.g. 'Steel', 'Aluminum 6061', 'ABS Plastic'."})
+            "description": "e.g. 'Steel', 'Aluminum 6061'."})
     .strict_schema()
 )
 item = Item.create_tool_item(

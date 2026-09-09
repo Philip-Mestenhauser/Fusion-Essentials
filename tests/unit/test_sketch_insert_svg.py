@@ -269,20 +269,17 @@ class TestMeasuredExtent:
         _wire(sketch, _importer([]))          # the fake sketch carries no boundingBox
         assert payload(mod.handler(file_path=svg))["sketch_extent"] is None
 
-    def test_the_description_states_the_measured_unit_convention(self, mod):
-        # the one fact a caller cannot recover after the call: the file's own size is ignored.
-        assert "IGNORED" in mod.TOOL_DESCRIPTION
-        assert "1/96 inch" in mod.TOOL_DESCRIPTION and "3.7795" in mod.TOOL_DESCRIPTION
+    def test_the_scale_input_states_the_measured_unit_convention(self, mod):
+        # the one fact a caller cannot recover before the call: the file's own size is ignored and
+        # a user unit lands as 1/96 inch, so 'scale' is what sizes the art.
+        desc = mod.tool.to_dict()["inputSchema"]["properties"]["scale"]["description"]
+        assert "1/96 inch" in desc
 
-    def test_the_description_states_where_the_art_lands(self, mod):
+    def test_the_y_input_states_where_the_art_lands(self, mod):
         # the other half of the same convention: SVG y points DOWN, so art anchored at y=0 hangs
-        # into NEGATIVE sketch y. A caller who does not know reads the negative extent as a bug.
-        assert "NEGATIVE sketch y" in mod.TOOL_DESCRIPTION
-        assert "-height" in mod.TOOL_DESCRIPTION
-
-    def test_the_description_names_the_other_svg_entry_point(self, mod):
-        # two tools import SVG; this one is the one with an offset and a scale to pass
-        assert "doc_insert_import imports svg as well" in mod.TOOL_DESCRIPTION
+        # into negative sketch y. A caller who does not know reads the negative extent as a bug.
+        desc = mod.tool.to_dict()["inputSchema"]["properties"]["y"]["description"]
+        assert "DOWN" in desc
 
     def test_every_declared_output_is_in_the_payload(self, mod, sketch, svg):
         _wire(sketch, _importer([], bbox=_LANDED))

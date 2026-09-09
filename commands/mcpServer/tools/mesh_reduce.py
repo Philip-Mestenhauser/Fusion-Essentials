@@ -20,11 +20,10 @@ from ._design_common import run_in_base_feature
 
 app = adsk.core.Application.get()
 
-_REDUCE_MESH = _inputs.MeshBodyRef("mesh", required=True, description="The mesh body to decimate.")
+_REDUCE_MESH = _inputs.MeshBodyRef("mesh", required=True)
 _REDUCE_TARGET = _inputs.Choice("target", ["proportion", "face_count", "max_deviation"],
                                 default="proportion", description="What 'value' means.")
-_REDUCE_METHOD = _inputs.Choice("method", ["adaptive", "uniform"], default="adaptive",
-                                description="Reduction method.")
+_REDUCE_METHOD = _inputs.Choice("method", ["adaptive", "uniform"], default="adaptive")
 _REDUCE_UNITS = _inputs.UnitField()
 
 
@@ -163,7 +162,7 @@ tool = (
     _inputs.apply_to_tool(
         Tool.create_simple(name="mesh_reduce", description=TOOL_DESCRIPTION),
         _REDUCE_SPEC)
-    .add_input_property("value", {"type": "number", "description": "Percent (0,100] for proportion; a positive integer for face_count; a positive length (in 'units') for max_deviation."})
+    .add_input_property("value", {"type": "number", "description": "A percent, a face count, or a length in 'units' - as 'target' selects."})
     .add_required_input("value")
     .strict_schema()
 )

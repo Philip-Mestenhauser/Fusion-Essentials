@@ -19,10 +19,8 @@ from ._surface_common import _body_names_and_solid
 
 app = adsk.core.Application.get()
 
-_SURFACE = _inputs.SurfaceBodyRef("surface", required=True,
-    description="The OPEN surface body to trim (validated isSolid == false).")
-_TRIM_TOOL = _inputs.GeometryHandle("trim_tool", require="face", required=True,
-    description="A face / patch body that intersects the surface and divides it.")
+_SURFACE = _inputs.SurfaceBodyRef("surface", required=True)
+_TRIM_TOOL = _inputs.GeometryHandle("trim_tool", require="face", required=True)
 
 
 def _abort(trim_input):
@@ -197,15 +195,14 @@ def handler(surface=None, trim_tool=None, keep=None) -> dict:
 
 
 TOOL_DESCRIPTION = (
-"Trim an OPEN surface body against a tool that intersects and divides it - the unwanted cell(s) "
-"are removed."
+"Trim an open surface body; the cell(s) not kept are removed."
 )
 tool = (
     Tool.create_simple(name="surface_trim", description=TOOL_DESCRIPTION)
     .add_input_property("surface", _SURFACE.schema())
     .add_input_property("trim_tool", _TRIM_TOOL.schema())
     .add_input_property("keep", {"type": ["string", "array"],
-            "description": "Which resulting cell(s) to keep (default the larger remainder)."})
+            "description": "'larger' (default), 'smaller', or cell index number(s)."})
     .add_required_input("surface")
     .add_required_input("trim_tool")
     .strict_schema()

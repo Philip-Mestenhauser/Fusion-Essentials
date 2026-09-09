@@ -25,16 +25,10 @@ app = adsk.core.Application.get()
 
 # BodyRefList(kind="mesh") kind-checks EVERY element before returning, so a BRep handle in the list
 # fails the call before any mutation - what createInput(target, list[MeshBody]) needs.
-_TARGET = _inputs.MeshBodyRef("target", required=True,
-                              description="The MESH body kept/modified (the result lands here).")
-_TOOLS = _inputs.BodyRefList("tools", kind="mesh", required=True,
-                             description="The MESH bodies combined INTO the target.")
-_OPERATION = _inputs.Choice("operation", ["join", "cut", "intersect", "merge"], default="join",
-                            description="join combines by enclosing volumes; cut removes the tools' "
-                            "overlap; intersect keeps only the shared volume; merge combines "
-                            "without altering faces.")
-_ALGORITHM = _inputs.Choice("algorithm", ["legacy", "enhanced"], default="enhanced",
-                            description="'enhanced' yields fewer triangles.")
+_TARGET = _inputs.MeshBodyRef("target", required=True)
+_TOOLS = _inputs.BodyRefList("tools", kind="mesh", required=True)
+_OPERATION = _inputs.Choice("operation", ["join", "cut", "intersect", "merge"], default="join")
+_ALGORITHM = _inputs.Choice("algorithm", ["legacy", "enhanced"], default="enhanced")
 
 _SPEC = [_TARGET, _TOOLS, _OPERATION, _ALGORITHM]
 
@@ -270,7 +264,8 @@ def handler(target: str = "", tools=None, operation: str = "join",
 
 
 TOOL_DESCRIPTION = (
-    "Boolean-combine MESH bodies - the mesh analogue of model_combine, which only sees BRep solids."
+    "Boolean-combine MESH bodies: 'tools' into 'target', the body that survives; model_combine "
+    "sees only BRep solids."
 )
 
 mesh_combine_tool = _inputs.apply_to_tool(

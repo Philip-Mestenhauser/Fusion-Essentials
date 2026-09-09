@@ -110,17 +110,14 @@ def handler(occurrence: str = "") -> dict:
 
 
 _DESC = (
-"Delete one component occurrence from the active design (e.g. a stray/duplicate from a botched "
-"pattern). The result names any joints the delete removed; if it was the last instance of its "
-"component, the component goes too. Undo in Fusion if unintended."
+"Delete one component occurrence; if it was the last instance of its component, the component "
+"goes too."
 )
 
 tool = (
     Tool.create_simple(name="design_delete_occurrence", description=_DESC)
     .add_input_property("occurrence", {"type": "string",
-            "description": "Occurrence to delete: a 'handle' (the entityToken from "
-            "design_get(include=['tree'], tree_handles=true) - the exact identity) or a "
-            "fullPathName/name (refused when several instances answer to it)."})
+            "description": "An occurrence 'handle' (design_get tree) or fullPathName/name."})
     .strict_schema()
 )
 item = Item.create_tool_item(

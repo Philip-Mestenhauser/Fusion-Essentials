@@ -41,7 +41,6 @@ _TARGET = _inputs.OccurrenceRefList("target",
 # hide/show also reach single BODIES, which occurrence-granular visibility cannot; isolate stays
 # occurrence-only. with_kinds so the handler branches occurrence-vs-body.
 _VIS_TARGET = _inputs.TargetRefList("target", with_kinds=True,
-        description="Target(s) to isolate/show/hide.",
         contract=("A list of occurrences (handle/fullPathName/name) and/or - hide/show only - bodies "
                   "(find_geometry 'handle' or body name); ambiguous names are refused."))
 _FOCUS = _inputs.OccurrenceRef("focus",
@@ -984,40 +983,30 @@ def handler(action: str = "", target=None, orientation: str = "", focus: str = "
 
 
 TOOL_DESCRIPTION = (
-    "View-state verbs to inspect the model from different angles, then restore - no geometry "
-    "changes. 'snapshot' saves camera+style+all visibility and 'restore' puts them back - "
-    "in-memory, cleared on reload, covering the display folders too. 'show' also lights the "
-    "target's ancestors. 'display' toggles the NON-BODY folders design-wide. "
-    "A Named View ('save_view'/'apply_view'/'list_views') stores the camera only. Pair with "
-    "view_screenshot; for section views use view_section (a named view won't restore a cut)."
+    "View-state verbs: aim the camera, isolate/show/hide, set the visual style, toggle the "
+    "non-body display folders, snapshot and restore - no geometry changes."
 )
 
 tool = (
     Tool.create_simple(name="view_set", description=TOOL_DESCRIPTION)
-    .add_input_property(*_inputs.Choice("action", _ACTIONS, required=True,
-            description="The view verb to perform.").as_property())
+    .add_input_property(*_inputs.Choice("action", _ACTIONS, required=True).as_property())
     .add_required_input("action")
     .add_input_property(*_VIS_TARGET.as_property())
     .add_input_property("view_name", {"type": "string",
-            "description": "Name for save_view / apply_view."})
+            "description": "For save_view / apply_view."})
     .add_input_property(*_inputs.Choice("orientation", list(_ORIENTATIONS),
-            description="Camera preset for 'orient'.").as_property())
+            description="For 'orient'.").as_property())
     .add_input_property("focus", {"type": ["string", "array"], "items": {"type": "string"},
-            "description": "Occurrence or sketch name to frame the view on (orient); a LIST frames "
-                           "their union."})
-    .add_input_property(*_inputs.Choice("projection", list(_PROJECTIONS),
-            description="Camera projection for 'orient'.").as_property())
-    .add_input_property("perspective_angle_deg", {"type": "number",
-            "description": "Field-of-view angle in degrees for a perspective 'orient'."})
+            "description": "Occurrence or sketch to frame on; a list frames their union."})
+    .add_input_property(*_inputs.Choice("projection", list(_PROJECTIONS)).as_property())
+    .add_input_property("perspective_angle_deg", {"type": "number"})
     .add_input_property(*_inputs.Choice("style", list(_STYLES),
-            description="Visual style for 'style'.").as_property())
-    .add_input_property("fit", {"type": "boolean",
-            "description": "Fit when orienting (default true) - frames 'focus' if given, else all."})
+            description="For 'style'.").as_property())
+    .add_input_property("fit", {"type": "boolean", "description": "Default true."})
     .add_input_property("categories", {"type": "array",
             "items": {"type": "string", "enum": ["sketches", "construction", "origins", "joints"]},
-            "description": "Display folders for action='display' (omit = all four)."})
-    .add_input_property("visible", {"type": "boolean",
-            "description": "Show (true) or hide (false) the chosen categories."})
+            "description": "For 'display'; omit = all of them."})
+    .add_input_property("visible", {"type": "boolean"})
     .strict_schema()
 )
 

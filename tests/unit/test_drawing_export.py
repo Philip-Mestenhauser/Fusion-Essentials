@@ -512,15 +512,19 @@ class TestTheDescriptionAsksForNoHumanStep:
 
     def test_it_names_doc_open_as_the_route(self):
         desc = self._description()
-        assert "doc_open opens it by file_id" in desc
-        assert "no Fusion UI step first" in desc
+        assert "doc_open by file_id" in desc
+        # no human step is asked for: the UI is not on the wire at all
+        assert "Fusion UI" not in desc
 
     def test_it_makes_no_never_reviewed_blocking_claim(self):
         desc = self._description()
         assert "never-reviewed" not in desc
         assert "reviewed drawing" not in desc
-        # the tool still does not open anything - that is a scope fact, not a review fact
-        assert "does not open a drawing by id" in desc
+
+    def test_it_takes_no_drawing_id(self):
+        # the tool still does not open anything - a scope fact the schema itself carries
+        props = de.tool.to_dict()["inputSchema"]["properties"]
+        assert "file_id" not in props and "drawing" not in props
 
 
 class TestSheetRangeCarriesTheWedgeFact:

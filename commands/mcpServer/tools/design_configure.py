@@ -22,8 +22,7 @@ from . import _inputs
 
 app = adsk.core.Application.get()
 
-_BODY = _inputs.BodyRef("body",
-        description="Body whose visibility, appearance or material varies per configuration.")
+_BODY = _inputs.BodyRef("body")
 
 
 def _find_row(table, target):
@@ -769,36 +768,34 @@ def handler(action: str = "", name: str = "", new_name: str = "", parameter: str
 
 
 TOOL_DESCRIPTION = (
-    "BUILD or SWITCH a Configured Design: 'action' picks the verb - convert the design ('create'), "
-    "add or rename a configuration, switch to one ('activate'), or add a column that varies a "
-    "parameter, a feature suppress, a body visibility, an appearance, a material or a nested part "
-    "insert across them. Read the table back with design_get(include=['configurations'])."
+    "Build or switch a Configured Design; 'action' picks the verb. Read the table back with "
+    "design_get(include=['configurations'])."
 )
 
 tool = (
     Tool.create_simple(name="design_configure", description=TOOL_DESCRIPTION)
-    .add_input_property("action", {"type": "string", "enum": list(_ACTIONS),
-            "description": "Which configuration operation to perform."})
-    .add_input_property("name", {"type": "string", "description": "Configuration name; for rename_configuration, the existing one."})
-    .add_input_property("new_name", {"type": "string", "description": "New name for rename_configuration."})
-    .add_input_property("parameter", {"type": "string", "description": "Model parameter name (add_parameter)."})
-    .add_input_property("feature", {"type": "string", "description": "Timeline feature name (add_suppress)."})
+    .add_input_property("action", {"type": "string", "enum": list(_ACTIONS)})
+    .add_input_property("name", {"type": "string",
+            "description": "The configuration (rename_configuration: the existing one)."})
+    .add_input_property("new_name", {"type": "string"})
+    .add_input_property("parameter", {"type": "string"})
+    .add_input_property("feature", {"type": "string"})
     .add_input_property(*_BODY.as_property())
-    .add_input_property("values", {"type": "object", "description": "{config_name: expression} (add_parameter)."})
+    .add_input_property("values", {"type": "object", "description": "{config: expression} (add_parameter)."})
     .add_input_property("suppressed_in", {"type": "array", "items": {"type": "string"},
-            "description": "Configurations to suppress the feature in (add_suppress)."})
+            "description": "Which configurations (add_suppress)."})
     .add_input_property("hidden_in", {"type": "array", "items": {"type": "string"},
-            "description": "Configurations to hide the body in (add_visibility)."})
+            "description": "Which configurations (add_visibility)."})
     .add_input_property("appearances", {"type": "object",
-            "description": "{config_name: appearance_name} (set_appearance)."})
+            "description": "{config: appearance} (set_appearance)."})
     .add_input_property("materials", {"type": "object",
-            "description": "{config_name: material_name}, each already in the design (add_material)."})
+            "description": "{config: material} (add_material)."})
     .add_input_property("insert_part", {"type": "string",
-            "description": "Configured part to insert: lineage urn or its name in the active project (add_insert)."})
+            "description": "Lineage urn or project name (add_insert)."})
     .add_input_property("insert_config", {"type": "string",
-            "description": "Which part configuration to physically insert; defaults to the part's first (add_insert)."})
+            "description": "add_insert; default the part's first."})
     .add_input_property("insert_map", {"type": "object",
-            "description": "{assembly_config: part_config} - nested config mapping (add_insert)."})
+            "description": "{assembly_config: part_config} (add_insert)."})
     .strict_schema()
 )
 # enforce_timeout=False: add_insert's addFromConfiguration is a blocking, uninterruptible

@@ -623,23 +623,20 @@ def _session_projection(active, max_results):
 
 
 TOOL_DESCRIPTION = (
-    "Read the SESSION's documents in one call: the ACTIVE document and every open one, with save "
-    "state and lineage URNs. app.documents is a SUPERSET of visible tabs. In-memory; for the CLOUD "
-    "data model use data_get. include=[...] adds cloud slices: 'versions' (with milestones), "
-    "'xref_tree' (freshness of referenced components, derive links, and refs that will not load), "
-    "'used_in' (documents that reference THIS one). Roll a version back with doc_restore_version.\n"
+    "Read the SESSION's open documents: which is active, save state, lineage URNs. include=[...] "
+    "adds cloud slices; the cloud data model itself is data_get.\n"
     + _outputs.produces_block(RETURNS)
 )
 
 tool = (
     Tool.create_simple(name="doc_get", description=TOOL_DESCRIPTION)
-    .add_input_property("max_results", {"type": "integer", "description": f"Cap on 'open_documents' (default {_OPEN_DOCS_CAP})."})
+    .add_input_property("max_results", {"type": "integer", "description": f"Default {_OPEN_DOCS_CAP}."})
     .add_input_property("include", {"type": "array", "items": {"type": "string", "enum": ["versions", "xref_tree", "used_in", "default"]},
-            "description": "Cloud slices to add; 'default' keeps the session list beside them."})
-    .add_input_property("versions_max", {"type": "integer", "description": f"Cap on the 'versions' list (default {_VERSIONS_CAP})."})
-    .add_input_property("xref_max", {"type": "integer", "description": f"Cap on the 'xref_tree' references walked (default {_XREF_CAP})."})
-    .add_input_property("max_depth", {"type": "integer", "description": "Max assembly depth for the 'xref_tree' walk."})
-    .add_input_property("used_in_max", {"type": "integer", "description": f"Cap on the 'used_in' list (default {_USED_IN_CAP})."})
+            "description": "'default' keeps the session list too."})
+    .add_input_property("versions_max", {"type": "integer"})
+    .add_input_property("xref_max", {"type": "integer"})
+    .add_input_property("max_depth", {"type": "integer", "description": "'xref_tree' walk depth."})
+    .add_input_property("used_in_max", {"type": "integer"})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

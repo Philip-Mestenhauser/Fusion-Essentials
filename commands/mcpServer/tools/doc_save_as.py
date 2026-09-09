@@ -258,12 +258,8 @@ def handler(name: str = "", project: str = "", project_id: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Save the ACTIVE Fusion document into a project/folder under 'name' (Document.saveAs) - "
-    "including a design NEVER saved before, unlike data_upload_file (a LOCAL file) or "
-    "doc_copy (a SAVED cloud file). 'folder' may be nested; create_path=true makes missing "
-    "folders. A same-name file there is REFUSED unless allow_duplicate_name=true. A large "
-    "assembly's saveAs can outlive a client timeout while still SUCCEEDING - verify with "
-    "doc_get before retrying, since a retry forks a duplicate."
+    "Save the ACTIVE document into a cloud project/folder under 'name' - including a design never "
+    "saved before."
 )
 
 tool = (
@@ -271,18 +267,17 @@ tool = (
         name="doc_save_as",
         description=TOOL_DESCRIPTION,
         input_param_name="name",
-        input_param_description="Name to save the active document as.",
+        input_param_description="Name for the saved document.",
     )
     .add_input_property("project", {"type": "string", "description": "Destination project name."})
-    .add_input_property("project_id", {"type": "string", "description": "Destination project id (alt to name)."})
+    .add_input_property("project_id", {"type": "string"})
     .add_input_property("folder", {"type": "string",
-        "description": "Destination folder path (e.g. 'Parts/WidgetA')."})
+        "description": "Destination folder path, e.g. 'Parts/WidgetA'."})
     .add_input_property("create_path", {"type": "boolean",
-        "description": "Create missing destination folders (default false)."})
-    .add_input_property("description", {"type": "string",
-        "description": "Version description for the save."})
+        "description": "Create missing folders. Default false."})
+    .add_input_property("description", {"type": "string"})
     .add_input_property("allow_duplicate_name", {"type": "boolean",
-        "description": "Permit a same-name fork in the target folder (default false = refuse)."})
+        "description": "Default false."})
     .strict_schema()
 )
 # enforce_timeout=False: saveAs is a blocking, uninterruptible main-thread cloud write that COMMITS,

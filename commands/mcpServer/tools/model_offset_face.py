@@ -27,10 +27,8 @@ RETURNS = [
                          absent_when="no_timeline_feature"),
 ]
 
-_FACES = _inputs.GeometryHandleList("faces", require="face", required=True,
-    description="The faces to push/pull (from find_geometry).")
-_DISTANCE = _inputs.Distance("distance", allow_zero=False, required=True,
-    description="Offset along each face's normal, positive outward / negative inward.")
+_FACES = _inputs.GeometryHandleList("faces", require="face", required=True)
+_DISTANCE = _inputs.Distance("distance", allow_zero=False, required=True)
 
 app = adsk.core.Application.get()
 
@@ -116,9 +114,7 @@ def handler(faces=None, distance: float = 0.0, units: str = "mm") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Push or pull faces along their normal by a signed distance, without redrawing the sketch that "
-    "created them: positive extends outward (adds material), negative pushes inward. The 'faces' "
-    "need not be on one body.\n"
+    "Push faces along the normal; positive adds material.\n"
     + _outputs.produces_block(RETURNS)
 )
 

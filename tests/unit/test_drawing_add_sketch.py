@@ -303,9 +303,15 @@ class TestCoordinateUnit:
 
 
 class TestToolDescription:
-    def test_the_description_keys_coordinates_to_the_standard(self):
-        # the description is all an agent has before the first call, so it carries the rule that
-        # decides whether a 100 lands as 100 mm or as 2540 mm.
-        desc = dw.tool.to_dict()["description"]
-        assert "STANDARD fixes" in desc and "mm under ISO, in under ASME" in desc
-        assert "reported as coordinate_unit" in desc
+    def test_the_geometry_input_keys_coordinates_to_the_standard(self):
+        # the wire is all an agent has before the first call, so the input carrying the numbers
+        # states the rule that decides whether a 100 lands as 100 mm or as 2540 mm.
+        desc = dw.tool.to_dict()["inputSchema"]["properties"]["geometry"]["description"]
+        assert "mm under ISO, in under ASME" in desc
+        assert "coordinate_unit" in desc
+
+    def test_an_arity_refusal_names_what_the_points_mean(self):
+        # the per-kind point FORM is the claim the description no longer carries: an arc's three
+        # points are not interchangeable, so the refusal an undercount meets spells them out
+        message = dw._plan([{"kind": "arc", "points": [[0, 0], [1, 1]]}])[2]
+        assert "start, a point on it, end" in message and "Got 2" in message

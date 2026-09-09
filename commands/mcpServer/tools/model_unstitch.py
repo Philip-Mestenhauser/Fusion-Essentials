@@ -19,10 +19,9 @@ from ._surface_common import _result_body_report
 app = adsk.core.Application.get()
 
 # a whole body (BodyRef any) OR specific faces (GeometryHandleList).
-_UNSTITCH_BODY = _inputs.BodyRef("target", kind="any", required=False,
-    description="A whole body to explode.")
+_UNSTITCH_BODY = _inputs.BodyRef("target", kind="any", required=False)
 _UNSTITCH_FACES = _inputs.GeometryHandleList("faces", require="face", required=False,
-    description="Faces to peel off instead of a whole body.")
+    description="Peeled off instead of a whole body.")
 
 
 def handler(target="", faces=None, chain=True) -> dict:
@@ -102,8 +101,7 @@ def handler(target="", faces=None, chain=True) -> dict:
 
 
 TOOL_DESCRIPTION = (
-"Explode a body (or specific 'faces') into per-face SURFACE bodies - the inverse of model_stitch. "
-"Edit a face, then model_stitch to re-close."
+"Explode a body into per-face surface bodies - the inverse of model_stitch."
 )
 
 tool = (
@@ -111,7 +109,7 @@ tool = (
     .add_input_property("target", _UNSTITCH_BODY.schema())
     .add_input_property("faces", _UNSTITCH_FACES.schema())
     .add_input_property("chain", {"type": "boolean",
-            "description": "Include connected/adjacent faces (isChainSelection; default true)."})
+            "description": "Include adjacent faces (default true)."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,

@@ -113,9 +113,11 @@ class ReturnsVerdict(OutputKind):
         return ""
 
 
-def produces_block(spec, header="PRODUCES") -> str:
-    """A tool's RETURNS spec as a description block, one line per declared output."""
-    lines = [f"{header}:"]
+def produces_block(spec, header="Produces") -> str:
+    """A tool's RETURNS spec as one description line: each output key and the tools that consume
+    it - the label and the omitted-when clause stay in the payload, where they are read."""
+    parts = []
     for out in spec:
-        lines.append(f"- {out.produces_note()}")
-    return "\n".join(lines)
+        who = (" -> " + "/".join(out.consumers)) if out.consumers else ""
+        parts.append(f"{out.key}{who}")
+    return f"{header}: " + ", ".join(parts) + "."

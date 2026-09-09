@@ -25,9 +25,9 @@ _ACTIONS = ("add", "copy", "delete", "rename", "set_size", "set_orientation", "t
 _ACTION = _inputs.Choice("action", list(_ACTIONS), required=True,
                          description="The sheet operation to perform.")
 _SHEET_SIZE = _inputs.Choice("sheet_size", list(SHEET_SIZE_MAP),
-                             description="Preset sheet size (set_size).")
+                             description="For set_size.")
 _ORIENTATION = _inputs.Choice("orientation", ["landscape", "portrait"],
-                              description="Sheet orientation (set_orientation).")
+                              description="For set_orientation.")
 # The shared decoders/records live in _drawing_common (drawing_get reads through the same ones,
 # so a write's read-back and the read tool can never disagree about a sheet's facts).
 _ORIENTATION_MEMBERS = _drawing_common.ORIENTATION_MEMBERS
@@ -340,21 +340,16 @@ def handler(action: str = "", sheet: str = "", new_name: str = "", sheet_size: s
 
 TOOL_DESCRIPTION = (
     "Manage the active 2D drawing's sheets - add, copy, delete, rename, set_size, set_orientation, "
-    "or tidy_up (lay a sheet's views out again). An ADDED sheet inherits the ACTIVE sheet's size "
-    "and orientation, a COPY the SOURCE sheet's; either way the new sheet becomes active, which is "
-    "the only way a sheet becomes active. Sheet width and height are read-only, follow the size, "
-    "and are millimetres on EVERY drawing (width_height_unit); sheet_units reports the drawing's "
-    "dimension display unit, which is not theirs. Acts on whichever drawing is the active "
-    "document; drawing_export is the only way to see a sheet (a drawing has no viewport)."
+    "or tidy_up (lay a sheet's views out again)."
 )
 
 tool = (
     Tool.create_simple(name="drawing_edit_sheet", description=TOOL_DESCRIPTION)
     .add_input_property(*_ACTION.as_property())
     .add_input_property("sheet", {"type": "string",
-            "description": "Sheet to act on by name. Omit for the drawing's active sheet."})
+            "description": "By name; omit for the active sheet."})
     .add_input_property("new_name", {"type": "string",
-            "description": "Name for the new sheet (add / copy) or the new name (rename)."})
+            "description": "For add, copy or rename."})
     .add_input_property(*_SHEET_SIZE.as_property())
     .add_input_property(*_ORIENTATION.as_property())
     .strict_schema()

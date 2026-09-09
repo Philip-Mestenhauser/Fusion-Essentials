@@ -112,26 +112,23 @@ def handler(sketch_name: str = "", units: str = "mm",
 
 
 TOOL_DESCRIPTION = (
-    "Draw a line in 3D on a sketch, where the END point may be OFF the sketch plane (z != 0): "
-    "z is measured along the sketch's LOCAL normal, not world Z (sketch_add_geometry stays on "
-    "the x-y plane). The start defaults to the origin. Reports each endpoint's resolved "
-    "coordinates and whether the end is off-plane."
+    "Draw a sketch line whose end may sit OFF the sketch plane: x/y/z are in 'units', z along the "
+    "sketch's own normal. The start defaults to the origin."
 )
 tool = (
     Tool.create_simple(name="sketch_add_3d_line", description=TOOL_DESCRIPTION)
-    .add_input_property("sketch_name", {"type": "string", "description": "Sketch to draw on (default: most recent)."})
+    .add_input_property("sketch_name", {"type": "string", "description": "Default: most recent sketch."})
     .add_input_property(*COMPONENT_SCOPE)
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("x1", {"type": "number", "description": "Start X (default 0)."})
-    .add_input_property("y1", {"type": "number", "description": "Start Y (default 0)."})
-    .add_input_property("z1", {"type": "number", "description": "Start Z (default 0 = on plane)."})
-    .add_input_property("x2", {"type": "number", "description": "End X (required)."})
-    .add_input_property("y2", {"type": "number", "description": "End Y (required)."})
-    .add_input_property("z2", {"type": "number", "description": "End Z (required; non-zero = off-plane)."})
-    .add_input_property("coincident_start_to_origin", {"type": "boolean",
-            "description": "Lock the start point to the sketch origin with a coincident constraint (default false)."})
+    .add_input_property("x1", {"type": "number"})
+    .add_input_property("y1", {"type": "number"})
+    .add_input_property("z1", {"type": "number"})
+    .add_input_property("x2", {"type": "number"})
+    .add_input_property("y2", {"type": "number"})
+    .add_input_property("z2", {"type": "number"})
+    .add_input_property("coincident_start_to_origin", {"type": "boolean"})
     .add_input_property("is_construction", {"type": "boolean",
-            "description": "Draw as CONSTRUCTION geometry (reference, not a profile edge). Default false."})
+            "description": "Reference geometry, not a profile edge."})
     .strict_schema()
 )
 item = Item.create_tool_item(

@@ -764,15 +764,8 @@ def handler() -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "GETTING STARTED / where am I: cold-boot orientation - call FIRST on an open document for one cheap "
-    "situational read instead of fishing across tool families. (New to this server? Start with "
-    "sys_capability_map for the tool families, then this.) Returns the document + its data-model "
-    "location (hub/project/folder + "
-    "URN), overall bounding box, camera state, current selection, content counts + a depth-1 browser "
-    "digest, a health rollup (timeline errors, broken joints, out-of-date AND unresolved references -> "
-    "is_healthy), CAM "
-    "presence, and a 'pointers' block naming the targeted tool to refine each area (design_get(include=['tree']), "
-    "find_geometry, assembly_get, cam_get). Orient here, then drill down with those scoped calls."
+    "Getting started on an open document - the first read: what it is, where it lives, its contents "
+    "and health, CAM state, and pointers to the tool that drills each area."
 )
 
 tool = Tool.create_simple(name="workspace_orient", description=TOOL_DESCRIPTION).strict_schema()

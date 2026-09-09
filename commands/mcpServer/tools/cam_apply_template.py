@@ -22,8 +22,7 @@ _GEN_MODES = {
 "skip": "SkipGeneration",            # default: create ops, don't generate toolpaths
 "generate": "ForceGeneration",       # create AND generate the toolpaths
 }
-_GEN = _inputs.Choice("generate", options=list(_GEN_MODES), default="skip",
-                      description="Toolpath generation after the operations are created.")
+_GEN = _inputs.Choice("generate", options=list(_GEN_MODES), default="skip")
 
 
 def _setup_op_nodes(setup_obj) -> list:
@@ -225,13 +224,9 @@ def handler(setup: str = "", template_url: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Apply a CAM toolpath template to a setup, recreating the template's operations "
-    "in that setup. Identify the template by 'template_url' or 'template_name' "
-    "(cam_get(include=['templates']) lists both). Returns the operations the setup gained "
-    "with the tool each reads back; 'ready' is false while any of them carries none. "
-    "Note: with generate='generate' a large template can exceed the 30s call "
-    "limit and return a timeout even though the work is still running - do NOT blindly "
-    "retry; verify with cam_get(include=['operations']) / view_screenshot first."
+    "Apply a CAM toolpath template to a setup, recreating its operations there. "
+    "cam_get(include=['templates']) lists the templates; generate='generate' can time out while "
+    "the work still runs."
 )
 
 tool = (
@@ -239,10 +234,10 @@ tool = (
         name="cam_apply_template",
         description=TOOL_DESCRIPTION,
         input_param_name="setup",
-        input_param_description="Name of the setup to apply the template to.",
+        input_param_description="Setup name (from cam_get).",
     )
-    .add_input_property("template_url", {"type": "string", "description": "Template asset URL (from cam_get(include=['templates'])."})
-    .add_input_property("template_name", {"type": "string", "description": "Template name (searched under location)."})
+    .add_input_property("template_url", {"type": "string"})
+    .add_input_property("template_name", {"type": "string"})
     .add_input_property(*_LOCATION.as_property())
     .add_input_property(*_GEN.as_property())
     .strict_schema()

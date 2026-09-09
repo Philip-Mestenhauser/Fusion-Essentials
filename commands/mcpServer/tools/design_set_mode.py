@@ -72,19 +72,16 @@ def handler(target: str = "", confirm_history_loss: bool = False) -> dict:
     })
 
 
-TOOL_DESCRIPTION = ("Convert the active design between parametric and direct modeling. "
-            "Parametric->Direct destroys the timeline and all design history, and refuses "
-            "without confirm_history_loss=true. Re-run design_get(include=['mode']) afterwards.")
+TOOL_DESCRIPTION = ("Convert the active design between parametric and direct modeling; going "
+            "direct destroys the timeline and all design history.")
 
 tool = (
     Tool.create_simple(
         name="design_set_mode",
         description=TOOL_DESCRIPTION)
-    .add_input_property("target", {"type": "string", "enum": list(_TARGETS),
-            "description": "The modelling mode to convert the design to."})
+    .add_input_property("target", {"type": "string", "enum": list(_TARGETS)})
     .add_input_property("confirm_history_loss", {"type": "boolean",
-            "description": "Required true to go parametric->direct "
-            "(discards the timeline). Ignored otherwise."})
+            "description": "Required to go parametric->direct."})
     .add_required_input("target")
     .strict_schema()
 )

@@ -26,12 +26,10 @@ RETURNS = [
                          absent_when="no_timeline_feature"),
 ]
 
-_FACES = _inputs.GeometryHandleList("faces", require="face", required=True,
-    description="The faces to replace - all on ONE body.")
+_FACES = _inputs.GeometryHandleList("faces", require="face", required=True)
 # createInput takes a single Base target and accepts both a face and a body; the platform decides
 # which of them it will compute with.
-_TARGET = _inputs.TargetRef("target", required=True, allow=("body", "face"),
-    description="The replacement OPEN surface: a surface body, or a face on one.")
+_TARGET = _inputs.TargetRef("target", required=True, allow=("body", "face"))
 
 app = adsk.core.Application.get()
 
@@ -154,9 +152,7 @@ def handler(faces=None, target=None, tangent_chain: bool = True) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Replace face(s) of a body with a different surface - re-cut the boundary without redrawing the "
-    "feature that made it. 'faces' must be on ONE body; the platform refuses a solid-derived "
-    "'target', so build the surface with surface_patch / surface_extrude.\n"
+    "Replace body faces with an open surface (see surface_patch).\n"
     + _outputs.produces_block(RETURNS)
 )
 
@@ -164,8 +160,7 @@ replace_face_tool = (
     Tool.create_simple(name="model_replace_face", description=TOOL_DESCRIPTION)
     .add_input_property(*_FACES.as_property())
     .add_input_property(*_TARGET.as_property())
-    .add_input_property("tangent_chain", {"type": "boolean",
-        "description": "Also include tangent-connected faces (default true)."})
+    .add_input_property("tangent_chain", {"type": "boolean"})
     .add_required_input("faces")
     .add_required_input("target")
     .strict_schema()

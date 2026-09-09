@@ -317,13 +317,8 @@ def _op_tool_desc(op):
 
 
 TOOL_DESCRIPTION = (
-    "Compare two CAM operations by name: which PARAMETERS differ, with the value on each side, and "
-    "which GEOMETRY selection sets differ - chains, faces, boundary/stock contours, drive curves, "
-    "hole/groove/thread sets and surface sets, each by its counts and the per-selection properties "
-    "it answers, selection lengths scaled into 'units'. Use to see what makes one machining "
-    "strategy different from a similar one. Also reports the tool each uses and how many parameters "
-    "match. A 0/0 answer says what it did NOT compare. 'differences' is capped (max_results, "
-    f"default {_DIFFERENCES_CAP}); 'truncated' flags a hit cap."
+    "Compare two CAM operations by name: which parameters and which geometry selections differ, "
+    "with the value on each side."
 )
 
 tool = (
@@ -331,12 +326,12 @@ tool = (
         name="cam_compare_operations",
         description=TOOL_DESCRIPTION,
         input_param_name="operation_a",
-        input_param_description="Name of the first operation.",
+        input_param_description="Operation name (from cam_get).",
     )
-    .add_input_property("operation_b", {"type": "string", "description": "Name of the second operation."})
+    .add_input_property("operation_b", {"type": "string",
+            "description": "Operation name (from cam_get)."})
     .add_input_property("max_results", {"type": "integer", "description":
-            f"Cap on the 'differences' array returned (default {_DIFFERENCES_CAP}, "
-            f"max {_DIFFERENCES_CEILING})."})
+            f"Default {_DIFFERENCES_CAP}, max {_DIFFERENCES_CEILING}."})
     .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )

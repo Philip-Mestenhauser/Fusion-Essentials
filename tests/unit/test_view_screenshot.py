@@ -467,7 +467,7 @@ class TestFitToRestoreDisclosure:
     def test_the_description_discloses_the_hide_and_restore(self):
         # disclosed on 'fit_to' itself - the input whose value triggers the visibility change
         desc = gs.tool.to_dict()["inputSchema"]["properties"]["fit_to"]["description"]
-        assert "hides the rest" in desc
+        assert "Hides the rest" in desc
         assert "restores them" in desc
 
 
@@ -732,7 +732,7 @@ class TestFilePathWrite:
     def test_the_surface_offers_the_path_and_says_the_image_still_returns(self):
         props = gs.tool.to_dict()["inputSchema"]["properties"]
         assert props["file_path"]["type"] == "string"
-        assert ".png" in props["file_path"]["description"]
+        assert "PNG" in props["file_path"]["description"]
         assert "file_path" in gs.TOOL_DESCRIPTION and "inline" in gs.TOOL_DESCRIPTION
 
 

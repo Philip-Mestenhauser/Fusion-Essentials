@@ -21,11 +21,11 @@ from . import _inputs
 from . import _assert
 
 # PlaneRef input (multi-source: origin alias | construction name | face/plane handle) for the mirror plane.
-_PLANE = _inputs.PlaneRef("plane", default="yz", description="The plane to mirror across.")
-_BODIES = _inputs.BodyRefList("bodies", required=False, description="The bodies to mirror.")
+_PLANE = _inputs.PlaneRef("plane", default="yz")
+_BODIES = _inputs.BodyRefList("bodies", required=False)
 # FeatureRefList resolves each timeline name to (entity, timeline label): EXACT case-insensitive
 # match, 'name@index' to pick one of several same-named objects, ambiguity refused.
-_FEATURES = _inputs.FeatureRefList("features", description="The timeline features to mirror.")
+_FEATURES = _inputs.FeatureRefList("features")
 
 app = adsk.core.Application.get()
 
@@ -227,8 +227,7 @@ def handler(bodies=None, features=None, plane: str = "yz", join: bool = False) -
 
 
 TOOL_DESCRIPTION = (
-    "Mirror solid BODIES or timeline FEATURES across a plane to make the symmetric half. Give "
-    "'bodies' or 'features', not both."
+    "Mirror bodies or timeline features across a plane."
 )
 
 mirror_tool = (
@@ -237,8 +236,7 @@ mirror_tool = (
     .add_input_property(*_FEATURES.as_property())
     .add_input_property(_PLANE.name, _PLANE.schema())
     .add_input_property("join", {"type": "boolean",
-            "description": "Combine the mirror with the original into one body (default false); "
-            "bodies only, refused with 'features'."})
+            "description": "Fuse into the original (default false)."})
     .strict_schema()
 )
 mirror_item = Item.create_tool_item(tool=mirror_tool, write="write", handler=handler, run_on_main_thread=True,

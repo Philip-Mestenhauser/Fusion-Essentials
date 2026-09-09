@@ -23,11 +23,10 @@ RETURNS = [
     _outputs.ReturnsValue("sketch_extent", "the sketch's measured size after the import"),
 ]
 
-_X = _inputs.Distance("x", allow_zero=True, default=0.0,
-                      description="X offset from the sketch origin.")
+_X = _inputs.Distance("x", allow_zero=True, default=0.0)
 _Y = _inputs.Distance("y", allow_zero=True, default=0.0,
-                      description="Y offset from the sketch origin.")
-_UNITS = _inputs.UnitField(description="Units for x/y.")
+                      description="SVG y runs DOWN from here.")
+_UNITS = _inputs.UnitField()
 
 _SPEC = [_X, _Y, _UNITS]
 
@@ -169,25 +168,19 @@ def handler(file_path: str = "", sketch_name: str = "", x=None, y=None, units: s
 
 
 TOOL_DESCRIPTION = (
-    "Import an SVG from LOCAL DISK into an EXISTING sketch at (x,y) in the sketch's "
-    "own frame. SIZE: width/height and viewBox in the file are IGNORED - 1 SVG user unit lands as "
-    "1/96 inch times 'scale', so scale=3.7795 makes 1 user unit = 1 mm. PLACEMENT: SVG's y axis "
-    "points DOWN and lands as NEGATIVE sketch y, so art imported at y=0 occupies y from -height "
-    "to 0. doc_insert_import imports svg as well, with no offset or scale to pass.\n"
+    "Import an SVG into a sketch at (x,y).\n"
     + _outputs.produces_block(RETURNS)
 )
 
 tool = (
     _inputs.apply_to_tool(
         Tool.create_simple(name="sketch_insert_svg", description=TOOL_DESCRIPTION), _SPEC)
-    .add_input_property("file_path", {"type": "string",
-            "description": "Full path to the .svg file on local disk."})
+    .add_input_property("file_path", {"type": "string"})
     .add_required_input("file_path")
-    .add_input_property("sketch_name", {"type": "string",
-            "description": "Sketch to import into (default: most recent)."})
+    .add_input_property("sketch_name", {"type": "string"})
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("scale", {"type": "number",
-            "description": "Size multiplier (default 1)."})
+            "description": "1 SVG unit = 1/96 inch x this. Default 1."})
     .strict_schema()
 )
 

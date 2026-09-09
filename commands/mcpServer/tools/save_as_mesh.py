@@ -27,10 +27,8 @@ _QUALITIES = {
 }
 
 # save_as_mesh's source is a BRep body to tessellate (solid OR surface).
-_SAVE_BODY = _inputs.BodyRef("body", kind="any", required=True,
-                             description="The BRep solid/surface to tessellate into a mesh.")
-_SAVE_QUALITY = _inputs.Choice("quality", options=list(_QUALITIES), default="normal",
-                               description="Tessellation level of detail.")
+_SAVE_BODY = _inputs.BodyRef("body", kind="any", required=True)
+_SAVE_QUALITY = _inputs.Choice("quality", options=list(_QUALITIES), default="normal")
 
 
 def _tessellate(body, quality_key):
@@ -184,9 +182,8 @@ def handler(body: str = "", quality: str = "normal", name: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Tessellate a BRep solid/surface into a persistent MESH body IN the design - the "
-    "inverse of mesh_to_brep ('save as mesh'). The new mesh lands beside the source "
-    "body; inspect and edit it with the mesh_* tools."
+    "Tessellate a BRep solid/surface into a persistent MESH body beside it in the design - the "
+    "inverse of mesh_to_brep."
 )
 
 _SAVE_SPEC = [_SAVE_BODY, _SAVE_QUALITY]
@@ -195,7 +192,7 @@ tool = (
         Tool.create_simple(name="save_as_mesh", description=TOOL_DESCRIPTION),
         _SAVE_SPEC)
     .add_input_property("name", {"type": "string",
-            "description": "Optional name for the new mesh body."})
+            "description": "Names the new mesh body."})
     .strict_schema()
 )
 item = Item.create_tool_item(

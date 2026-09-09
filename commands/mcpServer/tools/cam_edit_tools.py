@@ -1000,23 +1000,15 @@ def handler(action: str = "list", scope: str = "document", library: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Read & manage CAM TOOL LIBRARIES and their tools. 'list': the libraries at a shared scope "
-    "with no 'library', else that library's tools; 'list_types': the from_type vocabulary; "
-    "'parameters': one tool's FULL parameter list; 'where_used': the operations using a "
-    "DOCUMENT-library tool; 'add'/'remove': add or drop a library's tools; 'edit': one tool's "
-    "parameters; 'add_preset'/'remove_preset': ONE named preset on the tool at 'tool'; "
-    "'create_library': a new library at a shared scope, named by 'library'. "
-    "list/list_types/parameters/where_used are read-only; the rest write and persist - and every "
-    "write is refused at scope='fusion', the libraries the installation ships."
+    "Read and manage CAM TOOL LIBRARIES and their tools - list, add, remove or edit tools, "
+    "manage presets, or create a library. Writes persist."
 )
 
 tool = (
     Tool.create_simple(name="cam_edit_tools", description=TOOL_DESCRIPTION)
-    .add_input_property("action", {"type": "string", "enum": list(_ACTIONS),
-            "description": "See the tool description."})
-    .add_input_property("scope", {"type": "string", "enum": list(_SCOPES),
-            "description": "Library location; hub is shared TEAM data, fusion the shipped sample libraries (reads only)."})
-    .add_input_property("library", {"type": "string", "description": "Shared-library name or url (not document scope)."})
+    .add_input_property("action", {"type": "string", "enum": list(_ACTIONS)})
+    .add_input_property("scope", {"type": "string", "enum": list(_SCOPES)})
+    .add_input_property("library", {"type": "string"})
     .add_input_property("add_tools", {"type": "array",
             "items": {"type": "object", "properties": {
                 "from_type": {"type": "string"}, "library_url": {"type": "string"}, "index": {"type": "integer"},
@@ -1027,18 +1019,17 @@ tool = (
                     "name": {"type": "string"},
                     "spindle_speed": {"type": ["number", "string"]},
                     "feed": {"type": ["number", "string"]}}}}}},
-            "description": "Tools to add. Each: {from_type:'drill'} clones a sample, {library_url,index} copies one. Its presets[] read spindle_speed/feed as 'preset' below does."})
-    .add_input_property("remove_indices", {"type": "array", "items": {"type": "integer"},
-            "description": "Tool indices to remove."})
-    .add_input_property("tool", {"type": "integer", "description": "Tool index (edit / add_preset / remove_preset / where_used / parameters)."})
-    .add_input_property("parameters", {"type": "object",
-            "description": "Tool parameters to set (edit): {name: expression}."})
+            "description": "{from_type:'drill'} clones a sample; {library_url,index} copies one."})
+    .add_input_property("remove_indices", {"type": "array", "items": {"type": "integer"}})
+    .add_input_property("tool", {"type": "integer",
+            "description": "Tool index, for the per-tool actions."})
+    .add_input_property("parameters", {"type": "object"})
     .add_input_property("tool_type", {"type": "string",
-            "description": "Filter for list: tool-type substring (e.g. 'ball')."})
+            "description": "list: tool-type substring, e.g. 'ball'."})
     .add_input_property("preset", {"type": "object", "properties": {
                 "name": {"type": "string"}, "spindle_speed": {"type": ["number", "string"]},
                 "feed": {"type": ["number", "string"]}},
-            "description": "For add_preset / remove_preset: the preset spec; {name} alone removes it. A bare number is rpm / mm-per-min whatever the document's units; a string carries its own ('35in/min')."})
+            "description": "A bare number is rpm / mm-per-min in the document's units; a string carries its own ('35in/min')."})
     .strict_schema()
 )
 item = Item.create_tool_item(

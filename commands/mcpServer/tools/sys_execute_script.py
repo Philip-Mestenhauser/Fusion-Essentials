@@ -28,7 +28,9 @@ def handler(script: str, read_only: bool = False) -> dict:
     """See TOOL_DESCRIPTION."""
     # Require a `run` function taking a single argument (the Fusion script idiom).
     if not re.search(r'def\s+run\s*\(\s*(\w+)\s*\):', script):
-        return _error_result("Script must define a 'run' function taking one argument, e.g. def run(context):")
+        return _refusal("Script must define a 'run' function taking one argument, e.g. def run(context):")
+    if _PRODUCTS_READ.search(script) and _drawing_common.active_drawing() is not None:
+        return _refusal(_PRODUCTS_ON_DRAWING)
 
     temp_file = None
     transaction_started = False
@@ -88,7 +90,7 @@ def handler(script: str, read_only: bool = False) -> dict:
                 pass  # if abort itself fails, nothing more we can do
         tb = traceback.format_exc()
         app.log(f"Fusion-Essentials MCP sys_execute_script error: {e}\n{tb}")
-        return _error_result(_extract_script_error(tb))
+        return _error_result(_extract_script_error(tb), mutated=not read_only)
     finally:
         if temp_file and os.path.exists(temp_file):
             try:
@@ -117,6 +119,11 @@ _UNJAM_PRELUDE = (
     "    _fe_out._written = 0\n"
     "    _fe_out._original = _fe_bottom\n"
 )
+# A read of any document's .products, the form measured killing the call on a DRAWING.
+_PRODUCTS_READ = re.compile(r"\.products\b")
+_PRODUCTS_ON_DRAWING = (
+    "The active document is a DRAWING and this script reads '.products': that read has been "
+    "measured killing the call, so nothing was run. Read app.activeProduct instead.")
 # What executeTextCommand reports for a text command this Fusion build does not carry.
 _NO_SUCH_COMMAND = "There is no command MCP.Execute"
 _NO_READ_ONLY_CHANNEL = (
@@ -142,8 +149,7 @@ def _clean_output(res: str) -> str:
 
 def _ok_result(cleaned: str) -> dict:
     result = {"isError": False, "message": "Script executed successfully"}
-    if cleaned:
-        result["content"] = [{"type": "text", "text": cleaned}]
+    result["content"] = [{"type": "text", "text": cleaned or _NO_OUTPUT}]
     return result
 
 
@@ -199,12 +205,22 @@ _DRAWING_ROLLBACK_ADVICE = (
     "sheets before assuming this call changed nothing."
 )
 
+# Appended to a failure that could have MUTATED a design - the reason one mutation per call is the
+# rule, delivered where a caller has to decide what to re-read.
+_DESIGN_ROLLBACK_ADVICE = (
+    "\n\nThe active document is a DESIGN: an UNCAUGHT raise always rolls the WHOLE script back, and "
+    "catching one is NO GUARANTEE the earlier work survived - some errors take the command down even "
+    "when caught. There is no per-item failure isolation, so this call cannot say WHICH item of a "
+    "batch failed. Re-read the state before assuming what landed."
+)
 
-def _error_result(text: str) -> dict:
+_NO_OUTPUT = "The script printed nothing - print() is what returns a value."
+
+
+def _refusal(text: str) -> dict:
+    """The failure shape for a script that never ran: no rollback advice, nothing to re-read."""
     # NOT _common.error: that mirrors one text into content AND message; here message stays terse
     # while content carries the whole traceback.
-    if _drawing_common.active_drawing() is not None:
-        text += _DRAWING_ROLLBACK_ADVICE
     return {
     "content": [{"type": "text", "text": text}],
     "isError": True,
@@ -212,34 +228,27 @@ def _error_result(text: str) -> dict:
     }
 
 
+def _error_result(text: str, mutated: bool = False) -> dict:
+    if _drawing_common.active_drawing() is not None:
+        text += _DRAWING_ROLLBACK_ADVICE
+    elif mutated:
+        text += _DESIGN_ROLLBACK_ADVICE
+    return _refusal(text)
+
+
 TOOL_DESCRIPTION = (
-    "Execute Fusion API Python in the live Fusion session; "
-    "prefer a typed tool when one exists (sys_find_tool).\n\n"
-    "REQUIREMENTS:\n"
-    "- MUST define `def run(context):`.\n"
-    "- DO NOT show modal UI - the agent cannot dismiss it.\n"
-    "- Let exceptions raise; the error text is returned.\n"
-    "- ONE mutation per call: no per-item failure isolation, so a half-failed batch cannot say "
-    "WHICH item failed. On a DESIGN document an UNCAUGHT raise always rolls the WHOLE script back, "
-    "and catching one is NO GUARANTEE the earlier work survived: some errors take the command down "
-    "even when caught. On a DRAWING document rollback is NOT GUARANTEED either way.\n"
-    "- On a DRAWING, reading a document's .products has been measured killing the call; use "
-    "app.activeProduct.\n"
-    "- Use print() to return values.\n\n"
-    "Read state first (workspace_orient), verify after."
+    "Run Fusion API Python in the live session; prefer a typed tool (sys_find_tool)."
 )
 
 tool = Tool.create_with_string_input(
     name="sys_execute_script",
     description=TOOL_DESCRIPTION,
     input_param_name="script",
-    input_param_description="Fusion API Python source code to execute. Must define def run(context):",
+    input_param_description="Must define run(context); no modal UI; ONE mutation per call.",
 ).add_input_property(
     "read_only",
     {"type": "boolean",
-     "description": "Run under Fusion's read-only context: a design change RAISES 'Cannot modify "
-                    "the design from a read-only context' instead of applying. Guards the DESIGN "
-                    "only - a read-only script still writes files. Default false."},
+     "description": "A design change RAISES; file writes still land. Default false."},
 ).strict_schema()
 
 # enforce_timeout=False: a long script cannot be interrupted mid-run and still COMMITs, so the

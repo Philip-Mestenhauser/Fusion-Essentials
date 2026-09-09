@@ -29,13 +29,10 @@ _REGEX_PREFIX = "re:"
 
 _UNREADABLE = object()      # a read-back that RAISED - distinct from one that reads None
 
-_ACTION = _inputs.Choice(
-    "action", list(_ACTIONS), default="roll",
-    description="What to do to the timeline.")
+_ACTION = _inputs.Choice("action", list(_ACTIONS), default="roll")
 _TO = _inputs.Choice(
     "to", list(_PLACES) + list(_STEPS), default="before",
-    description="Where action='roll' puts the marker: before/after a named 'feature', or a step "
-                "taken with none.")
+    description="before/after a named 'feature'; the steps take none.")
 # The attribute actions target the FEATURE ENTITY, which is what the FeatureRef kind resolves to;
 # it rides on the shared 'feature' input rather than adding a second name for the same thing.
 _ATTR_TARGET = _inputs.FeatureRef("feature")
@@ -552,13 +549,8 @@ def handler(action: str = "roll", feature: str = "", to: str = "before", end_fea
 
 
 TOOL_DESCRIPTION = (
-    "Drive the parametric timeline. 'roll' moves the marker before/after a named 'feature', or to "
-    "the beginning/end/next/previous step with none - items after the marker are rolled back and "
-    "not computed, so roll to='end' when done. 'suppress' suppresses or restores one item and "
-    "reports what it breaks. 'group' groups a range, 'ungroup' drops a group and keeps its items. "
-    "'delete_after_marker' IRREVERSIBLY discards everything after the marker. 'set_attribute' / "
-    "'delete_attribute' tag one item. Names come from design_get(include=['timeline']); delete one "
-    "feature with design_delete_feature."
+    "Drive the parametric timeline. Items after the marker are not computed, so roll to='end' when "
+    "done. Names come from design_get(include=['timeline'])."
 )
 
 tool = (
@@ -566,23 +558,18 @@ tool = (
     .add_input_property(*_ACTION.as_property())
     .add_input_property(*_TO.as_property())
     .add_input_property("feature", {"type": "string",
-            "description": "Timeline object name - the roll/suppress/attribute target, a group's first "
-            "item, or the group to ungroup; 'name@index' when it repeats."})
+            "description": "The roll/suppress/attribute target, or a group's first item."})
     .add_input_property("end_feature", {"type": "string",
-            "description": "Last item of the range to group."})
+            "description": "Last item of the group range."})
     .add_input_property("name", {"type": "string",
-            "description": "Name for the created group."})
+            "description": "The new group's name."})
     .add_input_property("suppressed", {"type": "boolean",
-            "description": "Suppress (true, default) or unsuppress (false) the named item."})
+            "description": "Default true; false unsuppresses."})
     .add_input_property("confirm_delete_after_marker", {"type": "boolean",
-            "description": "Acknowledge the irreversible discard after the marker; without it the "
-            "action previews and refuses. Default false."})
-    .add_input_property("attribute_group", {"type": "string",
-            "description": "Attribute group to set/delete in."})
-    .add_input_property("attribute_name", {"type": "string",
-            "description": "Attribute name in that group."})
-    .add_input_property("attribute_value", {"type": "string",
-            "description": "Text to store (set_attribute)."})
+            "description": "Without it the action previews and refuses."})
+    .add_input_property("attribute_group", {"type": "string"})
+    .add_input_property("attribute_name", {"type": "string"})
+    .add_input_property("attribute_value", {"type": "string"})
     .strict_schema()
 )
 item = Item.create_tool_item(

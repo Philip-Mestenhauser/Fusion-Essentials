@@ -767,21 +767,18 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
 
 
 TOOL_DESCRIPTION = (
-    "Drive a joint to a value - the API's Drive Joints command - moving the mechanism along its "
-    "DOF. 'angle_deg' (revolute/cylindrical) and/or 'distance' in 'units' (slider/cylindrical). An "
-    "out-of-range command is REFUSED before anything moves - Fusion IGNORES a beyond-limit drive "
-    "and never clamps, though a command AT a bound lands. A drive is TRANSIENT: a recompute resets "
-    "it unless assembly_capture_position(action='capture') keeps it. Motion-linked pairs: the "
-    "receipt says whether the link couples. Where it may, read the partner back rather than "
-    "driving it, and an xref/referenced pair refuses the SECOND member for the session."
+    "Drive a joint to a value - the pose is TRANSIENT until "
+    "assembly_capture_position(action='capture') keeps it."
 )
 
 tool = (
     Tool.create_simple(name="joint_drive", description=TOOL_DESCRIPTION)
-    .add_input_property("joint_name", {"type": "string", "description": "Name of the joint to drive (from assembly_get / design_get(include=['timeline']))."})
-    .add_input_property("angle_deg", {"type": "number", "description": "Rotation value in DEGREES (revolute / cylindrical)."})
-    .add_input_property("distance", {"type": "number", "description": "Slide value in 'units' (slider / cylindrical)."})
-    .add_input_property(*_inputs.units_property(description="Units for 'distance'."))
+    .add_input_property("joint_name", {"type": "string", "description": "From assembly_get."})
+    .add_input_property("angle_deg", {"type": "number",
+                                      "description": "Revolute / cylindrical."})
+    .add_input_property("distance", {"type": "number",
+                                     "description": "In 'units'; slider / cylindrical."})
+    .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )
 item = Item.create_tool_item(

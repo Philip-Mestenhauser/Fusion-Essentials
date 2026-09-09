@@ -25,16 +25,11 @@ _ACTIONS = ("create", "set_members", "rename", "suppress", "unsuppress", "delete
             "enable_analysis", "disable_analysis", "set_analysis_scope")
 _MEMBER_ACTIONS = ("create", "set_members")
 
-_ACTION = _inputs.Choice(
-    "action", list(_ACTIONS), required=True,
-    description="The set actions need 'name' (create needs 'members' instead); the analysis "
-                "actions switch contact analysis for the WHOLE design and take no name.")
+_ACTION = _inputs.Choice("action", list(_ACTIONS), required=True)
 _MEMBERS = _inputs.TargetRefList(
     "members", with_kinds=True,
     contract="create/set_members: 2 or more DISTINCT occurrences and/or BRep bodies to relate.")
-_SCOPE = _inputs.Choice(
-    "scope", ["contact_sets", "all_bodies"],
-    description="set_analysis_scope: what contact analysis runs over.")
+_SCOPE = _inputs.Choice("scope", ["contact_sets", "all_bodies"])
 
 
 def _flags(design):
@@ -383,21 +378,15 @@ def handler(action: str = "", name: str = "", members=None, new_name: str = "",
 
 TOOL_DESCRIPTION = (
     "Maintain the design's contact sets - the named groups of occurrences/bodies Fusion checks for "
-    "contact. 'create' relates 2 or more DISTINCT members and reports the name Fusion assigned; "
-    "'rename' reports the name that LANDED (a name already in use is auto-deduped to 'Name (1)'); "
-    "'delete' removes it IRREVERSIBLY and re-lists to confirm. A set only takes part while contact "
-    "analysis is ON and scoped to the sets - 'enable_analysis' and 'set_analysis_scope' switch that "
-    "for the whole design. List the sets and both flags with assembly_get(include=['contacts'])."
+    "contact."
 )
 
 tool = (
     Tool.create_simple(name="assembly_edit_contacts", description=TOOL_DESCRIPTION)
     .add_input_property(*_ACTION.as_property())
-    .add_input_property("name", {"type": "string",
-            "description": "The contact set to act on, from assembly_get(include=['contacts'])."})
+    .add_input_property("name", {"type": "string"})
     .add_input_property(*_MEMBERS.as_property())
-    .add_input_property("new_name", {"type": "string",
-            "description": "rename: the name you want; the name Fusion landed is what the result reports."})
+    .add_input_property("new_name", {"type": "string", "description": "rename: the name you want."})
     .add_input_property(*_SCOPE.as_property())
     .strict_schema()
 )

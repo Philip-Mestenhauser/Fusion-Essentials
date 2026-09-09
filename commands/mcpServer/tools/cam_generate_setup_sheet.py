@@ -32,7 +32,7 @@ _SHEET_SUFFIXES = {"html": (".html", ".htm"), "excel": (".xlsx", ".xls")}
 
 _FORMAT = _inputs.Choice(
     "format", ["html", "excel"], default="html",
-    description="Sheet format. excel needs Windows (the API's own limitation).")
+    description="excel needs Windows.")
 
 RETURNS = [
     _outputs.ReturnsValue("file_path", "the setup-sheet document written to disk"),
@@ -147,20 +147,17 @@ def handler(scope: str = "", format: str = "html", output_folder: str = "") -> d
 
 
 TOOL_DESCRIPTION = (
-    "Generate a machinist SETUP SHEET document for 'scope' into 'output_folder'. The file is named "
-    "after the DOCUMENT, so a second call to the same folder overwrites it. Toolpaths should be "
-    "generated first (cam_generate); pair with cam_post for the NC program itself."
+    "Generate a machinist SETUP SHEET, named after the DOCUMENT - a second call to the same folder "
+    "overwrites it.\n"
     + _outputs.produces_block(RETURNS)
 )
 
 tool = (
     Tool.create_simple(name="cam_generate_setup_sheet", description=TOOL_DESCRIPTION)
     .add_input_property("scope", {"type": "string",
-        "description": "Setup/folder/operation NAME to sheet; omit (or 'document') for all setups."})
+        "description": "Omit for all setups."})
     .add_input_property(_FORMAT.name, _FORMAT.schema())
-    .add_input_property("output_folder", {"type": "string",
-        "description": "Directory the sheet is written to (created if absent). One sheet per "
-                       "folder - the file name comes from the document."})
+    .add_input_property("output_folder", {"type": "string"})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,

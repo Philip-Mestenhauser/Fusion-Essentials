@@ -488,14 +488,19 @@ class TestTidyUp:
 
 
 class TestDescriptionClaims:
-    def test_the_add_vs_copy_inheritance_split_is_pinned(self):
+    def test_the_add_vs_copy_inheritance_split_is_pinned(self, wire):
         # Both halves are measured: an added sheet inherits the ACTIVE sheet's settings, a copy
-        # carries the SOURCE sheet's. A swap is a wrong wire claim on every add or copy.
-        assert "An ADDED sheet inherits the ACTIVE sheet" in es.TOOL_DESCRIPTION
-        assert "a COPY the SOURCE sheet" in es.TOOL_DESCRIPTION
+        # carries the SOURCE sheet's. A swap is a wrong wire claim on every add or copy - each
+        # note is where the caller meets its own half.
+        wire([sheet("Sheet1"), sheet("Spare")])
+        added = payload(es.handler(action="add"))["note"]
+        assert "inheriting its size and orientation" in added and "ACTIVE sheet" in added
+        copied = payload(es.handler(action="copy", sheet="Spare"))["note"]
+        assert "SOURCE sheet's size, orientation" in copied
 
-    def test_the_two_units_are_told_apart_on_the_wire(self):
+    def test_the_two_units_are_told_apart_on_the_wire(self, wire):
         # width/height are millimetres on EVERY drawing; sheet_units is the dimension unit. A
-        # description that reads them as one unit is the wire half of the same wrong claim.
-        assert "millimetres on EVERY drawing" in es.TOOL_DESCRIPTION
-        assert "sheet_units reports the drawing's dimension display unit" in es.TOOL_DESCRIPTION
+        # payload that published one label for both would be the wire half of the same wrong claim.
+        wire([sheet("Sheet1", size=_A3)], units="in")
+        out = payload(es.handler(action="set_size", sheet_size="a4"))
+        assert out["width_height_unit"] == "mm" and out["sheet_units"] == "in"

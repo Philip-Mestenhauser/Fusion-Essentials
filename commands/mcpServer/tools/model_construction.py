@@ -44,20 +44,18 @@ _GATE_DECIMALS = 15
 _COINCIDENT_REL_TOL = 1e-8
 
 # ── shared typed inputs (reused across modes; each mode uses the subset it needs) ────────────────
-_AXIS = _inputs.AxisRef("axis", default="z", description="Direction (kind=axis).")
-_PLANE = _inputs.PlaneRef("plane", default="xy", description="Base/1st plane (see 'mode').")
-_PLANE2 = _inputs.PlaneRef("plane2", description="2nd plane (see 'mode').")
-_PLANE3 = _inputs.PlaneRef("plane3", description="3rd plane (mode=three_planes).")
-_EDGES = _inputs.GeometryHandleList("edges", require="edge", description="Count depends on 'mode'.")
-_POINTS = _inputs.GeometryHandleList("points", require="vertex", description="Count depends on 'mode'.")
-_FACE = _inputs.GeometryHandle("face", require="face", description="Cylindrical/conical; any face for perpendicular_at_point.")
+_AXIS = _inputs.AxisRef("axis", default="z")
+_PLANE = _inputs.PlaneRef("plane", default="xy", description="Base/1st plane.")
+_PLANE2 = _inputs.PlaneRef("plane2")
+_PLANE3 = _inputs.PlaneRef("plane3")
+_EDGES = _inputs.GeometryHandleList("edges", require="edge")
+_POINTS = _inputs.GeometryHandleList("points", require="vertex")
+_FACE = _inputs.GeometryHandle("face", require="face")
 _MODE = _inputs.Choice("mode", _MODE_OPTIONS, default="",
     description="Build method within 'kind'.")
 # mode='on_path' reads 'at' through this: a unitless 0-1 ratio, or a length from the path start.
-_DISTANCE_TYPE = _inputs.Choice("distance_type", ["proportional", "absolute"], default="proportional",
-    description="How 'at' is read (mode=on_path).")
-_TO_OBJECT = _inputs.GeometryHandle("to_object", require="vertex",
-    description="mode=on_path (plane only): land at this point, shifted by 'offset'.")
+_DISTANCE_TYPE = _inputs.Choice("distance_type", ["proportional", "absolute"], default="proportional")
+_TO_OBJECT = _inputs.GeometryHandle("to_object", require="vertex")
 
 # MODE GUARD: setByPoint(Point3D) / setByLine(InfiniteLine3D) are DIRECT-edit-only and fail in
 # parametric, the default. Every other mode resolves real geometry and is parametric-valid, so it
@@ -945,19 +943,17 @@ def handler(kind: str = "point", mode: str = "", x: float = 0.0, y: float = 0.0,
 
 
 TOOL_DESCRIPTION = (
-    "Add a construction point, axis, or plane in the active component. 'mode' is the build method "
-    "within 'kind' (defaults: point=coordinate, axis=edge, plane=offset), and each mode reads its "
-    "own subset of the inputs below."
+    "Add a construction point, axis, or plane; each 'mode' reads its own subset of the inputs."
 )
 
 construction_tool = (
     Tool.create_simple(name="model_construction", description=TOOL_DESCRIPTION)
-    .add_input_property(*_inputs.Choice("kind", ["point", "axis", "plane"], default="point",
-        description="The datum kind.").as_property())
+    .add_input_property(*_inputs.Choice("kind", ["point", "axis", "plane"],
+        default="point").as_property())
     .add_input_property(*_MODE.as_property())
-    .add_input_property("x", {"type": "number", "description": "X in 'units'."})
-    .add_input_property("y", {"type": "number", "description": "Y in 'units'."})
-    .add_input_property("z", {"type": "number", "description": "Z in 'units'."})
+    .add_input_property("x", {"type": "number"})
+    .add_input_property("y", {"type": "number"})
+    .add_input_property("z", {"type": "number"})
     .add_input_property(*_AXIS.as_property())
     .add_input_property(*_PLANE.as_property())
     .add_input_property(*_PLANE2.as_property(brief=True))
@@ -965,16 +961,17 @@ construction_tool = (
     .add_input_property(*_EDGES.as_property())
     .add_input_property(*_POINTS.as_property())
     .add_input_property(*_FACE.as_property())
-    .add_input_property("angle", {"type": "number", "description": "Degrees (mode=at_angle/at_angle_on_face)."})
+    .add_input_property("angle", {"type": "number", "description": "In degrees."})
     .add_input_property("path", {"type": ["string", "array"], "items": {"type": "string"},
-            "description": "One find_geometry edge 'handle' (chains across TANGENT connections; a sharp corner stops the chain - the 'path' count is the truth), a JSON list (used exactly), or 'sketch:<name>'."})
-    .add_input_property("at", {"type": ["number", "string"],
-            "description": "Position along 'path' (mode=on_path): a 0-1 ratio or a length in 'units', per 'distance_type'."})
+            "description": "An edge 'handle' (chains across TANGENT connections only; the 'path' "
+                           "count is the truth), or 'sketch:<name>'."})
+    .add_input_property("at", {"type": ["number", "string"]})
     .add_input_property(*_DISTANCE_TYPE.as_property())
     .add_input_property(*_TO_OBJECT.as_property())
-    .add_input_property("offset", {"type": ["number", "string"], "description": "Distance in 'units', or a parameter expression ('StockZ/2'): mode=offset's plane offset, or the shift from 'to_object'."})
+    .add_input_property("offset", {"type": ["number", "string"],
+            "description": "The plane offset, or the shift from 'to_object'."})
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("name", {"type": "string", "description": "Name for the datum."})
+    .add_input_property("name", {"type": "string"})
     .strict_schema()
 )
 construction_item = Item.create_tool_item(
