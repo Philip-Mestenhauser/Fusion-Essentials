@@ -150,7 +150,7 @@ tool = (
     .add_input_property("folder", {"type": "string",
         "description": "Destination path, e.g. 'Imports/STEP'."})
     .add_input_property("create_path", {"type": "boolean",
-        "description": "Create missing folders. Default false."})
+        "description": "Create missing folders."})
     .strict_schema()
 )
 item = Item.create_tool_item(

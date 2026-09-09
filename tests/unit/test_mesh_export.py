@@ -499,18 +499,14 @@ class TestExportStlUnits:
         return _options_holding(des, "unitType", unit_member, "createSTLExportOptions", "stl",
                                 drop_write)
 
-    def test_an_omitted_unit_is_the_one_the_schema_advertises(self, tmp_path):
-        # The schema's advertised default and the unit the writer ASSIGNS are one value: a handler
-        # default drifting from the Choice's would advertise one unit while writing another, which
-        # every other test here - each naming its own literal - would pass straight over.
-        advertised = mx._EXPORT_UNITS.default
-        assert f"Default {advertised}." in mx._EXPORT_UNITS.schema()["description"]
-        des = _wire(_comp("Root", bodies=[BRepBody("Body1")]))
-        out = payload(mx.handler(format="stl", file_path=str(tmp_path / "p.stl")))
-        assert des.exportManager._calls[-1].unitType is getattr(
-            mx.adsk.fusion.DistanceUnits, mx._export.STL_UNIT_MEMBERS[advertised])
-        assert out["options_applied"]["stl_units"] == advertised
-        assert out["options_requested"]["stl_units"] == advertised
+    def test_an_omitted_unit_is_not_advertised_as_a_schema_default(self, tmp_path):
+        # The unit an omitted stl_units bakes in is NOT the value of a schema `default`: a client
+        # that materialized such a default into the call would be REFUSED on every other format, so
+        # the omitted unit is substituted by the handler and read back off the payload instead.
+        assert "default" not in mx._EXPORT_UNITS.schema()
+        _wire(_comp("Root", bodies=[BRepBody("Body1")]))
+        res = mx.handler(format="3mf", file_path=str(tmp_path / "p.3mf"), stl_units="mm")
+        assert res["isError"] is True and "stl_units" in res["message"]
 
     def test_omitting_the_unit_writes_mm_the_unit_mesh_insert_defaults_to(self, tmp_path):
         # mm, NOT whatever an untouched unitType would write (measured: the session's last explicit

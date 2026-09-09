@@ -227,9 +227,8 @@ combine_tool = (
     .add_input_property("tools", _TOOLS.schema())
     .add_input_property(*_inputs.boolean_op(options=("join", "cut", "intersect"), default="join").as_property())
     .add_input_property("keep_tools", {"type": "boolean",
-            "description": "Default false (the tools are consumed)."})
-    .add_input_property("new_component", {"type": "boolean",
-            "description": "Default false."})
+            "description": "False consumes the tool bodies."})
+    .add_input_property("new_component", {"type": "boolean"})
     .strict_schema()
 )
 combine_item = Item.create_tool_item(tool=combine_tool, write="write", handler=handler, run_on_main_thread=True,

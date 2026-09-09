@@ -25,7 +25,7 @@ from conftest import load_mcp_server, register_all_tools
 
 # The per-entry hard ceiling, in TRANSPORT bytes: the fleet's heaviest entry as measured, plus ~2%.
 # It bites on whichever entry is nearest it, so no single tool can fatten unnoticed.
-PER_TOOL_BUDGET_BYTES = 5_260
+PER_TOOL_BUDGET_BYTES = 5_360
 
 # The fleet limits, in COMPACT bytes, each its own measured statistic plus ~2%: the MEAN per
 # registered tool, and the NEAREST-RANK P90 (_rank_index - a size some entry really measures, never

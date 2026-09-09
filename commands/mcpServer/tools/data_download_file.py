@@ -137,7 +137,7 @@ tool = (
     .add_input_property("file_name", {"type": "string",
             "description": "Bare filename. Default: the cloud name."})
     .add_input_property("overwrite", {"type": "boolean",
-            "description": "Replace an existing local file. Default false."})
+            "description": "Replace an existing local file."})
     .strict_schema()
 )
 

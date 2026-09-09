@@ -76,7 +76,7 @@ tool = (
             "description": "e.g. '2 in', 'StockX/2', \"'text'\"; function args use ';': if(a>=2 in; 10 mm; 5 mm)."})
     .add_input_property("create", {"type": "boolean"})
     .add_input_property("unit", {"type": "string",
-            "description": "For a created parameter ('' unitless, default mm)."})
+            "description": "For a created parameter ('' unitless)."})
     .strict_schema()
 )
 

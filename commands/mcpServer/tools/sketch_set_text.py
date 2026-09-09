@@ -28,9 +28,9 @@ from . import _sketch_detail
 _MAX = 500
 
 _PATH_MODES = ("along_path", "fit_on_path")
-_MODE = _inputs.Choice("mode", ["multi_line"] + list(_PATH_MODES), default="multi_line",
+_MODE = _inputs.Choice("mode", ["multi_line"] + list(_PATH_MODES),
                        description="NEW text: a box at (x,y), or along 'path'.")
-_ALIGN = _inputs.Choice("align", ["left", "center", "right"], default="left")
+_ALIGN = _inputs.Choice("align", ["left", "center", "right"])
 
 _ALIGN_MEMBERS = {"left": "LeftHorizontalAlignment", "center": "CenterHorizontalAlignment",
                   "right": "RightHorizontalAlignment"}
@@ -324,7 +324,9 @@ def _create_text(design, text, sketch_name, height, x, y, units, mode, path, abo
     merr = _refuse_wrong_mode_inputs(mode, path, above_path, align, character_spacing, x, y)
     if merr:
         return error(merr)
-    align_key, aerr = _ALIGN.resolve(align)
+    # 'left' when omitted, which is NOT a schema default: align is create-only and mode
+    # 'fit_on_path' refuses it, so sending 'left' is not the same call as omitting it.
+    align_key, aerr = _ALIGN.resolve(align or "left")
     if aerr:
         return error(aerr)
     halign = getattr(adsk.core.HorizontalAlignments, _ALIGN_MEMBERS[align_key], None)
@@ -584,7 +586,9 @@ def handler(text: str = "", sketch_name: str = "", index: int = -1,
             return error(perr)
 
     if create:
-        mode_key, merr = _MODE.resolve(mode)
+        # 'multi_line' when omitted, which is NOT a schema default: mode is create-only and an edit
+        # refuses it, so sending 'multi_line' is not the same call as omitting it.
+        mode_key, merr = _MODE.resolve(mode or "multi_line")
         if merr:
             return error(merr)
         return _create_text(design, text, sketch_name,

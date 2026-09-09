@@ -211,9 +211,10 @@ _CURVED_SURFACE_OK = ("coincident_to_surface", "perpendicular_to_surface")
 _CONSTRAINT = _inputs.Choice("constraint", list(_CONSTRAINTS))
 _SURFACE = _inputs.SurfaceRef("surface", curved_ops=_CURVED_SURFACE_OK)
 _DISTANCE = _inputs.Distance("distance", allow_zero=False,
-                             description="Offset, or pattern spacing one.")
+                             description="Offset, or spacing one.")
+# 'distance' when omitted - a cross-field fallback, so it has no schema `default` to live in.
 _DISTANCE_TWO = _inputs.Distance("distance_two", allow_zero=False,
-                                 description="Pattern spacing two (default: 'distance').")
+                                 description="Spacing two; else 'distance'.")
 
 # rectangular_pattern spacing meaning, measured: with 3 instances and a 9 mm distance, 'spacing'
 # puts the centres 9 mm apart, while 'extent' spreads 9 instances across a 9 mm TOTAL span.
@@ -919,9 +920,10 @@ _ENTRY_SCHEMA = {
         "surface": _SURFACE.schema(),
         "distance": _DISTANCE.schema(),
         "distance_two": _DISTANCE_TWO.schema(brief=True),
-        "quantity": {"type": "integer", "description": "Includes the original."},
-        "quantity_two": {"type": "integer"},
-        "angle": {"type": "number", "description": "circular_pattern total angle, degrees."},
+        "quantity": {"type": "integer", "description": "Includes the original.", "default": 2},
+        "quantity_two": {"type": "integer", "default": 1},
+        "angle": {"type": "number", "description": "circular_pattern total angle, degrees.",
+                  "default": 360.0},
         "distance_type": _DISTANCE_TYPE.schema(),
         "symmetric": {"type": "boolean"},
         "suppressed": {"type": "array", "items": {"type": "boolean"}},

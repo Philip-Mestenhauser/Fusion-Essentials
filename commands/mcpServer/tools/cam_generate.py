@@ -277,7 +277,7 @@ tool = (
     Tool.create_simple(name="cam_generate", description=TOOL_DESCRIPTION)
     .add_input_property("target", {"type": "string"})
     .add_input_property("skip_valid", {"type": "boolean",
-            "description": "Default true; skips valid operations."})
+            "description": "Skips operations that are already valid."})
     .strict_schema()
 )
 item = Item.create_tool_item(

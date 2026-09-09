@@ -240,9 +240,9 @@ tool = (
             "description": "Along the plane normal, in 'units'."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("flip", {"type": "boolean"})
-    .add_input_property("show_hatch", {"type": "boolean", "description": "Default true."})
+    .add_input_property("show_hatch", {"type": "boolean"})
     .add_input_property("auto_view", {"type": "boolean",
-            "description": "Aims at the exposed cut face. Default true."})
+            "description": "Aims at the exposed cut face."})
     .strict_schema()
 )
 

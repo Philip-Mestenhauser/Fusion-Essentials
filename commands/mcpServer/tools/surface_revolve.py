@@ -133,7 +133,7 @@ tool = (
             "description": "Omit for the most recent sketch."})
     .add_input_property("curves", _CURVES.schema())
     .add_input_property(*_inputs.frame_axis("axis", default="z", description="Component origin axis.").as_property())
-    .add_input_property("angle_deg", {"type": "number", "description": "Default 360 (full)."})
+    .add_input_property("angle_deg", {"type": "number"})
     .add_input_property("symmetric", {"type": "boolean"})
     .add_input_property(*_inputs.boolean_op(options=("new", "join"), default="new").as_property())
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)

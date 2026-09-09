@@ -46,7 +46,7 @@ _FORMAT = _inputs.Choice("format", options=list(_FORMATS), default="step")
 # STL-only: bake units into the file (unitType) and pick binary vs ASCII (isBinaryFormat). stl_units
 # is ALWAYS assigned - an untouched unitType takes the unit of the LAST EXPLICIT assignment made
 # anywhere in the session, across documents. stl_binary omitted leaves the factory value alone.
-_STL_UNITS = _inputs.Choice("stl_units", options=list(_export.STL_UNIT_MEMBERS), default="mm",
+_STL_UNITS = _inputs.Choice("stl_units", options=list(_export.STL_UNIT_MEMBERS),
     description="Baked into the file; always assigned.")
 
 # There is deliberately NO dxf_units input: the FIRST read of DXFSketchExportOptions.units kills the
@@ -412,7 +412,9 @@ def handler(format: str = "step", file_path: str = "", target: str = "",
     if ferr:
         return error(ferr)
 
-    stl_unit_key, sue = _STL_UNITS.resolve(stl_units)
+    # 'mm' when omitted, which is NOT a schema default: an stl_units on another format is refused
+    # below, so sending 'mm' is not the same call as omitting it.
+    stl_unit_key, sue = _STL_UNITS.resolve(stl_units or "mm")
     if sue:
         return error(sue)
     # Both STL-only knobs are refused on another format rather than dropped, ahead of the dxf

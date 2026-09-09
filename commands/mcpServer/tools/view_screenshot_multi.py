@@ -148,8 +148,8 @@ tool = (
     .add_input_property("views", {"type": "array",
             "items": {"type": "string", "enum": list(_VIEWS) + ["all"]},
             "description": "['all'] = the six orthographic views; omit for front/top/right/iso."})
-    .add_input_property("width", {"type": "integer", "description": f"Default {_WIDTH_DEFAULT} px."})
-    .add_input_property("height", {"type": "integer", "description": f"Default {_HEIGHT_DEFAULT} px."})
+    .add_input_property("width", {"type": "integer", "description": "Pixels."})
+    .add_input_property("height", {"type": "integer", "description": "Pixels."})
     .add_input_property("transparent_background", {"type": "boolean"})
     .add_input_property("anti_aliased", {"type": "boolean"})
     .strict_schema()

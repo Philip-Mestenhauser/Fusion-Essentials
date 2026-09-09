@@ -40,8 +40,7 @@ _CURVE_HANDLES = _inputs.GeometryHandleList("curve_handles", require="edge")
 
 _BODIES = _inputs.BodyRefList("bodies")
 
-_PROJECT_TYPE = _inputs.Choice("project_type", ["closest_point", "along_vector"],
-    default="closest_point")
+_PROJECT_TYPE = _inputs.Choice("project_type", ["closest_point", "along_vector"])
 
 # projectToSurface wants an ENTITY for directionEntity (a ConstructionAxis is accepted), so
 # entity_only refuses a face handle - a face resolves to a direction VECTOR the call cannot consume.
@@ -457,7 +456,9 @@ def _to_surface(design, sketch, target_faces, source_sketch, curve_refs, curve_h
                                   source_component)
     if cerr:
         return error(cerr)
-    ptype, perr = _PROJECT_TYPE.resolve(project_type)
+    # 'closest_point' when omitted, which is NOT a schema default: _refuse_foreign_inputs refuses a
+    # project_type on the other actions, so sending it is not the same call as omitting it.
+    ptype, perr = _PROJECT_TYPE.resolve(project_type or "closest_point")
     if perr:
         return error(perr)
 
@@ -602,7 +603,7 @@ def _intersect(sketch, entities, bodies) -> dict:
     return ok(out)
 
 
-def handler(entities="", sketch_name: str = "", link: bool = None, action: str = "",
+def handler(entities="", sketch_name: str = "", link: bool = None, action: str = "into_sketch",
             target_faces="", source_sketch: str = "", curve_refs="", curve_handles="",
             project_type: str = "", direction: str = "", bodies="", component: str = "",
             source_component: str = "") -> dict:

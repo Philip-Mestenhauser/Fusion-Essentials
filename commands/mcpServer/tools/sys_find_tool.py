@@ -103,7 +103,7 @@ tool = (
     .add_input_property("query", {"type": "string",
             "description": "Keywords matched against tool names, descriptions and inputs."})
     .add_input_property("include_kinds", {"type": "boolean",
-            "description": "Also search the input kinds (default true)."})
+            "description": "Also search the input kinds."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=False)

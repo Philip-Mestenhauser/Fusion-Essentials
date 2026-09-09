@@ -236,7 +236,7 @@ mirror_tool = (
     .add_input_property(*_FEATURES.as_property())
     .add_input_property(_PLANE.name, _PLANE.schema())
     .add_input_property("join", {"type": "boolean",
-            "description": "Fuse into the original (default false)."})
+            "description": "Fuse into the original."})
     .strict_schema()
 )
 mirror_item = Item.create_tool_item(tool=mirror_tool, write="write", handler=handler, run_on_main_thread=True,

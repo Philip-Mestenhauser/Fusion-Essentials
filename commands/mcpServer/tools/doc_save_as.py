@@ -274,10 +274,9 @@ tool = (
     .add_input_property("folder", {"type": "string",
         "description": "Destination folder path, e.g. 'Parts/WidgetA'."})
     .add_input_property("create_path", {"type": "boolean",
-        "description": "Create missing folders. Default false."})
+        "description": "Create missing folders."})
     .add_input_property("description", {"type": "string"})
-    .add_input_property("allow_duplicate_name", {"type": "boolean",
-        "description": "Default false."})
+    .add_input_property("allow_duplicate_name", {"type": "boolean"})
     .strict_schema()
 )
 # enforce_timeout=False: saveAs is a blocking, uninterruptible main-thread cloud write that COMMITS,

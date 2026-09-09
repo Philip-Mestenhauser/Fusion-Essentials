@@ -956,7 +956,7 @@ tool = (
     .add_input_property("bottom_mode", {"type": "string", "description": "e.g. 'from contour'."})
     .add_input_property("bottom_offset", {"type": "string"})
     .add_input_property("generate", {"type": "boolean",
-            "description": "Default true; async - read cam_get_status."})
+            "description": "Async - read cam_get_status."})
     .strict_schema()
 )
 item = Item.create_tool_item(

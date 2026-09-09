@@ -109,7 +109,7 @@ tool = (
     .add_input_property("target", _UNSTITCH_BODY.schema())
     .add_input_property("faces", _UNSTITCH_FACES.schema())
     .add_input_property("chain", {"type": "boolean",
-            "description": "Include adjacent faces (default true)."})
+            "description": "Include adjacent faces."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,

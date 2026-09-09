@@ -180,8 +180,7 @@ tool = (
     Tool.create_simple(
         name="model_base_feature",
         description=TOOL_DESCRIPTION)
-    .add_input_property("action", {"type": "string", "enum": list(_ACTIONS),
-            "description": "Default start."})
+    .add_input_property("action", {"type": "string", "enum": list(_ACTIONS)})
     .add_input_property("base_feature", {"type": "string",
             "description": "Names the new scope on 'start'; picks one to finish."})
     .strict_schema()

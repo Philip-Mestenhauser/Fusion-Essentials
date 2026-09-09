@@ -196,7 +196,7 @@ tool = (
     )
     .add_input_property("confirm_name", {"type": "string", "description": "Case-sensitive."})
     .add_input_property("force", {"type": "boolean",
-        "description": "Allow a non-empty folder. Default false."})
+        "description": "Allow a non-empty folder."})
     .add_input_property("recursive_confirm", {"type": "string",
         "description": "The folder's name, acknowledging the subtree delete."})
     .strict_schema()

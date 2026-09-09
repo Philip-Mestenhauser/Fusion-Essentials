@@ -194,12 +194,12 @@ tool = (
     Tool.create_simple(name="sys_get_api_doc", description=TOOL_DESCRIPTION)
     .add_input_property("searchPattern", {"type": "string",
             "description": "Case-insensitive regex; docstrings too under description/all."})
-    .add_input_property("apiCategory", {"type": "string", "enum": ["class", "member", "description", "all"],
-            "description": "Default all."})
+    .add_input_property("apiCategory", {"type": "string",
+            "enum": ["class", "member", "description", "all"]})
     .add_input_property("filter", {"type": "string",
             "description": "Scope: 'adsk.cam' or 'adsk.fusion.Extrude'."})
     .add_input_property("max_results", {"type": "integer",
-            "description": f"Cap per kind (default/max {_MAX_RESULTS})."})
+            "description": f"Cap per kind, max {_MAX_RESULTS}."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

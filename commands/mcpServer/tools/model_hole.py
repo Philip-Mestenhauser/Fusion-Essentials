@@ -365,7 +365,7 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
             cbore_diameter: str = "", cbore_depth: str = "",
             csink_diameter: str = "", csink_angle: str = "",
             tap: str = "", fastener: str = "", fit: str = "normal", units: str = "mm",
-            placement: str = "sketch_points", points_space: str = "", edge: str = "",
+            placement: str = "sketch_points", points_space: str = "sketch", edge: str = "",
             edge_position: str = "",
             point: list = None, offset_edge_one: str = "", offset_one: str = "",
             offset_edge_two: str = "", offset_two: str = "",
@@ -856,10 +856,8 @@ tool = (
     .add_input_property("tip_angle", {"type": "string", "description": "e.g. '118 deg'."})
     .add_input_property("fastener", {"type": "string",
             "description": "e.g. 'M6 Socket Head Cap Screw'; overrides 'diameter'."})
-    .add_input_property("fit", {"type": "string", "enum": list(_FITS),
-            "description": "Default normal."})
-    .add_input_property("placement", {"type": "string", "enum": list(_PLACEMENTS),
-            "description": "Default sketch_points."})
+    .add_input_property("fit", {"type": "string", "enum": list(_FITS)})
+    .add_input_property("placement", {"type": "string", "enum": list(_PLACEMENTS)})
     .add_input_property(*_EDGE.as_property())
     .add_input_property("edge_position", {"type": "string", "enum": list(_EDGE_POSITIONS),
             "description": "For placement=on_edge."})

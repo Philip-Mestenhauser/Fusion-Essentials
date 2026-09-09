@@ -1,7 +1,5 @@
 """Unit tests for mesh_get.py - the MESH body listing, and the shared mesh reads it publishes."""
 
-import re
-
 import adsk.fusion
 import pytest
 
@@ -137,16 +135,15 @@ class TestMeshGet:
 
     def test_the_default_caps_the_array_when_no_max_results_is_named(self):
         # Every other cap test here names max_results, so none of them exercises the DEFAULT the
-        # description promises - the number a caller who names no cap actually gets. 51 meshes with
-        # nothing named must come back as 50, and the promise and the applied cap must be one number:
-        # a signature carrying its own literal beside the interpolated description lets them drift.
+        # schema promises - the number a caller who names no cap actually gets. 51 meshes with
+        # nothing named must come back as 50, and the promise and the applied cap must be one number.
         meshes = [MeshBody(f"Scan{i}", token=f"T{i}") for i in range(51)]
         _wire(MakeComp("Comp", mesh_bodies=meshes))
         out = payload(mo.handler(target=""))
         assert len(out["meshes"]) == 50
         assert out["truncated"] is True and out["count"] == 51
-        promised = mo.tool.to_dict()["inputSchema"]["properties"]["max_results"]["description"]
-        assert len(out["meshes"]) == int(re.search(r"[Dd]efault (\d+)", promised).group(1))
+        promised = mo.tool.to_dict()["inputSchema"]["properties"]["max_results"]["default"]
+        assert len(out["meshes"]) == promised
 
     def test_a_zero_max_results_falls_back_to_the_default_not_the_ceiling(self):
         # The constant's SECOND use site: the 'default' argument handed to clamp_rows. The test
@@ -159,8 +156,8 @@ class TestMeshGet:
         out = payload(mo.handler(target="", max_results=0))
         assert len(out["meshes"]) == 50
         assert out["truncated"] is True and out["count"] == 120
-        promised = mo.tool.to_dict()["inputSchema"]["properties"]["max_results"]["description"]
-        assert len(out["meshes"]) == int(re.search(r"[Dd]efault (\d+)", promised).group(1))
+        promised = mo.tool.to_dict()["inputSchema"]["properties"]["max_results"]["default"]
+        assert len(out["meshes"]) == promised
 
     def test_a_caller_cannot_lift_the_cap_past_the_ceiling(self):
         # every row crosses the wire: max_results is clamped into 1..200, so an oversized

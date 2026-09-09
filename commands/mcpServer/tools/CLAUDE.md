@@ -214,6 +214,7 @@ observed mutation, not just flipping `write=` locally.
 | **`description`** | `TOOL_DESCRIPTION` | **prose** — purpose + next-step pointer ONLY |
 | **per-input `description`** | `add_input_property(name, {…"description"})` | **prose** — a long one = a missing kind; type the input |
 | **`note` / `error`** in the result | `ok({"note":…})` / `error(...)` | **prose** — state the observed fact, never a guessed cause |
+| per-input `default` | the handler's signature default (a bool, a non-zero number, a non-empty string), or a kind's `default=` | structural — stamped at registration by `Item.create_tool_item`; never restated in prose. It is honest ONLY when sending the value does exactly what omitting it does: an input that means "leave unchanged" or "decided by another input" when omitted (a guard that reads the raw value, an edit that must not re-type) carries NO default. `test_wire_shape.TestSchemaDefaults` holds schema and signature in agreement both ways |
 
 Don't restate the schema (the agent sees the JSON), and never write a tutorial-style comment block
 into a description. Agent-facing strings are pure ASCII (see root CLAUDE.md).

@@ -248,7 +248,7 @@ tool = (
     .add_input_property("width", {"type": "integer"})
     .add_input_property("height", {"type": "integer"})
     .add_input_property("zoom", {"type": "number",
-            "description": "Applied after fitting: >1 out, <1 in. Default 1."})
+            "description": "Applied after fitting: >1 out, <1 in."})
     .add_input_property(*_FIT_TO.as_property())
     .add_input_property("transparent_background", {"type": "boolean"})
     .add_input_property("anti_aliased", {"type": "boolean"})

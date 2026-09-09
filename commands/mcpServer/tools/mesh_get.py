@@ -109,7 +109,7 @@ TOOL_DESCRIPTION = (
 tool = (
     Tool.create_simple(name="mesh_get", description=TOOL_DESCRIPTION)
     .add_input_property("target", {"type": "string", "description": "Component/occurrence name; '' scans the whole design."})
-    .add_input_property("max_results", {"type": "integer", "description": f"Default {_MESH_ROWS_DEFAULT}, max {_MESH_ROWS_CEILING}."})
+    .add_input_property("max_results", {"type": "integer", "description": f"Max {_MESH_ROWS_CEILING}."})
     .add_input_property(_MEASURE_UNITS.name, _MEASURE_UNITS.schema())
     .strict_schema()
 )

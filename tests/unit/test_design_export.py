@@ -444,17 +444,14 @@ class TestOptionsApplied:
         dx.handler(format="stl", file_path=str(tmp_path / "p.stl"))
         assert em._calls[-1].unitType is dx.adsk.fusion.DistanceUnits.MillimeterDistanceUnits
 
-    def test_the_omitted_unit_is_the_one_the_schema_advertises(self, tmp_path, monkeypatch):
-        # The advertised default and the unit actually assigned are ONE value: a handler default
-        # drifting from the Choice's would advertise one unit while writing another, and every test
-        # here naming its own literal would pass straight over it. The sibling mesh_export pins the
-        # same pair, so the two tools cannot drift apart on one measured fact.
-        advertised = dx._STL_UNITS.default
-        assert f"Default {advertised}." in dx._STL_UNITS.schema()["description"]
-        _, em, _ = _install(monkeypatch)
-        dx.handler(format="stl", file_path=str(tmp_path / "p.stl"))
-        assert em._calls[-1].unitType is getattr(
-            dx.adsk.fusion.DistanceUnits, dx._export.STL_UNIT_MEMBERS[advertised])
+    def test_the_omitted_unit_is_not_advertised_as_a_schema_default(self, tmp_path, monkeypatch):
+        # The unit an omitted stl_units bakes in is NOT the value of a schema `default`: a client
+        # that materialized such a default into the call would be REFUSED on every other format, so
+        # the omitted unit is substituted by the handler and read back off the payload instead.
+        assert "default" not in dx._STL_UNITS.schema()
+        _install(monkeypatch)
+        res = dx.handler(format="step", file_path=str(tmp_path / "p.step"), stl_units="mm")
+        assert res["isError"] is True and "stl_units" in res["message"]
 
     def test_an_omitted_unit_is_reported_in_the_payload_it_was_written_with(self, tmp_path,
                                                                             monkeypatch):

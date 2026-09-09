@@ -164,9 +164,9 @@ tool = (
     .add_input_property("faces", _THICKEN_FACES.schema())
     .add_input_property("thickness", {"type": "number", "description": "In 'units'; non-zero."})
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("symmetric", {"type": "boolean", "description": "Thicken both sides (default false)."})
+    .add_input_property("symmetric", {"type": "boolean", "description": "Thicken both sides."})
     .add_input_property(*_inputs.boolean_op(options=("new", "join", "cut"), default="new").as_property())
-    .add_input_property("chaining", {"type": "boolean", "description": "Select the connected face set (default true)."})
+    .add_input_property("chaining", {"type": "boolean", "description": "Select the connected face set."})
     .add_input_property(*_inputs.Choice("thicken_type", ["sharp", "rounded"],
         description="Corner treatment of the thickened wall.").as_property())
     .add_required_input("faces")

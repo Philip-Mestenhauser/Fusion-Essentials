@@ -1391,7 +1391,8 @@ class TestDistanceUnits:
         # units choices live in the schema enum, not re-spelled as "mm | cm | in" prose in 20 tools
         sch = inp.UnitField().schema()
         assert sch["type"] == "string" and sch["enum"] == ["mm", "cm", "in"]
-        assert "mm | cm | in" not in sch["description"]
+        assert sch["default"] == "mm"                  # the default is structure, not prose
+        assert "Default" not in sch.get("description", "")
 
 
 # ── shared singletons + as_property (the dedup mechanism for the enum migration) ─────────────────
@@ -1432,7 +1433,7 @@ class TestSharedInputs:
     def test_frame_axis(self):
         name, sch = inp.frame_axis(default="x").as_property()
         assert name == "axis" and sch["enum"] == ["x", "y", "z"]
-        assert "Default x" in sch["description"]
+        assert sch["default"] == "x"
 
     def test_joint_motion_full_set(self):
         # joint_create/edit get all six; the shared set means it can't drift from joint_at_geometry's
@@ -1478,11 +1479,13 @@ class TestChoice:
         # the bare option list should not be re-spelled in the description (enum carries it)
         assert "new, join, cut" not in sch["description"]
 
-    def test_schema_enum_with_default_notes_it(self):
+    def test_schema_enum_with_default_carries_it_as_structure(self):
         c = inp.Choice("op", ["new", "cut"], default="new")
         sch = c.schema()
         assert sch["enum"] == ["new", "cut"]
-        assert "Default new" in sch["description"]
+        assert sch["default"] == "new"
+        assert "description" not in sch                # nothing left to say in prose
+        assert "default" not in inp.Choice("op", ["new", "cut"]).schema()
 
 
 # ── resolve_inputs: end-to-end (units resolved first, distances scaled) ─────

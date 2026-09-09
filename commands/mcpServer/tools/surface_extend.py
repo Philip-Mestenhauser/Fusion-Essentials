@@ -122,7 +122,7 @@ tool = (
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property(*_inputs.Choice("extend_type", ["natural", "tangent", "perpendicular"],
         default="natural").as_property())
-    .add_input_property("chaining", {"type": "boolean", "description": "Follow the connected edge chain (default true)."})
+    .add_input_property("chaining", {"type": "boolean", "description": "Follow the connected edge chain."})
     .add_input_property(*_inputs.Choice("extend_alignment", ["free_edges", "align_edges"],
         description="Alignment of the extended side edges.").as_property())
     .add_required_input("edges")

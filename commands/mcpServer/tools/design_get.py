@@ -938,14 +938,14 @@ tool = (
             "items": {"type": "string", "enum": list(_SLICES + _DEFAULT_NAMES)},
             "description": "'default' keeps the orientation slice beside a deeper one."})
     .add_input_property("max_depth", {"type": "integer",
-            "description": f"include=tree. Default {_TREE_DEFAULT_DEPTH}, max {_TREE_MAX_DEPTH}."})
+            "description": f"include=tree. Max {_TREE_MAX_DEPTH}."})
     .add_input_property("component", {"type": "string",
             "description": "Start the tree at this component/occurrence."})
     .add_input_property("tree_bodies", {"type": "boolean"})
     .add_input_property("tree_handles", {"type": "boolean",
             "description": "Adds each node's handle + full_path."})
     .add_input_property("include_suppressed", {"type": "boolean",
-            "description": "include=timeline. Default true."})
+            "description": "include=timeline."})
     .add_input_property("group", {"type": "string"})
     .add_input_property("timeline_params", {"type": "boolean",
             "description": "Adds each row's own model parameters."})

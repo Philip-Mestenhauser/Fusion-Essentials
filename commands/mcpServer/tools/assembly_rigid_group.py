@@ -89,7 +89,7 @@ TOOL_DESCRIPTION = (
 tool = (
     Tool.create_simple(name="assembly_rigid_group", description=TOOL_DESCRIPTION)
     .add_input_property("occurrences", {"type": "string", "description": "Occurrence name(s) to lock together (comma-separated)."})
-    .add_input_property("include_children", {"type": "boolean", "description": "Also include the occurrences' children (default false)."})
+    .add_input_property("include_children", {"type": "boolean", "description": "Also include the occurrences' children."})
     .strict_schema()
 )
 item = Item.create_tool_item(

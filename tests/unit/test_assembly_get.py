@@ -8,7 +8,6 @@ occurrence<->joint cross-index.
 
 import json
 import math
-import re
 from types import SimpleNamespace
 
 import pytest
@@ -2181,11 +2180,10 @@ def jo_design(monkeypatch):
 
 
 def _promised_default(input_name):
-    """The default one max_* input's WIRE description states, as an int."""
-    text = ap.tool.to_dict()["inputSchema"]["properties"][input_name]["description"]
-    match = re.search(r"[Dd]efault (\d+)", text)
-    assert match, f"{input_name} states no default: {text!r}"
-    return int(match.group(1))
+    """The default one max_* input's WIRE SCHEMA carries, as an int."""
+    prop = ap.tool.to_dict()["inputSchema"]["properties"][input_name]
+    assert "default" in prop, f"{input_name} carries no schema default: {prop!r}"
+    return int(prop["default"])
 
 
 class TestDefaultCapsReachThePayload:

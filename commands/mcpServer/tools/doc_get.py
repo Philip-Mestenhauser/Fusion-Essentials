@@ -630,7 +630,7 @@ TOOL_DESCRIPTION = (
 
 tool = (
     Tool.create_simple(name="doc_get", description=TOOL_DESCRIPTION)
-    .add_input_property("max_results", {"type": "integer", "description": f"Default {_OPEN_DOCS_CAP}."})
+    .add_input_property("max_results", {"type": "integer"})
     .add_input_property("include", {"type": "array", "items": {"type": "string", "enum": ["versions", "xref_tree", "used_in", "default"]},
             "description": "'default' keeps the session list too."})
     .add_input_property("versions_max", {"type": "integer"})

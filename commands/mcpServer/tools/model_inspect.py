@@ -533,8 +533,8 @@ tool = (
             "items": {"type": "string", "enum": list(_SLICES + _DEFAULT_NAMES)},
             "description": "'default' keeps the bounding box beside it."})
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("accuracy", {"type": "string", "enum": ["low", "medium", "high", "very_high"],
-            "description": "Default medium."})
+    .add_input_property("accuracy", {"type": "string",
+            "enum": ["low", "medium", "high", "very_high"]})
     .add_input_property("per_body", {"type": "boolean"})
     .add_input_property(*_FRAME.as_property())
     .strict_schema()

@@ -496,12 +496,9 @@ tool = (
     .add_input_property("source_bodies", {"type": "array", "items": {"type": "string"}})
     .add_input_property("exclude_components", {"type": "array", "items": {"type": "string"}})
     .add_input_property("exclude_bodies", {"type": "array", "items": {"type": "string"}})
-    .add_input_property("include_parameters", {"type": "boolean",
-            "description": "Default true."})
-    .add_input_property("include_favorite_parameters", {"type": "boolean",
-            "description": "Default true."})
-    .add_input_property("place_at_origin", {"type": "boolean",
-            "description": "Default true."})
+    .add_input_property("include_parameters", {"type": "boolean"})
+    .add_input_property("include_favorite_parameters", {"type": "boolean"})
+    .add_input_property("place_at_origin", {"type": "boolean"})
     .strict_schema()
 )
 

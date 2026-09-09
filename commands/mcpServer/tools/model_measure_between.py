@@ -192,8 +192,7 @@ tool = (
     Tool.create_simple(name="model_measure_between", description=TOOL_DESCRIPTION)
     .add_input_property(*_A.as_property())
     .add_input_property(*_B.as_property())
-    .add_input_property("mode", {"type": "string", "enum": list(_MODES),
-            "description": "Default distance."})
+    .add_input_property("mode", {"type": "string", "enum": list(_MODES)})
     .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )

@@ -8,7 +8,10 @@ each add* carrying the argument order and operand types its binding declares, so
 wrong-kind call fails here the way it would live.
 """
 
+import ast
 import json
+import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import adsk.core
@@ -1169,3 +1172,34 @@ class TestGuards:
         s.sketchDimensions.addRadialDimension = lambda c, tp, isDriving=True: None
         res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0"}])
         assert res["isError"] is True and "returned nothing" in res["message"]
+
+
+def _defaults_one_applies():
+    """{field: value} for every entry.get(field, value) _one substitutes, read off the module."""
+    src = Path(sd.__file__).read_text(encoding="utf-8")
+    return {f: ast.literal_eval(v)
+            for f, v in re.findall(r'entry\.get\("(\w+)", ([^)]+)\)', src)}
+
+
+class TestEntrySchemaDefaults:
+    """An omitted entry field's value is STRUCTURE on the wire: the entry schema's `default` is the
+    value _one substitutes for it, so the prose never has to spell one."""
+
+    def test_the_entry_schema_promises_what_one_substitutes(self):
+        applied = _defaults_one_applies()
+        assert set(applied) >= {"is_driving", "tangent_side_one", "tangent_side_two"}, applied
+        props = sd._ENTRY_SCHEMA["properties"]
+        for field, value in applied.items():
+            # a false / '' / 0 default is what an absent field already says, so it stays OFF the
+            # wire and off this entry's byte budget
+            want = value if value else None
+            assert props[field].get("default") == want, field
+
+    def test_no_entry_default_is_promised_that_nothing_applies(self):
+        applied = _defaults_one_applies()
+        kinds = {k.name: k.default for v in vars(sd).values()
+                 for k in (v if isinstance(v, tuple) else (v,))
+                 if isinstance(k, sd._inputs.InputKind)}
+        for field, prop in sd._ENTRY_SCHEMA["properties"].items():
+            if "default" in prop:
+                assert prop["default"] in (applied.get(field), kinds.get(field)), field

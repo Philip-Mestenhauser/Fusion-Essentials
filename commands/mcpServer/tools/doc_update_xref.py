@@ -169,8 +169,7 @@ tool = (
     Tool.create_simple(name="doc_update_xref", description=TOOL_DESCRIPTION)
     .add_input_property("name", {"type": "string",
             "description": "Source document name of one reference to refresh (omit = all)."})
-    .add_input_property("only_out_of_date", {"type": "boolean",
-            "description": "Default true."})
+    .add_input_property("only_out_of_date", {"type": "boolean"})
     .strict_schema()
 )
 

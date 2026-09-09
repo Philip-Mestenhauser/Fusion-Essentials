@@ -258,7 +258,7 @@ revolve_tool = (
     .add_input_property("axis", {"type": "string",
             "description": _AXIS.schema()["description"] + " Or 'line:<i>' for a line in the "
             "profile's sketch."})
-    .add_input_property("angle_deg", {"type": "number", "description": "Default 360."})
+    .add_input_property("angle_deg", {"type": "number"})
     .add_input_property("second_angle_deg", {"type": "number"})
     .add_input_property(*_inputs.boolean_op(default="new").as_property())
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)

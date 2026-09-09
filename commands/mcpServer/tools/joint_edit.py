@@ -370,9 +370,11 @@ tool = (
     .add_input_property("input_one", {"type": "string",
             "description": "A Joint Origin name or '<occurrence>:<snap>'."})
     .add_input_property("input_two", {"type": "string"})
-    .add_input_property(*_inputs.joint_motion(default="rigid", options=_MOTIONS,
+    # No schema default on either: an omitted joint_type leaves the motion alone, and 'axis' is read
+    # only when a joint_type/world_axis re-sets it.
+    .add_input_property(*_inputs.joint_motion(default="", options=_MOTIONS,
             description="").as_property())
-    .add_input_property(*_inputs.frame_axis("axis", default="z",
+    .add_input_property(*_inputs.frame_axis("axis", default="",
             description="FRAME-relative, not world; for pin_slot the rotation axis.").as_property())
     .add_input_property(*_inputs.frame_axis("slide_axis", default="",
             description="pin_slot only.").as_property())

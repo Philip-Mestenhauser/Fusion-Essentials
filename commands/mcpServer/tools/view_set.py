@@ -1002,7 +1002,7 @@ tool = (
     .add_input_property("perspective_angle_deg", {"type": "number"})
     .add_input_property(*_inputs.Choice("style", list(_STYLES),
             description="For 'style'.").as_property())
-    .add_input_property("fit", {"type": "boolean", "description": "Default true."})
+    .add_input_property("fit", {"type": "boolean"})
     .add_input_property("categories", {"type": "array",
             "items": {"type": "string", "enum": ["sketches", "construction", "origins", "joints"]},
             "description": "For 'display'; omit = all of them."})

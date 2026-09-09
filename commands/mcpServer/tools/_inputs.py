@@ -27,6 +27,17 @@ app = adsk.core.Application.get()
 
 # ── base ────────────────────────────────────────────────────────────────────
 
+def schema_default(value) -> bool:
+    """Whether `value` is a default worth carrying on the wire: a bool, a non-zero number or a
+    non-empty string. None, an empty string, an empty list and 0 all mean 'omitted', which the
+    schema already says by the input's absence."""
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, (int, float)):
+        return value != 0
+    return isinstance(value, str) and bool(value)
+
+
 class InputKind:
     """One declared tool input: name + schema + how to resolve/validate it + its contract line."""
 
@@ -57,10 +68,16 @@ class InputKind:
         return (self.description + (" " + note if note else "")).strip()
 
     def _desc(self, brief=False) -> dict:
-        """The 'description' entry of the schema - absent when there is nothing to say, so an
-        input with no prose costs the wire nothing."""
+        """The 'description' and 'default' entries of the schema - each absent when there is
+        nothing to say, so an input with no prose and no default costs the wire nothing. A
+        default is STRUCTURE: the value an omitted input takes, never restated in prose."""
+        out = {}
         text = self._full_desc(brief)
-        return {"description": text} if text else {}
+        if text:
+            out["description"] = text
+        if schema_default(self.default):
+            out["default"] = self.default
+        return out
 
     def contract_note(self) -> str:
         """One-line 'what this input needs' - assembled into the tool's CONTRACT block."""
@@ -2049,10 +2066,10 @@ class UnitField(InputKind):
         super().__init__(name, default="mm", **kw)
 
     def schema(self, brief=False) -> dict:
-        return {"type": "string", "enum": list(self._UNITS), "description": self._full_desc(brief)}
+        return {"type": "string", "enum": list(self._UNITS), **self._desc(brief)}
 
     def contract_note(self) -> str:
-        return "Default mm."      # the legal values live in the schema `enum`
+        return ""      # the legal values live in the schema `enum`, the default in `default`
 
     def resolve(self, raw):
         f = _common.scale(raw or "mm")
@@ -2078,8 +2095,8 @@ class Choice(InputKind):
         return {"type": "string", "enum": list(self.options), **self._desc(brief)}
 
     def contract_note(self) -> str:
-        # the enum carries the option list; note only the default (if any) so we don't duplicate it.
-        return f"Default {self.default}." if self.default else ""
+        # the enum carries the option list and the schema `default` the default - nothing in prose.
+        return ""
 
     def resolve(self, raw):
         v = (raw or self.default or "").strip().lower()

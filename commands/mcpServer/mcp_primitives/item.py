@@ -92,6 +92,25 @@ class Verification:
         return f"Verification({', '.join(parts)})"
 
 
+def _defaults_from_signature(tool, handler):
+    """Stamp each input's DEFAULT into the schema from the handler's own signature default - a
+    bool, a non-zero number or a non-empty string - so the value an omitted input takes is
+    structure on the wire, not prose. A property that already carries a default keeps it."""
+    import inspect
+    from ..tools._inputs import schema_default
+    try:
+        params = inspect.signature(handler).parameters
+    except (TypeError, ValueError):
+        return
+    props = tool.input_schema.get("properties") or {}
+    for name, p in params.items():
+        prop = props.get(name)
+        if (p.default is inspect.Parameter.empty or not isinstance(prop, dict)
+                or "default" in prop or not schema_default(p.default)):
+            continue
+        prop["default"] = p.default
+
+
 class Item:
     """Bundles an MCP primitive with the callable that fulfills it.
 
@@ -144,6 +163,7 @@ class Item:
           'write'       -> modifies state
           'destructive' -> a hard-to-reverse write (delete, history-discarding conversion, close doc)
         Every tool must pass one (enforced by test_write_status_annotations.py)."""
+        _defaults_from_signature(tool, handler)
         if write == "read":
             tool.reads()
         elif write == "write":

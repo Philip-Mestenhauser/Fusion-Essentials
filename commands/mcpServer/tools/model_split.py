@@ -226,8 +226,7 @@ split_tool = (
     .add_input_property(_FACES.name, _FACES.schema())
     .add_input_property(_PLANE.name, _PLANE.schema())
     .add_input_property(_TOOLBODY.name, _TOOLBODY.schema())
-    .add_input_property("extend_tool", {"type": "boolean",
-            "description": "Default true."})
+    .add_input_property("extend_tool", {"type": "boolean"})
     .strict_schema()
 )
 split_item = Item.create_tool_item(tool=split_tool, write="write", handler=handler, run_on_main_thread=True,

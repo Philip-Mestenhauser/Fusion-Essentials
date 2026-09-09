@@ -147,7 +147,7 @@ tool = (
     )
     .add_input_property("confirm_name", {"type": "string", "description": "Case-sensitive."})
     .add_input_property("force", {"type": "boolean",
-        "description": "Delete despite references. Default false."})
+        "description": "Delete despite references."})
     .strict_schema()
 )
 item = Item.create_tool_item(

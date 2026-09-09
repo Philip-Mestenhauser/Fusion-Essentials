@@ -564,7 +564,7 @@ tool = (
     .add_input_property("name", {"type": "string",
             "description": "The new group's name."})
     .add_input_property("suppressed", {"type": "boolean",
-            "description": "Default true; false unsuppresses."})
+            "description": "False unsuppresses."})
     .add_input_property("confirm_delete_after_marker", {"type": "boolean",
             "description": "Without it the action previews and refuses."})
     .add_input_property("attribute_group", {"type": "string"})

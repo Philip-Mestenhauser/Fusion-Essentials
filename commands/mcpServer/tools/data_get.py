@@ -181,12 +181,12 @@ tool = (
     .add_input_property("project_id", {"type": "string"})
     .add_input_property("folder", {"type": "string",
             "description": "Folder PATH, e.g. 'Parts/Fixtures'."})
-    .add_input_property("recursive", {"type": "boolean", "description": "Default true."})
+    .add_input_property("recursive", {"type": "boolean"})
     .add_input_property("include", {"type": "array",
             "items": {"type": "string", "enum": list(_SLICES)},
             "description": "'folders' reads the folder tree."})
     .add_input_property("max_depth", {"type": "integer",
-            "description": f"Folder tree, default {_MAX_DEPTH_DEFAULT}."})
+            "description": "Depth of the folder tree."})
     .add_input_property("folder_budget", {"type": "integer",
             "description": "Folder fetches the walk may spend (default "
                            f"{_FOLDER_BUDGET_DEFAULT}, max {_FOLDER_BUDGET_MAX})."})

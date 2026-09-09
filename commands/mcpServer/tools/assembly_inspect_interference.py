@@ -197,7 +197,7 @@ TOOL_DESCRIPTION = (
 interference_tool = (
     Tool.create_simple(name="assembly_inspect_interference", description=TOOL_DESCRIPTION)
     .add_input_property("include_coincident_faces", {"type": "boolean",
-            "description": "Flush touches count as interference. Default false."})
+            "description": "Flush touches count as interference."})
     .strict_schema()
 )
 interference_item = Item.create_tool_item(tool=interference_tool, write="read", handler=handler, run_on_main_thread=True)

@@ -164,7 +164,7 @@ tool = (
     .add_input_property("file_path", {"type": "string", "description": "Local path to the mesh file."})
     .add_input_property("target_component", {"type": "string", "description": "Default: the active component."})
     .add_input_property("units", {"type": "string", "enum": list(_MESH_UNIT_TABLE),
-            "description": "The unit the file is authored in; stats are reported in it. Default mm."})
+            "description": "The unit the file is authored in; stats are reported in it."})
     .add_input_property("name", {"type": "string", "description": "Renames the imported body; single-body imports only."})
     .add_required_input("file_path")
     .strict_schema()

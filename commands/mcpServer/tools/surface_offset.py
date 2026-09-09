@@ -117,7 +117,7 @@ tool = (
     .add_input_property("faces", _OFFSET_FACES.schema())
     .add_input_property("distance", {"type": "number", "description": "In 'units'; positive = along the face normal, 0 = a coincident copy."})
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("chaining", {"type": "boolean", "description": "Expand across tangent-connected faces (default false)."})
+    .add_input_property("chaining", {"type": "boolean", "description": "Expand across tangent-connected faces."})
     .add_input_property(*_inputs.boolean_op(options=("new", "new_component"), default="new").as_property())
     .add_required_input("faces")
     .add_required_input("distance")

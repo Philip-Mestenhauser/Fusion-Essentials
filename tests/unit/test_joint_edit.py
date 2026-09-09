@@ -183,6 +183,16 @@ class TestMotion:
         res = jt.handler(joint_name="BoomPivot", joint_type="weld")
         assert res["isError"] is True and "Unknown joint_type" in res["message"]
 
+    def test_an_omitted_joint_type_re_types_nothing(self):
+        # An omitted EDIT input changes nothing: another field's edit must not carry a motion set
+        # with it, and neither input advertises a schema default a client could materialize into
+        # the call - which is what would re-type this joint to 'rigid' about z.
+        _, joint = _install(["BoomPivot"])
+        _payload(jt.handler(joint_name="BoomPivot", flip=True))
+        assert joint._motion_calls == []
+        props = jt.tool.input_schema["properties"]
+        assert "default" not in props["joint_type"] and "default" not in props["axis"]
+
 
 # ── offset / angle (parameter inputs — full parity with the create joint tool) ──
 

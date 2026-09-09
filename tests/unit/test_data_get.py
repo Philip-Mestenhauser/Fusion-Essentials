@@ -8,7 +8,6 @@ cloud logic + caps are covered by their tests and by live validation.
 """
 
 import json
-import re
 
 import pytest
 
@@ -241,8 +240,8 @@ class TestFolderDepthDefault:
         _payload(dge.handler(project="P1", include=["folders"]))
         assert seen["max_depth"] == 4
 
-        promised = dge.tool.to_dict()["inputSchema"]["properties"]["max_depth"]["description"]
-        assert seen["max_depth"] == int(re.search(r"default (\d+)", promised).group(1))
+        promised = dge.tool.to_dict()["inputSchema"]["properties"]["max_depth"]["default"]
+        assert seen["max_depth"] == promised
 
         # what that number DOES: a six-level chain read at the forwarded depth stops four levels
         # down, and the last node says its children are unknown rather than implying it has none.

@@ -615,7 +615,7 @@ class TestCreate:
     def test_the_wire_default_matches_the_handler_default(self, monkeypatch):
         # the schema an agent reads must not promise a different default than the handler applies.
         prop = cco.tool.to_dict()["inputSchema"]["properties"]["generate"]
-        assert "default false" in prop["description"].lower()
+        assert prop["default"] is False
         assert "default true" not in cco.TOOL_DESCRIPTION.lower()
 
 

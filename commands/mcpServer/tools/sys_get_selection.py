@@ -87,7 +87,7 @@ tool = (
     .add_input_property(*_inputs.Choice("require", list(_REQUIRE_KINDS),
             description="Flags a mismatch; nothing is filtered.").as_property())
     .add_input_property("max_results", {"type": "integer",
-            "description": f"Default {_SELECTION_CAP}, max {_SELECTION_CEILING}."})
+            "description": f"Max {_SELECTION_CEILING}."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler,

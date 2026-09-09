@@ -523,6 +523,20 @@ class TestCoreKinds:
         assert out["kind"] == "circle"
 
 
+class TestEntrySchemaDefaults:
+    """An omitted entry field's value is STRUCTURE on the wire: the entry schema's `default` is the
+    value the draw substitutes for it, so the prose never has to spell one."""
+
+    def test_an_omitted_degree_draws_the_schema_default(self, monkeypatch):
+        import adsk.fusion
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        _first(sk.handler(geometry=[{"kind": "cv_spline",
+                                     "points": [[0, 0], [5, 8], [10, 0], [15, 8]]}]))
+        promised = sk._ENTRY_SCHEMA["properties"]["degree"]["default"]
+        member = getattr(adsk.fusion.SplineDegrees, sk._SPLINE_DEGREES[promised])
+        assert s.sketchControlPointSplines.last[-1] == member
+
+
 class TestKindCollectionFallback:
 
     """Every kind's collection resolves through _common, so the factory-returned-but-nothing-landed

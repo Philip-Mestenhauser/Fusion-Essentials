@@ -788,7 +788,7 @@ _ENTRY_SCHEMA = {
         "sweep_deg": {"type": "number"},
         "start_deg": {"type": "number"},
         "rho": {"type": "number"},
-        "degree": {"type": "integer"},
+        "degree": {"type": "integer", "default": 3},
         "sides": {"type": "integer"},
         "arc_radius": {"type": "number", "description": "Overrides the start-to-centre distance."},
         "slot_length": {"type": "number", "description": "overall_slot tip-to-tip, center_point_slot HALF length. Overrides x2,y2."},

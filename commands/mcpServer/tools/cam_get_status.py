@@ -446,8 +446,7 @@ tool = (
             "description": "From cam_generate, or 'latest'."})
     .add_input_property("target", {"type": "string",
             "description": "Omit for the whole document."})
-    .add_input_property("include_operations", {"type": "boolean",
-            "description": "Default true."})
+    .add_input_property("include_operations", {"type": "boolean"})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler,

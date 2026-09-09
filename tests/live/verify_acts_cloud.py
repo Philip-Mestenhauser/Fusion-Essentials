@@ -16,7 +16,7 @@ from cloud_config import FOLDER, HUB, PROJECT
 from verify_core import (
     EXPORT_DIR, MARKER_PNG, _RECALL, _activated, _ctx_get, _document_closed, _driven_slide, _dwell,
     _extruded, _face_up_at, _fg, _home_address, _home_document, _jointed, _made_component,
-    _measured, _motion_linked, _new_document, _num, _recall, _refused, _watch)
+    _measured, _motion_linked, _new_document, _num, _recall, _refused, _watch, facade)
 
 _STAMP = time.strftime("%Y%m%d-%H%M%S")
 
@@ -136,6 +136,31 @@ def _file_record(folder_path, complete=True):
                          bool(f.get("name")) and str(f.get("id") or "").startswith("urn:")
                          and (loc.get("parent_folder") or {}).get("path") == folder_path
                          and state.get("is_complete") is complete)
+    return check
+
+
+# The cloud finishes with a saved file on its own clock (its record reads is_complete False for
+# tens of seconds after the save answers), and both the drawing generator and a delete need it
+# finished. Bounded: the budget running out is reported as the state it last read, never as complete.
+_SETTLE_POLLS = 12
+_SETTLE_GAP_S = 5.0
+
+
+def _file_settled(folder_path, polls=_SETTLE_POLLS):
+    """data_get(file=<urn>) re-read until the record reads is_complete True, then judged by
+    _file_record; the LAST read is what a failure prints."""
+    record = _file_record(folder_path)
+
+    def check(p):
+        call = facade("call")        # resolved when the row runs, after tool_verify has loaded
+        for i in range(polls):
+            if (p.get("state") or {}).get("is_complete") is True or i == polls - 1:
+                break
+            time.sleep(_SETTLE_GAP_S)
+            is_error, again = call("data_get", {"file": (p.get("file") or {}).get("id") or ""})
+            if not is_error and isinstance(again, dict):
+                p = again
+        return record(p)
     return check
 
 
@@ -852,10 +877,10 @@ _CLOUD_DRAWING = [
      _activated(SOURCE_DOC), None),
     ("doc_get", {}, _document_is(SOURCE_DOC), None),
     # the generator reads its source from the CLOUD, so the file's own record - is_complete among it
-    # - is read first, and a create refusing behind a source still processing is diagnosed by this
-    # row rather than by a retry.
+    # - is polled to settled first, and a create refusing behind a source still processing is
+    # diagnosed by this row rather than by a retry.
     ("data_get", lambda c: {"file": _ctx_get(c, "source_urn", "the source")},
-     _file_record(FOLDER), None),
+     _file_settled(FOLDER), None),
     ("drawing_create", {"standard": "iso", "units": "mm", "sheet_size": "a3"},
      _drawing_created, ("drawing", lambda p: [p["file_id"], p["drawing_name"]])),
     ("doc_open", lambda c: {"file_id": _ctx_get(c, "drawing", "the drawing")[0],
@@ -903,6 +928,11 @@ _CLOUD_DRAWING = [
     ("data_delete_file", lambda c: {"document_id": _ctx_get(c, "drawing", "the drawing")[0],
                                     "confirm_name": _ctx_get(c, "drawing", "the drawing")[1]},
      _file_deleted, None),
+    # the source was versioned above and closed just now; a delete taken while the cloud is still
+    # processing that version raises (InternalValidationError, measured), so the record is polled to
+    # settled first and a delete that still refuses is reported.
+    ("data_get", lambda c: {"file": _ctx_get(c, "source_urn", "the source")},
+     _file_settled(FOLDER), None),
     ("data_delete_file", lambda c: {"document_id": _ctx_get(c, "source_urn", "the source"),
                                     "confirm_name": SOURCE_DOC}, _file_deleted, None),
     # the witness standing apart from the deletes' own reports: the configured folder read back.

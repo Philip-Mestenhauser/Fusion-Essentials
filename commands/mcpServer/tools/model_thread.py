@@ -30,7 +30,7 @@ _FACES = _inputs.GeometryHandleList("faces", require="cylinder_face", required=T
 _LENGTH = _inputs.Distance("length", allow_zero=False, allow_negative=False,
     description="Thread only this much, from the 'location' end.")
 _OFFSET = _inputs.Distance("offset", allow_zero=True, allow_negative=False)
-_LOCATION = _inputs.Choice("location", ("high", "low"), default="high",
+_LOCATION = _inputs.Choice("location", ("high", "low"),
     description="'high' is where the axis points.")
 
 _LOCATION_ATTRS = {"high": "HighEndThreadLocation", "low": "LowEndThreadLocation"}
@@ -108,7 +108,9 @@ def handler(faces=None, designation: str = "", modeled: bool = False, left_hande
     if location and length_cm is None:
         return error("'location' picks which end a partial thread is measured from, so it needs "
                      "'length' too.")
-    loc_key, cerr = _LOCATION.resolve(location)
+    # 'high' when omitted, which is NOT a schema default: a supplied location without 'length' is
+    # refused above, so sending 'high' is not the same call as omitting it.
+    loc_key, cerr = _LOCATION.resolve(location or "high")
     if cerr:
         return error(cerr)
 

@@ -21,7 +21,7 @@ _ON_FACE = _inputs.GeometryHandle("on_face", require="planar_face")
 
 # The plane sketch_create builds on. PlaneRef owns every reference form and every refusal.
 _PLANE = _inputs.PlaneRef("plane", default="xy",
-                          description="Default xy; ignored with 'on_face'.")
+                          description="Ignored with 'on_face'.")
 
 
 def handler(plane: str = "xy", name: str = "", on_face: str = "") -> dict:

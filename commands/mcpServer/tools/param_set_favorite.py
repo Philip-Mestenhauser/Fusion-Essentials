@@ -39,7 +39,7 @@ tool = (
         input_param_description="User parameter name.",
     )
     .add_input_property("favorite", {"type": "boolean",
-            "description": "Favorite on/off (default true)."})
+            "description": "Favorite on/off."})
     .strict_schema()
 )
 item = Item.create_tool_item(

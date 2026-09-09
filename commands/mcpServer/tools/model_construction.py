@@ -54,7 +54,7 @@ _FACE = _inputs.GeometryHandle("face", require="face")
 _MODE = _inputs.Choice("mode", _MODE_OPTIONS, default="",
     description="Build method within 'kind'.")
 # mode='on_path' reads 'at' through this: a unitless 0-1 ratio, or a length from the path start.
-_DISTANCE_TYPE = _inputs.Choice("distance_type", ["proportional", "absolute"], default="proportional")
+_DISTANCE_TYPE = _inputs.Choice("distance_type", ["proportional", "absolute"])
 _TO_OBJECT = _inputs.GeometryHandle("to_object", require="vertex")
 
 # MODE GUARD: setByPoint(Point3D) / setByLine(InfiniteLine3D) are DIRECT-edit-only and fail in
@@ -255,7 +255,9 @@ def _at_fraction(raw, m):
 def _on_path_distance(comp, design, k, path_raw, at_raw, dtype_raw, m):
     """(path, PathDistanceTypes member, distance ValueInput, payload extra, error) for setByPath -
     'absolute' reads 'at' as a length in 'units', 'proportional' as a unitless ratio."""
-    dtype, derr = _DISTANCE_TYPE.resolve(dtype_raw)
+    # 'proportional' when omitted, which is NOT a schema default: 'to_object' refuses a supplied
+    # distance_type, so sending 'proportional' is not the same call as omitting it.
+    dtype, derr = _DISTANCE_TYPE.resolve(dtype_raw or "proportional")
     if derr:
         return None, None, None, None, derr
     if dtype == "absolute":

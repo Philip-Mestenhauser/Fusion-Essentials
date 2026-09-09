@@ -38,7 +38,7 @@ _FORMAT = _inputs.Choice("format", list(_FORMATS), default="pdf")
 # integer value is written here.
 _DWG_MEMBERS = {"simplified": "SimplifiedDWGFormat", "autocad": "AutoCADDWGFormat"}
 
-_DWG_VARIANT = _inputs.Choice("dwg_variant", list(_DWG_MEMBERS), default="autocad", required=False)
+_DWG_VARIANT = _inputs.Choice("dwg_variant", list(_DWG_MEMBERS), required=False)
 
 # input name -> the ONE format whose export options carry that setting: PDFExportOptions holds
 # sheetRange/sheetsToExport/useLineWeights, DXFExportOptions exportSplinesAsSplines, DWGExportOptions
@@ -143,7 +143,9 @@ def handler(format: str = "pdf", file_path: str = "", sheet_range: str = "",
                                    "splines_as_splines": splines_as_splines})
     if scope_err:
         return error(scope_err)
-    variant, e = _DWG_VARIANT.resolve(variant_raw)
+    # 'autocad' when omitted, which is NOT a schema default: _scope_error refuses a dwg_variant on
+    # another format, so sending 'autocad' is not the same call as omitting it.
+    variant, e = _DWG_VARIANT.resolve(variant_raw or "autocad")
     if e:
         return error(e)
 

@@ -248,7 +248,7 @@ tool = Tool.create_with_string_input(
 ).add_input_property(
     "read_only",
     {"type": "boolean",
-     "description": "A design change RAISES; file writes still land. Default false."},
+     "description": "A design change RAISES; file writes still land."},
 ).strict_schema()
 
 # enforce_timeout=False: a long script cannot be interrupted mid-run and still COMMITs, so the

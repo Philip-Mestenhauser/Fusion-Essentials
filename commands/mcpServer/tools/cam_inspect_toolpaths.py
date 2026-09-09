@@ -274,8 +274,8 @@ tool = (
     .add_input_property("scope", {"type": "string"})
     .add_input_property("max_results", {"type": "integer"})
     .add_input_property("include_suppressed", {"type": "boolean",
-            "description": "Default false; suppressing flips hasToolpath to False and only "
-                           "cam_generate brings it back."})
+            "description": "Suppressing flips hasToolpath to False and only cam_generate "
+                           "brings it back."})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

@@ -109,7 +109,7 @@ tool = (
     .add_input_property("expression", {"type": "string",
             "description": "e.g. '25 mm', 'PartX/2', \"'text'\"; function args use ';': max(a; b)."})
     .add_input_property("unit", {"type": "string",
-            "description": "mm/cm/in/deg, '' unitless, 'Text' for text (default mm)."})
+            "description": "mm/cm/in/deg, '' unitless, 'Text' for text."})
     .add_input_property("comment", {"type": "string"})
     .add_input_property("favorite", {"type": "boolean"})
     .add_input_property("params", {"type": "array",

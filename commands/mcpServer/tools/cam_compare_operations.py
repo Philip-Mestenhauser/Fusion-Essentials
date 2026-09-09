@@ -331,7 +331,7 @@ tool = (
     .add_input_property("operation_b", {"type": "string",
             "description": "Operation name (from cam_get)."})
     .add_input_property("max_results", {"type": "integer", "description":
-            f"Default {_DIFFERENCES_CAP}, max {_DIFFERENCES_CEILING}."})
+            f"Max {_DIFFERENCES_CEILING}."})
     .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )

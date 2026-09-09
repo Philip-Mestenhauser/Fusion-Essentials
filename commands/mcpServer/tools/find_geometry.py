@@ -315,7 +315,7 @@ find_tool = (
             "description": "[x,y,z] world point in 'units' to sort by."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("max_results", {"type": "integer", "description":
-            f"Default {_MAX_RESULTS_DEFAULT}, max {_MAX_RESULTS_CEILING}."})
+            f"Max {_MAX_RESULTS_CEILING}."})
     .strict_schema()
 )
 find_item = Item.create_tool_item(tool=find_tool, write="read", handler=handler, run_on_main_thread=True)

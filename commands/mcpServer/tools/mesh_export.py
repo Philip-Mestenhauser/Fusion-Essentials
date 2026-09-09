@@ -42,7 +42,7 @@ _EXPORT_REFINE = _inputs.Choice("refinement", options=list(_REFINEMENTS), defaul
 # STLExportOptions.unitType is sticky session state: an export that never assigns it writes the unit
 # of the last explicit assignment made anywhere in the session, across documents. So the omitted
 # case still ASSIGNS the default (mm, the unit mesh_insert defaults to) rather than leaving it alone.
-_EXPORT_UNITS = _inputs.Choice("stl_units", options=list(_export.STL_UNIT_MEMBERS), default="mm",
+_EXPORT_UNITS = _inputs.Choice("stl_units", options=list(_export.STL_UNIT_MEMBERS),
                                description="format=stl only; baked into the file.")
 
 
@@ -175,7 +175,9 @@ def handler(format: str = "3mf", file_path: str = "", target: str = "",
     ref, rerr = _EXPORT_REFINE.resolve(refinement)
     if rerr:
         return error(rerr)
-    unit_key, uerr = _EXPORT_UNITS.resolve(stl_units)
+    # 'mm' when omitted, which is NOT a schema default: an stl_units on another format is refused
+    # below, so sending 'mm' is not the same call as omitting it.
+    unit_key, uerr = _EXPORT_UNITS.resolve(stl_units or "mm")
     if uerr:
         return error(uerr)
     if (stl_units or "").strip() and fmt != "stl":

@@ -520,7 +520,7 @@ tool = (
     .add_input_property("tool_library_url", {"type": "string"})
     .add_input_property("tool_index", {"type": "integer"})
     .add_input_property("generate", {"type": "boolean",
-            "description": "Default false; select geometry first."})
+            "description": "Select geometry first."})
     .add_input_property("name", {"type": "string"})
     .strict_schema()
 )

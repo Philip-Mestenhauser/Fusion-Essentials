@@ -352,8 +352,7 @@ tool = (
     .add_input_property(*_inputs.Choice("what", list(_KIND_HINTS), default="any").as_property())
     .add_input_property("clear_current", {"type": "boolean"})
     .add_input_property("wait_seconds", {"type": "number",
-            "description": f"Default {_DEFAULT_WAIT_SECONDS:g}, max {_MAX_WAIT_SECONDS:g}; "
-            "0 = fire-and-return."})
+            "description": f"Max {_MAX_WAIT_SECONDS:g}; 0 = fire-and-return."})
     .writes()
     # The automatic write guard is bypassed: its wrap touches adsk.* off the main thread, so
     # expect_document is checked inside _begin_request instead, through _write_guard's own functions.

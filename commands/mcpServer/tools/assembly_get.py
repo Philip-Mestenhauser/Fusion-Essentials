@@ -37,9 +37,8 @@ _MOTION = {
     6: ("ball", 3),
 }
 
-# The default cap on each bounded array. Every one is read by the handler signature below AND
-# interpolated into its own max_* input description, so the number an agent is told is the number
-# the handler applies when the agent names none.
+# The default cap on each bounded array, read by the handler signature below - which is what the
+# schema stamps as each max_* input's structural default.
 _MAX_OCCURRENCES_DEFAULT = 50
 _MAX_JOINTS_DEFAULT = 100
 _MAX_JOINT_ORIGINS_DEFAULT = 50
@@ -416,13 +415,13 @@ tool = (
     .add_input_property("include", {"type": "array",
             "items": {"type": "string", "enum": list(_SLICES)},
             "description": "Omit for the light kinematic state."})
-    .add_input_property("include_joints", {"type": "boolean", "description": "Default true."})
-    .add_input_property("max_occurrences", {"type": "integer", "description": f"Default {_MAX_OCCURRENCES_DEFAULT}."})
-    .add_input_property("max_joints", {"type": "integer", "description": f"Default {_MAX_JOINTS_DEFAULT}."})
-    .add_input_property("max_joint_origins", {"type": "integer", "description": f"Default {_MAX_JOINT_ORIGINS_DEFAULT}."})
-    .add_input_property("max_relations", {"type": "integer", "description": f"Default {_MAX_RELATIONS_DEFAULT}."})
-    .add_input_property("max_contacts", {"type": "integer", "description": f"Default {_MAX_CONTACTS_DEFAULT}."})
-    .add_input_property("max_all_occurrences", {"type": "integer", "description": f"Default {_MAX_ALL_OCCURRENCES_DEFAULT}."})
+    .add_input_property("include_joints", {"type": "boolean"})
+    .add_input_property("max_occurrences", {"type": "integer"})
+    .add_input_property("max_joints", {"type": "integer"})
+    .add_input_property("max_joint_origins", {"type": "integer"})
+    .add_input_property("max_relations", {"type": "integer"})
+    .add_input_property("max_contacts", {"type": "integer"})
+    .add_input_property("max_all_occurrences", {"type": "integer"})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="read", handler=handler, run_on_main_thread=True)

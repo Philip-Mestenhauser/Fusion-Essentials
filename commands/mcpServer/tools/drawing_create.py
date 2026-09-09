@@ -585,7 +585,7 @@ tool = (
     .add_input_property(*_STANDARD.as_property())
     .add_input_property(*_UNITS.as_property())
     .add_input_property(*_CONTENT.as_property())
-    .add_input_property("isometric", {"type": "boolean", "description": "Default true."})
+    .add_input_property("isometric", {"type": "boolean"})
     .add_input_property(*_SHEET_SIZE.as_property())
     .add_input_property(*_ORIENTATION.as_property())
     .add_input_property(*_SHEET_SCOPE.as_property())

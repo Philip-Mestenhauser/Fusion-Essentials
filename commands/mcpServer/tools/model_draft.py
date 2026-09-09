@@ -148,8 +148,7 @@ draft_tool = (
     .add_input_property(_PULL.name, _PULL.schema())
     .add_input_property("angle_deg", {"type": "number"})
     .add_input_property("symmetric", {"type": "boolean"})
-    .add_input_property("tangent_chain", {"type": "boolean",
-            "description": "Default true."})
+    .add_input_property("tangent_chain", {"type": "boolean"})
     .add_input_property("flip", {"type": "boolean"})
     .strict_schema()
 )

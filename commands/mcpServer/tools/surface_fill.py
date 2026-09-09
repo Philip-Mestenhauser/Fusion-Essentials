@@ -368,8 +368,7 @@ fill_tool = (
     .add_input_property("cells", {"type": "array", "items": {"type": "integer"},
                                   "description": "Indices of the cells to KEEP."})
     .add_input_property("remove_tools", {"type": "boolean",
-                                         "description": "Consume the bounding bodies "
-                                                        "(default false)."})
+                                         "description": "Consume the bounding bodies."})
     .strict_schema()
 )
 fill_item = Item.create_tool_item(tool=fill_tool, write="write", handler=handler,

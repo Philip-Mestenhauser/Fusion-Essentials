@@ -156,7 +156,7 @@ tool = (
     .add_input_property("z", {"type": "number"})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("activate", {"type": "boolean",
-            "description": "Make it the active edit target (default false)."})
+            "description": "Make it the active edit target."})
     .add_input_property("rotate_deg", {"type": "number",
             "description": "Orientation about 'rotate_axis'."})
     .add_input_property(*_inputs.frame_axis("rotate_axis", default="z").as_property())
