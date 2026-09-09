@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 187  |  **description breadcrumbs:** 265  |  **note/error breadcrumbs:** 472
+**Tools:** 187  |  **description breadcrumbs:** 265  |  **note/error breadcrumbs:** 468
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -28,15 +28,15 @@ close orphans, factor duplicated guards into shared helpers.
 - **6x** across 3 module(s): "Could not create output directory '"
 - **5x** across 5 module(s): "'. Use: new, join, cut, intersect."
 - **5x** across 5 module(s): "Fusion declined to delete '"
-- **5x** across 5 module(s): "is not available on this Fusion version."
 - **4x** across 1 module(s): "Edits already applied before the failure:"
 - **4x** across 4 module(s): "No active design (open a document with design geometry)."
 - **4x** across 4 module(s): "deleteMe() reported success for '"
+- **4x** across 4 module(s): "is not available on this Fusion version."
 - **4x** across 1 module(s): "setMotionData reported success on '"
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
 - `doc_new`  <- 82  (desc 0, note 82)
-- `find_geometry`  <- 41  (desc 14, note 27)
+- `find_geometry`  <- 39  (desc 14, note 25)
 - `design_delete_feature`  <- 37  (desc 16, note 21)
 - `view_screenshot`  <- 34  (desc 5, note 29)
 - `design_get`  <- 33  (desc 8, note 25)
@@ -2634,6 +2634,10 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Line was drawn but could not be marked construction:
 
 ### `sketch_add_geometry`
+- '. Valid: mm, cm, in.
+- No active design. Create or open a document first (see doc_new).
+- No sketch to draw on. Create one first with sketch_create.
+- '. Use sketch_get to list them, or sketch_create first.
 - Draw more with sketch_add_geometry, or view_screenshot to view the sketch.
 - Rectangle drawn. NO horizontal/vertical constraint took, so its sides are held only by their coordinates - a later edit can skew it. Add them with sketch_constrain (horizontal / vertical) before di...
 - horizontal/vertical constraint(s) applied to its sides, as the UI does - the constructor itself lands none. Its corners already share points; what remains free is position and size, so dimension th...
@@ -2642,22 +2646,8 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Slot drawn from 2 solid SketchLines, 1 CONSTRUCTION SketchLine (the centre-to-centre line) and 2 SketchArc end caps - 5 curves, of which 'curves_added' counts the 3 lines. Address any of them as 'l...
 - Slot drawn - 'curves_added' counts its SketchLines: three, four when a length or angle is passed. Its two end caps are SketchArcs. Address either as 'line:<index>' / 'arc:<index>' for sketch_dimens...
 - Closed path drawn and a profile forms. The seam is WELDED - the closing segment ends on the first segment's start point, so the loop shares that point instead of carrying two at the same coordinate...
-- '. Valid: mm, cm, in.
-- No active design. Create or open a document first (see doc_new).
-- No sketch to draw on. Create one first with sketch_create.
-- returned no entity (check the parameters).
 - drawn. Its centre is a sketch point of its own: center_point=
 - - address points by that ref rather than by counting the ones you drew.
-- '. Use sketch_get to list them, or sketch_create first.
-- minor must be > 0 (got
-- ); omit it for major/2.
-- conic 'rho' must be greater than 0 and less than 1. Got
-- polygon needs sides >= 3.
-- returned an entity but the sketch's own
-- collection count did not change (
-- ) - nothing was added. Re-read sketch_get.
-- cv_spline 'degree' must be
-- - the only degrees the API accepts when creating a spline. Got
 
 ### `sketch_constrain`
 - Geometric constraint applied - the sketch is now parametric for this relationship.
@@ -2667,46 +2657,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - The sketch is still NOT fully constrained - other geometry holds the remaining freedom (sketch_get(include_entities=true) shows what).
 - The sketch's constrained state did not read back.
 - sketch entities - read their '<type>:<index>' refs with sketch_get.
-- ' resolve to ONE sketch point, so there is nothing to constrain. Name two different points, or drop the call; sketch_get(include_entities=true) lists them.
-- returned no constraint object.
-- ' returned a constraint but added no sketch geometry - nothing was created. Delete it with sketch_delete_entity(target='constraint:<index>').
 - applied with EVERY instance suppressed, so it created no curves - the pattern constraint itself is in the sketch. Re-run with fewer 'suppressed' flags set for a pattern that draws.
-- a 'text:<index>' ref applies to constraint=fix / unfix only - no other constraint takes a sketch TEXT as an operand. '
-- sketch curves or points
-- Could not resolve entity_one '
-- ' (use '<type>:<index>', type =
-- ' needs 'entity_two' (a second '<type>:<index>'). Got '
-- ' needs 'entities' - comma-separated '<type>:<index>' refs. Got '
-- was requested. The constraint is left in the sketch for inspection - sketch_delete_entity(target='constraint:<index>') removes it.
-- instance(s) suppressed, not the
-- requested, so the pattern is not what was asked for. The constraint is left in the sketch for inspection - sketch_delete_entity(target='constraint:<index>') removes it.
-- ' was created with a different distance_type than the '
-- ' requested, so its spacing is not what was asked for. The constraint is left in the sketch for inspection - sketch_delete_entity(target='constraint:<index>') removes it.
-- ' resolved to a sketch text whose definition hands back no rectangle lines - there is no anchor to lock.
-- anchor lines took the
-- - the text's anchor is left partly locked. Re-read the sketch with sketch_get before relying on its constrained state.
-- 'symmetry' needs 'entity_two'. Got '
-- 'symmetry' needs 'symmetry_line' - the axis line ref (e.g. 'line:0').
-- ' needs 'surface' - a plane alias (xy/xz/yz), a construction-plane name, or a face handle from find_geometry
-- (curved faces allowed).
-- (this constraint takes a PLANAR face only).
-- ' needs at least 3 lines in 'entities' to close a shape. Got
-- ' needs quantity >= 2. Got
-- unsupported constraint kind '
-- ' needs BOTH direction lines -
-- did not resolve. A null direction is documented as the sketch X axis but the API refuses it ('invalid argument directionOneEntity').
-- ' needs quantity >= 1 and quantity_two >= 1. Got
-- is not available on this Fusion version.
-- The sketch is now fully constrained.
-- The sketch is NOT fully constrained yet - dimension the remaining freedom with sketch_dimension, or retry with result_option='option3', which may adjust geometry within tolerance to close the solve.
-- Read what it added with sketch_get(include_entities=true).
-- entity(ies) within tolerance to reach the solve - their coordinates changed.
-- autoConstrain returned a result but added no dimensions or constraints, and the sketch is still not fully constrained (
-- dimension(s)). Try result_option='option3', which may adjust geometry within tolerance, or constrain it explicitly.
-- autoConstrain reported
-- constraint(s) added but the sketch still holds
-- constraint(s) - nothing landed in it.
-- The sketch is already fully constrained - nothing to add. (Fusion refuses AutoConstrain on a fully constrained sketch, so no call was made.)
 
 ### `sketch_copy`
 - ', and an added curve APPENDS at the end of its kind, so the ids already in use keep their entities - re-read sketch_get(include_entities=true) for the new ones. 'returned_entity_count' counts the ...
@@ -2751,25 +2702,9 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - (s) before the call. Re-read it with sketch_get before deleting more.
 
 ### `sketch_dimension`
-- Dimensional constraint added. Drive it later by name via param_set.
-- is_driving=false creates a DRIVEN (reference) dimension - the geometry controls it, so value '
-- ' cannot drive it. Drop 'value', or leave is_driving true.
 - No active design. Create or open a document first (see doc_new).
 - No sketch to dimension. Create one first with sketch_create.
-- ' did not resolve. Use '<type>:<index>' (
-- ), optionally with an anchor ':start'/':end'/':mid'/':center', e.g. 'line:0:end'.
-- ' takes a whole entity, not a point anchor - drop the ':
-- ' takes a whole entity as entity_two, not a point anchor - drop the ':
-- dimension returned nothing.
-- ' dimensions the whole line's length - drop the ':
-- ' anchor, or give entity_two to pin two points.
-- ' with no entity_two dimensions a LINE's own length; '
-- ' is not a line. Give entity_two ('<type>:<index>').
-- ' needs 'surface' - a plane alias (xy/xz/yz), a construction-plane name, or a face handle from find_geometry
-- (curved faces allowed).
-- (this dimension takes a PLANAR face only).
-- ' needs entity_two ('<type>:<index>'). '
-- Dimension added but could not set value '
+- Drive it later by name via param_set.
 
 ### `sketch_edit_curve`
 - Curve ids are creation-order indexes per kind: removing a curve RENUMBERS the ones after it, while an added curve APPENDS at the end (both measured) - re-read sketch_get(include_entities=true) befo...

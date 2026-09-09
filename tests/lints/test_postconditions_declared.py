@@ -121,11 +121,6 @@ _RUNG_SHORT = {
     "doc_new": "the request carries no value: a new document exists and is active",
     "design_recompute": "the request carries no value: the timeline health after the rebuild is "
                         "the only observation",
-    "sketch_add_geometry": "the SketchCurvesChanged fingerprint costs 0.27 s per read on a "
-                           "200-curve sketch, two reads per draw; adopted with the batched writes, "
-                           "where one pair covers a whole list (SKETCHFP-COST-1)",
-    "sketch_project": "the SketchCurvesChanged fingerprint costs 0.27 s per read on a 200-curve "
-                      "sketch; adopted with the batched writes (SKETCHFP-COST-1)",
 }
 
 

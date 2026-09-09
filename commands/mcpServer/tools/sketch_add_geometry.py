@@ -1,8 +1,9 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""MCP building block: draw ONE geometry entity on a sketch - line, rectangle, circle, arc, polygon,
-slot, spline, polyline. Coords/sizes accept mm | cm | in and convert to the API's internal cm.
+"""MCP building block: draw a LIST of geometry entities on one sketch - line, rectangle, circle,
+arc, polygon, slot, spline, polyline. Coords/sizes accept mm | cm | in and convert to the API's
+internal cm.
 """
 
 import math
@@ -13,10 +14,12 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import error, ok, safe, scale
+from ._common import error, safe, scale
 from ._sketch_detail import COMPONENT_SCOPE, _detail_engine, _sketch_summary
+from . import _assert
 from . import _common
 from . import _inputs
+from . import _sketch_batch
 
 app = adsk.core.Application.get()
 
@@ -547,27 +550,21 @@ def _parse_points(points):
     return out, None
 
 
-def handler(kind: str = "", sketch_name: str = "", units: str = "mm",
-            x1: float = None, y1: float = None, x2: float = None, y2: float = None,
-            cx: float = None, cy: float = None, radius: float = None,
-            sweep_deg: float = None, sides: int = None, points=None,
-            minor: float = None, is_construction: bool = False,
-            rho: float = None, degree: int = None,
-            start_deg: float = None, arc_radius: float = None,
-            slot_length: float = None,
-            angle_deg: float = None, create_width_dimension: bool = False,
-            create_radius_dimension: bool = False,
-            create_angle_dimension: bool = False,
-            component: str = "") -> dict:
-    """Draw one geometry entity on a sketch; required params per 'kind' are in _REQUIRED."""
-    kind = (kind or "").strip().lower()
-    if kind not in _KINDS:
-        return error(f"Unknown kind '{kind}'. Valid: {', '.join(_KINDS)}.")
+# The fields one 'geometry' entry takes - the wire schema and the entry guard read this one table.
+_ENTRY_FIELDS = ("kind", "x1", "y1", "x2", "y2", "cx", "cy", "radius", "minor", "sweep_deg",
+                 "start_deg", "rho", "degree", "sides", "arc_radius", "slot_length", "angle_deg",
+                 "points", "create_width_dimension", "create_radius_dimension",
+                 "create_angle_dimension", "is_construction")
 
+
+def handler(geometry=None, sketch_name: str = "", component: str = "", units: str = "mm") -> dict:
+    """See TOOL_DESCRIPTION."""
+    entries, eerr = _sketch_batch.entries_or_error(geometry, "geometry", _ENTRY_FIELDS)
+    if eerr:
+        return error(eerr)
     k = scale(units)
     if k is None:
         return error(f"Unknown units '{units}'. Valid: mm, cm, in.")
-
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
@@ -584,26 +581,39 @@ def handler(kind: str = "", sketch_name: str = "", units: str = "mm",
             return error(f"No sketch named '{requested}'. Use sketch_get to list them, "
     "or sketch_create first.")
         return error("No sketch to draw on. Create one first with sketch_create.")
+    return _sketch_batch.run_batch(entries, lambda i, e: _one(sketch, e, k, units), "geometry",
+                                   "drawn", safe(lambda: sketch.name))
+
+
+def _one(sketch, entry, k, units):
+    """(result, error) for ONE geometry entry drawn on `sketch`; required params per 'kind' are in
+    _REQUIRED."""
+    kind = (entry.get("kind") or "").strip().lower()
+    if kind not in _KINDS:
+        return None, f"Unknown kind '{kind}'. Valid: {', '.join(_KINDS)}."
+    is_construction = bool(entry.get("is_construction"))
 
     # polyline / closed_path / spline / cv_spline: a chain/curve from a 'points' list.
     if kind in _POINT_LIST_KINDS:
-        pts, perr = _parse_points(points)
+        pts, perr = _parse_points(entry.get("points"))
         if perr:
-            return error(perr)
+            return None, perr
         p = {"points": pts, "_points": pts}
         if kind == "cv_spline":
+            degree = entry.get("degree")
             d = 3 if degree is None else int(degree)
             if d not in _SPLINE_DEGREES:
-                return error(f"cv_spline 'degree' must be "
-                             f"{' or '.join(str(n) for n in sorted(_SPLINE_DEGREES))} - the only "
-                             f"degrees the API accepts when creating a spline. Got {degree}.")
+                return None, (f"cv_spline 'degree' must be "
+                              f"{' or '.join(str(n) for n in sorted(_SPLINE_DEGREES))} - the only "
+                              f"degrees the API accepts when creating a spline. Got {degree}.")
             p["degree"] = d
         # fall through to the shared draw + result below
 
     else:
         # Gather + validate the scalar params this kind needs.
-        supplied = {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "cx": cx, "cy": cy,
-    "radius": radius, "sweep_deg": sweep_deg, "sides": sides, "minor": minor, "rho": rho}
+        supplied = {key: entry.get(key) for key in
+                    ("x1", "y1", "x2", "y2", "cx", "cy", "radius", "sweep_deg", "sides", "minor",
+                     "rho")}
         p = {}
         missing = []
         for key in _REQUIRED[kind]:
@@ -612,28 +622,29 @@ def handler(kind: str = "", sketch_name: str = "", units: str = "mm",
             else:
                 p[key] = supplied[key]
         if missing:
-            return error(f"'{kind}' needs: {', '.join(_REQUIRED[kind])}. Missing: {', '.join(missing)}.")
-        p["minor"] = minor   # optional, passed through for ellipse / elliptical_arc
-        p["start_deg"] = start_deg   # optional, elliptical_arc only (default 0 = the major axis)
-        p["arc_radius"] = arc_radius            # optional, center_point_arc_slot only
-        p["slot_length"] = slot_length          # optional, overall_slot / center_point_slot only
-        p["angle_deg"] = angle_deg              # optional, the tailed slot kinds
-        p["create_width_dimension"] = bool(create_width_dimension)
-        p["create_radius_dimension"] = bool(create_radius_dimension)
-        p["create_angle_dimension"] = bool(create_angle_dimension)
+            return None, (f"'{kind}' needs: {', '.join(_REQUIRED[kind])}. "
+                          f"Missing: {', '.join(missing)}.")
+        p["minor"] = entry.get("minor")   # optional, passed through for ellipse / elliptical_arc
+        p["start_deg"] = entry.get("start_deg")  # optional, elliptical_arc (default 0 = major axis)
+        p["arc_radius"] = entry.get("arc_radius")     # optional, center_point_arc_slot only
+        p["slot_length"] = entry.get("slot_length")   # optional, overall_slot / center_point_slot
+        p["angle_deg"] = entry.get("angle_deg")       # optional, the tailed slot kinds
+        p["create_width_dimension"] = bool(entry.get("create_width_dimension"))
+        p["create_radius_dimension"] = bool(entry.get("create_radius_dimension"))
+        p["create_angle_dimension"] = bool(entry.get("create_angle_dimension"))
         if kind in _SLOT_KINDS:
             slot_err = _slot_error(kind, p)
             if slot_err:
-                return error(slot_err)
+                return None, slot_err
         if kind in ("circle", "ellipse", "elliptical_arc") and p["radius"] <= 0:
-            return error("radius must be > 0.")
+            return None, "radius must be > 0."
         if kind == "elliptical_arc" and p["minor"] is not None and p["minor"] <= 0:
-            return error(f"minor must be > 0 (got {p['minor']}); omit it for major/2.")
+            return None, f"minor must be > 0 (got {p['minor']}); omit it for major/2."
         # the conic binding states rhoValue must be greater than zero and less than one.
         if kind == "conic" and not 0.0 < float(p["rho"]) < 1.0:
-            return error(f"conic 'rho' must be greater than 0 and less than 1. Got {p['rho']}.")
+            return None, f"conic 'rho' must be greater than 0 and less than 1. Got {p['rho']}."
         if kind == "polygon" and int(p["sides"]) < 3:
-            return error("polygon needs sides >= 3.")
+            return None, "polygon needs sides >= 3."
 
     # Draw (defer compute so the single add is efficient and consistent).
     before_kind = _kind_curve_count(sketch, kind)
@@ -665,10 +676,10 @@ def handler(kind: str = "", sketch_name: str = "", units: str = "mm",
                 restore_error = str(e)
 
     if draw_error:
-        return error(draw_error + _restore_clause(restore_error, sketch))
+        return None, draw_error + _restore_clause(restore_error, sketch)
     if not label:
-        return error(f"Drawing {kind} returned no entity (check the parameters)."
-                     + _restore_clause(restore_error, sketch))
+        return None, (f"Drawing {kind} returned no entity (check the parameters)."
+                      + _restore_clause(restore_error, sketch))
 
     # VERIFY the draw against the sketch's own collection for this kind: a factory can hand back an
     # object without the curve landing in the sketch, and that is a failure, not a success.
@@ -681,15 +692,14 @@ def handler(kind: str = "", sketch_name: str = "", units: str = "mm",
             # is built out of lines, so 'rectangle collection' would send the caller looking for a
             # collection the sketch does not have.
             counted = _KIND_REF_TOKEN.get(kind, kind)
-            return error(f"Drawing {kind} returned an entity but the sketch's own {counted} "
-                         f"collection count did not change ({before_kind} -> {after_kind}) - "
-                         "nothing was added. Re-read sketch_get."
-                         + _restore_clause(restore_error, sketch))
+            return None, (f"Drawing {kind} returned an entity but the sketch's own {counted} "
+                          f"collection count did not change ({before_kind} -> {after_kind}) - "
+                          "nothing was added. Re-read sketch_get."
+                          + _restore_clause(restore_error, sketch))
 
     out = {
-    "drawn": label,
+    "label": label,
     "kind": kind,
-    "sketch_name": safe(lambda: sketch.name),
     "units": units,
     "sketch": _sketch_summary(sketch),
     "note": "Draw more with sketch_add_geometry, or view_screenshot to view the sketch.",
@@ -753,47 +763,59 @@ def handler(kind: str = "", sketch_name: str = "", units: str = "mm",
     if restore_error:
         out["compute_deferred"] = True
         out["note"] += _restore_clause(restore_error, sketch)
-    return ok(out)
+    return out, None
 
 
 TOOL_DESCRIPTION = (
-    "Draw one entity on a sketch; coords in 'units', angles in degrees."
+    "Draw entities on a sketch; coords in 'units', angles in degrees."
 )
+
+# One 'geometry' entry on the wire: the same fields the entry guard admits (_ENTRY_FIELDS).
+_ENTRY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "kind": _KIND.schema(),
+        "points": {"type": "array", "items": {"type": "array"},
+                   "description": "[x,y] pairs in 'units'. A cv_spline's are control points."},
+        "x1": {"type": "number"},
+        "y1": {"type": "number"},
+        "x2": {"type": "number"},
+        "y2": {"type": "number"},
+        "cx": {"type": "number"},
+        "cy": {"type": "number"},
+        "radius": {"type": "number"},
+        "minor": {"type": "number"},
+        "sweep_deg": {"type": "number"},
+        "start_deg": {"type": "number"},
+        "rho": {"type": "number"},
+        "degree": {"type": "integer"},
+        "sides": {"type": "integer"},
+        "arc_radius": {"type": "number", "description": "Overrides the start-to-centre distance."},
+        "slot_length": {"type": "number", "description": "overall_slot tip-to-tip, center_point_slot HALF length. Overrides x2,y2."},
+        "angle_deg": {"type": "number"},
+        "create_width_dimension": {"type": "boolean"},
+        "create_radius_dimension": {"type": "boolean"},
+        "create_angle_dimension": {"type": "boolean"},
+        "is_construction": {"type": "boolean"},
+    },
+    "required": ["kind"],
+    "additionalProperties": False,
+}
+
 tool = (
     Tool.create_simple(name="sketch_add_geometry", description=TOOL_DESCRIPTION)
-    .add_input_property(*_KIND.as_property())
-    .add_required_input("kind")
-    .add_input_property("points", {"type": "array",
-            "description": "[x,y] pairs in 'units'. A cv_spline's are control points.",
-            "items": {"type": "array"}})
+    .add_input_property("geometry", {"type": "array", "items": _ENTRY_SCHEMA,
+            "description": "Run in order; the first failure stops the run."})
+    .add_required_input("geometry")
     .add_input_property("sketch_name", {"type": "string", "description": "Default: most recent."})
     .add_input_property(*COMPONENT_SCOPE)
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("x1", {"type": "number"})
-    .add_input_property("y1", {"type": "number"})
-    .add_input_property("x2", {"type": "number"})
-    .add_input_property("y2", {"type": "number"})
-    .add_input_property("cx", {"type": "number"})
-    .add_input_property("cy", {"type": "number"})
-    .add_input_property("radius", {"type": "number"})
-    .add_input_property("minor", {"type": "number"})
-    .add_input_property("sweep_deg", {"type": "number"})
-    .add_input_property("start_deg", {"type": "number"})
-    .add_input_property("rho", {"type": "number"})
-    .add_input_property("degree", {"type": "integer"})
-    .add_input_property("sides", {"type": "integer"})
-    .add_input_property("arc_radius", {"type": "number", "description": "Overrides the start-to-centre distance."})
-    .add_input_property("slot_length", {"type": "number", "description": "overall_slot tip-to-tip, center_point_slot HALF length. Overrides x2,y2."})
-    .add_input_property("angle_deg", {"type": "number"})
-    .add_input_property("create_width_dimension", {"type": "boolean"})
-    .add_input_property("create_radius_dimension", {"type": "boolean"})
-    .add_input_property("create_angle_dimension", {"type": "boolean"})
-    .add_input_property("is_construction", {"type": "boolean"})
     .strict_schema()
 )
 item = Item.create_tool_item(
     tool=tool, write="write", handler=handler,
     run_on_main_thread=True,
+    postconditions=[_assert.SketchCurvesChanged(scope_keys=("component",))],
     verification=Verification(
         kind="inline", rung="value",
         evidence_test="tests/unit/test_sketch_add_geometry.py::TestKindCollectionFallback"

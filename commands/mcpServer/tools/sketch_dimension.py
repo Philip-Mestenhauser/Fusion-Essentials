@@ -12,9 +12,10 @@ import adsk.fusion
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe
+from ._common import error, safe
 from . import _common
 from . import _inputs
+from . import _sketch_batch
 from . import _sketch_detail
 
 app = adsk.core.Application.get()
@@ -258,21 +259,16 @@ def _moved_warning(moves, value_cm, gap_before_cm):
             "'solved' holds each referenced entity's post-solve position.")
 
 
-def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str = "",
-            entity_two: str = "", value: str = "", surface: str = "", is_driving: bool = True,
-            tangent_side_one: bool = True, tangent_side_two: bool = True,
-            component: str = "") -> dict:
-    """See TOOL_DESCRIPTION."""
-    dt = (dim_type or "distance").strip().lower()
-    if dt not in _DIM_TYPES:
-        return error(f"Unknown dim_type '{dim_type}'. Valid: {', '.join(_DIM_TYPES)}.")
-    # isDriving=False is the API's DRIVEN (reference) dimension: the geometry controls the
-    # dimension, so an expression cannot drive it. Refuse the contradiction naming both inputs.
-    if not is_driving and (value or "").strip():
-        return error(f"is_driving=false creates a DRIVEN (reference) dimension - the geometry "
-                     f"controls it, so value '{value}' cannot drive it. Drop 'value', or leave "
-                     "is_driving true.")
+# The fields one 'dimensions' entry takes - the wire schema and the entry guard read this one table.
+_ENTRY_FIELDS = ("dim_type", "entity_one", "entity_two", "value", "surface", "is_driving",
+                 "tangent_side_one", "tangent_side_two")
 
+
+def handler(dimensions=None, sketch_name: str = "", component: str = "") -> dict:
+    """See TOOL_DESCRIPTION."""
+    entries, eerr = _sketch_batch.entries_or_error(dimensions, "dimensions", _ENTRY_FIELDS)
+    if eerr:
+        return error(eerr)
     design = _common.design()
     if not design:
         return error("No active design. Create or open a document first (see doc_new).")
@@ -283,16 +279,39 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
     if not sketch:
         if requested:
             return error(f"No sketch named '{requested}'. Available: "
-                         + (", ".join(n for n in _common.all_sketch_names(design) if n)
-                            or "(none)") + ". Use sketch_get.")
+                        + (", ".join(n for n in _common.all_sketch_names(design) if n)
+                           or "(none)") + ". Use sketch_get.")
         return error("No sketch to dimension. Create one first with sketch_create.")
+    return _sketch_batch.run_batch(entries, lambda i, e: _one(sketch, e), "dimensions",
+                                   "dimensioned", safe(lambda: sketch.name))
+
+
+def _one(sketch, entry):
+    """(result, error) for ONE dimension entry added to `sketch`."""
+    dim_type = entry.get("dim_type", "distance")
+    entity_one = entry.get("entity_one") or ""
+    entity_two = entry.get("entity_two") or ""
+    value = entry.get("value") or ""
+    surface = entry.get("surface") or ""
+    is_driving = entry.get("is_driving", True)
+    tangent_side_one = entry.get("tangent_side_one", True)
+    tangent_side_two = entry.get("tangent_side_two", True)
+    dt = (dim_type or "distance").strip().lower()
+    if dt not in _DIM_TYPES:
+        return None, (f"Unknown dim_type '{dim_type}'. Valid: {', '.join(_DIM_TYPES)}.")
+    # isDriving=False is the API's DRIVEN (reference) dimension: the geometry controls the
+    # dimension, so an expression cannot drive it. Refuse the contradiction naming both inputs.
+    if not is_driving and (value or "").strip():
+        return None, (f"is_driving=false creates a DRIVEN (reference) dimension - the geometry "
+                     f"controls it, so value '{value}' cannot drive it. Drop 'value', or leave "
+                     "is_driving true.")
 
     base1, anchor1, aerr1 = _common.parse_anchor_ref(entity_one)
     if aerr1:
-        return error(aerr1)
+        return None, (aerr1)
     e1 = _common.resolve_entity_ref(sketch, base1)
     if e1 is None:
-        return error(f"entity_one '{entity_one}' did not resolve. Use '<type>:<index>' "
+        return None, (f"entity_one '{entity_one}' did not resolve. Use '<type>:<index>' "
     f"({'/'.join(_common.ENTITY_REF_KINDS)}), optionally with an anchor "
     "':start'/':end'/':mid'/':center', e.g. 'line:0:end'.")
     need_two = dt in _TWO_ENTITY_TYPES
@@ -305,21 +324,21 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
         # Only a line qualifies: it has two endpoints and no center (an arc's endpoint span is
         # not its length, so an arc/circle still needs an explicit entity_two).
         if anchor1:
-            return error(f"A single-entity '{dt}' dimensions the whole line's length - drop the "
+            return None, (f"A single-entity '{dt}' dimensions the whole line's length - drop the "
                          f"':{anchor1}' anchor, or give entity_two to pin two points.")
         has_ends = (safe(lambda: e1.startSketchPoint) is not None
                     and safe(lambda: e1.endSketchPoint) is not None)
         if not has_ends or safe(lambda: e1.centerSketchPoint) is not None:
-            return error(f"'{dt}' with no entity_two dimensions a LINE's own length; "
+            return None, (f"'{dt}' with no entity_two dimensions a LINE's own length; "
                          f"'{entity_one}' is not a line. Give entity_two ('<type>:<index>').")
         lone_line = True
     elif need_two:
         base2, anchor2, aerr2 = _common.parse_anchor_ref(entity_two)
         if aerr2:
-            return error(aerr2)
+            return None, (aerr2)
         e2 = _common.resolve_entity_ref(sketch, base2)
         if e2 is None:
-            return error(f"'{dt}' needs entity_two ('<type>:<index>'). '{entity_two}' did not resolve.")
+            return None, (f"'{dt}' needs entity_two ('<type>:<index>'). '{entity_two}' did not resolve.")
 
     dims = sketch.sketchDimensions
     P = adsk.core.Point3D.create
@@ -330,9 +349,9 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
     # Anchors pin one point of an entity for a DISTANCE dim (and for point_to_surface, whose binding
     # argument IS a SketchPoint); every other type takes whole entities.
     if anchor1 and dt not in _ANCHOR_TYPES:
-        return error(f"'{dt}' takes a whole entity, not a point anchor - drop the ':{anchor1}' from entity_one.")
+        return None, (f"'{dt}' takes a whole entity, not a point anchor - drop the ':{anchor1}' from entity_one.")
     if anchor2 and dt not in _DISTANCE_TYPES:
-        return error(f"'{dt}' takes a whole entity as entity_two, not a point anchor - drop the "
+        return None, (f"'{dt}' takes a whole entity as entity_two, not a point anchor - drop the "
                      f"':{anchor2}'.")
 
     kinds1, kinds2 = _OPERANDS.get(dt, (None, None))
@@ -341,19 +360,19 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
     if kinds1 and not anchor1:
         oerr = _operand_error(dt, "entity_one", entity_one, base1, kinds1)
         if oerr:
-            return error(oerr)
+            return None, (oerr)
     if kinds2:
         oerr = _operand_error(dt, "entity_two", entity_two, base2, kinds2)
         if oerr:
-            return error(oerr)
+            return None, (oerr)
 
     surf = None
     if dt in _SURFACE_TYPES:
         surf, serr = _SURFACE.resolve(surface, dt)
         if serr:
-            return error(serr)
+            return None, (serr)
         if surf is None:
-            return error(f"'{dt}' needs 'surface' - a plane alias (xy/xz/yz), a construction-plane "
+            return None, (f"'{dt}' needs 'surface' - a plane alias (xy/xz/yz), a construction-plane "
                          "name, or a face handle from find_geometry"
                          + (" (curved faces allowed)." if dt in _CURVED_SURFACE_OK
                             else " (this dimension takes a PLANAR face only)."))
@@ -365,14 +384,14 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
         else:
             p1, perr1 = _dim_point(sketch, e1, anchor1)
             if perr1:
-                return error(f"entity_one: {perr1}")
+                return None, (f"entity_one: {perr1}")
             p2, perr2 = _dim_point(sketch, e2, anchor2)
             if perr2:
-                return error(f"entity_two: {perr2}")
+                return None, (f"entity_two: {perr2}")
     elif dt == "point_to_surface":
         p1, perr1 = _dim_point(sketch, e1, anchor1)
         if perr1:
-            return error(f"entity_one: {perr1}")
+            return None, (f"entity_one: {perr1}")
     # Where the referenced entities sit BEFORE the solve - the baseline the post-solve read-back
     # measures movement against; gap_before is what the dimension measures between them right now.
     pairs = _referenced_pairs((base1, e1), (base2, e2))
@@ -418,7 +437,7 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
             dim = dims.addDistanceBetweenLineAndPlanarSurfaceDimension(e1, surf, is_driving)
     except Exception as e:
         if dt in _SELF_NAMING_FAILURE:
-            return error(f"Could not add the {dt} dimension: {e}")
+            return None, (f"Could not add the {dt} dimension: {e}")
         if kinds1:
             hint = (f"'{dt}' takes {_kinds_text(kinds1)} as entity_one"
                     + (f" and {_kinds_text(kinds2)} as entity_two" if kinds2 else "")
@@ -426,9 +445,9 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
         else:
             hint = ("Check the entity types match the dimension - radius/diameter need an "
                     "arc/circle, angle needs two lines.")
-        return error(f"Could not add the {dt} dimension: {e}. ({hint})")
+        return None, (f"Could not add the {dt} dimension: {e}. ({hint})")
     if not dim:
-        return error(f"Adding the {dt} dimension returned nothing.")
+        return None, (f"Adding the {dt} dimension returned nothing.")
 
     set_value = None
     if (value or "").strip():
@@ -436,12 +455,10 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
             dim.parameter.expression = value.strip()
             set_value = value.strip()
         except Exception as e:
-            return error(f"Dimension added but could not set value '{value}': {e}.")
+            return None, (f"Dimension added but could not set value '{value}': {e}.")
 
     out = {
-    "dimensioned": True,
     "dim_type": dt,
-    "sketch": safe(lambda: sketch.name),
     "parameter": safe(lambda: dim.parameter.name),
     # the value is READ BACK off the parameter - what Fusion holds, not an echo of the request
     "value": safe(lambda: dim.parameter.expression),
@@ -449,8 +466,7 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
     # READ BACK off the dimension: a driving dimension controls the geometry, a driven one only
     # reports it - which of the two the API actually made is not assumed from the request.
     "is_driving": safe(lambda: dim.isDriving),
-    "note": ("Dimensional constraint added. Drive it later by name via param_set."
-             + _TYPE_NOTES.get(dt, "")),
+    "note": "Drive it later by name via param_set." + _TYPE_NOTES.get(dt, ""),
     }
     if dt in _SURFACE_TYPES:
         out["surface"] = _inputs.surface_ref_label(surf)
@@ -477,26 +493,37 @@ def handler(dim_type: str = "distance", sketch_name: str = "", entity_one: str =
     jump = _moved_warning(moves, eval_cm, gap_before) if dt in _DISTANCE_TYPES else None
     if jump:
         out["solver_moved_warning"] = jump
-    return ok(out)
+    return out, None
 
 
 TOOL_DESCRIPTION = (
-"Add a DIMENSIONAL constraint and optionally drive its value."
+"Add dimensional constraints to one sketch, each optionally driven to a value."
 )
+
+# One 'dimensions' entry on the wire: the same fields the entry guard admits (_ENTRY_FIELDS).
+_ENTRY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "dim_type": _DIM_TYPE.schema(),
+        "entity_one": {"type": "string", "description": "Bare ref = the entity's START point (circle/ellipse: CENTRE); anchor ':start'/':end'/':mid'/':center'."},
+        "entity_two": {"type": "string"},
+        "value": {"type": "string", "description": "Expression like '25 mm' or 'StockX/2'; omit to keep measured."},
+        "surface": _SURFACE.schema(),
+        "is_driving": {"type": "boolean"},
+        "tangent_side_one": {"type": "boolean"},
+        "tangent_side_two": {"type": "boolean"},
+    },
+    "required": ["dim_type"],
+    "additionalProperties": False,
+}
 
 tool = (
     Tool.create_simple(name="sketch_dimension", description=TOOL_DESCRIPTION)
-    .add_input_property(*_DIM_TYPE.as_property())
-    .add_required_input("dim_type")
+    .add_input_property("dimensions", {"type": "array", "items": _ENTRY_SCHEMA,
+            "description": "Run in order; the first failure stops the run."})
+    .add_required_input("dimensions")
     .add_input_property("sketch_name", {"type": "string"})
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
-    .add_input_property("entity_one", {"type": "string", "description": "Bare ref = the entity's START point (circle/ellipse: CENTRE); anchor ':start'/':end'/':mid'/':center'."})
-    .add_input_property("entity_two", {"type": "string"})
-    .add_input_property("value", {"type": "string", "description": "Expression like '25 mm' or 'StockX/2'; omit to keep measured."})
-    .add_input_property(*_SURFACE.as_property())
-    .add_input_property("is_driving", {"type": "boolean"})
-    .add_input_property("tangent_side_one", {"type": "boolean"})
-    .add_input_property("tangent_side_two", {"type": "boolean"})
     .strict_schema()
 )
 

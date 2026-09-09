@@ -2,7 +2,8 @@
 
 Adds the Sketch Constrain menu - every GeometricConstraints add* kind, from perpendicular through
 the point-align, surface, polygon, offset and pattern kinds - to sketch entities referenced by
-'<type>:<index>' within a named sketch (no human selection).
+'<type>:<index>' within a named sketch (no human selection). One call carries a LIST of
+constraints against one resolved sketch; ``_constrain`` drives the single-entry form.
 
 Pinned here (no live Fusion): the entity resolver ('line:0' -> sketch.sketchCurves.sketchLines
 .item(0); 'point:2' -> sketch.sketchPoints.item(2)), the constraint DISPATCH by arity (which add*
@@ -379,6 +380,19 @@ def _payload(result):
     return json.loads(result["content"][0]["text"])
 
 
+def _constrain(sketch_name="S", component="", units="mm", **entry):
+    """One constraint through the LIST wire: handler(constraints=[entry], sketch_name=...)."""
+    return sc.handler(constraints=[entry], sketch_name=sketch_name, component=component,
+                      units=units)
+
+
+def _one_row(result):
+    """The one landed entry's result row - where a single-entry call's per-constraint keys live."""
+    out = _payload(result)
+    assert out["constrained"] == 1, out
+    return out["results"][0]
+
+
 class _CurvedFace:
     """A face whose surfaceType is NOT a plane - what PlaneRef refuses and a face handle accepts."""
     def __init__(self):
@@ -510,7 +524,7 @@ class TestResolveNewKinds:
 class TestTwoCurve:
     def test_perpendicular(self, install):
         s = _two_line_sketch(); install(s)
-        out = _payload(sc.handler(constraint="perpendicular", sketch_name="S",
+        out = _one_row(_constrain(constraint="perpendicular", sketch_name="S",
                                   entity_one="line:0", entity_two="line:1"))
         assert s.geometricConstraints.calls[0][0] == "perpendicular"
         assert out["applied"] == "perpendicular"
@@ -522,13 +536,13 @@ class TestTwoCurve:
                  ("collinear", "line:0", "line:1"))
         for cname, e1, e2 in cases:
             s = _two_line_sketch(); install(s)
-            _payload(sc.handler(constraint=cname, sketch_name="S",
+            _payload(_constrain(constraint=cname, sketch_name="S",
                                 entity_one=e1, entity_two=e2))
             assert s.geometricConstraints.calls[0][0] == cname
 
     def test_two_curve_needs_entity_two(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="parallel", sketch_name="S", entity_one="line:0")
+        res = _constrain(constraint="parallel", sketch_name="S", entity_one="line:0")
         assert res["isError"] is True and "entity_two" in res["message"]
 
 
@@ -537,7 +551,7 @@ class TestTwoCurve:
 class TestPointCurve:
     def test_midpoint(self, install):
         s = _two_line_sketch(); install(s)
-        _payload(sc.handler(constraint="midpoint", sketch_name="S",
+        _payload(_constrain(constraint="midpoint", sketch_name="S",
                             entity_one="point:0", entity_two="line:0"))
         name, args = s.geometricConstraints.calls[0]
         assert name == "midpoint"
@@ -545,7 +559,7 @@ class TestPointCurve:
 
     def test_coincident(self, install):
         s = _two_line_sketch(); install(s)
-        out = _payload(sc.handler(constraint="coincident", sketch_name="S",
+        out = _one_row(_constrain(constraint="coincident", sketch_name="S",
                                   entity_one="point:1", entity_two="line:0"))
         name, args = s.geometricConstraints.calls[0]
         assert name == "coincident"
@@ -554,7 +568,7 @@ class TestPointCurve:
 
     def test_point_curve_needs_entity_two(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="coincident", sketch_name="S", entity_one="point:0")
+        res = _constrain(constraint="coincident", sketch_name="S", entity_one="point:0")
         assert res["isError"] is True and "entity_two" in res["message"]
 
     def test_coincident_onto_a_curve_says_the_point_lands_on_it(self, install):
@@ -562,7 +576,7 @@ class TestPointCurve:
         # "centre it" gets a clean ok and wrong geometry, so the success note has to say so - and
         # name the ref form that expresses the other intent
         s = _two_line_sketch(); install(s)
-        out = _payload(sc.handler(constraint="coincident", sketch_name="S",
+        out = _one_row(_constrain(constraint="coincident", sketch_name="S",
                                   entity_one="point:1", entity_two="circle:0"))
         assert "ON that curve" in out["note"]
         assert "'circle:0:center'" in out["note"]
@@ -570,14 +584,14 @@ class TestPointCurve:
     def test_the_remedy_the_note_offers_matches_the_operand_kind(self, install):
         # a LINE has no centre - offering ':center' for one sends the caller at a refusal
         s = _two_line_sketch(); install(s)
-        out = _payload(sc.handler(constraint="coincident", sketch_name="S",
+        out = _one_row(_constrain(constraint="coincident", sketch_name="S",
                                   entity_one="point:1", entity_two="line:0"))
         assert "'line:0:start'" in out["note"] and "':end'" in out["note"]
         assert ":center" not in out["note"]
 
     def test_coincident_between_two_points_carries_no_curve_warning(self, install):
         s = _two_line_sketch(); install(s)
-        out = _payload(sc.handler(constraint="coincident", sketch_name="S",
+        out = _one_row(_constrain(constraint="coincident", sketch_name="S",
                                   entity_one="point:0", entity_two="point:1"))
         assert "ON that curve" not in out["note"]
 
@@ -638,7 +652,7 @@ class TestEntityAnchors:
 
     def test_a_centre_anchored_circle_reaches_coincident_as_the_centre_point(self, install):
         s = _anchored_sketch(); install(s)
-        _payload(sc.handler(constraint="coincident", sketch_name="S",
+        _payload(_constrain(constraint="coincident", sketch_name="S",
                             entity_one="point:0", entity_two="circle:0:center"))
         name, args = s.geometricConstraints.calls[0]
         assert name == "coincident"
@@ -647,14 +661,14 @@ class TestEntityAnchors:
     def test_an_anchored_entity_two_carries_no_on_the_curve_note(self, install):
         # the anchored ref already resolved to a point, so the on-the-rim trap does not apply
         s = _anchored_sketch(); install(s)
-        out = _payload(sc.handler(constraint="coincident", sketch_name="S",
+        out = _one_row(_constrain(constraint="coincident", sketch_name="S",
                                   entity_one="point:0", entity_two="circle:0:center"))
         assert "ON that curve" not in out["note"]
         assert out["entity_two"] == "circle:0:center"      # echoed as given, anchor included
 
     def test_a_line_endpoint_anchor_reaches_the_api(self, install):
         s = _anchored_sketch(); install(s)
-        _payload(sc.handler(constraint="coincident", sketch_name="S",
+        _payload(_constrain(constraint="coincident", sketch_name="S",
                             entity_one="line:0:end", entity_two="point:1"))
         _name, args = s.geometricConstraints.calls[0]
         assert args[0].name == "L0E"
@@ -669,7 +683,7 @@ class TestEntityAnchors:
                               _AnchoredLine("L1", seam, _endpoint("L1E", 4.0, 4.0))],
                        points=[FakeCurve("P0", "point")])
         install(s)
-        res = sc.handler(constraint="coincident", sketch_name="S",
+        res = _constrain(constraint="coincident", sketch_name="S",
                          entity_one="line:0:end", entity_two="line:1:start")
         assert res["isError"] is True
         assert "'line:0:end' and 'line:1:start'" in res["message"]
@@ -686,7 +700,7 @@ class TestEntityAnchors:
                               _AnchoredLine("L1", right, _endpoint("L1E", 4.0, 4.0))],
                        points=[FakeCurve("P0", "point")])
         install(s)
-        res = sc.handler(constraint="coincident", sketch_name="S",
+        res = _constrain(constraint="coincident", sketch_name="S",
                          entity_one="line:0:end", entity_two="line:1:start")
         assert left is not right                        # two objects, one point
         assert res["isError"] is True and "ONE sketch point" in res["message"]
@@ -700,13 +714,13 @@ class TestEntityAnchors:
         a.entityToken = b.entityToken = "TOK-SPLIT"
         s = FakeSketch("S", lines=[a, b], points=[FakeCurve("P0", "point")])
         install(s)
-        res = sc.handler(constraint="coincident", sketch_name="S",
+        res = _constrain(constraint="coincident", sketch_name="S",
                          entity_one="line:0", entity_two="line:1")
         assert "ONE sketch point" not in (res.get("message") or "")
 
     def test_both_point_slots_of_horizontal_points_take_anchors(self, install):
         s = _anchored_sketch(); install(s)
-        _payload(sc.handler(constraint="horizontal_points", sketch_name="S",
+        _payload(_constrain(constraint="horizontal_points", sketch_name="S",
                             entity_one="line:0:start", entity_two="circle:0:center"))
         name, args = s.geometricConstraints.calls[0]
         assert name == "horizontal_points"
@@ -714,7 +728,7 @@ class TestEntityAnchors:
 
     def test_a_circular_pattern_centres_on_an_anchored_point(self, install):
         s = _anchored_sketch(); install(s)
-        _payload(sc.handler(constraint="circular_pattern", sketch_name="S",
+        _payload(_constrain(constraint="circular_pattern", sketch_name="S",
                             entities="line:1", entity_one="circle:0:center", quantity=3))
         _name, args = s.geometricConstraints.calls[0]
         assert args[0].centerPoint.name == "C0C"
@@ -722,7 +736,7 @@ class TestEntityAnchors:
     def test_an_anchor_on_a_whole_entity_constraint_is_refused_naming_the_ones_that_take_it(self, install):
         # a point where addParallel wants a SketchLine raises live; refuse it before the call
         s = _anchored_sketch(); install(s)
-        res = sc.handler(constraint="parallel", sketch_name="S",
+        res = _constrain(constraint="parallel", sketch_name="S",
                          entity_one="line:0:end", entity_two="line:1")
         assert res["isError"] is True
         assert "':end'" in res["message"] and "coincident" in res["message"]
@@ -731,37 +745,37 @@ class TestEntityAnchors:
     def test_an_anchor_on_the_curve_slot_of_midpoint_is_refused(self, install):
         # midpoint's entity_two is the CURVE the point rides - a point there is the wrong operand
         s = _anchored_sketch(); install(s)
-        res = sc.handler(constraint="midpoint", sketch_name="S",
+        res = _constrain(constraint="midpoint", sketch_name="S",
                          entity_one="point:0", entity_two="line:0:end")
         assert res["isError"] is True and "entity_two" in res["message"]
 
     def test_an_unknown_anchor_is_refused_naming_the_valid_ones(self, install):
         s = _anchored_sketch(); install(s)
-        res = sc.handler(constraint="coincident", sketch_name="S",
+        res = _constrain(constraint="coincident", sketch_name="S",
                          entity_one="point:0", entity_two="circle:0:middle")
         assert res["isError"] is True and "unknown anchor" in res["message"]
 
     def test_a_centre_anchor_on_a_line_is_refused_naming_what_it_needs(self, install):
         s = _anchored_sketch(); install(s)
-        res = sc.handler(constraint="coincident", sketch_name="S",
+        res = _constrain(constraint="coincident", sketch_name="S",
                          entity_one="point:0", entity_two="line:0:center")
         assert res["isError"] is True and "circle or arc" in res["message"]
 
     def test_a_mid_anchor_creates_the_welded_point_and_passes_it(self, install, monkeypatch):
         monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: ("pt", x, y, z))
         s = _anchored_sketch(); install(s)
-        _payload(sc.handler(constraint="coincident", sketch_name="S",
+        _payload(_constrain(constraint="coincident", sketch_name="S",
                             entity_one="line:0:mid", entity_two="point:1"))
         assert s.sketchPoints.added == [("pt", 2.0, 0.0, 0.0)]
         name, args = s.geometricConstraints.calls[-1]
         assert name == "coincident" and args[0].name == "MID1"
 
-    def test_a_refusal_after_a_mid_anchor_would_orphan_it_so_nothing_is_built_first(self, install, monkeypatch):
+    def test_a_refusal_after_a_mid_anchor_would_orphan_it_so_nothing_is_built_one_row(self, install, monkeypatch):
         # the 'mid' anchor CREATES a point + midpoint constraint; entity_two resolves BEFORE it, so
         # an unresolvable entity_two leaves the sketch exactly as it was
         monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: ("pt", x, y, z))
         s = _anchored_sketch(); install(s)
-        res = sc.handler(constraint="coincident", sketch_name="S",
+        res = _constrain(constraint="coincident", sketch_name="S",
                          entity_one="line:0:mid", entity_two="point:99")
         assert res["isError"] is True and "entity_two" in res["message"]
         assert s.sketchPoints.added == []                    # no orphan point
@@ -769,14 +783,14 @@ class TestEntityAnchors:
 
     def test_the_anchor_forms_are_on_the_wire(self):
         # the anchor form is only reachable if the schema an agent reads names it
-        props = sc.tool.to_dict()["inputSchema"]["properties"]
+        props = sc.tool.to_dict()["inputSchema"]["properties"]["constraints"]["items"]["properties"]
         assert "'circle:0:center'" in props["entity_one"]["description"]
 
     def test_an_upper_case_ref_keeps_its_anchor(self, install):
         # entity refs resolve case-insensitively; an anchor that did not would make 'CIRCLE:0:CENTER'
         # a silent miss on a form the tool accepts in lower case
         s = _anchored_sketch(); install(s)
-        _payload(sc.handler(constraint="coincident", sketch_name="S",
+        _payload(_constrain(constraint="coincident", sketch_name="S",
                             entity_one="point:0", entity_two="CIRCLE:0:CENTER"))
         _name, args = s.geometricConstraints.calls[0]
         assert args[1].name == "C0C"
@@ -813,7 +827,7 @@ def shared_name(install_multi):
 class TestComponentScope:
     def test_the_unscoped_shared_name_refuses_and_names_the_scope_input(self, shared_name):
         alpha, beta = shared_name
-        res = sc.handler(constraint="horizontal", sketch_name="Sketch1", entity_one="line:0")
+        res = _constrain(constraint="horizontal", sketch_name="Sketch1", entity_one="line:0")
         assert res["isError"] is True
         assert "2 sketches are named 'Sketch1'" in res["message"]
         assert "'component'" in res["message"] and "Rename one" not in res["message"]
@@ -821,21 +835,21 @@ class TestComponentScope:
 
     def test_the_scope_constrains_THAT_components_sketch(self, shared_name):
         alpha, beta = shared_name
-        _payload(sc.handler(constraint="horizontal", sketch_name="Sketch1", component="Beta",
+        _payload(_constrain(constraint="horizontal", sketch_name="Sketch1", component="Beta",
                             entity_one="line:0"))
         assert beta.geometricConstraints.calls[0][1][0] is beta.sketchCurves.sketchLines.item(0)
         assert alpha.geometricConstraints.calls == []
 
     def test_the_sibling_component_is_reachable_by_the_same_call(self, shared_name):
         alpha, beta = shared_name
-        _payload(sc.handler(constraint="horizontal", sketch_name="Sketch1", component="Alpha",
+        _payload(_constrain(constraint="horizontal", sketch_name="Sketch1", component="Alpha",
                             entity_one="line:0"))
         assert alpha.geometricConstraints.calls[0][1][0] is alpha.sketchCurves.sketchLines.item(0)
         assert beta.geometricConstraints.calls == []
 
     def test_an_unknown_component_is_refused(self, shared_name):
         alpha, beta = shared_name
-        res = sc.handler(constraint="horizontal", sketch_name="Sketch1", component="Gamma",
+        res = _constrain(constraint="horizontal", sketch_name="Sketch1", component="Gamma",
                          entity_one="line:0")
         assert res["isError"] is True and "No component named 'Gamma'" in res["message"]
         assert alpha.geometricConstraints.calls == [] and beta.geometricConstraints.calls == []
@@ -845,7 +859,7 @@ class TestComponentScope:
         # anyway: otherwise the constraint lands in Alpha while the call named Beta.
         alpha = FakeSketch("OnlyOne", lines=[FakeCurve("A0", "line")])
         install_multi([("Alpha", [alpha]), ("Beta", [])])
-        res = sc.handler(constraint="horizontal", sketch_name="OnlyOne", component="Beta",
+        res = _constrain(constraint="horizontal", sketch_name="OnlyOne", component="Beta",
                          entity_one="line:0")
         assert res["isError"] is True and "'Beta'" in res["message"]
         assert alpha.geometricConstraints.calls == []
@@ -856,12 +870,12 @@ class TestComponentScope:
 class TestSingleLine:
     def test_horizontal(self, install):
         s = _two_line_sketch(); install(s)
-        _payload(sc.handler(constraint="horizontal", sketch_name="S", entity_one="line:0"))
+        _payload(_constrain(constraint="horizontal", sketch_name="S", entity_one="line:0"))
         assert s.geometricConstraints.calls[0][0] == "horizontal"
 
     def test_vertical(self, install):
         s = _two_line_sketch(); install(s)
-        out = _payload(sc.handler(constraint="vertical", sketch_name="S", entity_one="line:1"))
+        out = _one_row(_constrain(constraint="vertical", sketch_name="S", entity_one="line:1"))
         assert s.geometricConstraints.calls[0][0] == "vertical"
         # a one-line constraint reports entity_two / symmetry_line as None
         assert out["entity_two"] is None and out["symmetry_line"] is None
@@ -869,19 +883,19 @@ class TestSingleLine:
     def test_constraint_returning_nothing_is_error(self, install):
         s = _two_line_sketch(); install(s)
         s.geometricConstraints.addHorizontal = lambda l: None
-        res = sc.handler(constraint="horizontal", sketch_name="S", entity_one="line:0")
+        res = _constrain(constraint="horizontal", sketch_name="S", entity_one="line:0")
         assert res["isError"] is True and "returned no constraint object" in res["message"]
 
     def test_fix_sets_isfixed(self, install):
         s = _two_line_sketch(); install(s)
-        out = _payload(sc.handler(constraint="fix", sketch_name="S", entity_one="line:1"))
+        out = _one_row(_constrain(constraint="fix", sketch_name="S", entity_one="line:1"))
         assert s.sketchCurves.sketchLines.item(1).isFixed is True
         assert out["applied"] == "fix"
 
     def test_unfix(self, install):
         s = _two_line_sketch(); install(s)
         s.sketchCurves.sketchLines.item(0).isFixed = True
-        _payload(sc.handler(constraint="unfix", sketch_name="S", entity_one="line:0"))
+        _payload(_constrain(constraint="unfix", sketch_name="S", entity_one="line:0"))
         assert s.sketchCurves.sketchLines.item(0).isFixed is False
 
     def test_fix_failure_is_reported_not_a_false_success(self, install):
@@ -897,7 +911,7 @@ class TestSingleLine:
                 raise RuntimeError("cannot fix this entity")
 
         s.sketchCurves.sketchLines._items[1] = _RejectsFix()
-        res = sc.handler(constraint="fix", sketch_name="S", entity_one="line:1")
+        res = _constrain(constraint="fix", sketch_name="S", entity_one="line:1")
         assert res["isError"] is True
         assert "fix" in res["message"].lower()
 
@@ -919,7 +933,7 @@ class TestSingleLine:
                 pass                              # accepted and ignored
 
         s.sketchCurves.sketchLines._items[1] = _SwallowsFix()
-        res = sc.handler(constraint="fix", sketch_name="S", entity_one="line:1")
+        res = _constrain(constraint="fix", sketch_name="S", entity_one="line:1")
         assert res["isError"] is True
         assert "fix" in res["message"].lower()
 
@@ -988,7 +1002,7 @@ class TestSketchTextAnchor:
 
     def test_fixing_a_text_locks_every_anchor_line_and_reads_the_sketch_back(self, install):
         s = _text_sketch(); install(s)
-        out = _payload(sc.handler(constraint="fix", sketch_name="S", entity_one="text:0"))
+        out = _one_row(_constrain(constraint="fix", sketch_name="S", entity_one="text:0"))
         assert [ln.isFixed for ln in s.anchor_lines] == [True] * 4
         assert out["anchor_lines_fixed"] == 4
         assert out["is_fully_constrained"] is True
@@ -996,8 +1010,8 @@ class TestSketchTextAnchor:
 
     def test_unfix_releases_them_again(self, install):
         s = _text_sketch(); install(s)
-        _payload(sc.handler(constraint="fix", sketch_name="S", entity_one="text:0"))
-        out = _payload(sc.handler(constraint="unfix", sketch_name="S", entity_one="text:0"))
+        _payload(_constrain(constraint="fix", sketch_name="S", entity_one="text:0"))
+        out = _one_row(_constrain(constraint="unfix", sketch_name="S", entity_one="text:0"))
         assert [ln.isFixed for ln in s.anchor_lines] == [False] * 4
         assert out["is_fully_constrained"] is False
         assert "RELEASED" in out["note"]
@@ -1006,7 +1020,7 @@ class TestSketchTextAnchor:
         # the anchor is one DOF among however many the sketch holds - a text lock is not a promise
         # that the sketch is now constrained, and the payload must not imply it
         s = _text_sketch(always_loose=True); install(s)
-        out = _payload(sc.handler(constraint="fix", sketch_name="S", entity_one="text:0"))
+        out = _one_row(_constrain(constraint="fix", sketch_name="S", entity_one="text:0"))
         assert [ln.isFixed for ln in s.anchor_lines] == [True] * 4    # the lock still landed
         assert out["is_fully_constrained"] is False
         assert "still NOT fully constrained" in out["note"]
@@ -1014,31 +1028,31 @@ class TestSketchTextAnchor:
     def test_a_line_that_declines_the_lock_is_reported_not_papered_over(self, install):
         # 3 of 4 taking is a partly-locked anchor - a clean ok here would be a false success
         s = _text_sketch(lockable=(True, True, True, False)); install(s)
-        res = sc.handler(constraint="fix", sketch_name="S", entity_one="text:0")
+        res = _constrain(constraint="fix", sketch_name="S", entity_one="text:0")
         assert res["isError"] is True
         assert "3 of 4" in res["message"]
 
     def test_a_definition_handing_back_no_lines_is_refused(self, install):
         s = _text_sketch(n_lines=0, lockable=()); install(s)
-        res = sc.handler(constraint="fix", sketch_name="S", entity_one="text:0")
+        res = _constrain(constraint="fix", sketch_name="S", entity_one="text:0")
         assert res["isError"] is True and "no rectangle lines" in res["message"]
 
     def test_a_text_ref_on_any_other_constraint_names_the_two_that_take_it(self, install):
         s = _text_sketch(); install(s)
-        res = sc.handler(constraint="horizontal", sketch_name="S", entity_one="text:0")
+        res = _constrain(constraint="horizontal", sketch_name="S", entity_one="text:0")
         assert res["isError"] is True
         assert "fix / unfix" in res["message"] and "horizontal" in res["message"]
 
     def test_an_out_of_range_text_index_names_what_the_sketch_holds(self, install):
         s = _text_sketch(); install(s)
-        res = sc.handler(constraint="fix", sketch_name="S", entity_one="text:3")
+        res = _constrain(constraint="fix", sketch_name="S", entity_one="text:3")
         assert res["isError"] is True and "text:0..text:0" in res["message"]
 
     def test_a_sketch_qualified_text_ref_is_refused(self, install):
         # this tool constrains the ONE sketch 'sketch_name' names; honoring half an address silently
         # would fix a text in a sketch the caller never named here
         s = _text_sketch(); install(s)
-        res = sc.handler(constraint="fix", sketch_name="S", entity_one="Other/text:0")
+        res = _constrain(constraint="fix", sketch_name="S", entity_one="Other/text:0")
         assert res["isError"] is True and "sketch_name" in res["message"]
 
 
@@ -1047,14 +1061,14 @@ class TestSketchTextAnchor:
 class TestSymmetry:
     def test_symmetry_uses_symmetry_line(self, install):
         s = _two_line_sketch(); install(s)
-        _payload(sc.handler(constraint="symmetry", sketch_name="S",
+        _payload(_constrain(constraint="symmetry", sketch_name="S",
                             entity_one="line:0", entity_two="line:1", symmetry_line="line:0"))
         name, args = s.geometricConstraints.calls[0]
         assert name == "symmetry" and len(args) == 3
 
     def test_symmetry_needs_symmetry_line(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="symmetry", sketch_name="S",
+        res = _constrain(constraint="symmetry", sketch_name="S",
                          entity_one="line:0", entity_two="line:1")
         assert res["isError"] is True and "symmetry_line" in res["message"]
 
@@ -1064,14 +1078,14 @@ class TestSymmetry:
 class TestWrongKindRefusals:
     def test_horizontal_on_a_circle_is_a_clean_error(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="horizontal", sketch_name="S", entity_one="circle:0")
+        res = _constrain(constraint="horizontal", sketch_name="S", entity_one="circle:0")
         assert res["isError"] is True
         assert "horizontal" in res["message"] and "circle" in res["message"]
         assert s.geometricConstraints.calls == []          # nothing was applied
 
     def test_tangent_with_a_point_is_a_clean_error(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="tangent", sketch_name="S",
+        res = _constrain(constraint="tangent", sketch_name="S",
                          entity_one="point:0", entity_two="circle:0")
         assert res["isError"] is True
         assert "tangent" in res["message"]
@@ -1079,7 +1093,7 @@ class TestWrongKindRefusals:
 
     def test_concentric_with_a_line_is_a_clean_error(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="concentric", sketch_name="S",
+        res = _constrain(constraint="concentric", sketch_name="S",
                          entity_one="line:0", entity_two="circle:0")
         assert res["isError"] is True
         assert "concentric" in res["message"] and "line" in res["message"]
@@ -1087,7 +1101,7 @@ class TestWrongKindRefusals:
 
     def test_vertical_on_an_arc_is_a_clean_error(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="vertical", sketch_name="S", entity_one="arc:0")
+        res = _constrain(constraint="vertical", sketch_name="S", entity_one="arc:0")
         assert res["isError"] is True
         assert "vertical" in res["message"] and "arc" in res["message"]
         assert s.geometricConstraints.calls == []
@@ -1095,7 +1109,7 @@ class TestWrongKindRefusals:
     def test_coincident_with_a_curve_first_is_a_clean_error(self, install):
         # coincident/midpoint take a POINT as entity_one; a curve there raises live
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="coincident", sketch_name="S",
+        res = _constrain(constraint="coincident", sketch_name="S",
                          entity_one="circle:0", entity_two="line:0")
         assert res["isError"] is True
         assert "coincident" in res["message"] and "circle" in res["message"]
@@ -1103,7 +1117,7 @@ class TestWrongKindRefusals:
 
     def test_midpoint_with_a_line_first_is_a_clean_error(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="midpoint", sketch_name="S",
+        res = _constrain(constraint="midpoint", sketch_name="S",
                          entity_one="line:0", entity_two="line:1")
         assert res["isError"] is True
         assert "midpoint" in res["message"] and "line" in res["message"]
@@ -1111,14 +1125,14 @@ class TestWrongKindRefusals:
 
     def test_the_raw_api_reason_leads_and_the_operand_rule_follows(self, install):
         s = _two_line_sketch(); install(s)
-        r_tan = sc.handler(constraint="tangent", sketch_name="S",
+        r_tan = _constrain(constraint="tangent", sketch_name="S",
                            entity_one="point:0", entity_two="circle:0")
         msg = r_tan["message"]
         assert msg.index("invalid argument") < msg.index("two curves")
-        r_con = sc.handler(constraint="concentric", sketch_name="S",
+        r_con = _constrain(constraint="concentric", sketch_name="S",
                            entity_one="line:0", entity_two="circle:0")
         assert "center point" in r_con["message"]
-        r_hor = sc.handler(constraint="horizontal", sketch_name="S", entity_one="circle:0")
+        r_hor = _constrain(constraint="horizontal", sketch_name="S", entity_one="circle:0")
         assert "one line" in r_hor["message"]
 
 
@@ -1127,7 +1141,7 @@ class TestWrongKindRefusals:
 class TestHandlerAcceptsNewKinds:
     def test_a_spline_ref_reaches_the_api_unchanged(self, install):
         s = _full_sketch(); install(s)
-        out = _payload(sc.handler(constraint="tangent", sketch_name="S",
+        out = _one_row(_constrain(constraint="tangent", sketch_name="S",
                                   entity_one="spline:0", entity_two="line:0"))
         name, args = s.geometricConstraints.calls[0]
         assert name == "tangent"
@@ -1136,7 +1150,7 @@ class TestHandlerAcceptsNewKinds:
 
     def test_an_ellipse_ref_reaches_the_api_unchanged(self, install):
         s = _full_sketch(circles=[FakeCurve("C0", "circle")]); install(s)
-        out = _payload(sc.handler(constraint="concentric", sketch_name="S",
+        out = _one_row(_constrain(constraint="concentric", sketch_name="S",
                                   entity_one="ellipse:0", entity_two="circle:0"))
         name, args = s.geometricConstraints.calls[0]
         assert name == "concentric"
@@ -1146,7 +1160,7 @@ class TestHandlerAcceptsNewKinds:
     def test_control_point_and_fixed_spline_refs_are_fixable(self, install):
         s = _full_sketch(); install(s)
         for ref in ("cv_spline:0", "fixed_spline:0"):
-            _payload(sc.handler(constraint="fix", sketch_name="S", entity_one=ref))
+            _payload(_constrain(constraint="fix", sketch_name="S", entity_one=ref))
         assert [c.name for c in (s.sketchCurves.sketchControlPointSplines.item(0),
                                  s.sketchCurves.sketchFixedSplines.item(0))] == ["CV0", "FX0"]
         assert s.sketchCurves.sketchControlPointSplines.item(0).isFixed is True
@@ -1154,7 +1168,7 @@ class TestHandlerAcceptsNewKinds:
 
     def test_unresolvable_new_kind_ref_is_a_clean_error(self, install):
         s = _full_sketch(); install(s)
-        res = sc.handler(constraint="equal", sketch_name="S",
+        res = _constrain(constraint="equal", sketch_name="S",
                          entity_one="fixed_spline:9", entity_two="line:0")
         assert res["isError"] is True and "fixed_spline:9" in res["message"]
 
@@ -1164,12 +1178,12 @@ class TestHandlerAcceptsNewKinds:
 class TestGuards:
     def test_unknown_constraint(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="weld", sketch_name="S", entity_one="line:0")
+        res = _constrain(constraint="weld", sketch_name="S", entity_one="line:0")
         assert res["isError"] is True and "Unknown constraint" in res["message"]
 
     def test_missing_sketch(self, install):
         install(_two_line_sketch())
-        res = sc.handler(constraint="horizontal", sketch_name="Nope", entity_one="line:0")
+        res = _constrain(constraint="horizontal", sketch_name="Nope", entity_one="line:0")
         assert res["isError"] is True and "Nope" in res["message"]
 
     def test_a_sketch_name_two_components_share_is_refused_naming_both(self, install):
@@ -1180,14 +1194,14 @@ class TestGuards:
         design.rootComponent.name = "Root"
         other = _component([theirs], name="Frame")
         design._all_components = [design.rootComponent, other]
-        res = sc.handler(constraint="horizontal", sketch_name="S", entity_one="line:0")
+        res = _constrain(constraint="horizontal", sketch_name="S", entity_one="line:0")
         assert res["isError"] is True
         assert "2 sketches" in res["message"] and "Root" in res["message"] and "Frame" in res["message"]
         assert mine.geometricConstraints.calls == [] and theirs.geometricConstraints.calls == []
 
     def test_unresolvable_entity(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="horizontal", sketch_name="S", entity_one="line:9")
+        res = _constrain(constraint="horizontal", sketch_name="S", entity_one="line:9")
         assert res["isError"] is True and "line:9" in res["message"]
 
 
@@ -1196,26 +1210,26 @@ class TestOperandRulesReachTheWire:
 
     def test_perpendicular_names_two_lines(self, install):
         s = _full_sketch(); install(s)
-        res = sc.handler(constraint="perpendicular", sketch_name="S",
+        res = _constrain(constraint="perpendicular", sketch_name="S",
                          entity_one="line:0", entity_two="spline:0")
         assert "'perpendicular' takes two lines." in res["message"]
 
     def test_parallel_names_two_lines(self, install):
         s = _full_sketch(); install(s)
-        res = sc.handler(constraint="parallel", sketch_name="S",
+        res = _constrain(constraint="parallel", sketch_name="S",
                          entity_one="line:0", entity_two="ellipse:0")
         assert "'parallel' takes two lines." in res["message"]
 
     def test_equal_names_only_lines_arcs_and_circles(self, install):
         s = _full_sketch(); install(s)
-        res = sc.handler(constraint="equal", sketch_name="S",
+        res = _constrain(constraint="equal", sketch_name="S",
                          entity_one="spline:0", entity_two="spline:1")
         assert "'equal' takes two lines, two arcs, or two circles." in res["message"]
 
     def test_equal_refuses_two_ellipses_despite_matching_kinds(self, install):
         s = _full_sketch(ellipses=[FakeCurve("E0", "ellipse"), FakeCurve("E1", "ellipse")])
         install(s)
-        res = sc.handler(constraint="equal", sketch_name="S",
+        res = _constrain(constraint="equal", sketch_name="S",
                          entity_one="ellipse:0", entity_two="ellipse:1")
         assert res["isError"] is True
         assert s.geometricConstraints.calls == []
@@ -1224,20 +1238,20 @@ class TestOperandRulesReachTheWire:
         # the matching-kind half of the rule: arc+circle is refused live even though both are
         # legal 'equal' kinds on their own
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="equal", sketch_name="S",
+        res = _constrain(constraint="equal", sketch_name="S",
                          entity_one="arc:0", entity_two="circle:0")
         assert res["isError"] is True
         assert s.geometricConstraints.calls == []
 
     def test_symmetry_refuses_a_non_line_axis(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="symmetry", sketch_name="S", entity_one="line:0",
+        res = _constrain(constraint="symmetry", sketch_name="S", entity_one="line:0",
                          entity_two="line:1", symmetry_line="circle:0")
         assert res["isError"] is True and "axis line" in res["message"]
 
     def test_tangent_accepts_an_ellipse(self, install):
         s = _full_sketch(); install(s)
-        out = _payload(sc.handler(constraint="tangent", sketch_name="S",
+        out = _one_row(_constrain(constraint="tangent", sketch_name="S",
                                   entity_one="ellipse:0", entity_two="line:0"))
         assert out["applied"] == "tangent"
 
@@ -1247,7 +1261,7 @@ class TestOperandRulesReachTheWire:
 class TestSmooth:
     def test_two_lines_are_refused_with_the_spline_rule(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="smooth", sketch_name="S",
+        res = _constrain(constraint="smooth", sketch_name="S",
                          entity_one="line:0", entity_two="line:1")
         assert res["isError"] is True
         assert "'smooth' takes two curves, at least one of them a spline" in res["message"]
@@ -1262,15 +1276,15 @@ class TestSmooth:
         def _raise(_a, _b):
             raise RuntimeError("3 : Invalid argument for constraint")
         s.geometricConstraints.addSmooth = _raise
-        res = sc.handler(constraint="smooth", sketch_name="S",
+        res = _constrain(constraint="smooth", sketch_name="S",
                          entity_one="spline:0", entity_two="line:0")
         assert res["isError"] is True
         assert "COINCIDENT" in res["message"]
         assert "still coincident" in res["message"]
 
-    def test_a_spline_and_a_line_apply(self, install):
+    def test_a_spline_and_a_line_constrain(self, install):
         s = _full_sketch(); install(s)
-        out = _payload(sc.handler(constraint="smooth", sketch_name="S",
+        out = _one_row(_constrain(constraint="smooth", sketch_name="S",
                                   entity_one="spline:0", entity_two="line:0"))
         name, args = s.geometricConstraints.calls[0]
         assert name == "smooth"
@@ -1279,7 +1293,7 @@ class TestSmooth:
 
     def test_a_point_operand_is_refused(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="smooth", sketch_name="S",
+        res = _constrain(constraint="smooth", sketch_name="S",
                          entity_one="point:0", entity_two="line:0")
         assert res["isError"] is True
         assert s.geometricConstraints.calls == []
@@ -1290,7 +1304,7 @@ class TestSmooth:
 class TestPointAlignment:
     def test_horizontal_points_passes_both_points(self, install):
         s = _two_line_sketch(); install(s)
-        out = _payload(sc.handler(constraint="horizontal_points", sketch_name="S",
+        out = _one_row(_constrain(constraint="horizontal_points", sketch_name="S",
                                   entity_one="point:0", entity_two="point:2"))
         name, args = s.geometricConstraints.calls[0]
         assert name == "horizontal_points"
@@ -1299,13 +1313,13 @@ class TestPointAlignment:
 
     def test_vertical_points_passes_both_points(self, install):
         s = _two_line_sketch(); install(s)
-        _payload(sc.handler(constraint="vertical_points", sketch_name="S",
+        _payload(_constrain(constraint="vertical_points", sketch_name="S",
                             entity_one="point:1", entity_two="point:2"))
         assert s.geometricConstraints.calls[0][0] == "vertical_points"
 
     def test_a_line_operand_is_refused_with_the_two_points_rule(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="vertical_points", sketch_name="S",
+        res = _constrain(constraint="vertical_points", sketch_name="S",
                          entity_one="line:0", entity_two="point:0")
         assert res["isError"] is True
         assert "'vertical_points' takes two points." in res["message"]
@@ -1313,7 +1327,7 @@ class TestPointAlignment:
 
     def test_second_point_is_required(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="horizontal_points", sketch_name="S", entity_one="point:0")
+        res = _constrain(constraint="horizontal_points", sketch_name="S", entity_one="point:0")
         assert res["isError"] is True and "entity_two" in res["message"]
 
 
@@ -1322,7 +1336,7 @@ class TestPointAlignment:
 class TestSurfaceConstraints:
     def test_coincident_to_surface_passes_the_resolved_plane(self, install):
         s = _two_line_sketch(); install(s)
-        out = _payload(sc.handler(constraint="coincident_to_surface", sketch_name="S",
+        out = _one_row(_constrain(constraint="coincident_to_surface", sketch_name="S",
                                   entity_one="point:0", surface="xy"))
         name, args = s.geometricConstraints.calls[0]
         assert name == "coincident_to_surface"
@@ -1333,13 +1347,13 @@ class TestSurfaceConstraints:
     def test_line_on_surface_and_parallel_take_a_line(self, install):
         for cname in ("line_on_surface", "line_parallel_to_surface"):
             s = _two_line_sketch(); install(s)
-            _payload(sc.handler(constraint=cname, sketch_name="S",
+            _payload(_constrain(constraint=cname, sketch_name="S",
                                 entity_one="line:0", surface="xy"))
             assert s.geometricConstraints.calls[0][0] == cname
 
     def test_line_on_surface_refuses_a_circle(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="line_on_surface", sketch_name="S",
+        res = _constrain(constraint="line_on_surface", sketch_name="S",
                          entity_one="circle:0", surface="xy")
         assert res["isError"] is True
         assert "'line_on_surface' takes a LINE as entity_one plus a planar 'surface'." in res["message"]
@@ -1347,14 +1361,14 @@ class TestSurfaceConstraints:
 
     def test_perpendicular_to_surface_accepts_a_spline(self, install):
         s = _full_sketch(); install(s)
-        out = _payload(sc.handler(constraint="perpendicular_to_surface", sketch_name="S",
+        out = _one_row(_constrain(constraint="perpendicular_to_surface", sketch_name="S",
                                   entity_one="cv_spline:0", surface="xy"))
         assert out["applied"] == "perpendicular_to_surface"
 
     def test_perpendicular_to_surface_refuses_an_ellipse(self, install):
         # the binding supports line and spline curves only
         s = _full_sketch(); install(s)
-        res = sc.handler(constraint="perpendicular_to_surface", sketch_name="S",
+        res = _constrain(constraint="perpendicular_to_surface", sketch_name="S",
                          entity_one="ellipse:0", surface="xy")
         assert res["isError"] is True
         assert "LINE or SPLINE" in res["message"]
@@ -1368,7 +1382,7 @@ class TestSurfaceConstraints:
             s = _two_line_sketch()
             design = install(s)
             _wire_curved_face(monkeypatch, design)
-            out = _payload(sc.handler(constraint=cname, sketch_name="S", entity_one=ref,
+            out = _one_row(_constrain(constraint=cname, sketch_name="S", entity_one=ref,
                                       surface="CYL"))
             assert out["applied"] == cname
             assert s.geometricConstraints.calls[0][1][1] is _CURVED_FACE
@@ -1378,7 +1392,8 @@ class TestSurfaceConstraints:
     def test_the_surface_schema_names_the_constraints_that_accept_a_curved_face(self):
         # the only string an agent reads about this input must match what resolve() actually does:
         # blanket 'planar-face' prose would falsify the two constraints that take a cylinder
-        desc = sc._SURFACE.as_property()[1]["description"]
+        props = sc.tool.to_dict()["inputSchema"]["properties"]["constraints"]["items"]["properties"]
+        desc = props["surface"]["description"]
         assert "coincident_to_surface" in desc and "perpendicular_to_surface" in desc
         assert "curved face too for" in desc and "planar-face" in desc
         assert "line_on_surface" not in desc          # planar-only ops are not listed as curved-OK
@@ -1389,7 +1404,7 @@ class TestSurfaceConstraints:
             s = _two_line_sketch()
             design = install(s)
             _wire_curved_face(monkeypatch, design)
-            res = sc.handler(constraint=cname, sketch_name="S", entity_one="line:0",
+            res = _constrain(constraint=cname, sketch_name="S", entity_one="line:0",
                              surface="CYL")
             assert res["isError"] is True and "not PLANAR" in res["message"]
             assert s.geometricConstraints.calls == []
@@ -1404,15 +1419,15 @@ class TestSurfaceConstraints:
         # on the kind, required by these constraints), so this refusal is the handler's own - and it
         # is where the caller learns which face kinds THIS constraint accepts.
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint=cname, sketch_name="S", entity_one=ref)
+        res = _constrain(constraint=cname, sketch_name="S", entity_one=ref)
         assert res["isError"] is True
         assert f"'{cname}' needs 'surface'" in res["message"]
-        assert res["message"].endswith(tail)
+        assert tail in res["message"]
         assert s.geometricConstraints.calls == []
 
     def test_an_unresolvable_surface_is_a_clean_error(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="coincident_to_surface", sketch_name="S",
+        res = _constrain(constraint="coincident_to_surface", sketch_name="S",
                          entity_one="point:0", surface="NoSuchPlane")
         assert res["isError"] is True and "NoSuchPlane" in res["message"]
         assert s.geometricConstraints.calls == []
@@ -1429,7 +1444,7 @@ def _polygon_sketch():
 class TestPolygon:
     def test_every_listed_line_reaches_the_api(self, install):
         s = _polygon_sketch(); install(s)
-        out = _payload(sc.handler(constraint="polygon", sketch_name="S",
+        out = _one_row(_constrain(constraint="polygon", sketch_name="S",
                                   entities="line:0, line:1, line:2, line:3"))
         name, args = s.geometricConstraints.calls[0]
         assert name == "polygon"
@@ -1438,27 +1453,27 @@ class TestPolygon:
 
     def test_fewer_than_three_lines_cannot_close_a_shape(self, install):
         s = _polygon_sketch(); install(s)
-        res = sc.handler(constraint="polygon", sketch_name="S", entities="line:0,line:1")
+        res = _constrain(constraint="polygon", sketch_name="S", entities="line:0,line:1")
         assert res["isError"] is True and "at least 3" in res["message"]
         assert s.geometricConstraints.calls == []
 
     def test_a_non_line_member_is_refused(self, install):
         s = _polygon_sketch(); install(s)
-        res = sc.handler(constraint="polygon", sketch_name="S",
+        res = _constrain(constraint="polygon", sketch_name="S",
                          entities="line:0,line:1,circle:0")
         assert res["isError"] is True and "equal lengths" in res["message"]
         assert s.geometricConstraints.calls == []
 
     def test_an_unresolvable_member_is_named(self, install):
         s = _polygon_sketch(); install(s)
-        res = sc.handler(constraint="polygon", sketch_name="S",
+        res = _constrain(constraint="polygon", sketch_name="S",
                          entities="line:0,line:9,line:2")
         assert res["isError"] is True and "line:9" in res["message"]
         assert s.geometricConstraints.calls == []
 
     def test_entities_is_required(self, install):
         s = _polygon_sketch(); install(s)
-        res = sc.handler(constraint="polygon", sketch_name="S")
+        res = _constrain(constraint="polygon", sketch_name="S")
         assert res["isError"] is True and "'entities'" in res["message"]
 
 
@@ -1467,7 +1482,7 @@ class TestPolygon:
 class TestOffset:
     def test_created_curves_are_counted_off_the_constraint(self, install):
         s = _two_line_sketch(); install(s)
-        out = _payload(sc.handler(constraint="offset", sketch_name="S",
+        out = _one_row(_constrain(constraint="offset", sketch_name="S",
                                   entities="line:0,line:1", distance=5))
         assert s.geometricConstraints.calls[0][0] == "offset"
         assert out["created_count"] == 2
@@ -1477,14 +1492,14 @@ class TestOffset:
         # the length carries its UNIT: this factory family was measured reading a bare ValueInput
         # real in the document's default length unit, which turns 0.5 into 0.5 mm on an mm document
         s = _two_line_sketch(); install(s)
-        _payload(sc.handler(constraint="offset", sketch_name="S", entities="line:0",
+        _payload(_constrain(constraint="offset", sketch_name="S", entities="line:0",
                             distance=5, units="mm"))
         _, args = s.geometricConstraints.calls[0]
         assert args[0].offset == "0.5 cm"
 
     def test_inch_units_scale_the_distance(self, install):
         s = _two_line_sketch(); install(s)
-        _payload(sc.handler(constraint="offset", sketch_name="S", entities="line:0",
+        _payload(_constrain(constraint="offset", sketch_name="S", entities="line:0",
                             distance=1, units="in"))
         _, args = s.geometricConstraints.calls[0]
         assert args[0].offset == "2.54 cm"
@@ -1493,7 +1508,7 @@ class TestOffset:
         # The two constraints come back in an OffsetConstraintVector, not a list - counting it as a
         # single constraint reads no childCurves at all and the created-nothing gate goes blind.
         s = _two_line_sketch(); install(s)
-        out = _payload(sc.handler(constraint="offset_two_sides", sketch_name="S",
+        out = _one_row(_constrain(constraint="offset_two_sides", sketch_name="S",
                                   entities="line:0,line:1", distance=5))
         name, args = s.geometricConstraints.calls[0]
         assert name == "offset_two_sides" and args[1] is True
@@ -1503,43 +1518,43 @@ class TestOffset:
         # The gate must reach INTO the vector: two constraints that made no curves is a false ok.
         s = _two_line_sketch(); install(s)
         s.geometricConstraints.offset_curves_created = 0
-        res = sc.handler(constraint="offset_two_sides", sketch_name="S",
+        res = _constrain(constraint="offset_two_sides", sketch_name="S",
                          entities="line:0,line:1", distance=5)
         assert res["isError"] is True and "added no sketch geometry" in res["message"]
 
     def test_a_missing_distance_is_named(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="offset", sketch_name="S", entities="line:0")
+        res = _constrain(constraint="offset", sketch_name="S", entities="line:0")
         assert res["isError"] is True and "'distance'" in res["message"]
         assert s.geometricConstraints.calls == []
 
     def test_missing_entities_is_named_before_anything_is_created(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="offset", sketch_name="S", distance=5)
+        res = _constrain(constraint="offset", sketch_name="S", distance=5)
         assert res["isError"] is True and "'entities'" in res["message"]
         assert s.geometricConstraints.calls == []
 
     def test_a_zero_distance_is_refused(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="offset", sketch_name="S", entities="line:0", distance=0)
+        res = _constrain(constraint="offset", sketch_name="S", entities="line:0", distance=0)
         assert res["isError"] is True and "non-zero" in res["message"]
         assert s.geometricConstraints.calls == []
 
     def test_a_point_cannot_be_offset(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="offset", sketch_name="S", entities="point:0", distance=5)
+        res = _constrain(constraint="offset", sketch_name="S", entities="point:0", distance=5)
         assert res["isError"] is True and "end-connected curves" in res["message"]
         assert s.geometricConstraints.calls == []
 
     def test_a_constraint_that_created_no_curves_is_an_error(self, install):
         s = _two_line_sketch(); install(s)
         s.geometricConstraints.offset_curves_created = 0
-        res = sc.handler(constraint="offset", sketch_name="S", entities="line:0", distance=5)
+        res = _constrain(constraint="offset", sketch_name="S", entities="line:0", distance=5)
         assert res["isError"] is True and "added no sketch geometry" in res["message"]
 
     def test_bad_units_are_named(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="offset", sketch_name="S", entities="line:0",
+        res = _constrain(constraint="offset", sketch_name="S", entities="line:0",
                          distance=5, units="furlong")
         assert res["isError"] is True and "furlong" in res["message"]
 
@@ -1549,7 +1564,7 @@ class TestOffset:
 class TestSketchPatterns:
     def test_rectangular_sets_both_directions(self, install):
         s = _two_line_sketch(); install(s)
-        out = _payload(sc.handler(constraint="rectangular_pattern", sketch_name="S",
+        out = _one_row(_constrain(constraint="rectangular_pattern", sketch_name="S",
                                   entities="circle:0", entity_one="line:0",
                                   entity_two="line:1", quantity=3, distance=10,
                                   quantity_two=2, distance_two=5))
@@ -1564,7 +1579,7 @@ class TestSketchPatterns:
         # default length unit - createByReal(9.0) laid out 9 mm of spacing on an mm document, a 10x
         # error - so a DISTANCE must carry its unit. A quantity is a count and is unaffected.
         s = _two_line_sketch(); install(s)
-        _payload(sc.handler(constraint="rectangular_pattern", sketch_name="S",
+        _payload(_constrain(constraint="rectangular_pattern", sketch_name="S",
                             entities="circle:0", entity_one="line:0", entity_two="line:1",
                             quantity=3, distance=90, quantity_two=2, distance_two=90))
         pin = s.geometricConstraints.calls[0][1][0]
@@ -1574,7 +1589,7 @@ class TestSketchPatterns:
     def _rect_with(self, s, cls):
         """Drive a rectangular pattern whose input is `cls` - the seam a refusing setter arrives on."""
         s.geometricConstraints.createRectangularPatternInput = cls
-        return sc.handler(constraint="rectangular_pattern", sketch_name="S", entities="circle:0",
+        return _constrain(constraint="rectangular_pattern", sketch_name="S", entities="circle:0",
                           entity_one="line:0", entity_two="line:1", quantity=3, distance=10,
                           quantity_two=2, distance_two=5)
 
@@ -1618,13 +1633,13 @@ class TestSketchPatterns:
             def setDirectionTwo(self, *args):
                 super().setDirectionTwo(*args); return None
 
-        out = _payload(self._rect_with(s, _Mute))
+        out = _one_row(self._rect_with(s, _Mute))
         assert out["created_count"] == 5
 
     def test_rectangular_direction_entities_default_to_none(self, install):
         # a null direction entity means the sketch X axis / 90 degrees to direction one
         s = _two_line_sketch(); install(s)
-        _payload(sc.handler(constraint="rectangular_pattern", sketch_name="S",
+        _payload(_constrain(constraint="rectangular_pattern", sketch_name="S",
                             entities="circle:0", entity_one="line:0", entity_two="line:1",
                             quantity=2, distance=10))
         pin = s.geometricConstraints.calls[0][1][0]
@@ -1632,7 +1647,7 @@ class TestSketchPatterns:
 
     def test_rectangular_uses_the_given_direction_lines(self, install):
         s = _two_line_sketch(); install(s)
-        _payload(sc.handler(constraint="rectangular_pattern", sketch_name="S",
+        _payload(_constrain(constraint="rectangular_pattern", sketch_name="S",
                             entities="circle:0", entity_one="line:0", entity_two="line:1",
                             quantity=2, distance=10, quantity_two=2, distance_two=10))
         pin = s.geometricConstraints.calls[0][1][0]
@@ -1640,7 +1655,7 @@ class TestSketchPatterns:
 
     def test_distance_two_falls_back_to_distance(self, install):
         s = _two_line_sketch(); install(s)
-        _payload(sc.handler(constraint="rectangular_pattern", sketch_name="S",
+        _payload(_constrain(constraint="rectangular_pattern", sketch_name="S",
                             entities="circle:0", entity_one="line:0", entity_two="line:1",
                             quantity=2, distance=10, quantity_two=2))
         pin = s.geometricConstraints.calls[0][1][0]
@@ -1649,7 +1664,7 @@ class TestSketchPatterns:
     def test_a_count_the_api_changed_is_reported_not_echoed(self, install):
         s = _two_line_sketch(); install(s)
         s.geometricConstraints.pattern_quantity_is = 7
-        res = sc.handler(constraint="rectangular_pattern", sketch_name="S",
+        res = _constrain(constraint="rectangular_pattern", sketch_name="S",
                          entities="circle:0", entity_one="line:0", entity_two="line:1",
                          quantity=3, distance=10)
         assert res["isError"] is True
@@ -1657,14 +1672,14 @@ class TestSketchPatterns:
 
     def test_a_pattern_that_created_nothing_is_an_error(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="rectangular_pattern", sketch_name="S",
+        res = _constrain(constraint="rectangular_pattern", sketch_name="S",
                          entities="circle:0", entity_one="line:0", entity_two="line:1",
                          quantity=1, distance=10)
         assert res["isError"] is True and "added no sketch geometry" in res["message"]
 
     def test_circular_takes_the_center_point_and_the_angle(self, install):
         s = _two_line_sketch(); install(s)
-        out = _payload(sc.handler(constraint="circular_pattern", sketch_name="S",
+        out = _one_row(_constrain(constraint="circular_pattern", sketch_name="S",
                                   entities="circle:0,arc:0", entity_one="point:0",
                                   quantity=4, angle=180))
         pin = s.geometricConstraints.calls[0][1][0]
@@ -1674,7 +1689,7 @@ class TestSketchPatterns:
 
     def test_circular_needs_a_point_as_the_center(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="circular_pattern", sketch_name="S",
+        res = _constrain(constraint="circular_pattern", sketch_name="S",
                          entities="circle:0", entity_one="line:0", quantity=4)
         assert res["isError"] is True
         assert "a POINT as entity_one (the center)" in res["message"]
@@ -1682,7 +1697,7 @@ class TestSketchPatterns:
 
     def test_circular_refuses_a_quantity_below_two(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="circular_pattern", sketch_name="S",
+        res = _constrain(constraint="circular_pattern", sketch_name="S",
                          entities="circle:0", entity_one="point:0", quantity=1)
         assert res["isError"] is True and "quantity >= 2" in res["message"]
         assert s.geometricConstraints.calls == []
@@ -1690,7 +1705,7 @@ class TestSketchPatterns:
     def test_a_quantity_the_api_changed_is_reported_not_echoed(self, install):
         s = _two_line_sketch(); install(s)
         s.geometricConstraints.pattern_quantity_is = 2
-        res = sc.handler(constraint="circular_pattern", sketch_name="S",
+        res = _constrain(constraint="circular_pattern", sketch_name="S",
                          entities="circle:0", entity_one="point:0", quantity=4)
         assert res["isError"] is True and "quantity = 2" in res["message"]
 
@@ -1716,7 +1731,7 @@ class TestAutoConstrain:
     def test_auto_needs_no_entity_refs_at_all(self, install):
         s = _two_line_sketch(); install(s)
         _auto_result(s, dims=2, cons=3, fully=True)
-        out = _payload(sc.handler(constraint="auto", sketch_name="S"))
+        out = _one_row(_constrain(constraint="auto", sketch_name="S"))
         assert out["applied"] == "auto"
         assert out["added_dimensions"] == 2 and out["added_constraints"] == 3
         assert out["is_fully_constrained"] is True and "now fully constrained" in out["note"]
@@ -1727,7 +1742,7 @@ class TestAutoConstrain:
         # call, and the platform raise can never surface.
         s = _two_line_sketch(); install(s)
         s.isFullyConstrained = True
-        out = _payload(sc.handler(constraint="auto", sketch_name="S"))
+        out = _one_row(_constrain(constraint="auto", sketch_name="S"))
         assert out["added_dimensions"] == 0 and out["added_constraints"] == 0
         assert out["is_fully_constrained"] is True
         assert "already fully constrained" in out["note"]
@@ -1736,7 +1751,7 @@ class TestAutoConstrain:
     def test_the_requested_option_is_set_on_the_input_and_labeled_requested(self, install):
         s = _two_line_sketch(); install(s)
         _auto_result(s, cons=1)
-        out = _payload(sc.handler(constraint="auto", sketch_name="S", result_option="option2"))
+        out = _one_row(_constrain(constraint="auto", sketch_name="S", result_option="option2"))
         assert s.autoConstrainInput.resultOption is \
             adsk.fusion.AutoConstrainResultTypes.Option2AutoConstrainResultType
         assert out["result_option_requested"] == "option2"
@@ -1745,14 +1760,14 @@ class TestAutoConstrain:
         # null is autoConstrain's whole failure channel - it does not raise
         s = _two_line_sketch(); install(s)
         s.autoConstrainResult = None
-        res = sc.handler(constraint="auto", sketch_name="S")
+        res = _constrain(constraint="auto", sketch_name="S")
         assert res["isError"] is True
         assert "returned null" in res["message"] and "Nothing was constrained" in res["message"]
 
     def test_a_null_under_option3_advises_retrying_with_option1_or_2(self, install):
         s = _two_line_sketch(); install(s)
         s.autoConstrainResult = None
-        res = sc.handler(constraint="auto", sketch_name="S", result_option="option3")
+        res = _constrain(constraint="auto", sketch_name="S", result_option="option3")
         assert res["isError"] is True
         assert "not eligible for geometry adjustment" in res["message"]
         assert "option1" in res["message"] and "option2" in res["message"]
@@ -1760,14 +1775,14 @@ class TestAutoConstrain:
     def test_option3_discloses_the_geometry_it_moved(self, install):
         s = _two_line_sketch(); install(s)
         _auto_result(s, cons=2, moved=[s.sketchCurves.sketchLines.item(0)], fully=True)
-        out = _payload(sc.handler(constraint="auto", sketch_name="S", result_option="option3"))
+        out = _one_row(_constrain(constraint="auto", sketch_name="S", result_option="option3"))
         assert out["moved_geometry_count"] == 1 and out["moved_geometry"] == ["line:0"]
         assert "MOVED 1 entity" in out["note"]
 
     def test_a_result_that_added_nothing_to_a_free_sketch_is_an_error(self, install):
         s = _two_line_sketch(); install(s)
         _auto_result(s)
-        res = sc.handler(constraint="auto", sketch_name="S")
+        res = _constrain(constraint="auto", sketch_name="S")
         assert res["isError"] is True
         assert "added no dimensions or constraints" in res["message"]
         assert "option3" in res["message"]
@@ -1776,7 +1791,7 @@ class TestAutoConstrain:
         s = _two_line_sketch(); install(s)
         s.isFullyConstrained = True
         _auto_result(s, fully=True)
-        out = _payload(sc.handler(constraint="auto", sketch_name="S"))
+        out = _one_row(_constrain(constraint="auto", sketch_name="S"))
         assert out["added_dimensions"] == 0 and out["added_constraints"] == 0
         assert out["is_fully_constrained"] is True
 
@@ -1784,7 +1799,7 @@ class TestAutoConstrain:
         s = _two_line_sketch(); install(s)
         s.autoConstrain = lambda aci: types.SimpleNamespace(
             addedDimensions=[object(), object()], addedConstraints=[], movedGeometry=[])
-        res = sc.handler(constraint="auto", sketch_name="S")
+        res = _constrain(constraint="auto", sketch_name="S")
         assert res["isError"] is True
         assert "reported 2 dimension(s)" in res["message"] and "nothing landed" in res["message"]
 
@@ -1793,7 +1808,7 @@ class TestAutoConstrain:
         # constrain half fails - a refusal that hides them reads as "nothing happened"
         s = _two_line_sketch(); install(s)
         _auto_result(s, moved=[s.sketchCurves.sketchLines.item(0)])
-        res = sc.handler(constraint="auto", sketch_name="S", result_option="option3")
+        res = _constrain(constraint="auto", sketch_name="S", result_option="option3")
         assert res["isError"] is True
         assert "added no dimensions or constraints" in res["message"]
         assert "MOVED 1 entity(ies)" in res["message"] and "REMAINS" in res["message"]
@@ -1803,7 +1818,7 @@ class TestAutoConstrain:
         line0 = s.sketchCurves.sketchLines.item(0)
         s.autoConstrain = lambda aci: types.SimpleNamespace(
             addedDimensions=[object()], addedConstraints=[], movedGeometry=[line0])
-        res = sc.handler(constraint="auto", sketch_name="S", result_option="option3")
+        res = _constrain(constraint="auto", sketch_name="S", result_option="option3")
         assert res["isError"] is True
         assert "nothing landed in it." in res["message"] and "MOVED 1 entity(ies)" in res["message"]
 
@@ -1818,13 +1833,13 @@ class TestAutoConstrain:
             return types.SimpleNamespace(addedDimensions=[], addedConstraints=vector,
                                          movedGeometry=[])
         s.autoConstrain = _run
-        out = _payload(sc.handler(constraint="auto", sketch_name="S"))
+        out = _one_row(_constrain(constraint="auto", sketch_name="S"))
         assert out["added_constraints"] == 3
 
     def test_a_sketch_left_free_points_at_the_next_step(self, install):
         s = _two_line_sketch(); install(s)
         _auto_result(s, cons=1, fully=False)
-        out = _payload(sc.handler(constraint="auto", sketch_name="S"))
+        out = _one_row(_constrain(constraint="auto", sketch_name="S"))
         assert out["is_fully_constrained"] is False
         assert "NOT fully constrained" in out["note"] and "option3" in out["note"]
 
@@ -1834,18 +1849,18 @@ class TestPatternExtensions:
         base = dict(constraint="rectangular_pattern", sketch_name="S", entities="circle:0",
                     entity_one="line:0", entity_two="line:1", quantity=3, distance=10)
         base.update(kw)
-        return sc.handler(**base)
+        return _constrain(**base)
 
     def test_distance_type_defaults_to_spacing(self, install):
         s = _two_line_sketch(); install(s)
-        out = _payload(self._rect())
+        out = _one_row(self._rect())
         pin = s.geometricConstraints.calls[0][1][0]
         assert pin.distanceType is adsk.fusion.PatternDistanceType.SpacingPatternDistanceType
         assert out["distance_type"] == "spacing"
 
     def test_distance_type_extent_reaches_the_pattern_input(self, install):
         s = _two_line_sketch(); install(s)
-        out = _payload(self._rect(distance_type="extent"))
+        out = _one_row(self._rect(distance_type="extent"))
         pin = s.geometricConstraints.calls[0][1][0]
         assert pin.distanceType is adsk.fusion.PatternDistanceType.ExtentPatternDistanceType
         assert out["distance_type"] == "extent"
@@ -1866,14 +1881,14 @@ class TestPatternExtensions:
 
     def test_symmetric_sets_both_rectangular_directions(self, install):
         s = _two_line_sketch(); install(s)
-        out = _payload(self._rect(symmetric=True))
+        out = _one_row(self._rect(symmetric=True))
         pin = s.geometricConstraints.calls[0][1][0]
         assert pin.isSymmetricInDirectionOne is True and pin.isSymmetricInDirectionTwo is True
         assert out["symmetric_requested"] is True and out["symmetric_applied"] is True
 
     def test_symmetry_is_left_alone_when_it_was_not_asked_for(self, install):
         s = _two_line_sketch(); install(s)
-        out = _payload(self._rect())
+        out = _one_row(self._rect())
         pin = s.geometricConstraints.calls[0][1][0]
         assert not hasattr(pin, "isSymmetricInDirectionOne")
         assert out["symmetric_requested"] is False and out["symmetric_applied"] is False
@@ -1881,13 +1896,13 @@ class TestPatternExtensions:
     def test_a_symmetry_the_platform_declined_is_surfaced_not_claimed(self, install):
         s = _two_line_sketch(); install(s)
         s.geometricConstraints.pattern_symmetric_is = False
-        out = _payload(self._rect(symmetric=True))
+        out = _one_row(self._rect(symmetric=True))
         assert out["symmetric_requested"] is True and out["symmetric_applied"] is False
         assert "reads back NOT symmetric" in out["note"]
 
     def test_symmetric_sets_the_circular_flag(self, install):
         s = _two_line_sketch(); install(s)
-        out = _payload(sc.handler(constraint="circular_pattern", sketch_name="S",
+        out = _one_row(_constrain(constraint="circular_pattern", sketch_name="S",
                                   entities="circle:0", entity_one="point:0", quantity=4,
                                   symmetric=True))
         pin = s.geometricConstraints.calls[0][1][0]
@@ -1904,14 +1919,14 @@ class TestPatternSuppression:
                     entity_one="line:0", entity_two="line:1", quantity=3, quantity_two=2,
                     distance=10)
         base.update(kw)
-        return sc.handler(**base)
+        return _constrain(**base)
 
     def test_the_flags_reach_the_pattern_input_as_the_tuple_it_echoes(self, install):
         # the echo is a TUPLE on both input classes: flags handed over as a list read back unequal,
         # and the pattern is refused as a set that did not take before it is ever created
         s = _two_line_sketch(); install(s)
         flags = [False, True, False, False, True]
-        out = _payload(self._rect(suppressed=flags))
+        out = _one_row(self._rect(suppressed=flags))
         pin = s.geometricConstraints.calls[0][1][0]
         assert pin.isSuppressed == (False, True, False, False, True)
         assert out["suppressed_requested"] == flags and out["suppressed_applied"] == flags
@@ -1941,7 +1956,7 @@ class TestPatternSuppression:
 
     def test_a_json_string_of_flags_is_accepted(self, install):
         s = _two_line_sketch(); install(s)
-        out = _payload(self._rect(suppressed="[false, true, false, false, false]"))
+        out = _one_row(self._rect(suppressed="[false, true, false, false, false]"))
         pin = s.geometricConstraints.calls[0][1][0]
         assert pin.isSuppressed == (False, True, False, False, False)
         assert out["suppressed_requested"][1] is True
@@ -1970,7 +1985,7 @@ class TestPatternSuppression:
     def test_an_unreadable_pattern_publishes_the_request_only(self, install):
         s = _two_line_sketch(); install(s)
         s.geometricConstraints.pattern_suppression_readable = False
-        out = _payload(self._rect(suppressed=[True, False, False, False, False]))
+        out = _one_row(self._rect(suppressed=[True, False, False, False, False]))
         assert out["suppressed_applied"] is None
         assert "only" in out["note"] and "REQUESTED" in out["note"]
 
@@ -1996,7 +2011,7 @@ class TestPatternSuppression:
         # the N-1 rule holds for circular too (measured at quantity 4 with 3 flags), though its
         # binding states no ORDER for the indices, so no order is claimed for it
         s = _two_line_sketch(); install(s)
-        out = _payload(sc.handler(constraint="circular_pattern", sketch_name="S",
+        out = _one_row(_constrain(constraint="circular_pattern", sketch_name="S",
                                   entities="circle:0", entity_one="point:0", quantity=4,
                                   suppressed=[False, True, False]))
         pin = s.geometricConstraints.calls[0][1][0]
@@ -2006,7 +2021,7 @@ class TestPatternSuppression:
 
     def test_circular_refuses_a_wrong_length_list(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="circular_pattern", sketch_name="S", entities="circle:0",
+        res = _constrain(constraint="circular_pattern", sketch_name="S", entities="circle:0",
                          entity_one="point:0", quantity=4, suppressed=[False, True])
         assert res["isError"] is True and "needs 3 flag(s)" in res["message"]
         assert s.geometricConstraints.calls == []
@@ -2014,14 +2029,14 @@ class TestPatternSuppression:
     def test_a_suppressed_instance_draws_no_curve(self, install):
         # measured: a 3x2 pattern of one circle with a single flag set creates 4, not 5
         s = _two_line_sketch(); install(s)
-        out = _payload(self._rect(suppressed=[False, True, False, False, False]))
+        out = _one_row(self._rect(suppressed=[False, True, False, False, False]))
         assert out["created_count"] == 4
 
     def test_suppressing_every_instance_is_a_pattern_with_no_curves_not_a_failure(self, install):
         # the created-nothing gate catches a silent no-op; a request to suppress everything is not
         # one, and refusing it would call the caller's own instruction a failure
         s = _two_line_sketch(); install(s)
-        out = _payload(self._rect(suppressed=[True] * 5))
+        out = _one_row(self._rect(suppressed=[True] * 5))
         assert out["created_count"] == 0
         assert out["suppressed_applied"] == [True] * 5
         assert "EVERY instance suppressed" in out["note"] and "no curves" in out["note"]
@@ -2045,21 +2060,21 @@ class TestPatternSuppression:
         # the rectangular binding fixes the order as row-column; the circular one states no order
         s = _two_line_sketch(); install(s)
         rect = self._rect(suppressed=[False])
-        circ = sc.handler(constraint="circular_pattern", sketch_name="S", entities="circle:0",
+        circ = _constrain(constraint="circular_pattern", sketch_name="S", entities="circle:0",
                           entity_one="point:0", quantity=4, suppressed=[False])
         assert "row-column order" in rect["message"]
         assert "row-column" not in circ["message"] and "needs 3 flag(s)" in circ["message"]
 
     def test_a_pattern_without_the_input_is_untouched(self, install):
         s = _two_line_sketch(); install(s)
-        out = _payload(self._rect())
+        out = _one_row(self._rect())
         pin = s.geometricConstraints.calls[0][1][0]
         assert pin.isSuppressed is None and "suppressed" not in pin.order
         assert "suppressed_requested" not in out
 
     def test_suppression_is_refused_on_a_non_pattern_constraint(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="polygon", sketch_name="S",
+        res = _constrain(constraint="polygon", sketch_name="S",
                          entities="line:0,line:1,circle:0", suppressed=[True])
         assert res["isError"] is True
         assert "'suppressed' applies to constraint=" in res["message"]
@@ -2088,7 +2103,7 @@ class TestAutoConstrainStrategies:
         for input_name, prop, option, family_name, member in self._KNOBS:
             s = _two_line_sketch(); install(s)
             _auto_result(s, cons=1)
-            _payload(sc.handler(constraint="auto", sketch_name="S", **{input_name: option}))
+            _payload(_constrain(constraint="auto", sketch_name="S", **{input_name: option}))
             family = getattr(adsk.fusion, family_name)
             assert getattr(s.autoConstrainInput, prop) is getattr(family, member)
 
@@ -2097,14 +2112,14 @@ class TestAutoConstrainStrategies:
         # be a needless failure point on a build that renamed the member
         s = _two_line_sketch(); install(s)
         _auto_result(s, cons=1)
-        _payload(sc.handler(constraint="auto", sketch_name="S"))
+        _payload(_constrain(constraint="auto", sketch_name="S"))
         for _input_name, prop, _option, _family, _member in self._KNOBS:
             assert not hasattr(s.autoConstrainInput, prop)
 
     def test_the_requested_strategies_are_published_as_requested(self, install):
         s = _two_line_sketch(); install(s)
         _auto_result(s, dims=2, cons=1, fully=True)
-        out = _payload(sc.handler(constraint="auto", sketch_name="S", dimension_strategy="baseline",
+        out = _one_row(_constrain(constraint="auto", sketch_name="S", dimension_strategy="baseline",
                                   linear_diameter_dims="prefer"))
         assert out["strategies_requested"] == {"dimension_strategy": "baseline",
                                                "linear_diameter_dims": "prefer"}
@@ -2113,13 +2128,13 @@ class TestAutoConstrainStrategies:
     def test_a_run_without_strategies_publishes_none(self, install):
         s = _two_line_sketch(); install(s)
         _auto_result(s, cons=1)
-        out = _payload(sc.handler(constraint="auto", sketch_name="S"))
+        out = _one_row(_constrain(constraint="auto", sketch_name="S"))
         assert "strategies_requested" not in out
 
     def test_an_unknown_option_is_refused_by_the_enum(self, install):
         s = _two_line_sketch(); install(s)
         _auto_result(s, cons=1)
-        res = sc.handler(constraint="auto", sketch_name="S", dimension_strategy="freestyle")
+        res = _constrain(constraint="auto", sketch_name="S", dimension_strategy="freestyle")
         assert res["isError"] is True
         assert "'dimension_strategy' must be one of" in res["message"]
         assert s.autoConstrainCalls == []
@@ -2131,7 +2146,7 @@ class TestAutoConstrainStrategies:
         s = _two_line_sketch(); install(s)
         _auto_result(s, cons=1)
         monkeypatch.setattr(adsk.fusion, "SymmetricDimensionStrategyTypes", object())
-        res = sc.handler(constraint="auto", sketch_name="S", symmetric_strategy="end_to_center")
+        res = _constrain(constraint="auto", sketch_name="S", symmetric_strategy="end_to_center")
         assert res["isError"] is True
         assert "'symmetric_strategy' is not available on this Fusion version." in res["message"]
         assert s.autoConstrainCalls == []
@@ -2148,13 +2163,13 @@ class TestAutoConstrainStrategies:
                 if name != "dimensionStrategy":
                     object.__setattr__(self, name, value)
         s.createAutoConstrainInput = lambda: _Deaf()
-        res = sc.handler(constraint="auto", sketch_name="S", dimension_strategy="chain")
+        res = _constrain(constraint="auto", sketch_name="S", dimension_strategy="chain")
         assert res["isError"] is True and "did not take" in res["message"]
         assert s.autoConstrainCalls == []
 
     def test_a_strategy_is_refused_on_a_constraint_that_has_no_such_setting(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="horizontal", sketch_name="S", entity_one="line:0",
+        res = _constrain(constraint="horizontal", sketch_name="S", entity_one="line:0",
                          inter_loop_strategy="chain")
         assert res["isError"] is True
         assert "'inter_loop_strategy' applies to constraint=auto only" in res["message"]
@@ -2179,37 +2194,37 @@ class TestEveryConstraintCarriesItsOperandRule:
         # live-verified: a null direction raises "3 : invalid argument directionOneEntity" even
         # though the binding documents it as the sketch X axis
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="rectangular_pattern", sketch_name="S",
+        res = _constrain(constraint="rectangular_pattern", sketch_name="S",
                          entities="circle:0", entity_one="line:0", quantity=2, distance=10)
         assert res["isError"] is True and "BOTH direction lines" in res["message"]
         assert s.geometricConstraints.calls == []
 
     def test_an_unknown_constraint_lists_the_valid_ones(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="weldish", sketch_name="S", entity_one="line:0")
+        res = _constrain(constraint="weldish", sketch_name="S", entity_one="line:0")
         assert res["isError"] is True and "smooth" in res["message"]
 
     def test_an_unresolvable_entity_one_names_the_ref(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="horizontal", sketch_name="S", entity_one="line:99")
+        res = _constrain(constraint="horizontal", sketch_name="S", entity_one="line:99")
         assert res["isError"] is True and "line:99" in res["message"]
 
     def test_the_entities_selector_is_parsed_by_the_shared_resolver(self, install):
         # sketch_constrain's list kinds and sketch_move/sketch_copy take the SAME selector; a
         # per-tool copy of the parser is how the two start disagreeing about a bad ref
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="polygon", sketch_name="S", entities="line:0,arc:7,line:1")
+        res = _constrain(constraint="polygon", sketch_name="S", entities="line:0,arc:7,line:1")
         assert res["isError"] is True
-        assert res["message"] == sc._common.resolve_entity_refs(s, "line:0,arc:7,line:1")[2]
+        assert sc._common.resolve_entity_refs(s, "line:0,arc:7,line:1")[2] in res["message"]
 
     def test_a_list_kind_without_entities_is_refused(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="polygon", sketch_name="S")
+        res = _constrain(constraint="polygon", sketch_name="S")
         assert res["isError"] is True and "entities" in res["message"]
 
     def test_symmetry_without_entity_two_is_refused(self, install):
         s = _two_line_sketch(); install(s)
-        res = sc.handler(constraint="symmetry", sketch_name="S", entity_one="line:0",
+        res = _constrain(constraint="symmetry", sketch_name="S", entity_one="line:0",
                          symmetry_line="line:1")
         assert res["isError"] is True and "entity_two" in res["message"]
 
@@ -2219,7 +2234,7 @@ class TestNamedSketchMiss:
         # the name is STRIPPED before the walk, so echoing the raw input quotes a name nothing
         # ever looked for - and the caller retries against a sketch that was never missing.
         install(_two_line_sketch())
-        res = sc.handler(constraint="parallel", sketch_name="  Ghost  ",
+        res = _constrain(constraint="parallel", sketch_name="  Ghost  ",
                          entity_one="line:0", entity_two="line:1")
         assert res["isError"] is True
         assert "No sketch named 'Ghost'" in res["message"]
@@ -2227,6 +2242,61 @@ class TestNamedSketchMiss:
 
     def test_the_miss_still_lists_what_is_there(self, install):
         install(_two_line_sketch())
-        res = sc.handler(constraint="parallel", sketch_name="Ghost",
+        res = _constrain(constraint="parallel", sketch_name="Ghost",
                          entity_one="line:0", entity_two="line:1")
         assert "Available: S" in res["message"]
+
+
+class TestBatch:
+    """One call carries a LIST of constraints against ONE resolved sketch: they run in order, the
+    first failure stops the run, and the payload says what landed and what was not attempted."""
+
+    def test_two_entries_land_in_order_carrying_their_indexes(self, install):
+        s = _two_line_sketch(); install(s)
+        out = _payload(sc.handler(constraints=[{"constraint": "horizontal",
+                                                "entity_one": "line:0"},
+                                               {"constraint": "vertical",
+                                                "entity_one": "line:1"}], sketch_name="S"))
+        assert out["constrained"] == 2 and out["requested"] == 2 and out["sketch"] == "S"
+        assert [r["index"] for r in out["results"]] == [0, 1]
+        assert [r["applied"] for r in out["results"]] == ["horizontal", "vertical"]
+        assert [c[0] for c in s.geometricConstraints.calls] == ["horizontal", "vertical"]
+
+    def test_a_second_entry_that_fails_leaves_the_first_in_the_sketch(self, install):
+        # the run stops, it does not roll back - what landed before the failure stays, so the
+        # payload has to name the entry that stopped it and how many never ran
+        s = _two_line_sketch(); install(s)
+        out = _payload(sc.handler(constraints=[{"constraint": "horizontal",
+                                                "entity_one": "line:0"},
+                                               {"constraint": "horizontal",
+                                                "entity_one": "circle:0"},
+                                               {"constraint": "vertical",
+                                                "entity_one": "line:1"}], sketch_name="S"))
+        assert out["constrained"] == 1 and out["requested"] == 3
+        assert out["results"][0]["applied"] == "horizontal"
+        assert out["failed"]["index"] == 1
+        assert "'horizontal' takes one line." in out["failed"]["error"]
+        assert out["not_attempted"] == 1
+        assert [c[0] for c in s.geometricConstraints.calls] == ["horizontal"]
+
+    def test_a_first_entry_that_fails_is_an_error_naming_its_index(self, install):
+        s = _two_line_sketch(); install(s)
+        res = sc.handler(constraints=[{"constraint": "horizontal", "entity_one": "circle:0"},
+                                      {"constraint": "vertical", "entity_one": "line:1"}],
+                         sketch_name="S")
+        assert res["isError"] is True
+        assert "constraints[0]:" in res["message"] and "Nothing landed." in res["message"]
+        assert s.geometricConstraints.calls == []
+
+    def test_an_unknown_field_in_an_entry_is_refused_naming_it(self, install):
+        s = _two_line_sketch(); install(s)
+        res = sc.handler(constraints=[{"constraint": "horizontal", "entity_one": "line:0",
+                                       "entity_three": "line:1"}], sketch_name="S")
+        assert res["isError"] is True and "entity_three" in res["message"]
+        assert s.geometricConstraints.calls == []
+
+    def test_an_empty_list_is_refused(self, install):
+        s = _two_line_sketch(); install(s)
+        res = sc.handler(constraints=[], sketch_name="S")
+        assert res["isError"] is True and "non-empty list" in res["message"]
+        assert s.geometricConstraints.calls == []

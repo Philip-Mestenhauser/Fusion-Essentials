@@ -22,12 +22,18 @@ def report(entry):
     props = (entry.get("inputSchema") or {}).get("properties") or {}
     prose, allow, _family = _prose_over(entry)
     verdict = f"OVER by {prose - allow}" if prose > allow else f"under by {allow - prose}"
-    print(f"== {entry['name']}: prose {prose} against {allow} ({len(props)} inputs) - {verdict}")
+    print(f"== {entry['name']}: prose {prose} against {allow} - {verdict}")
     print(f"   [{len(entry.get('description') or '')}] tool: {entry.get('description')}")
     for name, p in props.items():
         d = p.get("description") if isinstance(p, dict) else None
         if d:
             print(f"   [{len(d)}] {name}: {d}")
+        items = p.get("items") if isinstance(p, dict) else None
+        if isinstance(items, dict) and items.get("type") == "object":
+            for sub, sp in (items.get("properties") or {}).items():
+                sd = sp.get("description") if isinstance(sp, dict) else None
+                if sd:
+                    print(f"   [{len(sd)}] {name}[].{sub}: {sd}")
 
 
 if __name__ == "__main__":

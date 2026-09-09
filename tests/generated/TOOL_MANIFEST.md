@@ -132,12 +132,12 @@ Produces: feature, area_after. |
 | | Tool | Summary |
 |---|---|---|
 | ✎ | `sketch_add_3d_line` | Draw a sketch line whose end may sit OFF the sketch plane: x/y/z are in 'units', z along the sketch's own normal |
-| ✎ | `sketch_add_geometry` | Draw one entity on a sketch; coords in 'units', angles in degrees. |
-| ✎ | `sketch_constrain` | Apply a geometric constraint between sketch entities, referenced '<type>:<index>'. |
+| ✎ | `sketch_add_geometry` | Draw entities on a sketch; coords in 'units', angles in degrees. |
+| ✎ | `sketch_constrain` | Apply geometric constraints to one sketch, entities '<type>:<index>'. |
 | ✎ | `sketch_copy` | COPY sketch entities, transformed. |
 | ✎ | `sketch_create` | Create a sketch on a plane or a planar face; draw on it with sketch_add_geometry. |
 | ⚠ | `sketch_delete_entity` | Delete ONE sketch entity, constraint, dimension or text, named as '<type>:<index>'. |
-| ✎ | `sketch_dimension` | Add a DIMENSIONAL constraint and optionally drive its value. |
+| ✎ | `sketch_dimension` | Add dimensional constraints to one sketch, each optionally driven to a value. |
 | ✎ | `sketch_edit_curve` | Edit an EXISTING sketch curve in place |
 | · | `sketch_get` | Read the design's sketches, or ONE sketch's overview: counts, constrained state, and profile handles for model_extrude. |
 | ✎ | `sketch_insert_svg` | Import an SVG into a sketch at (x,y).

@@ -708,6 +708,11 @@ _PLACE_DELTA_TOOLS = ("design_add_instance",)
 _PLACE_XYZ = ("nearest_to", "point")        # one [x, y, z]
 _PLACE_POINTS = ("points",)                 # a list of [x, y] or [x, y, z]
 
+# Keys holding a LIST of entry objects. A sketch write tool takes one per call and its entries carry
+# the authored coordinates the call draws at, so every position the layout reads and shifts lives one
+# level down rather than beside 'sketch_name'.
+_PLACE_ENTRY_LISTS = ("geometry",)
+
 # Keys naming the entity a step addresses, most specific first. A step that names one belongs to
 # that entity's chunk wherever it sits in the narrative; only a step naming none inherits the chunk
 # being built around it. 'name' is absent on purpose - on a creating step it names the thing being
@@ -795,11 +800,28 @@ def _place_num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def _place_dicts(args):
+    """The dicts a step pins positions in: its own arguments, then each entry of an entry list."""
+    yield args
+    for key in _PLACE_ENTRY_LISTS:
+        for entry in (args.get(key) if isinstance(args.get(key), (list, tuple)) else ()):
+            if isinstance(entry, dict):
+                yield entry
+
+
 def _place_points(args, frame="xy", tool=""):
     """Every world position the step's arguments pin, as (x, y) with None on an axis the argument
     does not constrain. Pair keys are read in 'frame' - the plane the sketch was drawn on - so an
     XZ sketch pins only X. frame None is a plane derived from geometry that travels with its chunk,
     which anchors nothing."""
+    out = []
+    for one in _place_dicts(args):
+        out.extend(_place_points_in(one, frame, tool))
+    return out
+
+
+def _place_points_in(args, frame="xy", tool=""):
+    """The positions ONE argument dict pins - see _place_points."""
     num, out = _place_num, []
     axes = _PLACE_FRAMES.get(frame or "", (None, None))
 
@@ -920,21 +942,30 @@ def _place_shift(args, dx, dy, frame="xy", tool=""):
 
     if callable(args):
         return lambda ctx, _f=args: _place_shift(_f(ctx), dx, dy, frame, tool)
-    out = dict(args)
-    for kx, ky in _PLACE_PAIRS:
-        if (kx, ky) == ("x", "y") and tool in _PLACE_DELTA_TOOLS:
-            continue
-        if num(out.get(kx)) and num(out.get(ky)):
-            out[kx], out[ky] = out[kx] + du, out[ky] + dv
-    if out.get("kind") == "plane" and num(out.get("offset")):
-        out["offset"] += {"xz": dy, "yz": dx}.get(out.get("plane"), 0.0)
-    for key in _PLACE_XYZ:
-        if key in out:
-            out[key] = shift_seq(out[key])
-    for key in _PLACE_POINTS:
+
+    def shift_one(src):
+        out = dict(src)
+        for kx, ky in _PLACE_PAIRS:
+            if (kx, ky) == ("x", "y") and tool in _PLACE_DELTA_TOOLS:
+                continue
+            if num(out.get(kx)) and num(out.get(ky)):
+                out[kx], out[ky] = out[kx] + du, out[ky] + dv
+        if out.get("kind") == "plane" and num(out.get("offset")):
+            out["offset"] += {"xz": dy, "yz": dx}.get(out.get("plane"), 0.0)
+        for key in _PLACE_XYZ:
+            if key in out:
+                out[key] = shift_seq(out[key])
+        for key in _PLACE_POINTS:
+            v = out.get(key)
+            if isinstance(v, (list, tuple)):
+                out[key] = [shift_seq(p) for p in v]
+        return out
+
+    out = shift_one(args)
+    for key in _PLACE_ENTRY_LISTS:
         v = out.get(key)
         if isinstance(v, (list, tuple)):
-            out[key] = [shift_seq(p) for p in v]
+            out[key] = [shift_one(e) if isinstance(e, dict) else e for e in v]
     return out
 
 

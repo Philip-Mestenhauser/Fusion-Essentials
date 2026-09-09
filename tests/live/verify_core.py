@@ -671,13 +671,14 @@ def _dim_measures(mm, tol=0.05):
     is the only thing that tells those apart. Translation-invariant, so the layout pass moving the
     bench cannot change it."""
     def check(p):
-        parts = (p.get("value") or "").split()
+        r = (p.get("results") or [{}])[0]
+        parts = (r.get("value") or "").split()
         try:
             got = float(parts[0])
         except (IndexError, ValueError):
             got = None
         return _measured(f"dimension measures {mm} mm",
-                         {"dim_type": p.get("dim_type"), "value": p.get("value")},
+                         {"dim_type": r.get("dim_type"), "value": r.get("value")},
                          got is not None and abs(got - mm) < tol)
     return check
 
@@ -1532,18 +1533,21 @@ def _box(name, ox=0, oy=0, tint="", shape="box"):
     cubes mated together show nothing: which one moved, and which way, is exactly what a viewer is
     trying to read off the joint."""
     if shape == "disc":
-        draw = ("sketch_add_geometry", {"kind": "circle", "cx": ox + 10, "cy": oy + 10, "radius": 10,
-                                        "sketch_name": name + "S"}, "ok", None)
+        draw = ("sketch_add_geometry",
+                {"geometry": [{"kind": "circle", "cx": ox + 10, "cy": oy + 10, "radius": 10}],
+                 "sketch_name": name + "S"}, "ok", None)
         height = 16
     elif shape == "bar":
-        draw = ("sketch_add_geometry", {"kind": "rectangle", "x1": ox, "y1": oy + 5,
-                                        "x2": ox + 34, "y2": oy + 15,
-                                        "sketch_name": name + "S"}, "ok", None)
+        draw = ("sketch_add_geometry",
+                {"geometry": [{"kind": "rectangle", "x1": ox, "y1": oy + 5,
+                               "x2": ox + 34, "y2": oy + 15}],
+                 "sketch_name": name + "S"}, "ok", None)
         height = 8
     else:
-        draw = ("sketch_add_geometry", {"kind": "rectangle", "x1": ox, "y1": oy,
-                                        "x2": ox + 20, "y2": oy + 20,
-                                        "sketch_name": name + "S"}, "ok", None)
+        draw = ("sketch_add_geometry",
+                {"geometry": [{"kind": "rectangle", "x1": ox, "y1": oy,
+                               "x2": ox + 20, "y2": oy + 20}],
+                 "sketch_name": name + "S"}, "ok", None)
         height = 10
     return [
         ("model_create_component", {"name": name, "activate": True}, _made_component, None),

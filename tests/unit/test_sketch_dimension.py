@@ -1,10 +1,11 @@
 """Unit tests for ``sketch_dimension.py`` — dimensional constraints + driven values.
 
 Covers dim_type dispatch (every SketchDimensions add* the tool exposes), the entity-ref
-resolution, the per-type operand gates, the two-entity requirement, the driving/driven flag, and
-driving the value via the dimension's parameter. No live Fusion — the fakes mimic
-Sketch.sketchDimensions, each add* carrying the argument order and operand types its binding
-declares, so a mis-ordered or wrong-kind call fails here the way it would live.
+resolution, the per-type operand gates, the two-entity requirement, the driving/driven flag,
+driving the value via the dimension's parameter, and the list form's batch payload (what landed,
+what failed, what was not attempted). No live Fusion — the fakes mimic Sketch.sketchDimensions,
+each add* carrying the argument order and operand types its binding declares, so a mis-ordered or
+wrong-kind call fails here the way it would live.
 """
 
 import json
@@ -237,8 +238,8 @@ class TestComponentScope:
 
     def test_the_unscoped_shared_name_refuses_and_names_the_scope_input(self, monkeypatch):
         alpha, beta = self._shared(monkeypatch)
-        res = sd.handler(dim_type="radius", sketch_name="Sketch1", entity_one="circle:0",
-                         value="5 mm")
+        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0",
+                                      "value": "5 mm"}], sketch_name="Sketch1")
         assert res["isError"] is True
         assert "2 sketches are named 'Sketch1'" in res["message"]
         assert "'component'" in res["message"] and "Rename one" not in res["message"]
@@ -246,20 +247,22 @@ class TestComponentScope:
 
     def test_the_scope_dimensions_THAT_components_sketch(self, monkeypatch):
         alpha, beta = self._shared(monkeypatch)
-        _payload(sd.handler(dim_type="radius", sketch_name="Sketch1", component="Beta",
-                            entity_one="circle:0", value="5 mm"))
+        _payload(sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0",
+                                         "value": "5 mm"}],
+                            sketch_name="Sketch1", component="Beta"))
         assert len(beta.sketchDimensions.calls) == 1 and alpha.sketchDimensions.calls == []
 
     def test_the_sibling_component_is_reachable_by_the_same_call(self, monkeypatch):
         alpha, beta = self._shared(monkeypatch)
-        _payload(sd.handler(dim_type="radius", sketch_name="Sketch1", component="Alpha",
-                            entity_one="circle:0", value="5 mm"))
+        _payload(sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0",
+                                         "value": "5 mm"}],
+                            sketch_name="Sketch1", component="Alpha"))
         assert len(alpha.sketchDimensions.calls) == 1 and beta.sketchDimensions.calls == []
 
     def test_an_unknown_component_is_refused(self, monkeypatch):
         alpha, beta = self._shared(monkeypatch)
-        res = sd.handler(dim_type="radius", sketch_name="Sketch1", component="Gamma",
-                         entity_one="circle:0", value="5 mm")
+        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0",
+                                      "value": "5 mm"}], sketch_name="Sketch1", component="Gamma")
         assert res["isError"] is True and "No component named 'Gamma'" in res["message"]
         assert alpha.sketchDimensions.calls == [] and beta.sketchDimensions.calls == []
 
@@ -267,8 +270,8 @@ class TestComponentScope:
         # The scope is VALIDATED, not dropped because the name would have resolved anyway.
         alpha = FakeSketch("OnlyOne")
         _install_multi(monkeypatch, [("Alpha", [alpha]), ("Beta", [])])
-        res = sd.handler(dim_type="radius", sketch_name="OnlyOne", component="Beta",
-                         entity_one="circle:0", value="5 mm")
+        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0",
+                                      "value": "5 mm"}], sketch_name="OnlyOne", component="Beta")
         assert res["isError"] is True and "'Beta'" in res["message"]
         assert alpha.sketchDimensions.calls == []
 
@@ -276,41 +279,48 @@ class TestComponentScope:
 class TestDispatch:
     def test_distance_two_lines(self, monkeypatch):
         s = _install(monkeypatch)
-        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1", value="25 mm"))
+        out = _payload(sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "line:0",
+                                               "entity_two": "line:1", "value": "25 mm"}]))
         assert s.sketchDimensions.calls[-1][0] == "distance"
-        assert out["value_driven"] is True and out["value"] == "25 mm"
+        first = out["results"][0]
+        assert first["value_driven"] is True and first["value"] == "25 mm"
 
     def test_horizontal_orientation(self, monkeypatch):
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="horizontal_distance", entity_one="line:0", entity_two="line:1"))
+        _payload(sd.handler(dimensions=[{"dim_type": "horizontal_distance", "entity_one": "line:0",
+                                         "entity_two": "line:1"}]))
         assert s.sketchDimensions.calls[-1][:2] == ("distance", "horiz")
 
     def test_radius_one_circle(self, monkeypatch):
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="radius", entity_one="circle:0", value="5 mm"))
+        _payload(sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0",
+                                         "value": "5 mm"}]))
         assert s.sketchDimensions.calls[-1][0] == "radius"
 
     def test_diameter(self, monkeypatch):
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="diameter", entity_one="circle:0"))
+        _payload(sd.handler(dimensions=[{"dim_type": "diameter", "entity_one": "circle:0"}]))
         assert s.sketchDimensions.calls[-1][0] == "diameter"
 
     def test_angle_two_lines(self, monkeypatch):
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="angle", entity_one="line:0", entity_two="line:1", value="90 deg"))
+        _payload(sd.handler(dimensions=[{"dim_type": "angle", "entity_one": "line:0",
+                                         "entity_two": "line:1", "value": "90 deg"}]))
         assert s.sketchDimensions.calls[-1][0] == "angle"
 
 
     def test_vertical_orientation(self, monkeypatch):
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="vertical_distance", entity_one="line:0", entity_two="line:1"))
+        _payload(sd.handler(dimensions=[{"dim_type": "vertical_distance", "entity_one": "line:0",
+                                         "entity_two": "line:1"}]))
         assert s.sketchDimensions.calls[-1][:2] == ("distance", "vert")
 
     def test_distance_to_a_circle_anchors_at_its_center(self, monkeypatch):
         # a circle has no startSketchPoint; the handler completes it to centerSketchPoint - the only
         # anchor addDistanceDimension can express - instead of passing the raw curve into the API.
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="distance", entity_one="circle:0", entity_two="line:0"))
+        _payload(sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "circle:0",
+                                         "entity_two": "line:0"}]))
         kind, _orient, p1, p2 = s.sketchDimensions.calls[-1]
         assert kind == "distance"
         assert p1 == "center_sp"
@@ -319,7 +329,8 @@ class TestDispatch:
     def test_distance_to_an_ellipse_anchors_at_its_center(self, monkeypatch):
         # 'ellipse:<index>' resolves to its center point exactly like a circle.
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="distance", entity_one="ellipse:0", entity_two="line:0"))
+        _payload(sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "ellipse:0",
+                                         "entity_two": "line:0"}]))
         kind, _orient, p1, p2 = s.sketchDimensions.calls[-1]
         assert kind == "distance"
         assert p1 == "ellipse_center_sp"
@@ -329,11 +340,11 @@ class TestDispatch:
         # 'spline:<index>' resolves - an open fitted spline has start/end sketch points like a
         # line, so a lone spline dimensions its own length the same way a lone line does.
         s = _install(monkeypatch)
-        out = _payload(sd.handler(dim_type="distance", entity_one="spline:0"))
+        out = _payload(sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "spline:0"}]))
         kind, _orient, p1, p2 = s.sketchDimensions.calls[-1]
         assert kind == "distance"
         assert (p1, p2) == ("spline_sp", "spline_ep")
-        assert out["dimensioned"] is True
+        assert out["dimensioned"] == 1
 
 
 # ── _radial_text_point: the offset-from-center math (the module's key bug-fix) ──
@@ -361,19 +372,21 @@ class TestAngularWedge:
 
     def test_the_text_point_reaching_the_api_is_the_sketch_origin(self, monkeypatch):
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="angle", entity_one="line:0", entity_two="line:1"))
+        _payload(sd.handler(dimensions=[{"dim_type": "angle", "entity_one": "line:0",
+                                         "entity_two": "line:1"}]))
         kind, _l1, _l2, tp = s.sketchDimensions.calls[-1]
         assert kind == "angle" and tp == ("pt", 0, 0, 0)   # what makes the note's rule true
 
     def test_the_note_names_the_origin_facing_wedge(self, monkeypatch):
         _install(monkeypatch)
-        out = _payload(sd.handler(dim_type="angle", entity_one="line:0", entity_two="line:1"))
-        assert "FACING THE SKETCH ORIGIN" in out["note"]
+        out = _payload(sd.handler(dimensions=[{"dim_type": "angle", "entity_one": "line:0",
+                                               "entity_two": "line:1"}]))
+        assert "FACING THE SKETCH ORIGIN" in out["results"][0]["note"]
 
     def test_other_types_do_not_carry_the_wedge_note(self, monkeypatch):
         _install(monkeypatch)
-        out = _payload(sd.handler(dim_type="radius", entity_one="circle:0"))
-        assert "WEDGE" not in out["note"].upper()
+        out = _payload(sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0"}]))
+        assert "WEDGE" not in out["results"][0]["note"].upper()
 
 
 class TestRadialTextPoint:
@@ -420,24 +433,28 @@ class TestPointOf:
 class TestAnchorHandler:
     def test_end_anchor_uses_end_point(self, monkeypatch):
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="horizontal_distance", entity_one="line:0:end", entity_two="line:1"))
+        _payload(sd.handler(dimensions=[{"dim_type": "horizontal_distance",
+                                         "entity_one": "line:0:end", "entity_two": "line:1"}]))
         _kind, _orient, p1, p2 = s.sketchDimensions.calls[-1]
         assert p1 == "ep" and p2 == "sp"          # entity_one END, entity_two default START
 
     def test_center_anchor_on_circle(self, monkeypatch):
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="distance", entity_one="circle:0:center", entity_two="line:0"))
+        _payload(sd.handler(dimensions=[{"dim_type": "distance",
+                                         "entity_one": "circle:0:center",
+                                         "entity_two": "line:0"}]))
         _kind, _orient, p1, _p2 = s.sketchDimensions.calls[-1]
         assert p1 == "center_sp"
 
     def test_anchor_rejected_on_radius(self, monkeypatch):
         _install(monkeypatch)
-        res = sd.handler(dim_type="radius", entity_one="circle:0:center")
+        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0:center"}])
         assert res["isError"] is True and "anchor" in res["message"].lower()
 
     def test_unknown_anchor_is_error(self, monkeypatch):
         _install(monkeypatch)
-        res = sd.handler(dim_type="distance", entity_one="line:0:bogus", entity_two="line:1")
+        res = sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "line:0:bogus",
+                                      "entity_two": "line:1"}])
         assert res["isError"] is True and "unknown anchor" in res["message"].lower()
 
 
@@ -509,18 +526,20 @@ class TestSolvedReadBack:
         return s
 
     def _rows(self, out):
-        return {row["ref"]: row for row in out["solved"]}
+        return {row["ref"]: row for row in out["results"][0]["solved"]}
 
     def test_a_line_reports_its_span_midpoint_and_length(self, monkeypatch):
         self._rich(monkeypatch)
-        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1"))
+        out = _payload(sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "line:0",
+                                               "entity_two": "line:1"}]))
         row = self._rows(out)["line:0"]
         assert row["start_mm"] == [0.0, 0.0, 0.0] and row["end_mm"] == [40.0, 0.0, 0.0]
         assert row["mid_mm"] == [20.0, 0.0, 0.0] and row["length_mm"] == 40.0
 
     def test_a_circle_reports_its_centre_and_radius(self, monkeypatch):
         self._rich(monkeypatch)
-        out = _payload(sd.handler(dim_type="distance", entity_one="circle:0", entity_two="line:0"))
+        out = _payload(sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "circle:0",
+                                               "entity_two": "line:0"}]))
         row = self._rows(out)["circle:0"]
         assert row["center_mm"] == [10.0, 10.0, 0.0] and row["radius_mm"] == 5.0
 
@@ -528,9 +547,9 @@ class TestSolvedReadBack:
         # the teleport signature: a 30 mm gap driven to 25 mm demands 5 mm of change, and the solve
         # slid the far line 38 mm
         self._rich(monkeypatch, moves=[(1, 3.8, 0.0)], value_cm=2.5)
-        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1",
-                                  value="25 mm"))
-        warn = out["solver_moved_warning"]
+        out = _payload(sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "line:0",
+                                               "entity_two": "line:1", "value": "25 mm"}]))
+        warn = out["results"][0]["solver_moved_warning"]
         assert "line:1 by 38.0 mm" in warn
         assert "demanded only 5.0 mm of change" in warn and "30.0 mm measured" in warn
         assert "line:0" not in warn                       # the entity that stayed put is not blamed
@@ -540,35 +559,36 @@ class TestSolvedReadBack:
     def test_a_move_in_step_with_the_demanded_change_is_published_but_not_warned(self, monkeypatch):
         # a 30 mm gap driven to 15 mm demands 15 mm of change; a 12 mm shift is an ordinary solve
         self._rich(monkeypatch, moves=[(1, 1.2, 0.0)], value_cm=1.5)
-        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1",
-                                  value="15 mm"))
-        assert "solver_moved_warning" not in out
+        out = _payload(sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "line:0",
+                                               "entity_two": "line:1", "value": "15 mm"}]))
+        assert "solver_moved_warning" not in out["results"][0]
         assert self._rows(out)["line:1"]["moved_mm"] == 12.0
 
     def test_a_zero_value_dimension_pulling_two_edges_together_is_silent(self, monkeypatch):
         # driving a 30 mm gap to 0 demands 30 mm of movement - the whole point of the dimension.
         # A threshold read off the VALUE (0) would scream at every pull-together.
         self._rich(monkeypatch, moves=[(1, 0.0, -3.0)], value_cm=0.0)
-        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1",
-                                  value="0 mm"))
-        assert "solver_moved_warning" not in out
+        out = _payload(sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "line:0",
+                                               "entity_two": "line:1", "value": "0 mm"}]))
+        assert "solver_moved_warning" not in out["results"][0]
         assert self._rows(out)["line:1"]["moved_mm"] == 30.0
 
     def test_a_dimension_that_demanded_nothing_screams_when_geometry_slid_anyway(self, monkeypatch):
         # the P12 shape: the dimension's value already matched the measured gap, so it demanded no
         # change at all - and the solver still slid an entity 44 mm, which is the whole defect
         self._rich(monkeypatch, moves=[(1, 4.4, 0.0)], value_cm=3.0)
-        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1",
-                                  value="30 mm"))
-        assert "line:1 by 44.0 mm" in out["solver_moved_warning"]
-        assert "demanded only 0.0 mm of change" in out["solver_moved_warning"]
+        out = _payload(sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "line:0",
+                                               "entity_two": "line:1", "value": "30 mm"}]))
+        warn = out["results"][0]["solver_moved_warning"]
+        assert "line:1 by 44.0 mm" in warn
+        assert "demanded only 0.0 mm of change" in warn
 
     def test_a_rounding_nudge_under_a_demand_of_nothing_is_not_a_jump(self, monkeypatch):
         # same demanded-nothing dimension, but the entity moved 0.05 mm - solver rounding, not a jump
         self._rich(monkeypatch, moves=[(1, 0.005, 0.0)], value_cm=3.0)
-        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1",
-                                  value="30 mm"))
-        assert "solver_moved_warning" not in out
+        out = _payload(sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "line:0",
+                                               "entity_two": "line:1", "value": "30 mm"}]))
+        assert "solver_moved_warning" not in out["results"][0]
         assert self._rows(out)["line:1"]["moved_mm"] == 0.05
 
     def test_an_angular_dimension_never_carries_the_length_warning(self, monkeypatch):
@@ -583,52 +603,58 @@ class TestSolvedReadBack:
             lines[1].translate(9.9, 0.0)             # a big move, in a dimension with no length gap
             return ang
         s.sketchDimensions.addAngularDimension = _add
-        out = _payload(sd.handler(dim_type="angle", entity_one="line:0", entity_two="line:1",
-                                  value="90 deg"))
-        assert "solver_moved_warning" not in out
+        out = _payload(sd.handler(dimensions=[{"dim_type": "angle", "entity_one": "line:0",
+                                               "entity_two": "line:1", "value": "90 deg"}]))
+        assert "solver_moved_warning" not in out["results"][0]
         assert self._rows(out)["line:1"]["moved_mm"] == 99.0    # the move is still published
 
     def test_a_horizontal_dimension_measures_its_gap_on_its_own_axis(self, monkeypatch):
         # horizontal_distance measures X only: line:0 start (0,0) to line:1 start (0,3) is a 0 mm
         # horizontal gap, so driving it to 40 mm demands 40 mm and a 38 mm slide is in step
         self._rich(monkeypatch, moves=[(1, 3.8, 0.0)], value_cm=4.0)
-        out = _payload(sd.handler(dim_type="horizontal_distance", entity_one="line:0",
-                                  entity_two="line:1", value="40 mm"))
-        assert "solver_moved_warning" not in out
+        out = _payload(sd.handler(dimensions=[{"dim_type": "horizontal_distance",
+                                               "entity_one": "line:0", "entity_two": "line:1",
+                                               "value": "40 mm"}]))
+        assert "solver_moved_warning" not in out["results"][0]
 
     def test_two_refs_into_one_entity_publish_one_row(self, monkeypatch):
         # 'line:0:start' and 'line:0:end' name the SAME line - two rows would be one entity's
         # geometry published twice under one key
         self._rich(monkeypatch)
-        out = _payload(sd.handler(dim_type="distance", entity_one="line:0:start",
-                                  entity_two="line:0:end"))
-        assert [row["ref"] for row in out["solved"]] == ["line:0"]
+        out = _payload(sd.handler(dimensions=[{"dim_type": "distance",
+                                               "entity_one": "line:0:start",
+                                               "entity_two": "line:0:end"}]))
+        assert [row["ref"] for row in out["results"][0]["solved"]] == ["line:0"]
 
     def test_an_arc_reports_its_centre_and_radius(self, monkeypatch):
         # an arc carries endpoints AND a centre; the centre+radius shape is the one that describes it
         self._rich(monkeypatch)
-        out = _payload(sd.handler(dim_type="distance", entity_one="arc:0", entity_two="line:0"))
+        out = _payload(sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "arc:0",
+                                               "entity_two": "line:0"}]))
         row = self._rows(out)["arc:0"]
         assert row["center_mm"] == [20.0, 50.0, 0.0] and row["radius_mm"] == 8.0
         assert "start_mm" not in row
 
     def test_a_lone_line_dimension_reads_that_one_line_back(self, monkeypatch):
         self._rich(monkeypatch)
-        out = _payload(sd.handler(dim_type="distance", entity_one="line:0"))
+        out = _payload(sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "line:0"}]))
         assert list(self._rows(out)) == ["line:0"]
 
     def test_an_anchored_ref_reads_back_under_its_bare_entity_ref(self, monkeypatch):
         # 'circle:0:center' dimensions the circle - the row names the entity, not the anchor form
         self._rich(monkeypatch)
-        out = _payload(sd.handler(dim_type="distance", entity_one="circle:0:center",
-                                  entity_two="line:0"))
+        out = _payload(sd.handler(dimensions=[{"dim_type": "distance",
+                                               "entity_one": "circle:0:center",
+                                               "entity_two": "line:0"}]))
         assert set(self._rows(out)) == {"circle:0", "line:0"}
 
     def test_geometry_that_does_not_read_publishes_no_solved_block(self, monkeypatch):
         # the honest empty: nothing measured twice means nothing claimed about a move
         _install(monkeypatch)
-        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1"))
-        assert "solved" not in out and "solver_moved_warning" not in out
+        out = _payload(sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "line:0",
+                                               "entity_two": "line:1"}]))
+        first = out["results"][0]
+        assert "solved" not in first and "solver_moved_warning" not in first
 
 
 class TestNegativeDistance:
@@ -640,14 +666,17 @@ class TestNegativeDistance:
         neg = FakeDim("distance")
         neg.parameter.value = -2.0
         s.sketchDimensions.addDistanceDimension = lambda p1, p2, orient, tp, isDriving=True: neg
-        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1", value="-20 mm"))
-        assert "negative_distance_warning" in out
-        assert "mirror" in out["negative_distance_warning"].lower()
+        out = _payload(sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "line:0",
+                                               "entity_two": "line:1", "value": "-20 mm"}]))
+        first = out["results"][0]
+        assert "negative_distance_warning" in first
+        assert "mirror" in first["negative_distance_warning"].lower()
 
     def test_positive_distance_no_warning(self, monkeypatch):
         s = _install(monkeypatch)   # FakeParam.value defaults positive
-        out = _payload(sd.handler(dim_type="distance", entity_one="line:0", entity_two="line:1", value="20 mm"))
-        assert "negative_distance_warning" not in out
+        out = _payload(sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "line:0",
+                                               "entity_two": "line:1", "value": "20 mm"}]))
+        assert "negative_distance_warning" not in out["results"][0]
 
     def test_negative_radius_not_flagged(self, monkeypatch):
         # radius is not a distance-family type - a negative value there is not the mirror trap
@@ -655,8 +684,9 @@ class TestNegativeDistance:
         neg = FakeDim("radius")
         neg.parameter.value = -5.0
         s.sketchDimensions.addRadialDimension = lambda c, tp, isDriving=True: neg
-        out = _payload(sd.handler(dim_type="radius", entity_one="circle:0", value="-5 mm"))
-        assert "negative_distance_warning" not in out
+        out = _payload(sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0",
+                                               "value": "-5 mm"}]))
+        assert "negative_distance_warning" not in out["results"][0]
 
 
 class TestLoneLineDistance:
@@ -665,22 +695,22 @@ class TestLoneLineDistance:
 
     def test_lone_line_dimensions_its_own_length(self, monkeypatch):
         s = _install(monkeypatch)
-        out = _payload(sd.handler(dim_type="distance", entity_one="line:0"))
+        out = _payload(sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "line:0"}]))
         kind, _orient, p1, p2 = s.sketchDimensions.calls[-1]
         assert kind == "distance"
         assert (p1, p2) == ("sp", "ep")                  # the line's own start/end points
-        assert out["dimensioned"] is True
+        assert out["dimensioned"] == 1
 
     def test_lone_circle_still_needs_entity_two(self, monkeypatch):
         # a circle has no length to dimension alone - refused with the entity_two requirement named
         _install(monkeypatch)
-        res = sd.handler(dim_type="distance", entity_one="circle:0")
+        res = sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "circle:0"}])
         assert res["isError"] is True and "entity_two" in res["message"]
 
     def test_lone_line_with_anchor_rejected(self, monkeypatch):
         # an anchored single ref is ambiguous (anchor pins ONE point; a length needs both) - refused
         _install(monkeypatch)
-        res = sd.handler(dim_type="distance", entity_one="line:0:end")
+        res = sd.handler(dimensions=[{"dim_type": "distance", "entity_one": "line:0:end"}])
         assert res["isError"] is True and "anchor" in res["message"].lower()
 
 
@@ -690,19 +720,20 @@ class TestWrongKindRefusals:
 
     def test_radius_on_a_line_is_a_clean_error(self, monkeypatch):
         _install(monkeypatch)
-        res = sd.handler(dim_type="radius", entity_one="line:0")
+        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "line:0"}])
         assert res["isError"] is True
         assert "radius" in res["message"] and "arc/circle" in res["message"]
 
     def test_diameter_on_a_line_is_a_clean_error(self, monkeypatch):
         _install(monkeypatch)
-        res = sd.handler(dim_type="diameter", entity_one="line:0")
+        res = sd.handler(dimensions=[{"dim_type": "diameter", "entity_one": "line:0"}])
         assert res["isError"] is True
         assert "diameter" in res["message"] and "arc/circle" in res["message"]
 
     def test_angle_with_a_circle_is_a_clean_error(self, monkeypatch):
         _install(monkeypatch)
-        res = sd.handler(dim_type="angle", entity_one="circle:0", entity_two="line:0")
+        res = sd.handler(dimensions=[{"dim_type": "angle", "entity_one": "circle:0",
+                                      "entity_two": "line:0"}])
         assert res["isError"] is True
         assert "angle" in res["message"] and "two lines" in res["message"]
 
@@ -715,41 +746,48 @@ class TestOffsetAndLinearDiameter:
 
     def test_offset_passes_the_line_first(self, monkeypatch):
         s = _install(monkeypatch)
-        out = _payload(sd.handler(dim_type="offset", entity_one="line:0", entity_two="line:1",
-                                  value="8 mm"))
+        out = _payload(sd.handler(dimensions=[{"dim_type": "offset", "entity_one": "line:0",
+                                               "entity_two": "line:1", "value": "8 mm"}]))
         kind, line, second = s.sketchDimensions.calls[-1]
         assert kind == "offset"
         assert line.startSketchPoint == "sp" and second.startSketchPoint == "sp"
-        assert out["dim_type"] == "offset" and out["value"] == "8 mm"
+        first = out["results"][0]
+        assert first["dim_type"] == "offset" and first["value"] == "8 mm"
 
     def test_offset_takes_a_point_as_the_second_operand(self, monkeypatch):
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="offset", entity_one="line:0", entity_two="point:1"))
+        _payload(sd.handler(dimensions=[{"dim_type": "offset", "entity_one": "line:0",
+                                         "entity_two": "point:1"}]))
         kind, _line, second = s.sketchDimensions.calls[-1]
         assert kind == "offset" and isinstance(second, FakeSketchPoint)
 
     def test_offset_refuses_a_circle_as_the_line(self, monkeypatch):
         _install(monkeypatch)
-        res = sd.handler(dim_type="offset", entity_one="circle:0", entity_two="line:0")
+        res = sd.handler(dimensions=[{"dim_type": "offset", "entity_one": "circle:0",
+                                      "entity_two": "line:0"}])
         assert res["isError"] is True
         assert "'line'" in res["message"] and "circle:0" in res["message"]
 
     def test_offset_refuses_an_arc_as_the_second_operand(self, monkeypatch):
         _install(monkeypatch)
-        res = sd.handler(dim_type="offset", entity_one="line:0", entity_two="arc:0")
+        res = sd.handler(dimensions=[{"dim_type": "offset", "entity_one": "line:0",
+                                      "entity_two": "arc:0"}])
         assert res["isError"] is True and "entity_two" in res["message"]
 
     def test_linear_diameter_routes_to_its_own_add(self, monkeypatch):
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="linear_diameter", entity_one="line:0", entity_two="point:0"))
+        _payload(sd.handler(dimensions=[{"dim_type": "linear_diameter", "entity_one": "line:0",
+                                         "entity_two": "point:0"}]))
         assert s.sketchDimensions.calls[-1][0] == "linear_diameter"
 
     def test_the_offset_note_states_that_it_rotates_the_second_line_parallel(self, monkeypatch):
         # the constraint MOVES geometry instead of refusing a non-parallel line - a caller that
         # cannot see that from the payload has to re-read the sketch to find its shape changed
         _install(monkeypatch)
-        out = _payload(sd.handler(dim_type="offset", entity_one="line:0", entity_two="line:1"))
-        assert "ROTATED parallel" in out["note"] and "sketch_get" in out["note"]
+        out = _payload(sd.handler(dimensions=[{"dim_type": "offset", "entity_one": "line:0",
+                                               "entity_two": "line:1"}]))
+        note = out["results"][0]["note"]
+        assert "ROTATED parallel" in note and "sketch_get" in note
 
     def test_linear_diameter_parallelism_failure_surfaces_the_api_sentence_alone(self, monkeypatch):
         # the API refuses non-parallel lines here (where offset silently rotates them) and names
@@ -757,7 +795,8 @@ class TestOffsetAndLinearDiameter:
         s = _install(monkeypatch)
         s.sketchDimensions.addLinearDiameterDimension = _raiser(
             "3 : Both sketch lines should be parallel")
-        res = sd.handler(dim_type="linear_diameter", entity_one="line:0", entity_two="line:1")
+        res = sd.handler(dimensions=[{"dim_type": "linear_diameter", "entity_one": "line:0",
+                                      "entity_two": "line:1"}])
         assert res["isError"] is True
         assert "Both sketch lines should be parallel" in res["message"]
         assert "takes 'line' as entity_one" not in res["message"]
@@ -765,15 +804,16 @@ class TestOffsetAndLinearDiameter:
     def test_a_wrong_operand_kind_still_names_the_kinds(self, monkeypatch):
         # the kind gate runs BEFORE the add, so the self-naming-failure path never swallows it
         _install(monkeypatch)
-        res = sd.handler(dim_type="linear_diameter", entity_one="circle:0", entity_two="line:0")
+        res = sd.handler(dimensions=[{"dim_type": "linear_diameter", "entity_one": "circle:0",
+                                      "entity_two": "line:0"}])
         assert res["isError"] is True and "'line'" in res["message"]
 
 
 class TestConcentricCircle:
     def test_two_circles(self, monkeypatch):
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="concentric_circle", entity_one="circle:0",
-                            entity_two="circle:1"))
+        _payload(sd.handler(dimensions=[{"dim_type": "concentric_circle",
+                                         "entity_one": "circle:0", "entity_two": "circle:1"}]))
         kind, c1, c2 = s.sketchDimensions.calls[-1]
         assert kind == "concentric_circle"
         assert c1 is not c2                       # the two DIFFERENT circles, not one twice
@@ -781,13 +821,14 @@ class TestConcentricCircle:
     def test_an_arc_is_a_legal_operand(self, monkeypatch):
         # the binding documents "two concentric circles or arcs" - an arc must not be refused
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="concentric_circle", entity_one="arc:0",
-                            entity_two="circle:0"))
+        _payload(sd.handler(dimensions=[{"dim_type": "concentric_circle", "entity_one": "arc:0",
+                                         "entity_two": "circle:0"}]))
         assert s.sketchDimensions.calls[-1][0] == "concentric_circle"
 
     def test_refuses_a_line(self, monkeypatch):
         _install(monkeypatch)
-        res = sd.handler(dim_type="concentric_circle", entity_one="circle:0", entity_two="line:0")
+        res = sd.handler(dimensions=[{"dim_type": "concentric_circle", "entity_one": "circle:0",
+                                      "entity_two": "line:0"}])
         assert res["isError"] is True
         assert "'circle'" in res["message"] and "line:0" in res["message"]
 
@@ -798,8 +839,9 @@ class TestTangentDistance:
 
     def test_side_flags_land_in_the_interleaved_positions(self, monkeypatch):
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="tangent_distance", entity_one="circle:0",
-                            entity_two="circle:1", tangent_side_one=False, tangent_side_two=True))
+        _payload(sd.handler(dimensions=[{"dim_type": "tangent_distance",
+                                         "entity_one": "circle:0", "entity_two": "circle:1",
+                                         "tangent_side_one": False, "tangent_side_two": True}]))
         kind, e1, side_one, e2, side_two = s.sketchDimensions.calls[-1]
         assert kind == "tangent_distance"
         assert side_one is False and side_two is True
@@ -807,21 +849,25 @@ class TestTangentDistance:
 
     def test_both_sides_default_true(self, monkeypatch):
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="tangent_distance", entity_one="line:0", entity_two="arc:0"))
+        _payload(sd.handler(dimensions=[{"dim_type": "tangent_distance", "entity_one": "line:0",
+                                         "entity_two": "arc:0"}]))
         _kind, _e1, side_one, _e2, side_two = s.sketchDimensions.calls[-1]
         assert side_one is True and side_two is True
 
     def test_second_operand_must_be_a_circle_or_arc(self, monkeypatch):
         _install(monkeypatch)
-        res = sd.handler(dim_type="tangent_distance", entity_one="circle:0", entity_two="line:0")
+        res = sd.handler(dimensions=[{"dim_type": "tangent_distance", "entity_one": "circle:0",
+                                      "entity_two": "line:0"}])
         assert res["isError"] is True and "entity_two" in res["message"]
 
 
 class TestEllipseRadiusDims:
     def test_major_and_minor_route_to_different_adds(self, monkeypatch):
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="ellipse_major_radius", entity_one="ellipse:0"))
-        _payload(sd.handler(dim_type="ellipse_minor_radius", entity_one="ellipse:0"))
+        _payload(sd.handler(dimensions=[{"dim_type": "ellipse_major_radius",
+                                         "entity_one": "ellipse:0"}]))
+        _payload(sd.handler(dimensions=[{"dim_type": "ellipse_minor_radius",
+                                         "entity_one": "ellipse:0"}]))
         assert [c[0] for c in s.sketchDimensions.calls[-2:]] == ["ellipse_major_radius",
                                                                  "ellipse_minor_radius"]
 
@@ -829,13 +875,15 @@ class TestEllipseRadiusDims:
         # a text point AT the centre is the degenerate radial-family input; the ellipse dims get the
         # same offset-from-centre point the radius/diameter dims do, never (0,0,0).
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="ellipse_major_radius", entity_one="ellipse:0"))
+        _payload(sd.handler(dimensions=[{"dim_type": "ellipse_major_radius",
+                                         "entity_one": "ellipse:0"}]))
         _kind, _ellipse, tp = s.sketchDimensions.calls[-1]
         assert tp != ("pt", 0, 0, 0)
 
     def test_refuses_a_circle(self, monkeypatch):
         _install(monkeypatch)
-        res = sd.handler(dim_type="ellipse_major_radius", entity_one="circle:0")
+        res = sd.handler(dimensions=[{"dim_type": "ellipse_major_radius",
+                                      "entity_one": "circle:0"}])
         assert res["isError"] is True
         assert "'ellipse'" in res["message"] and "circle:0" in res["message"]
 
@@ -847,33 +895,38 @@ class TestSurfaceDims:
 
     def test_point_to_surface_passes_the_point_and_the_resolved_plane(self, monkeypatch):
         s = _install(monkeypatch)
-        out = _payload(sd.handler(dim_type="point_to_surface", entity_one="point:0", surface="xy"))
+        out = _payload(sd.handler(dimensions=[{"dim_type": "point_to_surface",
+                                               "entity_one": "point:0", "surface": "xy"}]))
         kind, point, surface = s.sketchDimensions.calls[-1]
         assert kind == "point_to_surface"
         assert isinstance(point, FakeSketchPoint) and surface.name == "XY"
-        assert out["surface"] == "XY"       # the RESOLVED plane, not the raw 'xy' token
+        # the RESOLVED plane, not the raw 'xy' token
+        assert out["results"][0]["surface"] == "XY"
 
     def test_point_to_surface_accepts_an_anchored_ref(self, monkeypatch):
         # the binding argument is a SketchPoint, and 'circle:0:center' resolves to exactly one
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="point_to_surface", entity_one="circle:0:center", surface="xy"))
+        _payload(sd.handler(dimensions=[{"dim_type": "point_to_surface",
+                                         "entity_one": "circle:0:center", "surface": "xy"}]))
         _kind, point, _surface = s.sketchDimensions.calls[-1]
         assert point == "center_sp"
 
     def test_point_to_surface_without_a_surface_is_refused(self, monkeypatch):
         _install(monkeypatch)
-        res = sd.handler(dim_type="point_to_surface", entity_one="point:0")
+        res = sd.handler(dimensions=[{"dim_type": "point_to_surface", "entity_one": "point:0"}])
         assert res["isError"] is True and "surface" in res["message"]
 
     def test_line_to_surface_passes_the_line(self, monkeypatch):
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="line_to_surface", entity_one="line:0", surface="xy"))
+        _payload(sd.handler(dimensions=[{"dim_type": "line_to_surface", "entity_one": "line:0",
+                                         "surface": "xy"}]))
         kind, line, surface = s.sketchDimensions.calls[-1]
         assert kind == "line_to_surface" and line.startSketchPoint == "sp" and surface.name == "XY"
 
     def test_line_to_surface_refuses_a_point(self, monkeypatch):
         _install(monkeypatch)
-        res = sd.handler(dim_type="line_to_surface", entity_one="point:0", surface="xy")
+        res = sd.handler(dimensions=[{"dim_type": "line_to_surface", "entity_one": "point:0",
+                                      "surface": "xy"}])
         assert res["isError"] is True
         assert "'line'" in res["message"] and "point:0" in res["message"]
 
@@ -882,11 +935,14 @@ class TestSurfaceDims:
         face = BRepFace(Cylinder(axis=None))
         monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace)
         sd.app.activeProduct._tokens["CYL"] = face
-        out = _payload(sd.handler(dim_type="point_to_surface", entity_one="point:0", surface="CYL"))
+        out = _payload(sd.handler(dimensions=[{"dim_type": "point_to_surface",
+                                               "entity_one": "point:0", "surface": "CYL"}]))
         _kind, _point, surface = s.sketchDimensions.calls[-1]
         assert surface is face                       # the second pass through the face kind
-        assert out["surface"] == "BRepFace"           # the resolved entity's type, not the token
-        res = sd.handler(dim_type="line_to_surface", entity_one="line:0", surface="CYL")
+        # the resolved entity's type, not the token
+        assert out["results"][0]["surface"] == "BRepFace"
+        res = sd.handler(dimensions=[{"dim_type": "line_to_surface", "entity_one": "line:0",
+                                      "surface": "CYL"}])
         assert res["isError"] is True and "PLANAR" in res["message"]
 
     def test_the_surface_schema_names_the_dim_that_accepts_a_curved_face(self):
@@ -902,7 +958,8 @@ class TestSurfaceDims:
         s = _install(monkeypatch)
         s.sketchDimensions.addDistanceBetweenLineAndPlanarSurfaceDimension = _raiser(
             "3 : line is not parallel to the planar surface")
-        res = sd.handler(dim_type="line_to_surface", entity_one="line:0", surface="xy")
+        res = sd.handler(dimensions=[{"dim_type": "line_to_surface", "entity_one": "line:0",
+                                      "surface": "xy"}])
         assert res["isError"] is True
         assert "not parallel to the planar surface" in res["message"]
         assert "takes 'line' as entity_one" not in res["message"]
@@ -911,9 +968,10 @@ class TestSurfaceDims:
 class TestDrivingFlag:
     def test_is_driving_reaches_the_api_and_is_read_back(self, monkeypatch):
         s = _install(monkeypatch)
-        out = _payload(sd.handler(dim_type="radius", entity_one="circle:0", is_driving=False))
+        out = _payload(sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0",
+                                               "is_driving": False}]))
         assert s.sketchDimensions.driving[-1] is False
-        assert out["is_driving"] is False
+        assert out["results"][0]["is_driving"] is False
 
     def test_the_payload_reports_the_dimension_not_the_request(self, monkeypatch):
         # the API made a DRIVING dimension though a driven one was asked for: the payload must say
@@ -921,17 +979,19 @@ class TestDrivingFlag:
         s = _install(monkeypatch)
         s.sketchDimensions.addRadialDimension = (
             lambda c, tp, isDriving=True: FakeDim("radius", is_driving=True))
-        out = _payload(sd.handler(dim_type="radius", entity_one="circle:0", is_driving=False))
-        assert out["is_driving"] is True
+        out = _payload(sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0",
+                                               "is_driving": False}]))
+        assert out["results"][0]["is_driving"] is True
 
     def test_driving_defaults_true(self, monkeypatch):
         s = _install(monkeypatch)
-        _payload(sd.handler(dim_type="radius", entity_one="circle:0"))
+        _payload(sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0"}]))
         assert s.sketchDimensions.driving[-1] is True
 
     def test_a_driven_dimension_refuses_a_value(self, monkeypatch):
         s = _install(monkeypatch)
-        res = sd.handler(dim_type="radius", entity_one="circle:0", value="5 mm", is_driving=False)
+        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0",
+                                      "value": "5 mm", "is_driving": False}])
         assert res["isError"] is True
         assert "is_driving" in res["message"] and "5 mm" in res["message"]
         assert s.sketchDimensions.calls == []        # refused BEFORE any dimension was added
@@ -940,25 +1000,82 @@ class TestDrivingFlag:
 class TestAnchorRefusalsOnWholeEntityTypes:
     def test_anchor_on_entity_two_is_refused_for_angle(self, monkeypatch):
         _install(monkeypatch)
-        res = sd.handler(dim_type="angle", entity_one="line:0", entity_two="line:1:end")
+        res = sd.handler(dimensions=[{"dim_type": "angle", "entity_one": "line:0",
+                                      "entity_two": "line:1:end"}])
         assert res["isError"] is True and "anchor" in res["message"].lower()
 
     def test_anchor_is_refused_on_a_whole_entity_type(self, monkeypatch):
         _install(monkeypatch)
-        res = sd.handler(dim_type="concentric_circle", entity_one="circle:0:center",
-                         entity_two="circle:1")
+        res = sd.handler(dimensions=[{"dim_type": "concentric_circle",
+                                      "entity_one": "circle:0:center", "entity_two": "circle:1"}])
         assert res["isError"] is True and "anchor" in res["message"].lower()
+
+
+class TestBatch:
+    """One call carries a LIST of dimensions: they run in order against the one resolved sketch,
+    the first failure stops the run, and the payload says what landed, what failed and how many
+    entries were never attempted."""
+
+    def test_two_entries_both_land_under_their_own_index(self, monkeypatch):
+        s = _install(monkeypatch)
+        out = _payload(sd.handler(dimensions=[
+            {"dim_type": "radius", "entity_one": "circle:0", "value": "5 mm"},
+            {"dim_type": "diameter", "entity_one": "circle:1"}]))
+        assert out["dimensioned"] == 2 and out["requested"] == 2
+        assert [r["index"] for r in out["results"]] == [0, 1]
+        assert [r["dim_type"] for r in out["results"]] == ["radius", "diameter"]
+        assert [c[0] for c in s.sketchDimensions.calls] == ["radius", "diameter"]
+
+    def test_a_later_failure_leaves_the_earlier_entry_landed(self, monkeypatch):
+        s = _install(monkeypatch)
+        out = _payload(sd.handler(dimensions=[
+            {"dim_type": "radius", "entity_one": "circle:0"},
+            {"dim_type": "radius", "entity_one": "circle:9"},
+            {"dim_type": "diameter", "entity_one": "circle:1"}]))
+        assert out["dimensioned"] == 1 and [r["index"] for r in out["results"]] == [0]
+        assert out["failed"]["index"] == 1
+        assert "entity_one 'circle:9' did not resolve" in out["failed"]["error"]
+        assert out["not_attempted"] == 1
+        assert "Stopped at dimensions[1]" in out["note"]
+        assert [c[0] for c in s.sketchDimensions.calls] == ["radius"]
+
+    def test_a_first_entry_failure_is_an_error_and_nothing_landed(self, monkeypatch):
+        s = _install(monkeypatch)
+        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:9"},
+                                     {"dim_type": "radius", "entity_one": "circle:0"}])
+        assert res["isError"] is True
+        assert "dimensions[0]" in res["message"]
+        assert "entity_one 'circle:9' did not resolve" in res["message"]
+        assert "Nothing landed." in res["message"]
+        assert "1 later entry was not attempted" in res["message"]
+        assert s.sketchDimensions.calls == []
+
+    def test_an_unknown_field_is_refused_naming_it_and_the_legal_fields(self, monkeypatch):
+        s = _install(monkeypatch)
+        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0",
+                                      "expression": "5 mm"}])
+        assert res["isError"] is True
+        assert "dimensions[0]" in res["message"] and "expression" in res["message"]
+        assert "value" in res["message"] and "tangent_side_one" in res["message"]
+        assert s.sketchDimensions.calls == []     # the guard runs before any entry does
+
+    def test_an_empty_list_is_refused(self, monkeypatch):
+        s = _install(monkeypatch)
+        res = sd.handler(dimensions=[])
+        assert res["isError"] is True and "non-empty list" in res["message"]
+        assert s.sketchDimensions.calls == []
 
 
 class TestGuards:
     def test_unknown_dim_type(self, monkeypatch):
         _install(monkeypatch)
-        res = sd.handler(dim_type="bogus", entity_one="line:0")
+        res = sd.handler(dimensions=[{"dim_type": "bogus", "entity_one": "line:0"}])
         assert res["isError"] is True and "dim_type" in res["message"]
 
     def test_no_sketch_named(self, monkeypatch):
         _install(monkeypatch)
-        res = sd.handler(dim_type="radius", sketch_name="Nope", entity_one="circle:0")
+        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0"}],
+                         sketch_name="Nope")
         assert res["isError"] is True and "No sketch named 'Nope'" in res["message"]
 
     def test_the_named_miss_lists_the_sketches_that_are_there(self, monkeypatch):
@@ -968,7 +1085,8 @@ class TestGuards:
         # sketch_delete_entity with ". Use sketch_get."), which is also the breadcrumb edge the
         # pointer map reads out of this error.
         _install(monkeypatch, sketches=[FakeSketch("First"), FakeSketch("Last")])
-        res = sd.handler(dim_type="radius", sketch_name="Nope", entity_one="circle:0")
+        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0"}],
+                         sketch_name="Nope")
         assert res["isError"] is True
         assert res["message"] == "No sketch named 'Nope'. Available: First, Last. Use sketch_get."
 
@@ -976,14 +1094,16 @@ class TestGuards:
         # find_or_recent_sketch answers the most-recent sketch for a BLANK name only; a NAMED miss
         # in an empty design still reaches the named branch, where an empty join reads as nothing.
         _install(monkeypatch, sketches=[])
-        res = sd.handler(dim_type="radius", sketch_name="Nope", entity_one="circle:0")
+        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0"}],
+                         sketch_name="Nope")
         assert res["isError"] is True and "Available: (none)" in res["message"]
 
     def test_a_padded_name_reports_the_name_the_walk_searched_for(self, monkeypatch):
         # the resolver STRIPS the name before searching, so the miss quotes the stripped form -
         # echoing the raw input names a sketch nothing ever looked for.
         _install(monkeypatch)
-        res = sd.handler(dim_type="radius", sketch_name="  Ghost  ", entity_one="circle:0")
+        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0"}],
+                         sketch_name="  Ghost  ")
         assert res["isError"] is True
         assert "No sketch named 'Ghost'" in res["message"]
         assert "'  Ghost  '" not in res["message"]
@@ -992,7 +1112,7 @@ class TestGuards:
         # a blank name asks for the MOST RECENT sketch, so there is no requested name to quote:
         # the named-miss branch would render the absent name as the literal string 'None'.
         _install(monkeypatch, sketches=[])
-        res = sd.handler(dim_type="radius", entity_one="circle:0")
+        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0"}])
         assert res["isError"] is True
         assert "'None'" not in res["message"]
         assert res["message"] == "No sketch to dimension. Create one first with sketch_create."
@@ -1001,26 +1121,28 @@ class TestGuards:
         # ' ' strips to blank, which means the most recent sketch - searching for a space instead
         # misses every sketch and reports a name no caller typed.
         _install(monkeypatch, sketches=[FakeSketch("First"), FakeSketch("Last")])
-        res = sd.handler(dim_type="radius", sketch_name=" ", entity_one="circle:0")
+        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0"}],
+                         sketch_name=" ")
         assert "No sketch named" not in json.dumps(res)
         assert _payload(res)["sketch"] == "Last"
 
     def test_bad_entity_one(self, monkeypatch):
         _install(monkeypatch)
-        res = sd.handler(dim_type="radius", entity_one="circle:9")
+        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:9"}])
         assert res["isError"] is True and "entity_one" in res["message"]
 
     def test_angle_needs_entity_two(self, monkeypatch):
         _install(monkeypatch)
-        res = sd.handler(dim_type="angle", entity_one="line:0")
+        res = sd.handler(dimensions=[{"dim_type": "angle", "entity_one": "line:0"}])
         assert res["isError"] is True and "entity_two" in res["message"]
 
     def test_value_optional(self, monkeypatch):
         _install(monkeypatch)
-        out = _payload(sd.handler(dim_type="radius", entity_one="circle:0"))
-        assert out["value_driven"] is False
+        out = _payload(sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0"}]))
+        first = out["results"][0]
+        assert first["value_driven"] is False
         # not driven -> value echoes the dimension's auto-measured expression
-        assert out["value"] == "10 mm"
+        assert first["value"] == "10 mm"
 
     def test_value_set_failure_is_reported(self, monkeypatch):
         s = _install(monkeypatch)
@@ -1038,11 +1160,12 @@ class TestGuards:
         class _BadDim:
             parameter = _BadParam()
         s.sketchDimensions.addRadialDimension = lambda c, tp, isDriving=True: _BadDim()
-        res = sd.handler(dim_type="radius", entity_one="circle:0", value="oops")
+        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0",
+                                      "value": "oops"}])
         assert res["isError"] is True and "could not set value" in res["message"]
 
     def test_dimension_returning_nothing_is_error(self, monkeypatch):
         s = _install(monkeypatch)
         s.sketchDimensions.addRadialDimension = lambda c, tp, isDriving=True: None
-        res = sd.handler(dim_type="radius", entity_one="circle:0")
+        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0"}])
         assert res["isError"] is True and "returned nothing" in res["message"]

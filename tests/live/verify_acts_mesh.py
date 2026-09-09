@@ -24,7 +24,9 @@ _MACHINING = [
     # builds in clear space a viewer can see, never on top of the part or another cameo.
     ("model_create_component", {"name": "SRev", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xz", "name": "SRevS"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 10, "y1": 60, "x2": 10, "y2": 90, "sketch_name": "SRevS"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "line", "x1": 10, "y1": 60,
+                                           "x2": 10, "y2": 90}],
+                             "sketch_name": "SRevS"}, "ok", None),
     # 'is_solid' is isSolid read off the created body: a profile that closed into a SOLID, and a
     # body whose flag would not read at all (named in 'unverified'), both return ok.
     ("surface_revolve", {"sketch_name": "SRevS", "axis": "z", "angle_deg": 360},
@@ -35,8 +37,9 @@ _MACHINING = [
     ("sketch_create", {"plane": "xz", "name": "FillProf"}, "ok", None),
     # the arc's endpoints must sit ON the revolve axis (x=0) or the revolved surface is an open
     # tube enclosing nothing, and surface_fill refuses it (live-measured).
-    ("sketch_add_geometry", {"kind": "arc", "cx": 0, "cy": 150, "x1": 0, "y1": 156,
-                             "sweep_deg": 180, "sketch_name": "FillProf"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "arc", "cx": 0, "cy": 150, "x1": 0, "y1": 156,
+                                           "sweep_deg": 180}],
+                             "sketch_name": "FillProf"}, "ok", None),
     ("surface_revolve", {"sketch_name": "FillProf", "axis": "z", "angle_deg": 360}, "ok", None),
     # the closed sphere sheet encloses exactly ONE cell, so index 1 is one past the end: refused
     # NAMING the index and the range that exists, never clamped onto a neighbouring cell. The parse
@@ -53,7 +56,9 @@ _MACHINING = [
     ("surface_thicken", lambda c: {"faces": [_ctx_get(c, "srev_face", "surface face")], "thickness": 2}, "ok", None),
     ("model_create_component", {"name": "Surf", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "SurfS"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 200, "y1": 200, "x2": 240, "y2": 230, "sketch_name": "SurfS"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 200, "y1": 200,
+                                           "x2": 240, "y2": 230}],
+                             "sketch_name": "SurfS"}, "ok", None),
     ("surface_extrude", {"sketch_name": "SurfS", "distance": 15}, "ok", None),
     ("find_geometry", {"target": "Surf", "kind": "planar_face", "max_results": 1}, "ok", _fg("surf_face")),
     # 'faces_offset' is counted off the CREATED surface, so it disagrees with the one face requested
@@ -85,7 +90,8 @@ _MACHINING = [
     # anything - a single flat face has no corner to round.
     ("model_create_component", {"name": "SAlign", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "SAlignS"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 700, "y1": 200, "x2": 740, "y2": 230,
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 700, "y1": 200,
+                                           "x2": 740, "y2": 230}],
                              "sketch_name": "SAlignS"}, "ok", None),
     ("surface_extrude", {"sketch_name": "SAlignS", "distance": 15}, "ok", None),
     ("find_geometry", {"target": "SAlign", "kind": "line_edge", "nearest_to": [720, 215, 15],
@@ -102,7 +108,9 @@ _MACHINING = [
     ("design_activate_component", {"occurrence": "Surf:1"}, "ok", None),
     ("model_create_component", {"name": "SDel", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "SD1"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 300, "y1": 200, "x2": 320, "y2": 220, "sketch_name": "SD1"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 300, "y1": 200,
+                                           "x2": 320, "y2": 220}],
+                             "sketch_name": "SD1"}, "ok", None),
     ("model_extrude", {"sketch_name": "SD1", "profile_index": 0, "distance": 10}, _extruded, None),
     ("find_geometry", {"target": "SDel", "kind": "planar_face", "nearest_to": [310, 210, 10], "max_results": 1}, "ok", _fg("sdel_top")),
     # one face off a six-faced box: 'faces_delta' is measured across the result bodies' own counts,
@@ -123,7 +131,8 @@ _MACHINING = [
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("model_create_component", {"name": "PatchRail", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "PatchRailS"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 300, "y1": 210, "x2": 320, "y2": 210,
+    ("sketch_add_geometry", {"geometry": [{"kind": "line", "x1": 300, "y1": 210,
+                                           "x2": 320, "y2": 210}],
                              "sketch_name": "PatchRailS"}, "ok", None),
     ("surface_extrude", {"sketch_name": "PatchRailS", "distance": 10}, "ok", None),
     ("find_geometry", {"target": "PatchRail", "kind": "line_edge", "nearest_to": [310, 210, 10],
@@ -146,10 +155,13 @@ _MACHINING = [
     # trim deterministic (a coincident surface adds phantom cells and the trim keeps the wrong one).
     ("model_create_component", {"name": "SHole", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "SH1"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 600, "y1": 0, "x2": 640, "y2": 0, "sketch_name": "SH1"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "line", "x1": 600, "y1": 0,
+                                           "x2": 640, "y2": 0}],
+                             "sketch_name": "SH1"}, "ok", None),
     ("surface_extrude", {"sketch_name": "SH1", "distance": 40}, "ok", None),
     ("sketch_create", {"plane": "xz", "name": "SH2"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 620, "cy": -20, "radius": 5, "sketch_name": "SH2"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "circle", "cx": 620, "cy": -20, "radius": 5}],
+                             "sketch_name": "SH2"}, "ok", None),
     ("surface_extrude", {"sketch_name": "SH2", "distance": 10, "symmetric": True}, "ok", None),
     ("find_geometry", {"target": "SHole", "kind": "planar_face", "nearest_to": [620, 0, 20], "max_results": 1}, "ok", _fg("sh_sheet")),
     ("find_geometry", {"target": "SHole", "kind": "cylinder_face", "nearest_to": [620, 0, 20], "max_results": 1}, "ok", _fg("sh_cutter")),
@@ -170,7 +182,8 @@ _MACHINING = [
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("model_create_component", {"name": "Ruled", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "RuledS"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "line", "x1": 900, "y1": 0, "x2": 940, "y2": 0,
+    ("sketch_add_geometry", {"geometry": [{"kind": "line", "x1": 900, "y1": 0,
+                                           "x2": 940, "y2": 0}],
                              "sketch_name": "RuledS"}, "ok", None),
     ("surface_extrude", {"sketch_name": "RuledS", "distance": 30}, "ok", None),
     ("find_geometry", {"target": "Ruled", "kind": "line_edge", "nearest_to": [920, 0, 30],
@@ -207,7 +220,8 @@ _MACHINING = [
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("model_create_component", {"name": "RuledSolid", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "RuledSolidS"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 980, "y1": 200, "x2": 1020, "y2": 240,
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 980, "y1": 200,
+                                           "x2": 1020, "y2": 240}],
                              "sketch_name": "RuledSolidS"}, "ok", None),
     ("model_extrude", {"sketch_name": "RuledSolidS", "profile_index": 0, "distance": 20}, _extruded, None),
     ("find_geometry", {"target": "RuledSolid", "kind": "line_edge", "nearest_to": [1000, 200, 20],
@@ -221,7 +235,9 @@ _MACHINING = [
     # split / unstitch / stitch / base-feature / arrange / compute-holder.
     ("model_create_component", {"name": "Spl", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "Sp1"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 400, "y1": 200, "x2": 440, "y2": 240, "sketch_name": "Sp1"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 400, "y1": 200,
+                                           "x2": 440, "y2": 240}],
+                             "sketch_name": "Sp1"}, "ok", None),
     ("model_extrude", {"sketch_name": "Sp1", "profile_index": 0, "distance": 20}, _extruded, None),
     ("model_construction", {"kind": "plane", "plane": "xz", "offset": 220, "name": "SplMid"},
      _datum_plane("xz"), None),
@@ -229,7 +245,9 @@ _MACHINING = [
     ("model_split", lambda c: {"split": "body", "target": _ctx_get(c, "spl_body", "split body"), "split_plane": "SplMid"}, _split_bodies, None),
     ("model_create_component", {"name": "Stc", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "St1"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 500, "y1": 200, "x2": 520, "y2": 220, "sketch_name": "St1"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 500, "y1": 200,
+                                           "x2": 520, "y2": 220}],
+                             "sketch_name": "St1"}, "ok", None),
     ("model_extrude", {"sketch_name": "St1", "profile_index": 0, "distance": 10}, _extruded, None),
     ("find_geometry", {"target": "Stc", "kind": "planar_face", "nearest_to": [510, 210, 10], "max_results": 1}, "ok", _fg("stc_body")),
     ("model_unstitch", lambda c: {"target": _ctx_get(c, "stc_body", "unstitch body"), "chain": False}, _unstitched, None),
@@ -242,7 +260,9 @@ _MACHINING = [
     # compute_holder needs a body + a cyl-face axis + a planar end-datum.
     ("model_create_component", {"name": "HolderPart", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "HP1"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 600, "y1": 200, "x2": 640, "y2": 220, "sketch_name": "HP1"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 600, "y1": 200,
+                                           "x2": 640, "y2": 220}],
+                             "sketch_name": "HP1"}, "ok", None),
     ("model_extrude", {"sketch_name": "HP1", "profile_index": 0, "distance": 10}, _extruded, None),
     ("find_geometry", {"target": "HolderPart", "kind": "planar_face", "nearest_to": [620, 210, 10], "max_results": 1}, "ok", _fg("hp_top")),
     # hole points ride the face's LOCAL frame = the model origin projected onto the face, so
@@ -265,12 +285,13 @@ _NESTING = _box("ArrP1", ox=200, oy=350) + [
     # A nest that only ever sees one footprint proves nothing about the solver.
     ("model_create_component", {"name": "ArrP2", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "ArrP2S"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 260, "y1": 350, "x2": 320, "y2": 368,
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 260, "y1": 350,
+                                           "x2": 320, "y2": 368}],
                              "sketch_name": "ArrP2S"}, "ok", None),
     ("model_extrude", {"sketch_name": "ArrP2S", "profile_index": 0, "distance": 10}, _extruded, None),
     ("model_create_component", {"name": "ArrP3", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "ArrP3S"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 350, "cy": 359, "radius": 16,
+    ("sketch_add_geometry", {"geometry": [{"kind": "circle", "cx": 350, "cy": 359, "radius": 16}],
                              "sketch_name": "ArrP3S"}, "ok", None),
     ("model_extrude", {"sketch_name": "ArrP3S", "profile_index": 0, "distance": 10}, _extruded, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
@@ -283,9 +304,10 @@ _NESTING = _box("ArrP1", ox=200, oy=350) + [
     # case a box boundary cannot show. Its six lines are line:0..line:5, which is what the reshape
     # below scales.
     ("sketch_create", {"plane": "xy", "name": "ArrB"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "polygon", "cx": 300, "cy": 500, "radius": 120, "sides": 6,
+    ("sketch_add_geometry", {"geometry": [{"kind": "polygon", "cx": 300, "cy": 500,
+                                           "radius": 120, "sides": 6}],
                              "sketch_name": "ArrB"},
-     lambda p: p.get("curves_added") == 6, None),
+     lambda p: p["results"][0].get("curves_added") == 6, None),
     _watch(["ArrB", "ArrP1:1", "ArrP2:1", "ArrP3:1"]),
     # TRUE-SHAPE, because the boundary is a hexagon: the rectangular solver nests bounding boxes and
     # refuses a non-rectangular envelope outright (ARRANGE_ERROR_ENVELOPE_INVALIDRECTANGULAR), which
@@ -322,7 +344,9 @@ _NESTING = _box("ArrP1", ox=200, oy=350) + [
 _MESH = [
     ("model_create_component", {"name": "Msh", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "MshS"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle", "x1": 200, "y1": 300, "x2": 220, "y2": 320, "sketch_name": "MshS"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 200, "y1": 300,
+                                           "x2": 220, "y2": 320}],
+                             "sketch_name": "MshS"}, "ok", None),
     # FRAME BEFORE THE FIRST BODY, on the sketch that is about to become one. The automatic camera
     # row lands on a chunk's first body, which means the body appears while the camera is still on
     # whatever the previous act was doing - and this act's sketch was drawn back in the sketch phase,
@@ -338,7 +362,9 @@ _MESH = [
     ("model_construction", {"kind": "plane", "plane": "xy", "offset": 5, "name": "MshMid"},
      _datum_plane("xy"), None),
     ("sketch_create", {"plane": "xy", "name": "MshCyl"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 260, "cy": 360, "radius": 15, "sketch_name": "MshCyl"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "circle", "cx": 260, "cy": 360,
+                                           "radius": 15}],
+                             "sketch_name": "MshCyl"}, "ok", None),
     ("model_extrude", {"sketch_name": "MshCyl", "profile_index": 0, "distance": 20}, _extruded, None),
     ("find_geometry", {"target": "Msh", "kind": "cylinder_face", "nearest_to": [260, 360, 10], "max_results": 1}, "ok", _fg("cyl_body")),
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "cyl_body", "cyl body"), "name": "MRED", "quality": "high"}, "ok", None),

@@ -423,7 +423,7 @@ _CAM_STORY = [
     # workspace: the geometry the 'sketch' selection takes, which is a WHOLE sketch (SketchSelection
     # accepts sketches, not their curves and not their profiles).
     ("sketch_create", {"plane": "xy", "name": "CamContourSketch"}, "ok", None),
-    ("sketch_add_geometry", {"kind": "circle", "cx": 0, "cy": 0, "radius": 10,
+    ("sketch_add_geometry", {"geometry": [{"kind": "circle", "cx": 0, "cy": 0, "radius": 10}],
                              "sketch_name": "CamContourSketch"}, "ok", None),
     ("view_switch_workspace", {"workspace": "manufacture"}, "ok", None),
     # CAM is looked at, not sketched in: drop the sketch clutter design-wide for the whole
@@ -1942,9 +1942,11 @@ def _posted_as_is(name):
 _SWARF_RIG = [
     ("model_create_component", {"name": _SW_COMP, "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": _SW_SKETCH}, "ok", None),
-    ("sketch_add_geometry", {"kind": "rectangle",
-                             "x1": _SW_CX - _SW_BASE_X / 2, "y1": _SW_CY - _SW_BASE_Y / 2,
-                             "x2": _SW_CX + _SW_BASE_X / 2, "y2": _SW_CY + _SW_BASE_Y / 2,
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle",
+                                           "x1": _SW_CX - _SW_BASE_X / 2,
+                                           "y1": _SW_CY - _SW_BASE_Y / 2,
+                                           "x2": _SW_CX + _SW_BASE_X / 2,
+                                           "y2": _SW_CY + _SW_BASE_Y / 2}],
                              "sketch_name": _SW_SKETCH}, "ok", None),
     # a NEGATIVE taper leans every wall inward over the rise, so no wall is vertical and each one
     # is a ruled surface between its own bottom and top edge - which is what a rail pair is.
@@ -1957,13 +1959,14 @@ _SWARF_RIG = [
     # path has a body to classify. Nothing later reads this body.
     ("model_create_component", {"name": _L_COMP, "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": _L_SKETCH}, "ok", None),
-    ("sketch_add_geometry", {"kind": "closed_path", "sketch_name": _L_SKETCH,
-                             "points": [[_L_X0, _L_Y0],
-                                        [_L_X0 + _L_LONG, _L_Y0],
-                                        [_L_X0 + _L_LONG, _L_Y0 + _L_ARM],
-                                        [_L_X0 + _L_ARM, _L_Y0 + _L_ARM],
-                                        [_L_X0 + _L_ARM, _L_Y0 + _L_SHORT],
-                                        [_L_X0, _L_Y0 + _L_SHORT]]}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "closed_path",
+                                           "points": [[_L_X0, _L_Y0],
+                                                      [_L_X0 + _L_LONG, _L_Y0],
+                                                      [_L_X0 + _L_LONG, _L_Y0 + _L_ARM],
+                                                      [_L_X0 + _L_ARM, _L_Y0 + _L_ARM],
+                                                      [_L_X0 + _L_ARM, _L_Y0 + _L_SHORT],
+                                                      [_L_X0, _L_Y0 + _L_SHORT]]}],
+                             "sketch_name": _L_SKETCH}, "ok", None),
     ("model_extrude", {"sketch_name": _L_SKETCH, "profile_index": 0, "distance": _L_H,
                        "operation": "new"}, _extruded, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),

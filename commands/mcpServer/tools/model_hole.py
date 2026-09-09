@@ -197,7 +197,7 @@ def _require_linear_edge(edge_ent, label):
 _PROFILE_CUT_REMEDY = (
     "Cut it as a profile instead: sketch_create on the same face reports where that sketch's origin "
     "sits and where its +X/+Y point, place a circle at those coordinates with "
-    "sketch_add_geometry(kind='circle'), then model_extrude(operation='cut').")
+    "sketch_add_geometry(geometry=[{kind: 'circle', ...}]), then model_extrude(operation='cut').")
 
 
 def _world_lift(design, sketch, context_occ):
