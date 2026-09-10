@@ -147,6 +147,8 @@ def _own_nodes(scope):
     out, stack = [], list(getattr(scope, "body", []))
     while stack:
         node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
         out.append(node)
         stack.extend(c for c in ast.iter_child_nodes(node)
                      if not isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)))

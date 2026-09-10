@@ -523,8 +523,8 @@ class TestHealthAndReferenceVerify:
     def test_warning_health_state_does_not_error(self, monkeypatch):
         derive_features = FakeDeriveFeatures(health=1, message="a minor warning")
         _install(monkeypatch, derive_features=derive_features)
-        res = io.handler(document_id="urn:x")
-        assert res["isError"] is False
+        out = _payload(io.handler(document_id="urn:x"))
+        assert out["derived"] is True and out["feature_name"] == "Derive1"
 
     def test_out_of_date_at_creation_errors(self, monkeypatch):
         derive_features = FakeDeriveFeatures(out_of_date=True)

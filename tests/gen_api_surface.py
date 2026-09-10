@@ -102,6 +102,13 @@ def _return_class(node):
     return f"{m.group(1)}.{m.group(2)}" if m else None
 
 
+def read_declarations(path):
+    """Return exact source bytes and their parsed declaration tree without importing the module."""
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    return raw, ast.parse(raw.decode("utf-8-sig"), filename=str(path))
+
+
 def scan_module(path, module_name):
     """(properties, factories, bool_methods, other_methods) for one bindings module.
 
@@ -110,8 +117,7 @@ def scan_module(path, module_name):
     method name is just as dead as assigning a typo.
     factories:  'fusion.MeshCombineFeatures.createInput' -> 'fusion.MeshCombineFeatureInput'.
     """
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        tree = ast.parse(fh.read(), filename=path)
+    _, tree = read_declarations(path)
     properties, factories, bools, other = {}, {}, set(), set()
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
@@ -199,8 +205,10 @@ def build(bindings_dir=None):
 
 
 def _build_id(root):
-    """The webdeploy build hash the bindings came from - '<hash>/Api/Python/packages/adsk'."""
+    """Return the build directory for the declared Windows and macOS binding layouts."""
     parts = os.path.normpath(root).split(os.sep)
+    if len(parts) >= 7 and parts[-5] == "Contents" and parts[-6].endswith(".app"):
+        return parts[-7]
     return parts[-5] if len(parts) >= 5 else os.path.basename(root)
 
 

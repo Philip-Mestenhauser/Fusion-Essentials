@@ -523,6 +523,7 @@ class TestNothingToSelect:
         monkeypatch.setattr(sel, "_active_design", lambda: _fake_pickable_design(0, 0, 0))
         res = sel.handler(wait_seconds=0)
         assert res["isError"] is True
+        assert "bodies=0" in res["message"] and "occurrences=0" in res["message"]
 
     def test_sketch_only_design_is_pickable(self, monkeypatch):
         # A sketch-only doc (the unbodied parametric-plan handoff) has clickable sketch geometry -

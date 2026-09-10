@@ -1206,7 +1206,8 @@ class TestDataModel:
         note = dm["version_lag_note"]
         assert dm["version_number"] == 3 and dm["latest_version_number"] == 2
         assert "HOLDS" in note and "pre-save" in note
-        assert "version_confirmed" in note                 # the read to trust instead
+        assert "fresh data_get" in note and "version_confirmed is true only" in note
+        assert "false/pending is unknown" in note
         assert "few seconds" not in note
 
     def test_unsaved_doc_has_no_version_note_to_warn_about(self):

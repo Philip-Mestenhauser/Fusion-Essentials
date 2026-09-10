@@ -26,6 +26,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 
 # Fusion payloads carry non-ASCII (PMI symbols); the Windows console default cannot encode them.
@@ -33,7 +34,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from verify_core import (
-    NOTE_MAX, REFUSAL_NOTE_MAX, SRC_ROOT, STEP_SLEEP_S, VERIFIED, _HERE, _RECALL,
+    NOTE_MAX, REFUSAL_NOTE_MAX, REPO_ROOT, SRC_ROOT, STEP_SLEEP_S, VERIFIED, _HERE, _RECALL,
     _Refusal, _leaves_no_row, _unparked, capability_met,
     capability_skip_reason, facade, parked_reason, predicate_kind, probe_capabilities,
     step_capability)
@@ -43,6 +44,7 @@ from verify_core import (
 # owner-present drawing tier, and judge no step of this run. Hashing them makes a row-only edit
 # to one invalidate a receipt its content takes no part in.
 _NOT_THE_SWEEP = ("measure_api.py", "drawing_verify.py")
+_ATTESTATION_TCB = ("Fusion-Essentials.py", "lib/loaded_attestation.py")
 
 
 def source_hash(root=None):
@@ -62,6 +64,8 @@ def source_hash(root=None):
                 rel = os.path.relpath(full, root).replace(os.sep, "/")
                 entries.append((rel, full))
     if root == SRC_ROOT:      # a custom root (the offline tests') hashes only itself
+        for rel in _ATTESTATION_TCB:
+            entries.append((rel, os.path.join(REPO_ROOT, *rel.split("/"))))
         for fn in sorted(os.listdir(_HERE)):
             if fn.endswith(".py") and fn not in _NOT_THE_SWEEP:
                 entries.append(("tests_live/" + fn, os.path.join(_HERE, fn)))
@@ -75,15 +79,23 @@ def source_hash(root=None):
 
 _STAMP_RE = re.compile(r"^Stamp: source ([0-9a-f]{64}) \| Fusion (\S+) \| verified (\S+)",
                        re.MULTILINE)
+_LOADED_RE = re.compile(
+    r"^Loaded: implementation ([0-9a-f]{64}) \| schema ([0-9a-f]{64}) \| load (\S+) \| session (\S+)$",
+    re.MULTILINE)
 
 
 def write_verified(ledger, fusion_version, stamp_date, src_hash, path=None, notes=None,
-                   act_modes=None):
+                   act_modes=None, attestation=None):
     """Write the tracked receipt. Called only on a run with zero FAIL/blocked/pass* steps. 'notes'
     maps a driven tool to its shot-list step text (the ledger doubles as the demo's shot list) - a
     third column, empty when absent so the two-column stamp/count contract is unchanged.
     'act_modes' lists (act, narrative|fallback) - a machine-readable column, so a fallback-heavy
     run is visible without reading prose."""
+    if not isinstance(attestation, dict) or not all(
+            isinstance(attestation.get(key), str) and attestation[key]
+            for key in ("implementation_fingerprint", "schema_fingerprint", "load_id",
+                        "session_id")):
+        raise ValueError("receipt needs the complete loaded implementation/schema/session identity")
     notes = notes or {}
     n_cov = sum(1 for _, s in ledger if s == "covered")
     # 'called' and 'called (<parked reason>)' are the SAME bucket - the reason is rendering, not a
@@ -125,6 +137,9 @@ def write_verified(ledger, fusion_version, stamp_date, src_hash, path=None, note
         "FAIL/blocked/pass* steps rewrites this file.",
         "",
         "Stamp: source {0} | Fusion {1} | verified {2}".format(src_hash, fusion_version, stamp_date),
+        "Loaded: implementation {0} | schema {1} | load {2} | session {3}".format(
+            attestation["implementation_fingerprint"], attestation["schema_fingerprint"],
+            attestation["load_id"], attestation["session_id"]),
         "",
         "{0} covered / {1} called / {2} refusals-only / {3} skipped(reason) / {4} pending".format(
             n_cov, n_called, n_ref, n_skip, n_pend),
@@ -145,7 +160,7 @@ def write_verified(ledger, fusion_version, stamp_date, src_hash, path=None, note
     return path or VERIFIED
 
 
-def check(root=None, verified_path=None):
+def check(root=None, verified_path=None, attestation=None):
     """The receipt gate: drives nothing, needs no Fusion. Exit 0 = the last green live run saw
     exactly this tool source; 1 = no receipt, or the source changed since that run."""
     source_hash = facade("source_hash")
@@ -154,9 +169,12 @@ def check(root=None, verified_path=None):
         print("VERIFIED_TOOLS.md does not exist - run tool_verify.py once against live Fusion.")
         return 1
     with open(path, encoding="utf-8") as fh:
-        m = _STAMP_RE.search(fh.read())
-    if not m:
-        print("VERIFIED_TOOLS.md has no stamp line - regenerate it (run tool_verify.py).")
+        text = fh.read()
+    m = _STAMP_RE.search(text)
+    loaded = _LOADED_RE.search(text)
+    if not m or not loaded:
+        print("VERIFIED_TOOLS.md has no complete source/loaded stamp - regenerate it "
+              "(run tool_verify.py).")
         return 1
     stamped_hash, stamped_version, stamped_date = m.groups()
     current = source_hash(root)
@@ -164,6 +182,12 @@ def check(root=None, verified_path=None):
         print("tool source changed since the last live verification ({0}, Fusion {1}) -"
               .format(stamped_date, stamped_version))
         print("re-run with Fusion up: py -3 tests/live/tool_verify.py")
+        return 1
+    stamped_identity = dict(zip(
+        ("implementation_fingerprint", "schema_fingerprint", "load_id", "session_id"),
+        loaded.groups()))
+    if attestation is not None and _identity_refusal(stamped_identity, attestation):
+        print("loaded implementation/schema/session differs from the verification receipt")
         return 1
     print("live verification current: source matches the green run of {0} (Fusion {1})"
           .format(stamped_date, stamped_version))
@@ -195,15 +219,28 @@ def _jsonable(mapping, what):
 
 
 def save_run_state(run_id, state):
-    """Write one chunk's state after an act. The whole file is rewritten each time: a partial file
-    is what a --resume would read."""
+    """Atomically replace one resumable run checkpoint after fully writing its new state."""
     os.makedirs(RESULTS_DIR, exist_ok=True)
     body = dict(state)
     body["ctx"] = _jsonable(body.get("ctx") or {}, "the run's ctx")
     body["recall"] = _jsonable(body.get("recall") or {}, "the run's recalled values")
-    with open(run_state_path(run_id), "w", encoding="utf-8", newline="\n") as fh:
-        json.dump(body, fh, indent=2)
-    return run_state_path(run_id)
+    encoded = io.StringIO()
+    json.dump(body, encoded, indent=2)
+    path = run_state_path(run_id)
+    fd, temporary = tempfile.mkstemp(
+        prefix="." + os.path.basename(path) + ".", suffix=".tmp", dir=RESULTS_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(encoded.getvalue())
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    return path
 
 
 def load_run_state(run_id):
@@ -216,20 +253,31 @@ def load_run_state(run_id):
 
 
 def _document_now():
-    """The active document as a resume compares it: its name, its lineage id, and how much design it
-    holds. Two wire reads, taken once at a chunk boundary."""
+    """Read the active document handle and design count used by resume at a chunk boundary."""
     call = facade("call")
     is_error, doc = call("doc_get", {})
     if is_error or not isinstance(doc, dict):
-        return {"name": None, "document_id": None, "feature_count": None}
+        return {"name": None, "document_id": None, "document_handle": None, "feature_count": None}
     active = doc.get("active") or {}
     is_error, design = call("design_get", {})
     features = None if is_error or not isinstance(design, dict) else design.get("feature_count")
     return {"name": active.get("name"), "document_id": active.get("document_id"),
-            "feature_count": features}
+            "document_handle": active.get("document_handle"), "feature_count": features}
 
 
-def resume_refusal(state, run_id, current_hash, document):
+def _identity_refusal(previous, current, allow_new_session=False):
+    """Why a loaded identity no longer matches the run boundary, or None."""
+    if current is None:
+        return "the current health row has no complete loaded attestation"
+    for field in ("implementation_fingerprint", "schema_fingerprint", "load_id"):
+        if previous.get(field) != current.get(field):
+            return "the loaded %s changed during this run" % field
+    if not allow_new_session and previous.get("session_id") != current.get("session_id"):
+        return "the server session changed without an observed reload"
+    return None
+
+
+def resume_refusal(state, run_id, current_hash, document, current_identity=None):
     """Why this resume cannot be joined to the chunks before it, or None: no such run id, an id that
     already walked the program (a resume would stamp from its saved ledger without driving a step),
     a SOURCE that moved (the receipt binds one hash), or a DOCUMENT that is not the one the last
@@ -244,6 +292,9 @@ def resume_refusal(state, run_id, current_hash, document):
         return ("the tool source changed since this run's first chunk ({0}...) - the receipt binds "
                 "ONE hash, so a resume under {1}... would stamp a run no chunk was judged under. "
                 "Start a new run id.".format(str(state.get("source_hash"))[:12], current_hash[:12]))
+    identity = _identity_refusal(state.get("attestation") or {}, current_identity)
+    if identity:
+        return identity + ". Start a new run id."
     return _document_refusal(state, run_id, document)
 
 
@@ -260,14 +311,17 @@ def develop_refusal(state, run_id, document):
 def _document_refusal(state, run_id, document):
     """Why the active document is not the one this run left open, or None."""
     was = state.get("document") or {}
-    if not was.get("name"):
-        return ("run {0!r} saved no document identity - it stopped before its first act boundary, so "
-                "there is nothing to check the active document against and a resume could run the "
-                "remaining acts anywhere. Start a new run id.".format(run_id))
-    if document.get("name") != was.get("name") or document.get("document_id") != was.get("document_id"):
-        return ("the document this run left open is not the active one: it was {0!r} and {1!r} is "
-                "active now. Re-open nothing - start a new run id.".format(
-                    was.get("name"), document.get("name")))
+    saved_handle, current_handle = was.get("document_handle"), document.get("document_handle")
+    def valid_handle(value):
+        suffix = value[len("session:"):] if isinstance(value, str) else ""
+        return (isinstance(value, str) and value.startswith("session:") and bool(suffix)
+                and all(not character.isspace() for character in value))
+    if not valid_handle(saved_handle) or not valid_handle(current_handle):
+        return ("run {0!r} has no complete document handle in its saved or current identity - "
+                "the exact active document is unreadable, so start a new run id.".format(run_id))
+    if type(saved_handle) is not type(current_handle) or saved_handle != current_handle:
+        return ("the document handle this run left open is not the active one: it was {0!r} and "
+                "{1!r} is active now. Start a new run id.".format(saved_handle, current_handle))
     then, now = was.get("feature_count"), document.get("feature_count")
     if isinstance(then, int) and isinstance(now, int) and now < then:
         return ("the active document holds {0} features and this run left {1} - it is not the world "
@@ -430,6 +484,7 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
     # The wire reads, the act program and the ledger tables as the FACADE holds them at the moment
     # the run starts - see verify_core.facade for why they are not this module's own globals.
     health_gate, registered_tools = facade("health_gate"), facade("registered_tools")
+    attestation_identity = facade("attestation_identity")
     source_hash, write_verified = facade("source_hash"), facade("write_verified")
     poll_generation, reload_smoke = facade("poll_generation"), facade("reload_smoke")
     ACTS, POLL_AFTER, STORY, EXCLUDED = (facade("ACTS"), facade("POLL_AFTER"), facade("STORY"),
@@ -466,10 +521,19 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
                   run_id, run_state_path(run_id)))
         return 1
     health = health_gate()
+    pinned_attestation = attestation_identity(health)
+    if pinned_attestation is None:
+        print("run refused: health did not provide a complete loaded attestation")
+        return 1
     print(f"server ok: {health.get('server')} v{health.get('version', '?')}")
+
+    def current_attestation():
+        return attestation_identity(health_gate())
+
     if run_id and resume:
         refusal = (develop_refusal(state, run_id, _document_now()) if develop
-                   else resume_refusal(state, run_id, pinned_source_hash, _document_now()))
+                   else resume_refusal(state, run_id, pinned_source_hash, _document_now(),
+                                       pinned_attestation))
         if refusal:
             print("resume refused: " + refusal)
             return 1
@@ -481,7 +545,7 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
         else:
             print("resuming run {0}: {1} act(s) already done".format(
                 run_id, len(state.get("acts_done") or [])))
-    all_tools = registered_tools()
+    all_tools = registered_tools(health)
 
     # THE CAPABILITY TIER: every capability an act or a step declares, answered True/False/None by
     # its own probe. An unmet capability routes its acts and steps to the receipt's
@@ -525,6 +589,23 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
     # produced no evidence of its own, whatever the saved ledger says.
     document = prior.get("document")
     walked = 0
+
+    def checkpoint():
+        nonlocal document
+        # The document goes into every boundary save, read once per chunk at the first of them.
+        document = document or _document_now()
+        save_run_state(run_id, {
+            "run": run_id, "source_hash": pinned_source_hash,
+            "attestation": pinned_attestation, "acts_done": acts_done,
+            "rows": [list(r) for r in rows], "notes": notes,
+            "act_modes": [list(m) for m in act_modes], "valued": sorted(valued),
+            "parked": parked, "gated": gated, "entitlements": entitlements,
+            "ctx": ctx, "recall": dict(_RECALL),
+            "timings": {t: list(v) for t, v in timings.items()},
+            "act_seconds": [list(a) for a in act_seconds],
+            "elapsed_s": chunk_started + (time.time() - run_started),
+            "document": document})
+
     for name, pre, narrative, fallback in ACTS:
         if name in acts_done and not develop:
             continue
@@ -545,9 +626,16 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
             if name not in acts_done:
                 acts_done.append(name)
             walked += 1
-            if run_id and not develop and source_hash() != pinned_source_hash:
-                print("run refused: source changed during this run; no state or receipt written")
-                return 1
+            if not develop:
+                if source_hash() != pinned_source_hash:
+                    print("run refused: source changed during this run; no state or receipt written")
+                    return 1
+                identity_problem = _identity_refusal(pinned_attestation, current_attestation())
+                if identity_problem:
+                    print("run refused: " + identity_problem + "; no state or receipt written")
+                    return 1
+                if run_id:
+                    checkpoint()
             continue
         mode, steps = "narrative", narrative
         if pre is not None and fallback is not None and not _precondition_holds(pre):
@@ -594,22 +682,12 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
         if not develop and source_hash() != pinned_source_hash:
             print("run refused: source changed during this run; no state or receipt written")
             return 1
+        identity_problem = _identity_refusal(pinned_attestation, current_attestation())
+        if not develop and identity_problem:
+            print("run refused: " + identity_problem + "; no state or receipt written")
+            return 1
         if run_id and not develop:
-            # The document goes into EVERY boundary save, read once per chunk at the first of them:
-            # a chunk killed later still leaves the identity its resume is refused against, and the
-            # read is taken here rather than before the first act, which is where the opening act
-            # creates the document.
-            document = document or _document_now()
-            save_run_state(run_id, {
-                "run": run_id, "source_hash": pinned_source_hash, "acts_done": acts_done,
-                "rows": [list(r) for r in rows], "notes": notes,
-                "act_modes": [list(m) for m in act_modes], "valued": sorted(valued),
-                "parked": parked, "gated": gated, "entitlements": entitlements,
-                "ctx": ctx, "recall": dict(_RECALL),
-                "timings": {t: list(v) for t, v in timings.items()},
-                "act_seconds": [list(a) for a in act_seconds],
-                "elapsed_s": chunk_started + (time.time() - run_started),
-                "document": document})
+            checkpoint()
 
     # A run is COMPLETE when every act of the program has run under this id - in this chunk or an
     # earlier one. Only a complete run stamps, and only a complete run fires the reload beat.
@@ -622,8 +700,15 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
     if complete and not develop and source_hash() != pinned_source_hash:
         print("run refused: source changed during this run; no receipt written")
         return 1
+    final_attestation = pinned_attestation
     if complete:
-        reload_smoke(rows, notes, valued=valued)
+        reloaded = reload_smoke(rows, notes, valued=valued,
+                                expected_attestation=pinned_attestation)
+        if reloaded is None:
+            print("run refused: reload did not prove the expected loaded identity")
+            return 1
+        if reloaded is not None:
+            final_attestation = reloaded
         if not develop and source_hash() != pinned_source_hash:
             print("run refused: source changed during reload; no receipt written")
             return 1
@@ -715,7 +800,7 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
                 drove += " - 0 acts driven this chunk - the reload beat only"
             print("\nwrote {0} (stamp: source {1}..., Fusion {2}, {3}){4}".format(
                 write_verified(ledger, fusion_version, stamp_date, src_hash,
-                               notes=notes, act_modes=act_modes),
+                               notes=notes, act_modes=act_modes, attestation=final_attestation),
                 src_hash[:12], fusion_version, stamp_date, drove))
     if write_json:
         os.makedirs(RESULTS_DIR, exist_ok=True)

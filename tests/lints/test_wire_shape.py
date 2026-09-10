@@ -125,23 +125,14 @@ class TestToolsListWireFormat:
             assert "priority" not in ann, f"{entry['name']}: priority should not be in annotations"
             assert "lastModified" not in ann, f"{entry['name']}: lastModified should not be in annotations"
 
-    def test_strict_schema_tool_has_additional_properties_false(self, server):
+    def test_every_tool_schema_is_strict_on_the_wire(self, server):
         result = server._handle_tools_list(request_id="test-5")
         tools = result["result"]["tools"]
-        strict_schema_tools = [
-            e for e in tools
-            if e.get("inputSchema", {}).get("additionalProperties") is False
-        ]
-        assert strict_schema_tools, (
-            "No strict-schema tools found with additionalProperties=false. "
-            "Expected at least one from assembly_move.py or assembly_get.py"
-        )
-        tool_names = [t["name"] for t in strict_schema_tools]
-        assert any(
-            name in tool_names for name in [
-                "assembly_ground", "assembly_move", "assembly_rigid_group",
-            ]
-        ), f"No known strict-schema tool found. Found: {tool_names}"
+        assert tools, "No tools registered"
+        for entry in tools:
+            assert entry.get("inputSchema", {}).get("additionalProperties") is False, (
+                f"{entry['name']}: inputSchema must carry additionalProperties=false"
+            )
 
     def test_destructive_tools_marked_on_the_wire(self, server):
         result = server._handle_tools_list(request_id="test-9")
@@ -167,10 +158,10 @@ class TestToolsListWireFormat:
         tools = result["result"]["tools"]
         for entry in tools:
             ann = entry.get("annotations", {})
-            if "readOnlyHint" in ann:
-                assert isinstance(ann["readOnlyHint"], bool), (
-                    f"{entry['name']}: readOnlyHint should be bool, got {type(ann['readOnlyHint'])}"
-                )
+            assert isinstance(ann.get("readOnlyHint"), bool), (
+                f"{entry['name']}: readOnlyHint must be present and bool, "
+                f"got {ann.get('readOnlyHint')!r}"
+            )
 
     def test_destructive_hint_when_present_is_bool(self, server):
         result = server._handle_tools_list(request_id="test-8")

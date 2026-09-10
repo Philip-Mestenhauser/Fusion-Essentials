@@ -2,7 +2,7 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """Save the ACTIVE document in place - a new cloud version of the same file. Document.save()
-returning True is NOT proof a version was created, so a VersionAdvanced postcondition re-reads it."""
+returning True is NOT proof a version was created, so VersionAdvanced compares fresh cloud reads."""
 
 import adsk.core
 
@@ -58,14 +58,12 @@ def handler(description: str = "") -> dict:
     if not did:
         return error(f"Fusion declined to save '{safe(lambda: doc.name)}'.")
 
-    # Document.save() returning True is NOT proof a version was created (observed live: a document
-    # open as another document's reference saves nothing). The VersionAdvanced postcondition on this
-    # tool's Item re-reads isModified and fails the call if the save didn't persist.
+    # The postcondition reports local completion separately from fresh cloud version advancement.
     payload = {
         "saved": True,
         "document_name": safe(lambda: doc.name),
         "description": _agent_description(description),
-        "note": "Active document saved as a new cloud version (verified: no longer modified).",
+        "note": "Document.save returned true; confirmation fields report local completion and observed cloud version state.",
     }
     _report_lineage_change(payload, doc, lineage_before)
     return ok(payload)

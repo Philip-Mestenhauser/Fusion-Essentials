@@ -4,11 +4,25 @@
 """Exact scratch document binding tests."""
 
 import os
+from pathlib import Path
 import sys
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "live"))
 import measure_api  # noqa: E402
+
+_ATTESTATION = {"implementation_fingerprint": "a" * 64, "schema_fingerprint": "b" * 64,
+                "load_id": "fixture-load", "session_id": "fixture-session"}
+
+
+def _health(identity=None):
+    identity = identity or _ATTESTATION
+    return {"server": "Fusion-Essentials MCP Server", "version": "t",
+            "session_id": identity["session_id"],
+            "attestation": {"complete": True, "loaded_matches_source": True,
+                            "implementation_fingerprint": identity["implementation_fingerprint"],
+                            "schema_fingerprint": identity["schema_fingerprint"],
+                            "load_id": identity["load_id"]}}
 
 
 def _row(handle, active=False, saved=False):
@@ -125,8 +139,9 @@ class TestTheCloudPreflight:
         # unconfigured machine must still be able to measure the rest of the surface. The version
         # read is stubbed to a constant here - past the gate, this run WOULD reach the session.
         no_session.setattr(measure_api, "CLOUD_PROJECT", "")
-        no_session.setattr(measure_api, "_fusion_version", lambda: "0.0.0")
-        no_session.setattr(measure_api, "registered_tools", lambda: set())
+        no_session.setattr(measure_api, "health_gate", _health)
+        no_session.setattr(measure_api, "_fusion_version", lambda health=None: "0.0.0")
+        no_session.setattr(measure_api, "registered_tools", lambda _health=None: set())
         with pytest.raises(SystemExit) as exc:
             measure_api.run_measurements(write_json=False, only={"save-image-options-defaults"})
         # it got PAST the cloud gate and stopped at the next one, which is about the server
@@ -168,8 +183,9 @@ def test_activation_refusal_never_dispatches_measurement_or_closes_others(monkey
         raise AssertionError("Unexpected call: " + tool)
     monkeypatch.setattr(measure_api, "call", call)
     monkeypatch.setattr(measure_api, "cloud_rows", lambda: [])
-    monkeypatch.setattr(measure_api, "_fusion_version", lambda: "test")
-    monkeypatch.setattr(measure_api, "registered_tools", lambda: {"sys_execute_script"})
+    monkeypatch.setattr(measure_api, "health_gate", _health)
+    monkeypatch.setattr(measure_api, "_fusion_version", lambda health=None: "test")
+    monkeypatch.setattr(measure_api, "registered_tools", lambda _health=None: {"sys_execute_script"})
     with pytest.raises(SystemExit, match="before first row"):
         measure_api.run_measurements(write_json=False, only={"save-image-options-defaults"})
     assert not any(tool in ("sys_execute_script", "doc_close") for tool, _args in calls)
@@ -180,8 +196,9 @@ def test_failed_cleanup_prevents_success_and_evidence_publication(monkeypatch):
     owned = "session:" + "a" * 32
     monkeypatch.setattr(measure_api, "ROWS", [{"id": "probe", "body": "pass"}])
     monkeypatch.setattr(measure_api, "cloud_rows", lambda: [])
-    monkeypatch.setattr(measure_api, "_fusion_version", lambda: "test")
-    monkeypatch.setattr(measure_api, "registered_tools", lambda: {"sys_execute_script"})
+    monkeypatch.setattr(measure_api, "health_gate", _health)
+    monkeypatch.setattr(measure_api, "_fusion_version", lambda health=None: "test")
+    monkeypatch.setattr(measure_api, "registered_tools", lambda _health=None: {"sys_execute_script"})
     monkeypatch.setattr(measure_api, "_reclaim_scratch", lambda handle: 0)
     monkeypatch.setattr(measure_api, "_close_scratch", lambda handle: False)
     monkeypatch.setattr(measure_api.time, "sleep", lambda seconds: None)
@@ -216,3 +233,150 @@ def test_close_acknowledgement_without_complete_absence_proof_refuses(monkeypatc
         return read_error, after
     monkeypatch.setattr(measure_api, "call", call)
     assert measure_api._close_scratch(owned) is False
+
+
+def _ledger_text(source_hash, rows=None):
+    rows = measure_api.ROWS if rows is None else rows
+    lines = ["Stamp: Fusion test | verified fixture | source " + source_hash,
+             "Loaded: implementation {0} | schema {1} | load {2} | session {3}".format(
+                 _ATTESTATION["implementation_fingerprint"],
+                 _ATTESTATION["schema_fingerprint"], _ATTESTATION["load_id"],
+                 _ATTESTATION["session_id"]),
+             "| result | claim id | claim | encoded in |", "|---|---|---|---|"]
+    lines.extend(measure_api._ledger_row(row) for row in rows)
+    return "\n".join(lines) + "\n"
+
+
+def _run_check(monkeypatch, tmp_path, text, source_hash):
+    ledger = tmp_path / "VERIFIED_API_FACTS.md"
+    ledger.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(measure_api, "LEDGER", str(ledger))
+    monkeypatch.setattr(measure_api, "health_gate", _health)
+    monkeypatch.setattr(measure_api, "_fusion_version", lambda health=None: "test")
+    monkeypatch.setattr(measure_api, "_measure_source_hash", lambda: source_hash)
+    return measure_api.check()
+
+
+@pytest.mark.parametrize("change", ["missing", "claim", "encoded", "order", "malformed"])
+def test_check_rejects_missing_or_changed_ledger_row(monkeypatch, tmp_path, capsys, change):
+    source_hash = "a" * 64
+    text = _ledger_text(source_hash)
+    lines = text.splitlines()
+    row_index = next(i for i, line in enumerate(lines) if line.startswith("| PASS |"))
+    if change == "missing":
+        del lines[row_index]
+    elif change == "malformed":
+        lines.append("| PASS | unexpected | malformed | extra | column |")
+    else:
+        cells = lines[row_index].split("|")
+        if change == "claim":
+            cells[3] = " changed claim "
+        elif change == "encoded":
+            cells[4] = " changed source "
+        else:
+            lines[row_index], lines[row_index + 1] = lines[row_index + 1], lines[row_index]
+        lines[row_index] = "|".join(cells) if change in ("claim", "encoded") else lines[row_index]
+    assert _run_check(monkeypatch, tmp_path, "\n".join(lines) + "\n", source_hash) == 1
+    output = capsys.readouterr().out
+    assert "ledger rows do not match" in output or "malformed ledger row" in output
+
+
+def test_check_rejects_source_body_drift_with_unchanged_row_prose(monkeypatch, tmp_path, capsys):
+    original = Path(measure_api.__file__).read_text(encoding="utf-8")
+    old_source = tmp_path / "measure_api_old.py"
+    new_source = tmp_path / "measure_api_new.py"
+    old_source.write_text(original, encoding="utf-8")
+    changed = original.replace("opts.width == 0", "opts.width == 1", 1)
+    assert changed != original
+    new_source.write_text(changed, encoding="utf-8")
+    monkeypatch.setattr(measure_api, "__file__", str(old_source))
+    old_hash = measure_api._measure_source_hash()
+    text = _ledger_text(old_hash)
+    monkeypatch.setattr(measure_api, "__file__", str(new_source))
+    ledger = tmp_path / "VERIFIED_API_FACTS.md"
+    ledger.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(measure_api, "LEDGER", str(ledger))
+    monkeypatch.setattr(measure_api, "health_gate", _health)
+    monkeypatch.setattr(measure_api, "_fusion_version", lambda health=None: "test")
+    assert measure_api.check() == 1
+    assert "source hash does not match" in capsys.readouterr().out
+
+
+def test_write_ledger_roundtrips_through_check_with_pipe_escaping(monkeypatch, tmp_path, capsys):
+    rows = [{"id": "probe", "claim": "claim | with pipe", "encoded_in": "source | label", "body": "pass"}]
+    ledger = tmp_path / "VERIFIED_API_FACTS.md"
+    monkeypatch.setattr(measure_api, "ROWS", rows)
+    monkeypatch.setattr(measure_api, "LEDGER", str(ledger))
+    monkeypatch.setattr(measure_api, "health_gate", _health)
+    monkeypatch.setattr(measure_api, "_fusion_version", lambda health=None: "test")
+    source_hash = measure_api._measure_source_hash()
+    measure_api.write_ledger([(rows[0], "PASS", "")], "test", "fixture", source_hash,
+                             _ATTESTATION)
+    assert measure_api.check() == 0
+    assert "contracts current" in capsys.readouterr().out
+
+
+def test_check_rejects_old_ledger_without_source_identity(monkeypatch, tmp_path, capsys):
+    old = "Stamp: Fusion test | verified fixture\n"
+    assert _run_check(monkeypatch, tmp_path, old, "a" * 64) == 1
+    assert "complete stamp/source/loaded identity" in capsys.readouterr().out
+
+
+def test_run_refuses_publication_when_source_changes_mid_run(monkeypatch, capsys):
+    owned = "session:" + "a" * 32
+    monkeypatch.setattr(measure_api, "ROWS", [{"id": "probe", "body": "pass",
+                                                "claim": "claim", "encoded_in": "source"}])
+    monkeypatch.setattr(measure_api, "cloud_rows", lambda: [])
+    monkeypatch.setattr(measure_api, "health_gate", _health)
+    monkeypatch.setattr(measure_api, "_fusion_version", lambda health=None: "test")
+    monkeypatch.setattr(measure_api, "registered_tools", lambda _health=None: {"sys_execute_script"})
+    monkeypatch.setattr(measure_api, "_reclaim_scratch", lambda handle: 0)
+    monkeypatch.setattr(measure_api, "_close_scratch", lambda handle: True)
+    monkeypatch.setattr(measure_api.time, "sleep", lambda seconds: None)
+    hashes = iter(["a" * 64, "b" * 64])
+    monkeypatch.setattr(measure_api, "_measure_source_hash", lambda: next(hashes))
+    monkeypatch.setattr(measure_api, "write_ledger",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("published")))
+    monkeypatch.setattr(measure_api, "write_api_facts",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("published")))
+    def call(tool, args):
+        if tool == "doc_new":
+            return False, {"document_handle": owned}
+        assert tool == "sys_execute_script" and args["expect_document"] == owned
+        return False, "PASS test"
+    monkeypatch.setattr(measure_api, "call", call)
+    assert measure_api.run_measurements(write_json=False) == 1
+    assert "changed during the run" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("field", measure_api._ATTESTATION_FIELDS)
+def test_run_refuses_publication_when_loaded_identity_changes_mid_run(
+        monkeypatch, capsys, field):
+    owned = "session:" + "a" * 32
+    changed = dict(_ATTESTATION)
+    changed[field] = ("c" * 64 if field.endswith("fingerprint") else "changed-" + field)
+    health_rows = iter([_health(), _health(changed)])
+    monkeypatch.setattr(measure_api, "ROWS", [{"id": "probe", "body": "pass",
+                                                "claim": "claim", "encoded_in": "source"}])
+    monkeypatch.setattr(measure_api, "cloud_rows", lambda: [])
+    monkeypatch.setattr(measure_api, "health_gate", lambda: next(health_rows))
+    monkeypatch.setattr(measure_api, "_fusion_version", lambda health=None: "test")
+    monkeypatch.setattr(measure_api, "registered_tools", lambda _health=None: {"sys_execute_script"})
+    monkeypatch.setattr(measure_api, "_reclaim_scratch", lambda handle: 0)
+    monkeypatch.setattr(measure_api, "_close_scratch", lambda handle: True)
+    monkeypatch.setattr(measure_api.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(measure_api, "_measure_source_hash", lambda: "d" * 64)
+    monkeypatch.setattr(measure_api, "write_ledger",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("published")))
+    monkeypatch.setattr(measure_api, "write_api_facts",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("published")))
+
+    def call(tool, args):
+        if tool == "doc_new":
+            return False, {"document_handle": owned}
+        assert tool == "sys_execute_script" and args["expect_document"] == owned
+        return False, "PASS test"
+
+    monkeypatch.setattr(measure_api, "call", call)
+    assert measure_api.run_measurements(write_json=False) == 1
+    assert field + " changed" in capsys.readouterr().out

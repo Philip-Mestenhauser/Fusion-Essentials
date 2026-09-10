@@ -9,7 +9,8 @@ import json
 
 import pytest
 
-from conftest import FakeApplication, FakeDataFile, FakeDocuments, FakeFusionDocument, load_tool
+from conftest import (FakeApplication, FakeData, FakeDataFile, FakeDocuments,
+                      FakeFusionDocument, load_tool)
 
 dm = load_tool("doc_save")
 
@@ -34,11 +35,30 @@ class _ForkingSave(FakeFusionDocument):
         return super().save(description)
 
 
+class _VersionData(FakeData):
+    """Fresh cloud files served before and after the save."""
+    def __init__(self, files):
+        super().__init__()
+        self._sequence = list(files)
+        self._calls = 0
+
+    def findFileById(self, lineage):
+        item = self._sequence[min(self._calls, len(self._sequence) - 1)]
+        self._calls += 1
+        return item
+
+
+def _version(number, lineage="urn:same"):
+    return FakeDataFile("PartA", file_id=lineage, version=number, latest_version=number,
+                        version_id=f"urn:file?version={number}")
+
+
 @pytest.fixture
 def install_app(monkeypatch):
     """Point doc_save (and, when asked, the postcondition kernel) at ONE active document."""
-    def _install(active, kernel=None):
-        app = FakeApplication(active_document=active,
+    def _install(active, kernel=None, fresh=()):
+        data = _VersionData(fresh) if fresh else FakeData()
+        app = FakeApplication(active_document=active, data=data,
                               documents=FakeDocuments([active] if active is not None else []))
         monkeypatch.setattr(dm, "app", app)
         if kernel is not None:
@@ -93,13 +113,17 @@ class TestSaveDocument:
         assert res["isError"] is True
         assert "still modified" in res["message"].lower()
 
-    def test_kernel_passes_a_real_save(self, install_app):
-        # the persisted save clears isModified - the postcondition confirms instead of biting.
+    def test_kernel_confirms_only_a_fresh_cloud_advance(self, install_app, monkeypatch):
         kernel = load_tool("_assert")
-        doc = _doc(is_modified=True)
-        install_app(doc, kernel=kernel)
-        out = _payload(kernel.wrap(dm.handler, [kernel.VersionAdvanced()])())
-        assert out["saved"] is True and out["version_confirmed"] is True
+        doc = _doc(is_modified=True, urn="urn:same")
+        install_app(doc, kernel=kernel, fresh=[_version(1), _version(2)])
+        post = kernel.VersionAdvanced()
+        monkeypatch.setattr(post, "_DEADLINE_S", 0.0)
+        monkeypatch.setattr(post, "_POLL_SLEEP", 0.0)
+        out = _payload(kernel.wrap(dm.handler, [post])())
+        assert out["saved"] is True
+        assert out["local_save_confirmed"] is True and out["version_confirmed"] is True
+        assert out["latest_version_before"] == 1 and out["latest_version_after"] == 2
 
     def test_save_document_item_declares_the_postcondition(self):
         # the wiring is the contract: the registered Item carries VersionAdvanced (walk the guard chain).

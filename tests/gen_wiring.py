@@ -220,8 +220,19 @@ def _smells(text):
 # ── collect: per-tool {desc, note_text, family, readonly} + reference edges by surface ──────────────
 
 def collect(registry=None):
-    if registry is None:
-        from mcpServer.mcp_primitives import registry
+    """Collect wiring data without replacing the process registry singleton."""
+    if registry is not None:
+        return _collect_unguarded(registry)
+    from mcpServer.mcp_primitives import registry as shared_registry
+    saved_registry = shared_registry._registry_instance
+    try:
+        return _collect_unguarded(shared_registry)
+    finally:
+        shared_registry._registry_instance = saved_registry
+
+
+def _collect_unguarded(registry):
+    """Collect wiring data through the supplied registry module or test seam."""
     records = {}
     owner = {}
     input_names = set()

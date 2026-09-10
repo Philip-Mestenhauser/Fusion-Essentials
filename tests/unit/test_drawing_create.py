@@ -728,6 +728,7 @@ class TestPartsList:
         install()
         res = dc.handler(parts_list_location="center")
         assert res["isError"] is True
+        assert "parts_list_location" in res["message"] and "center" in res["message"]
 
 
 class TestTemplateFile:
@@ -887,6 +888,7 @@ class TestCustomSheetSize:
         install()
         res = dc.handler(sheet_size="custom", custom_width_mm=0, custom_height_mm=297)
         assert res["isError"] is True
+        assert "custom_width_mm" in res["message"] and "0" in res["message"]
 
     def test_custom_width_without_custom_sheet_size_is_refused(self, install):
         install()
@@ -916,6 +918,7 @@ class TestHoleAnnotations:
         install()
         res = dc.handler(hole_annotations="bogus")
         assert res["isError"] is True
+        assert "hole_annotations" in res["message"] and "bogus" in res["message"]
 
 
 class TestPerViewDraftingDisplay:
@@ -953,16 +956,19 @@ class TestPerViewDraftingDisplay:
         install()
         res = dc.handler(center_line="bogus")
         assert res["isError"] is True
+        assert "center_line" in res["message"] and "bogus" in res["message"]
 
     def test_unknown_center_mark_is_refused(self, install):
         install()
         res = dc.handler(center_mark="bogus")
         assert res["isError"] is True
+        assert "center_mark" in res["message"] and "bogus" in res["message"]
 
     def test_unknown_tangent_edges_is_refused(self, install):
         install()
         res = dc.handler(tangent_edges="bogus")
         assert res["isError"] is True
+        assert "tangent_edges" in res["message"] and "bogus" in res["message"]
 
     def test_center_line_request_is_refused_naming_the_absent_family(self, install):
         # adsk.drawing carries no CenterLineDisplayTypes, so the setting has no API to reach; a

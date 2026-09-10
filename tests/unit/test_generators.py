@@ -264,6 +264,14 @@ class TestApiSurfaceCheckNeedsBindings:
             gen_api_surface.find_bindings(str(explicit))
         assert "Explicit --bindings-dir is invalid" in str(exc.value)
 
+    @pytest.mark.parametrize("pattern", gen_api_surface._BINDING_GLOBS,
+                             ids=["windows-production", "windows-preview", "macos-production"])
+    def test_build_label_uses_the_hash_for_each_declared_binding_layout(self, pattern):
+        path = pattern.replace("*", "probe-build-hash")
+        assert gen_api_surface._build_id(path) == "probe-build-hash"
+        assert 'BINDINGS_BUILD = "probe-build-hash"' in gen_api_surface._render(
+            path, {}, {}, set())
+
     def test_main_forwards_explicit_bindings_dir(self, tmp_path, monkeypatch):
         seen = []
         expected = str(tmp_path / "adsk")
@@ -448,7 +456,51 @@ class TestWiringNameCollision:
         monkeypatch.setattr(gen_wiring, "load_tool", lambda n: mods[n])
         data = gen_wiring.collect(registry=reg)
         assert sorted(data["records"]) == ["doc_open", "doc_save"]
+        assert [item.get_name() for item in reg.get_tools()] == ["doc_open"]
 
+
+@pytest.fixture
+def populated_wiring_registry(monkeypatch):
+    from mcpServer.mcp_primitives import registry
+    from mcpServer.mcp_primitives.item import Item
+    from mcpServer.mcp_primitives.tool import Tool
+
+    seeded = registry.Registry()
+    sentinel = Item.create_tool_item(
+        tool=Tool.create_simple(name="sentinel_get", description="Sentinel tool."),
+        write="read", handler=lambda: {})
+    seeded.register(sentinel)
+    monkeypatch.setattr(registry, "_registry_instance", seeded)
+    return registry, seeded, sentinel
+
+
+class TestWiringRegistryIsolation:
+    @pytest.mark.parametrize("failure", [None, "registration", "attribution"])
+    def test_implicit_collect_restores_the_populated_real_singleton(
+            self, monkeypatch, populated_wiring_registry, failure):
+        registry, seeded, sentinel = populated_wiring_registry
+
+        def register():
+            registry.get_registry()
+            if failure == "registration":
+                raise RuntimeError("registration failed")
+
+        monkeypatch.setattr(gen_wiring, "_tool_modules", lambda: ["probe_mod"])
+        monkeypatch.setattr(
+            gen_wiring, "load_tool",
+            lambda _name: types.SimpleNamespace(register_tool=register))
+        if failure == "attribution":
+            monkeypatch.setattr(registry, "get_tools", lambda: [_FakeItem("probe_get")])
+            monkeypatch.setattr(
+                gen_wiring, "_attribute",
+                lambda *_args: (_ for _ in ()).throw(RuntimeError("attribution failed")))
+        if failure:
+            with pytest.raises(RuntimeError, match=failure):
+                gen_wiring.collect()
+        else:
+            assert gen_wiring.collect()["records"] == {}
+        assert registry._registry_instance is seeded
+        assert seeded.get_tools() == [sentinel]
 
 _HOP_MODULE = '''"""Fake rich-read module: the router holds no guidance, the slices hold it all."""
 

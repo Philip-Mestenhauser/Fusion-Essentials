@@ -82,12 +82,12 @@ def _active_document_facts():
         info["version_number"] = safe(lambda: df.versionNumber)
         info["latest_version_number"] = safe(lambda: df.latestVersionNumber)
         info["fusion_web_url"] = safe(lambda: df.fusionWebURL)
-        # ONE lag sentence for BOTH version surfaces (this block's version_number/latest and
-        # xref_tree's current/latest): the numbered fields can trail a just-finished doc_save.
+        # ONE lag sentence for every held-DataFile version field in this projection and xref_tree.
         info["version_lag_note"] = (
-            "version_number / latest_version_number here (and current_version / latest_version in "
-            "xref_tree) can LAG a just-completed doc_save by a few seconds; version_id and the "
-            "version_confirmed doc_save returns are the authoritative post-save reads.")
+            "version_id / version_number / latest_version_number here (and current_version / "
+            "latest_version in xref_tree) come from held DataFile handles and can LAG a save. Use "
+            "fresh data_get reads for cloud identity; doc_save version_confirmed is true only when "
+            "fresh comparable before/after reads observed an advance, while false/pending is unknown.")
     if not has_df:
         info["save_state"] = ("never saved to the cloud - no document_id (URN) yet; save it first "
                               "(doc_save_as) before addressing it by id.")

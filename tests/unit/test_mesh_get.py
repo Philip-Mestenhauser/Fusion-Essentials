@@ -233,6 +233,7 @@ class TestMeshGet:
         _wire(MakeComp("Comp", mesh_bodies=[MeshBody("Scan")]))
         res = mo.handler(target="", units="parsec")
         assert res["isError"] is True
+        assert "parsec" in res["message"]
 
 
 class TestMeshMeasure:

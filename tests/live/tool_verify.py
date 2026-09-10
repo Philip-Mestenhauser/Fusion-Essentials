@@ -156,6 +156,7 @@ from verify_runner import (  # noqa: F401
     source_hash, _STAMP_RE, write_verified, check, _shoot, run_steps, judged_steps,
     _precondition_holds, _one_act, select_acts, run, RESULTS_DIR, run_state_path,
     save_run_state, load_run_state, resume_refusal, develop_refusal, _document_now)
+from verify_core import attestation_identity  # noqa: F401
 
 # The patchable surface is patched ON THIS MODULE (a consumer stubs tool_verify.call,
 # tool_verify.ACTS, tool_verify.source_hash), so the runner and the post-act hook read

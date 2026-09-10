@@ -20,7 +20,9 @@ Differences from the sample this was adapted from:
 
 import asyncio
 import errno
+import hashlib
 import json
+import math
 import os
 import threading
 import uuid
@@ -129,10 +131,29 @@ def _refuse_json_constant(literal: str):
                      "valid JSON. Send a finite number.")
 
 
+def _refuse_json_float(literal: str):
+    """Reject a JSON float token whose decoded value overflows to infinity."""
+    value = float(literal)
+    if not math.isfinite(value):
+        raise ValueError(f"'{literal}' overflows to a non-finite number. Send a finite number.")
+    return value
+
+
 # What one resources/list row carries: the two fields the spec requires (uri, name) plus what a
 # client shows and sizes a read against. 'text' is deliberately absent - a listing that carried the
 # body would ship the whole document to every client that only enumerated.
 _RESOURCE_LIST_FIELDS = ("uri", "name", "title", "description", "mimeType", "size")
+
+
+def _wire_tool_rows(items):
+    """The effective tools/list rows, including the configured bare-wire projection."""
+    rows = [item.primitive.to_dict() for _, item in sorted(items.items())]
+    return [_without_descriptions(row) for row in rows] if os.path.exists(BARE_WIRE_MARKER) else rows
+
+def _schema_fingerprint(rows):
+    """Hash the canonical actual tools/list schemas currently registered on this server."""
+    body = json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(body.encode("ascii")).hexdigest()
 
 
 def _resource_row(resource: Dict[str, Any]) -> Dict[str, Any]:
@@ -175,7 +196,8 @@ class SimpleMCPServer:
     """Routes MCP JSON-RPC requests to registered tool handlers, and serves a static resource
     catalog the caller built."""
 
-    def __init__(self, name: str = SERVER_NAME, resources=None, job_store=None):
+    def __init__(self, name: str = SERVER_NAME, resources=None, job_store=None,
+                 attestation=None):
         self.name = name
         # Session id assigned at initialize and echoed back to the client on every
         # response. Generated lazily so each server instance has a stable id.
@@ -184,6 +206,7 @@ class SimpleMCPServer:
         # tool name -> {prop: enum spec}, precomputed at registration so enum validation is O(1) per arg.
         self._enum_specs: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self.server_info = {"name": name, "version": __version__}
+        self._attestation = attestation
         self._job_store = job_store
         self._job_store_lock = threading.Lock()
         # Application-controlled content published over resources/*, built by the caller (entry.py)
@@ -204,6 +227,19 @@ class SimpleMCPServer:
                 futil.log("MCP resource skipped (needs a 'uri', a 'name' and a 'text' to serve): "
                           f"{uri!r}")
         self._resources_by_uri = {r["uri"]: r for r in self.resources}
+
+    def health(self):
+        """The server health row with its current session and registered-schema identity."""
+        try:
+            observed = self._attestation() if callable(self._attestation) else self._attestation
+            attestation = dict(observed or {})
+        except Exception as exc:
+            attestation = {"complete": False, "loaded_matches_source": False,
+                           "problems": ["loaded attestation failed: " + type(exc).__name__]}
+        attestation["schema_fingerprint"] = _schema_fingerprint(_wire_tool_rows(self.tools))
+        return {"status": "healthy", "server": self.name,
+                "version": self.server_info["version"], "session_id": self.session_id,
+                "attestation": attestation}
 
     def register(self, item: Item):
         if not isinstance(item, Item):
@@ -290,10 +326,8 @@ class SimpleMCPServer:
         }
 
     def _handle_tools_list(self, request_id: Any) -> Dict[str, Any]:
-        tools = [item.primitive.to_dict() for item in self.tools.values()]
-        if os.path.exists(BARE_WIRE_MARKER):
-            tools = [_without_descriptions(t) for t in tools]
-        return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": tools}}
+        return {"jsonrpc": "2.0", "id": request_id,
+                "result": {"tools": _wire_tool_rows(self.tools)}}
 
     async def _handle_tools_call(self, request_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
         tool_name = params.get("name")
@@ -486,12 +520,7 @@ class SimpleMCPServer:
 
     async def _execute_on_main_thread(self, handler_func, arguments: Dict[str, Any],
                                       enforce_timeout: bool = True) -> Any:
-        """Run handler_func(**arguments) on Fusion's main thread via TaskManager.
-
-        enforce_timeout=False waits indefinitely for the callback to complete - for tools (e.g.
-        sys_execute_script) whose work cannot be interrupted and would still commit, so a timeout
-        would only report a false failure for a change that actually applied.
-        """
+        """Run handler_func(**arguments) on Fusion's main thread via TaskManager."""
         import time
 
         result_holder = {'result': None, 'exception': None, 'completed': False}
@@ -508,10 +537,19 @@ class SimpleMCPServer:
                     result_holder['exception'] = e
                     result_holder['completed'] = True
 
+        def dropped(reason):
+            with result_lock:
+                if not result_holder['completed']:
+                    result_holder['exception'] = Exception(
+                        f"Handler execution was dropped before it started ({reason}). "
+                        "No change was made - safe to retry.")
+                    result_holder['completed'] = True
+
         if not TaskManager.is_running():
             TaskManager.start()
 
-        task_id = TaskManager.post(command="execute_handler", callback=callback, data={"arguments": arguments})
+        task_id = TaskManager.post(command="execute_handler", callback=callback,
+                                   data={"arguments": arguments}, on_drop=dropped)
         if not task_id:
             raise Exception("Failed to post task to TaskManager")
 
@@ -672,7 +710,8 @@ class MCPHandler(BaseHTTPRequestHandler):
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length)
             request_data = json.loads(post_data.decode('utf-8'),
-                                      parse_constant=_refuse_json_constant)
+                                      parse_constant=_refuse_json_constant,
+                                      parse_float=_refuse_json_float)
         except (ValueError, json.JSONDecodeError) as e:
             # The parse failure's own reason travels to the caller: "Invalid JSON" alone cannot tell
             # a truncated body from a refused NaN literal, and a client can only correct what it is
@@ -709,7 +748,7 @@ class MCPHandler(BaseHTTPRequestHandler):
             return
         # Convenience/diagnostic endpoints (not part of the MCP transport).
         if self.path == '/health':
-            self._send_json({"status": "healthy", "server": self.mcp_server.name, "version": self.mcp_server.server_info["version"]})
+            self._send_json(self.mcp_server.health())
             return
         if self.path == '/tools':
             self._send_json(self.mcp_server._handle_tools_list(1))
@@ -753,7 +792,8 @@ class MCPHandler(BaseHTTPRequestHandler):
         pass  # silence default stderr logging
 
 
-def start_server(host: str, port: int, items=None, resources=None, job_store=None):
+def start_server(host: str, port: int, items=None, resources=None, job_store=None,
+                 attestation=None):
     """Start the MCP HTTP server on host:port in a background thread.
 
     Returns a dict:
@@ -770,7 +810,8 @@ def start_server(host: str, port: int, items=None, resources=None, job_store=Non
     the user (likely Autodesk's built-in MCP server holding 27182).
     """
     try:
-        mcp = SimpleMCPServer(resources=resources, job_store=job_store)
+        mcp = SimpleMCPServer(resources=resources, job_store=job_store,
+                              attestation=attestation)
         for item in (items or []):
             mcp.register(item)
 

@@ -341,6 +341,7 @@ class TestListTypes:
         monkeypatch.setattr(ct, "_build_type_map", lambda: {})
         res = ct.handler(action="list_types")
         assert res["isError"] is True
+        assert "sample tool libraries" in res["message"]
 
 
 # ── add (multiple by reference) ─────────────────────────────────────────────

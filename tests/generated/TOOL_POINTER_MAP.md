@@ -1367,7 +1367,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - is already the latest version; nothing to restore -
 
 ### `doc_save`
-- Active document saved as a new cloud version (verified: no longer modified).
+- Document.save returned true; confirmation fields report local completion and observed cloud version state.
 - No active document to save.
 - The active document has never been saved (no cloud file yet). Use doc_save_as to give it a name and folder first.
 - Fusion declined to save '
@@ -1405,15 +1405,13 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - saveMilestone returned false for milestone '
 - '; no version and no milestone were created.
 - saveMilestone returned true, but
-- - so whether a NEW version was created is not decidable here (the fresh read after the save reports
-- ). Read the history back with doc_get include=['versions'].
-- saveMilestone returned true but the cloud tip has NOT advanced after
-- s of re-fetching (latest reads
-- ) - the signature of a save that versioned nothing, the same result an unmodified document gives. Check doc_get include=['versions'] before calling again.
-- was created and IS the milestone '
-- ' (confirmed on a fresh read of the cloud file). Read the history back with doc_get include=['versions'].
-- yet. The milestone mark becomes readable some seconds AFTER the version does, so this is NOT evidence that no milestone was created. Re-read doc_get include=['versions'] to confirm the milestone row.
-- was created and the document is no longer modified, but
+- . Cloud version advancement is unknown. Read doc_get include=['versions'] before retrying.
+- Cloud version advancement was not observed within
+- s of re-fetching; confirmation remains pending. Read doc_get include=['versions'] before retrying.
+- Fresh cloud reads confirmed version advancement and milestone '
+- '. Read doc_get include=['versions'] for the version history.
+- . Milestone confirmation remains pending; read doc_get include=['versions'] before retrying.
+- Fresh cloud reads confirmed version advancement, but
 - saveMilestone raised saving '
 
 ### `doc_update_xref`

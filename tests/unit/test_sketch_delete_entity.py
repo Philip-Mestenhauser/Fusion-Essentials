@@ -668,6 +668,7 @@ class TestGuards:
         s = _sketch(); _install(s)
         res = sd.handler(sketch_name="S", target="line:abc")
         assert res["isError"] is True
+        assert "non-integer index" in res["message"] and "line:abc" in res["message"]
 
 
 @pytest.fixture

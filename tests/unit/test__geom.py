@@ -850,7 +850,7 @@ class TestParallelPlaneNote:
         apart = _planar((0, 0, 2), (0, 0, 1), box=((4, 0, 2), (5, 1, 2)))
         over = _planar((0, 0, 2), (0, 0, 1), box=((0, 0, 2), (1, 1, 2)))
         for other in (apart, over):
-            geom.parallel_plane_facts(a, other, 2.0, 1.0, "cm")["note"].encode("ascii")
+            assert geom.parallel_plane_facts(a, other, 2.0, 1.0, "cm")["note"].isascii()
 
 
 # ── subtree_facts: the child occurrences a measurement does NOT cover ──────────────────────────
@@ -1253,7 +1253,7 @@ class TestSubtreeFacts:
         capped = _occ("Frame:1", [_occ(f"Frame:1+Bolt{i:02d}:1") for i in range(geom.SUBTREE_NAMES_MAX + 1)])
         _gaps(monkeypatch, {})
         for target in (deep, capped):
-            geom.subtree_facts(_pair(target, _occ("Third:1")), 10.0, "mm")["note"].encode("ascii")
+            assert geom.subtree_facts(_pair(target, _occ("Third:1")), 10.0, "mm")["note"].isascii()
 
 
 class _RaisingCoord:

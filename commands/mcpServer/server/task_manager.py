@@ -30,12 +30,8 @@ app = adsk.core.Application.get()
 # own MCP server or another add-in.
 CUSTOM_EVENT_ID = 'GTF_Fusion-Essentials.MCP.TaskManagerEvent'
 
-# A pending task should be claimed by notify() within seconds of being posted. If Fusion DROPS the
-# custom event under load (it never fires on the main thread) AND the poster doesn't cancel it (e.g. a
-# non-enforce_timeout poll loop, or the request thread died), the entry would linger in _pending_tasks
-# until stop(). Anything older than this TTL is therefore an orphan and is reaped on the next post().
-# Generous vs. MAIN_THREAD_TASK_TIMEOUT_S (~25s) so a legitimately slow-to-be-claimed task is never
-# reaped out from under a live poster.
+# A pending task should be claimed by notify() within seconds of being posted. An unclaimed entry
+# can outlive its caller, so the next post reaps entries older than this TTL.
 _PENDING_TASK_TTL_S = 300.0
 
 
@@ -128,16 +124,8 @@ class TaskManager:
                                                'on_drop': on_drop}
             event_data = {'task_id': task_id, 'command': command, 'data': data}
             try:
-                fired = app.fireCustomEvent(cls._custom_event.eventId, json.dumps(event_data))
-                if fired is not True:
-                    futil.log(
-                        "TaskManager.post: phase=fire_custom_event returned "
-                        f"{fired!r} ({type(fired).__name__}); task dropped",
-                        adsk.core.LogLevels.ErrorLogLevel)
-                    with cls._tasks_lock:
-                        dropped = cls._pending_tasks.pop(task_id, None)
-                    cls._notify_drop(dropped, "custom_event_not_fired")
-                    return None
+                # Fusion can return False even when it delivers the event.
+                app.fireCustomEvent(cls._custom_event.eventId, json.dumps(event_data))
             except Exception:
                 # The entry is inserted BEFORE the fire so notify() can never arrive to a missing
                 # task. If the fire itself fails, no event will ever claim that entry, and post()

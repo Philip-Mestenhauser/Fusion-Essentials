@@ -12,13 +12,55 @@ from ._data_common import _urn_candidates
 app = adsk.core.Application.get()
 
 MAP_BLURB = (
-    "_resolve_open_document - the open-document resolve doc_activate and doc_close share: one "
-    "document from an opaque session handle, positional open:N, a lineage URN / web URL, or an "
-    "exact display name, REFUSING more than one distinct match with the address each row reaches by; "
-    "VERSION_LAG_WINDOW_S - the measured window a version read can still trail the cloud tip in")
+    "_resolve_open_document - exact open-document resolve by handle/index/URN/name, refusing "
+    "ambiguity; VERSION_LAG_WINDOW_S - measured cloud-tip lag window; "
+    "fresh_version_read/wait_for_version_advance - fresh cloud identity reads around a save")
 
 # MEASURED: a version read taken inside this window can still trail the tip the lineage carries.
 VERSION_LAG_WINDOW_S = 20
+
+
+def fresh_version_read(application, lineage):
+    """Fresh DataFile identity for one lineage, with unreadable fields left None."""
+    fresh = safe(lambda: application.data.findFileById(lineage)) if lineage else None
+    return {
+        "data_file": fresh,
+        "lineage": safe(lambda: fresh.id) if fresh is not None else None,
+        "version_id": safe(lambda: fresh.versionId) if fresh is not None else None,
+        "version_number": safe(lambda: fresh.versionNumber) if fresh is not None else None,
+        "latest_version_number": safe(lambda: fresh.latestVersionNumber)
+        if fresh is not None else None,
+    }
+
+
+def _version_advanced(before, after):
+    """True/False for comparable fresh reads, or None when lineage/version is unreadable or forked."""
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return None
+    old_lineage, new_lineage = before.get("lineage"), after.get("lineage")
+    if not (isinstance(old_lineage, str) and old_lineage
+            and isinstance(new_lineage, str) and new_lineage
+            and old_lineage == new_lineage):
+        return None
+    for key in ("latest_version_number", "version_number"):
+        old_number, new_number = before.get(key), after.get(key)
+        if (isinstance(old_number, int) and not isinstance(old_number, bool)
+                and isinstance(new_number, int) and not isinstance(new_number, bool)):
+            return new_number > old_number
+    return None
+
+
+def wait_for_version_advance(application, lineage, before, deadline_s, poll_sleep):
+    """Bounded fresh reads until a comparable cloud version advances; returns (verdict, last read)."""
+    from . import _export
+
+    def probe():
+        after = fresh_version_read(application, lineage)
+        verdict = _version_advanced(before, after)
+        return verdict is True or verdict is None, (verdict, after)
+
+    _settled, reading = _export.pump_until(probe, deadline_s, poll_sleep)
+    return reading
 
 
 def _lineage_key(urn):

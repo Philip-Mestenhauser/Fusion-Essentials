@@ -49,27 +49,75 @@ class Postcondition:
 
 
 class VersionAdvanced(Postcondition):
-    """After a save: the active document is no longer modified."""
+    """After a save: local completion and fresh cloud version advancement are reported separately."""
 
     name = "version_advanced"
     rung = "value"
     read_tool = "doc_get"
 
+    _DEADLINE_S = 8.0
+    _POLL_SLEEP = 0.5
+
     def capture(self, kwargs):
-        return bool(safe(lambda: app.activeDocument.isModified, False))
+        from . import _doc_common
+        doc = safe(lambda: app.activeDocument)
+        lineage = safe(lambda: doc.dataFile.id) if doc is not None else None
+        return {
+            "was_modified": safe(lambda: doc.isModified) if doc is not None else None,
+            "lineage": lineage,
+            "version": _doc_common.fresh_version_read(app, lineage),
+        }
 
     def verify(self, kwargs, payload, before):
         if payload.get("already_current"):
             return "", {}                    # clean-doc no-op: nothing was supposed to change
-        still = safe(lambda: app.activeDocument.isModified)
+        from . import _doc_common
+        doc = safe(lambda: app.activeDocument)
+        still = safe(lambda: doc.isModified) if doc is not None else None
         if still is None:
-            return "", {"version_confirmed": False}
-        if still:
-            return ("save reported success but the document is STILL modified - Fusion created no "
-                    "version. This happens when the document is open as another document's reference "
-                    "(e.g. a design open behind its drawing) or a stale duplicate instance is open. "
-                    "Close the referencing/duplicate document, reopen this one top-level, then save."), {}
-        return "", {"version_confirmed": True}
+            local_confirmed = False
+        elif still:
+            return ("save reported success but the active document is STILL modified - local save "
+                    "completion was not confirmed. The cloud version state is not decided by this "
+                    "modified flag. Close any referencing or duplicate document, reopen this one "
+                    "top-level, then inspect doc_get/data_get before saving again."), {}
+        else:
+            local_confirmed = True
+
+        evidence = {"local_save_confirmed": local_confirmed}
+        # doc_save_milestone already performs the same bounded fresh comparison in its handler.
+        if "cloud_tip_advanced" in payload:
+            confirmed = payload.get("cloud_tip_advanced") is True
+            evidence["version_confirmed"] = confirmed
+            if not confirmed:
+                evidence["pending"] = True
+            return "", evidence
+
+        before_version = before.get("version") if isinstance(before, dict) else None
+        lineage_after = safe(lambda: doc.dataFile.id) if doc is not None else None
+        verdict, after = _doc_common.wait_for_version_advance(
+            app, lineage_after, before_version, self._DEADLINE_S, self._POLL_SLEEP)
+        evidence.update({
+            "version_confirmed": verdict is True,
+            "cloud_tip_advanced": verdict is True,
+            "version_id_before": before_version.get("version_id")
+            if isinstance(before_version, dict) else None,
+            "version_id_after": after.get("version_id"),
+            "version_before": before_version.get("version_number")
+            if isinstance(before_version, dict) else None,
+            "version_after": after.get("version_number"),
+            "latest_version_before": before_version.get("latest_version_number")
+            if isinstance(before_version, dict) else None,
+            "latest_version_after": after.get("latest_version_number"),
+        })
+        if verdict is not True:
+            evidence["pending"] = True
+            evidence["version_status"] = (
+                "Cloud version advancement was not observed in fresh comparable reads. Re-read "
+                "data_get for the document_id." if verdict is False else
+                "Cloud version advancement is unknown because fresh before/after lineage/version "
+                "reads were not comparable. Re-read data_get for the document_id.")
+        return "", evidence
 
 
 # The refresh settles asynchronously and only advances while the main thread runs, so the re-read is

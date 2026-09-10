@@ -87,9 +87,9 @@ def _data_identity(doc):
     ident["latest_version_number"] = safe(lambda: df.latestVersionNumber)
     ident["version_lag_note"] = (
         "version_number / latest_version_number are read off the DataFile handle this open document "
-        "HOLDS, and that handle keeps its pre-save values after a save (so the two can disagree with "
-        "each other and with the cloud) - the version_confirmed a doc_save returns, or a fresh "
-        "data_get on the URN, is the post-save read to trust.")
+        "HOLDS, and that handle can keep pre-save values after a save. Use a fresh data_get on the "
+        "URN for cloud identity; doc_save version_confirmed is true only when fresh comparable "
+        "before/after reads observed an advance, while false/pending is unknown.")
     ident["web_url"] = safe(lambda: df.fusionWebURL)
 
     folder = safe(lambda: df.parentFolder)

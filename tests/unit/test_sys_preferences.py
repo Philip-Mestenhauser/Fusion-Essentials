@@ -374,7 +374,8 @@ class TestHonestReads:
 
     def test_no_active_preferences_is_an_error(self, monkeypatch):
         monkeypatch.setattr(get, "app", _MutePreferencesApp())
-        assert get.handler()["isError"] is True
+        msg = _message(get.handler())
+        assert "preferences" in msg and "read" in msg
 
 
 class TestEnumDecoding:
@@ -466,7 +467,8 @@ class TestWriteProtocol:
     def test_a_raising_setter_is_an_error(self, monkeypatch):
         p = _make_prefs(raises={"grid": ("isLayoutGridLockEnabled",)})
         monkeypatch.setattr(setp, "app", FakeApplication(preferences=p))
-        assert setp.handler(member="grid.isLayoutGridLockEnabled", value=True)["isError"] is True
+        msg = _message(setp.handler(member="grid.isLayoutGridLockEnabled", value=True))
+        assert "grid.isLayoutGridLockEnabled" in msg and "raises" in msg
 
 
 class TestCollectionMembers:
@@ -573,7 +575,8 @@ class TestFloatMinimum:
 
 class TestWriteGuards:
     def test_a_missing_member_is_refused(self, prefs):
-        assert setp.handler(value=4)["isError"] is True
+        msg = _message(setp.handler(value=4))
+        assert "Provide 'member'" in msg
 
     def test_a_missing_value_is_refused(self, prefs):
         assert "Provide 'value'" in _message(setp.handler(member="display.generalPrecision"))

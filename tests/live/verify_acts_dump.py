@@ -114,6 +114,8 @@ def _verdicts(p):
         {"part_box": part, "anchor": anchor, "up_tol": env["up_tol"],
          "stock_box": env["stock_box"], "cuts": env["cutting_rows"],
          "outside": env["outside_count"], "first_outside": env["first_outside"],
+         "first_outside_point": env["first_outside_point"],
+         "unread_motion": env["unread_motion"], "unverified_paths": env["unverified_paths"],
          "floor_z": rim["floor_z"], "lowest_z": rim["lowest_z"],
          "reaches_below_the_flange_top": not above_top, "axis_rows": tilted["axis_rows"]},
         inside and above_rim and upright

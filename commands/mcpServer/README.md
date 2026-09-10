@@ -15,32 +15,34 @@ It is **off by default** and runs only on your own machine (loopback).
 
 ## Enabling it
 
-1. Open **Utilities → Add-Ins**, run Fusion-Essentials.
-2. Open **Fusion-Essentials Settings**, and on the feature-enablement tab tick
+1. [Install and run Fusion-Essentials](../../README.md#installation) in Fusion.
+2. Open **Fusion Essentials Settings**, and on the feature-enablement tab tick
    **Enable MCP Server**.
 3. Reload Fusion-Essentials (Add-Ins dialog → Stop, then Run). The setting takes
    effect on reload.
-4. The server starts on `http://127.0.0.1:27182/mcp`. Confirm with a browser:
-   `http://127.0.0.1:27182/health` should return `{"status": "healthy", ...}`.
+4. The endpoint is `http://127.0.0.1:27182/mcp`. Open `http://127.0.0.1:27182/health` in a browser
+   and check both `"status": "healthy"` and `"server": "Fusion-Essentials MCP Server"`.
 
 Optional tool **families** (`appearance`, `cam`, `data`, `drawing`, `mesh`, `save`, `surface`) can each
 be disabled with a checkbox under **Settings → MCP Server**, to shrink the tool surface an agent has
 to load when you don't need that domain. All families are enabled by default. Like the other MCP
 settings, a disabled family takes effect on reload — its tools are not registered, and
-`workspace_orient` / `sys_capability_map` / `sys_find_tool` then reflect only what's enabled.
+`workspace_orient` / `sys_capability_map` / `sys_find_tool` reflect the available tools and gates.
+Reconnect your MCP client after reload so it refreshes its tool list. To disable MCP, untick
+**Enable MCP Server** and reload; stopping the add-in also stops its server.
 
 ### Port note
 
-`27182` is Fusion's own well-known MCP port. The Fusion-Essentials server and
-Fusion's **built-in** MCP server cannot both use it at once — whichever starts first
-wins. If Fusion's built-in server is on and holds the port, Fusion-Essentials detects
-this and shows a dialog asking you to turn off **Preferences → Fusion MCP Server** and
-reload. You do not need to configure Fusion's built-in server; just leave it off.
+Fusion-Essentials binds `127.0.0.1:27182` and checks the responding server's identity. Another
+server conflicts only if it occupies that endpoint; Fusion's built-in MCP server does not always
+use this port. On a collision, stop the process holding it and reload Fusion-Essentials. If that
+process is Fusion's built-in server, turn off **Preferences → Fusion MCP Server**. Its configuration
+is separate from this add-in's settings.
 
 ## Connecting a client
 
 The server speaks the **Streamable HTTP** MCP transport, so clients that support an
-HTTP transport can connect directly — no `mcp-remote`/Node bridge needed.
+HTTP transport can connect directly from the same machine — no `mcp-remote`/Node bridge needed.
 
 **Claude Code** (project-scoped `.mcp.json` at the repo root):
 
@@ -55,8 +57,11 @@ HTTP transport can connect directly — no `mcp-remote`/Node bridge needed.
 }
 ```
 
-Approve the server when your client prompts you. (A `.mcp.json` is included in this
-repo.)
+This repository includes that [`.mcp.json`](../../.mcp.json). For another client, add a Streamable
+HTTP server with the same URL. Approve or enable the server in the client as required, then check
+that its tool list contains `workspace_orient`. A healthy endpoint alone does not establish a client
+connection. Review the client permission presets under *Security* before adopting them.
+
 ## Why specific tools instead of "just let it write scripts"
 
 Fusion has a Python API, and a capable model can write against it. Handing an assistant a single
@@ -86,12 +91,6 @@ mechanisms are in *What makes the tools trustworthy*, below.
 There is still a general script tool, `sys_execute_script`, for cases the others do not cover. It is
 off by default and gated separately from everything else (see *Security*). Most of the work here
 exists so that you rarely need to reach for it.
-
-Fusion ships an MCP server of its own as well. Run one or the other, since they compete for the same
-port (see *Port note*). The two rest on different bets: theirs buys breadth through scripting, this
-one buys a smaller set of operations that check themselves.
-
-
 
 ## What the agent is told
 
@@ -136,9 +135,8 @@ are predictable: `<family>_<verb>`, so the family prefix tells you the area —
 | `appearance_` / `mesh_` / `surface_` | colour, mesh bodies, surface modelling | `appearance_set`, `mesh_export`, `surface_thicken` |
 | `drawing_` / `workspace_` / `save_` | 2D drawings, orientation, save-as-mesh | `drawing_create`, `workspace_orient`, `save_as_mesh` |
 
-Every tool's result declares whether it **mutates** (read / writes the design / writes to
-the cloud / destructive) — the `write` level is part of each tool's definition and is
-surfaced to the client.
+Tool definitions expose `readOnlyHint` and, for destructive tools, `destructiveHint` annotations.
+These describe behavior; the client's permission policy determines whether it asks before a call.
 
 ### A few core tools (the ones a session leans on)
 
@@ -225,8 +223,9 @@ entities answer to is refused with the candidates' handles rather than silently 
 
 The naming schema (`<family>_<verb>`, with the verb's read/write kind linted against the declared
 write level), pure-ASCII wire strings, helper deduplication, and doc freshness are all enforced by
-lints in `tests/`. The one command is `py -3 tests/check_all.py` (generator checks + the whole
-suite + the live gate). Generated inventories live in `tests/generated/`:
+lints in `tests/`. Run `tests/check_all.py` with the
+[contributor environment](../../CONTRIBUTING.md#contributor-setup-and-verification) for generator
+checks, the suite and maintainer live acceptance. Generated inventories live in `tests/generated/`:
 [`TOOL_MANIFEST.md`](../../tests/generated/TOOL_MANIFEST.md) (per-tool) and
 [`TOOL_POINTER_MAP.md`](../../tests/generated/TOOL_POINTER_MAP.md) (how tools point to each other, plus a
 self-audit of the guidance strings). Authoring conventions live in
@@ -234,33 +233,34 @@ self-audit of the guidance strings). Authoring conventions live in
 
 ## Security
 
-- **Loopback only.** The server binds `127.0.0.1`; it is not reachable from other
-  machines. Requests from non-loopback web origins are rejected.
-- **Off by default**, and only runs while the add-in is running.
+- **Local transport.** The server binds `127.0.0.1` and rejects non-loopback web origins. It has no
+  authentication token and permits requests without an Origin header, so other local processes can
+  connect. A connected AI client may send tool results to its model provider.
+- **Registration gates.** The server is off by default and runs only while the add-in is running.
+  Family checkboxes remove those tools on reload; they are independent of client permissions.
 - **`sys_execute_script` is separately gated.** It lets a connected agent run
   arbitrary Python in your active Fusion session — including modifying or deleting
   your design. It is **disabled by default**; enable it only if you trust the agent
   and the client connecting to the server, via **Settings → MCP Server → "Allow AI to
-  execute arbitrary Fusion API scripts"** (then reload). A script's changes are grouped
-  into ONE undo step, but a script that raises is **not** guaranteed to roll back —
-  partial changes can commit, so verify state afterward and undo manually if needed.
-- **Two independent gates.** The add-in setting above decides whether the tool is *registered at
-  all*; your MCP client's own permissions decide what it may call without asking you. Every tool
-  declares whether it only reads, changes the design, or does something you cannot undo, and the
-  shipped client presets (`.claude/settings.json`, `.codex/config.toml`) follow that: they
-  pre-approve the read-only tools and nothing else, so anything that writes still asks you first,
-  and `sys_execute_script` is never pre-approved in any of them. A lint keeps those presets in step
-  with the registry's actual read set, and
-  [`PERMISSION_POSTURE.md`](../../tests/generated/PERMISSION_POSTURE.md) is the generated table of
-  where each tool currently sits. If the prompting gets tedious, do not widen the shipped file: put
-  a `.claude/settings.local.json` beside it listing the extra tools you want to run without being
-  asked. That file is per-machine and is not committed, so a choice you make for yourself does not
-  become everyone's default.
+  execute arbitrary Fusion API scripts (advanced; security risk)"** (then reload). Scripts can also
+  access local files and network resources. The default execution path groups document changes into
+  an undo transaction, but an error does **not** guarantee rollback; verify state afterward.
+- **Read-only script option.** `sys_execute_script(read_only=true)` uses Fusion's `MCP.Execute`
+  read-only context to reject design changes. It still permits file writes and still requires the
+  script registration and client permission gates. Builds without that text command return an error.
+  This is not a server-wide read-only mode or a Python sandbox.
+- **Document guard.** When supplied, `expect_document` refuses a write when the active
+  document differs from the target. This checks identity, not permission to write.
+- **Client policies differ.** [`.claude/settings.json`](../../.claude/settings.json) allows the listed
+  read tools and leaves writes out of its allow list.
+  [`.codex/config.toml`](../../.codex/config.toml) sets `approve` for listed typed tools, including
+  writes; cloud file/folder deletion and `sys_execute_script` use `prompt`, as do unlisted tools.
+  These project files apply only when the client loads them, and other client settings can change the
+  effective policy. Inspect the active policy before use; a tool annotation is not an approval gate.
+  Keep personal Claude overrides in the ignored `.claude/settings.local.json` file.
 
 ## Platform support
 
-Developed and tested on **Windows**. The add-in targets both Windows and macOS, and
-the read/navigation tools use only cross-platform Fusion APIs. `sys_execute_script`
-uses Fusion's `Python.Run` text command with a path-normalized temp file; this path
-is believed correct on macOS but **has not yet been verified on a Mac**. If you run on
-macOS, please test `sys_execute_script` before relying on it and report issues.
+Developed and tested on **Windows**, using Fusion's embedded Python. No separate server runtime
+or package installation is needed. The manifest targets Windows and macOS; that declaration is not
+verification of macOS support. macOS remains unverified, including script execution and settings UI.

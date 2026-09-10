@@ -596,8 +596,8 @@ class TestUnreadableDistance:
     def test_a_real_zero_distance_is_still_a_measurement(self, monkeypatch):
         # the boundary the bool guard must not swallow: 0.0 IS the touching answer.
         self._blind_measure(monkeypatch, 0.0)
-        res = mr.handler(relation="touching")
-        assert res["isError"] is False, res
+        out = _payload(mr.handler(relation="touching"))
+        assert out["passed"] is True and out["measured"]["min_distance"] == 0.0
 
     def test_touching_surfaces_it_as_a_normal_error_rather_than_claiming_contact(self, monkeypatch):
         # the dangerous direction: an unreadable gap must never be scored against the tolerance,

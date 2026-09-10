@@ -21,6 +21,8 @@ from conftest import (
     BRepEdge,
     BRepFace,
     FakeApplication,
+    FakeData,
+    FakeDataFile,
     FakeDocumentReference,
     FakeFusionDocument,
     FakeTimeline,
@@ -167,32 +169,131 @@ class TestWrapContract:
 
 # ── the shipped kinds against fakes ──────────────────────────────────────────
 
-class TestVersionAdvanced:
-    def _app(self, modified):
-        return FakeApplication(active_document=FakeFusionDocument(is_modified=modified))
+class _VersionData(FakeData):
+    """Fresh cloud files served in call order; the final reading repeats."""
+    def __init__(self, files):
+        super().__init__()
+        self._sequence = list(files)
+        self.calls = 0
 
-    def test_false_success_still_modified_bites(self, monkeypatch):
+    def findFileById(self, lineage):
+        item = self._sequence[min(self.calls, len(self._sequence) - 1)]
+        self.calls += 1
+        return item
+
+
+def _version(lineage, number, latest=None):
+    return FakeDataFile("Part", file_id=lineage, version=number,
+                        latest_version=number if latest is None else latest,
+                        version_id=f"urn:file?version={number}")
+
+
+class TestVersionAdvanced:
+    def _app(self, modified, lineage="urn:part", fresh=()):
+        doc = FakeFusionDocument(is_modified=modified,
+                                 data_file=FakeDataFile("Part", file_id=lineage))
+        data = _VersionData(fresh) if fresh else FakeData()
+        return FakeApplication(active_document=doc, data=data)
+
+    def _post(self, monkeypatch):
+        post = kernel.VersionAdvanced()
+        monkeypatch.setattr(post, "_DEADLINE_S", 0.0)
+        monkeypatch.setattr(post, "_POLL_SLEEP", 0.0)
+        return post
+
+    def test_false_success_still_modified_bites_without_claiming_cloud_absence(self, monkeypatch):
         monkeypatch.setattr(kernel, "app", self._app(True))
-        wrapped = kernel.wrap(lambda **kw: _ok({"saved": True}), [kernel.VersionAdvanced()])
+        wrapped = kernel.wrap(lambda **kw: _ok({"saved": True}), [self._post(monkeypatch)])
         res = wrapped()
         assert res["isError"] is True
         assert "still modified" in res["message"].lower()
+        assert "created no version" not in res["message"].lower()
 
-    def test_real_save_confirms(self, monkeypatch):
-        monkeypatch.setattr(kernel, "app", self._app(False))
-        out = _payload(kernel.wrap(lambda **kw: _ok({"saved": True}), [kernel.VersionAdvanced()])())
+    def test_fresh_same_lineage_advance_confirms_separately_from_local_completion(self, monkeypatch):
+        app = self._app(False, fresh=[_version("urn:part", 1), _version("urn:part", 2)])
+        monkeypatch.setattr(kernel, "app", app)
+        out = _payload(kernel.wrap(lambda **kw: _ok({"saved": True}),
+                                   [self._post(monkeypatch)])())
+        assert out["local_save_confirmed"] is True
         assert out["version_confirmed"] is True
+        assert out["latest_version_before"] == 1 and out["latest_version_after"] == 2
+
+    def test_unchanged_fresh_tip_is_pending_not_confirmed(self, monkeypatch):
+        app = self._app(False, fresh=[_version("urn:part", 1), _version("urn:part", 1)])
+        monkeypatch.setattr(kernel, "app", app)
+        out = _payload(kernel.wrap(lambda **kw: _ok({"saved": True}),
+                                   [self._post(monkeypatch)])())
+        assert out["local_save_confirmed"] is True
+        assert out["version_confirmed"] is False and out["pending"] is True
+
+    def test_no_fresh_baseline_is_pending_not_confirmed(self, monkeypatch):
+        app = self._app(False, fresh=[None, _version("urn:part", 2)])
+        monkeypatch.setattr(kernel, "app", app)
+        out = _payload(kernel.wrap(lambda **kw: _ok({"saved": True}),
+                                   [self._post(monkeypatch)])())
+        assert out["version_confirmed"] is False and out["pending"] is True
+
+    def test_forked_lineage_is_pending_not_compared_as_an_advance(self, monkeypatch):
+        app = self._app(False, lineage="urn:old",
+                        fresh=[_version("urn:old", 8), _version("urn:new", 1)])
+        monkeypatch.setattr(kernel, "app", app)
+
+        def save():
+            app.activeDocument.dataFile = FakeDataFile("Part", file_id="urn:new")
+            return _ok({"saved": True})
+
+        out = _payload(kernel.wrap(save, [self._post(monkeypatch)])())
+        assert out["version_confirmed"] is False and out["pending"] is True
+        assert out["latest_version_before"] == 8 and out["latest_version_after"] == 1
+
+    def test_an_older_fresh_tip_is_pending_not_mistaken_for_advancement(self, monkeypatch):
+        app = self._app(False, fresh=[_version("urn:part", 8), _version("urn:part", 7)])
+        monkeypatch.setattr(kernel, "app", app)
+        out = _payload(kernel.wrap(lambda **kw: _ok({"saved": True}),
+                                   [self._post(monkeypatch)])())
+        assert out["version_confirmed"] is False and out["pending"] is True
+        assert out["latest_version_before"] == 8 and out["latest_version_after"] == 7
+
+    def test_ordered_version_number_fallback_publishes_the_observed_numbers(self, monkeypatch):
+        readings = [FakeDataFile("Part", file_id="urn:part", version=n, latest_raises=True)
+                    for n in (1, 2)]
+        monkeypatch.setattr(kernel, "app", self._app(False, fresh=readings))
+        out = _payload(kernel.wrap(lambda **kw: _ok({"saved": True}),
+                                   [self._post(monkeypatch)])())
+        assert out["version_confirmed"] is True
+        assert (out["version_before"], out["version_after"]) == (1, 2)
+        assert out["latest_version_before"] is None and out["latest_version_after"] is None
+
+    def test_changed_unordered_version_ids_are_unknown(self, monkeypatch):
+        old = FakeDataFile("Part", file_id="urn:part", version="old", version_id="urn:old",
+                           latest_raises=True)
+        new = FakeDataFile("Part", file_id="urn:part", version="new", version_id="urn:new",
+                           latest_raises=True)
+        app = self._app(False, fresh=[old, new])
+        monkeypatch.setattr(kernel, "app", app)
+        out = _payload(kernel.wrap(lambda **kw: _ok({"saved": True}),
+                                   [self._post(monkeypatch)])())
+        assert out["version_id_before"] == "urn:old" and out["version_id_after"] == "urn:new"
+        assert out["version_confirmed"] is False and out["pending"] is True
+
+    def test_milestone_observation_avoids_a_second_cloud_wait(self, monkeypatch):
+        app = self._app(False, fresh=[_version("urn:part", 1)])
+        monkeypatch.setattr(kernel, "app", app)
+        out = _payload(kernel.wrap(
+            lambda **kw: _ok({"saved": True, "cloud_tip_advanced": True}),
+            [self._post(monkeypatch)])())
+        assert out["version_confirmed"] is True
+        assert app.data.calls == 1
 
     def test_already_current_noop_skips_the_check(self, monkeypatch):
-        monkeypatch.setattr(kernel, "app", self._app(True))   # doc dirty, but handler did nothing
+        monkeypatch.setattr(kernel, "app", self._app(True))
         out = _payload(kernel.wrap(lambda **kw: _ok({"saved": True, "already_current": True}),
-                                   [kernel.VersionAdvanced()])())
-        assert out["saved"] is True
+                                   [self._post(monkeypatch)])())
+        assert out["saved"] is True and "version_confirmed" not in out
 
     def test_an_unreadable_modified_flag_is_disclosed_not_silently_passed(self, monkeypatch):
-        # the gate could not run; the payload must SAY so rather than look like a confirmed save
         class _Doc(FakeFusionDocument):
-            """The dirty flag that will not read - a declared state, no measurement row carries it."""
+            """A document whose dirty flag cannot be read."""
 
             @property
             def isModified(self):
@@ -203,7 +304,9 @@ class TestVersionAdvanced:
                 pass
 
         monkeypatch.setattr(kernel, "app", FakeApplication(active_document=_Doc()))
-        out = _payload(kernel.wrap(lambda **kw: _ok({"saved": True}), [kernel.VersionAdvanced()])())
+        out = _payload(kernel.wrap(lambda **kw: _ok({"saved": True}),
+                                   [self._post(monkeypatch)])())
+        assert out["local_save_confirmed"] is False
         assert out["version_confirmed"] is False
 
 

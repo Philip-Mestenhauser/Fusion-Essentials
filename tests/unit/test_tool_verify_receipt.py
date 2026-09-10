@@ -14,6 +14,7 @@ import ast
 import hashlib
 import json
 import os
+from pathlib import Path
 import sys
 import urllib.request
 
@@ -24,6 +25,23 @@ sys.path.insert(0, os.path.join(TESTS_DIR, "live"))
 import tool_verify  # noqa: E402
 import verify_core  # noqa: E402  probe_capabilities/capability_skip_reason read their tables here
 import verify_runner  # noqa: E402  source_hash reads SRC_ROOT/_HERE off ITS namespace, not the facade
+
+_ATTESTATION = {"implementation_fingerprint": "a" * 64, "schema_fingerprint": "b" * 64,
+                "load_id": "fixture-load", "session_id": "fixture-session"}
+
+
+def _attested_health(identity=None):
+    identity = identity or _ATTESTATION
+    return {"server": tool_verify.SERVER_NAME, "version": "t",
+            "session_id": identity["session_id"],
+            "attestation": {"complete": True, "loaded_matches_source": True,
+                            "implementation_fingerprint": identity["implementation_fingerprint"],
+                            "schema_fingerprint": identity["schema_fingerprint"],
+                            "load_id": identity["load_id"]}}
+
+
+def _reloaded_attestation():
+    return dict(_ATTESTATION, load_id="fixture-load-2", session_id="fixture-session-2")
 
 
 def _tree(tmp_path, files):
@@ -82,9 +100,21 @@ class TestHarnessSideOfTheHash:
         live.mkdir()
         (live / "measure_api.py").write_bytes(b"ROWS = []\n")
         (live / "verify_core.py").write_bytes(b"EXCLUDED = {}\n")
+        repo = tmp_path / "repo"
+        _tree(repo, {"Fusion-Essentials.py": b"from . import commands\n",
+                     "lib/loaded_attestation.py": b"def begin(): pass\n"})
         monkeypatch.setattr(verify_runner, "SRC_ROOT", src)
+        monkeypatch.setattr(verify_runner, "REPO_ROOT", str(repo))
         monkeypatch.setattr(verify_runner, "_HERE", str(live))
         return src, live
+
+    def test_capture_bootstrap_and_helper_are_bound_into_the_source_hash(
+            self, tmp_path, monkeypatch):
+        src, _live = self._rig(tmp_path, monkeypatch)
+        before = tool_verify.source_hash(src)
+        helper = Path(verify_runner.REPO_ROOT) / "lib/loaded_attestation.py"
+        helper.write_bytes(b"def begin(): return False\n")
+        assert tool_verify.source_hash(src) != before
 
     def test_a_facts_harness_edit_leaves_the_hash_where_a_predicate_edit_moves_it(
             self, tmp_path, monkeypatch):
@@ -127,17 +157,17 @@ class TestVerifiedReceipt:
         root = _tree(tmp_path / "src", {"a.py": b"x = 1\n"})
         receipt = str(tmp_path / "VERIFIED_TOOLS.md")
         tool_verify.write_verified(self._LEDGER, "2704.1.23", "2026-07-11",
-                                   tool_verify.source_hash(root), path=receipt)
-        assert tool_verify.check(root=root, verified_path=receipt) == 0
+                                   tool_verify.source_hash(root), path=receipt, attestation=_ATTESTATION)
+        assert tool_verify.check(root=root, verified_path=receipt, attestation=_ATTESTATION) == 0
         assert "2026-07-11" in capsys.readouterr().out
 
     def test_check_goes_red_when_source_changes_after_stamp(self, tmp_path, capsys):
         root = _tree(tmp_path / "src", {"a.py": b"x = 1\n"})
         receipt = str(tmp_path / "VERIFIED_TOOLS.md")
         tool_verify.write_verified(self._LEDGER, "2704.1.23", "2026-07-11",
-                                   tool_verify.source_hash(root), path=receipt)
+                                   tool_verify.source_hash(root), path=receipt, attestation=_ATTESTATION)
         (tmp_path / "src" / "a.py").write_bytes(b"x = 2\n")
-        assert tool_verify.check(root=root, verified_path=receipt) == 1
+        assert tool_verify.check(root=root, verified_path=receipt, attestation=_ATTESTATION) == 1
         out = capsys.readouterr().out
         assert "changed since" in out and "tool_verify.py" in out
 
@@ -145,6 +175,23 @@ class TestVerifiedReceipt:
         root = _tree(tmp_path / "src", {"a.py": b"x = 1\n"})
         assert tool_verify.check(root=root, verified_path=str(tmp_path / "VERIFIED_TOOLS.md")) == 1
         assert "tool_verify.py" in capsys.readouterr().out
+
+    def test_check_goes_red_when_the_loaded_stamp_is_missing_or_changed(self, tmp_path, capsys):
+        root = _tree(tmp_path / "src", {"a.py": b"x = 1\n"})
+        receipt = str(tmp_path / "VERIFIED_TOOLS.md")
+        tool_verify.write_verified(self._LEDGER, "2704.1.23", "fixture",
+                                   tool_verify.source_hash(root), path=receipt,
+                                   attestation=_ATTESTATION)
+        original = Path(receipt).read_text(encoding="utf-8")
+        Path(receipt).write_text("\n".join(
+            line for line in original.splitlines() if not line.startswith("Loaded:")) + "\n",
+            encoding="utf-8")
+        assert tool_verify.check(root=root, verified_path=receipt) == 1
+        Path(receipt).write_text(original, encoding="utf-8")
+        changed = dict(_ATTESTATION, schema_fingerprint="c" * 64)
+        assert tool_verify.check(root=root, verified_path=receipt, attestation=changed) == 1
+        output = capsys.readouterr().out
+        assert "source/loaded stamp" in output and "differs" in output
 
     def test_check_goes_red_on_a_stampless_receipt(self, tmp_path, capsys):
         root = _tree(tmp_path / "src", {"a.py": b"x = 1\n"})
@@ -157,7 +204,7 @@ class TestVerifiedReceipt:
         root = _tree(tmp_path / "src", {"a.py": b"x = 1\n"})
         receipt = str(tmp_path / "VERIFIED_TOOLS.md")
         src_hash = tool_verify.source_hash(root)
-        tool_verify.write_verified(self._LEDGER, "2704.1.23", "2026-07-11", src_hash, path=receipt)
+        tool_verify.write_verified(self._LEDGER, "2704.1.23", "2026-07-11", src_hash, path=receipt, attestation=_ATTESTATION)
         with open(receipt, encoding="utf-8") as fh:
             text = fh.read()
         m = tool_verify._STAMP_RE.search(text)
@@ -174,7 +221,7 @@ class TestVerifiedReceipt:
         receipt = str(tmp_path / "VERIFIED_TOOLS.md")
         tool_verify.write_verified([("model_extrude", "covered"), ("model_create_component", "called")],
                                    "2704.1.23", "2026-07-11", tool_verify.source_hash(root),
-                                   path=receipt)
+                                   path=receipt, attestation=_ATTESTATION)
         with open(receipt, encoding="utf-8") as fh:
             text = fh.read()
         assert "1 covered / 1 called / 0 refusals-only / 0 skipped(reason) / 0 pending" in text
@@ -192,7 +239,7 @@ class TestVerifiedReceipt:
         tool_verify.write_verified([("model_extrude", "covered"),
                                     ("model_draft", "called (effect read unreadable - DR-1)")],
                                    "2704.1.23", "2026-07-11", tool_verify.source_hash(root),
-                                   path=receipt)
+                                   path=receipt, attestation=_ATTESTATION)
         with open(receipt, encoding="utf-8") as fh:
             text = fh.read()
         assert "1 covered / 1 called / 0 refusals-only / 0 skipped(reason) / 0 pending" in text
@@ -228,19 +275,23 @@ class _Harness:
              [("b_get", lambda ctx: {"x": ctx["k"]}, lambda p: p["n"] == 1, None)], [])]
 
     def __init__(self, monkeypatch, tmp_path, acts=None, elapsed=1.0, document="Untitled",
-                 features=7, src_hash="0" * 64, answer=None, poll_after=None):
+                 document_handle="session:fixture-document", features=7, src_hash="0" * 64,
+                 answer=None, poll_after=None):
         self.wrote, self.seen = {}, []
-        self.document, self.features, self.answer = document, features, answer
+        self.document, self.document_handle = document, document_handle
+        self.features, self.answer = features, answer
         monkeypatch.setattr(tool_verify, "call", self._call)
         monkeypatch.setattr(verify_runner, "time", _Clock(elapsed))
         monkeypatch.setattr(verify_runner, "RESULTS_DIR", str(tmp_path))
-        monkeypatch.setattr(tool_verify, "health_gate", lambda: {"server": "ok", "version": "t"})
-        monkeypatch.setattr(tool_verify, "registered_tools", lambda: ["a_get", "b_get"])
+        monkeypatch.setattr(tool_verify, "health_gate", _attested_health)
+        monkeypatch.setattr(tool_verify, "registered_tools", lambda _health=None: ["a_get", "b_get"])
         monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: src_hash)
         monkeypatch.setattr(tool_verify, "write_verified", self._write)
+        reloaded = dict(_ATTESTATION, load_id="fixture-load-2",
+                        session_id="fixture-session-2")
         monkeypatch.setattr(tool_verify, "reload_smoke",
                             lambda rows, notes, valued=None, **kw:
-                            self.seen.append(("reload beat", {})))
+                            (self.seen.append(("reload beat", {})), reloaded)[1])
         monkeypatch.setattr(tool_verify, "POLL_AFTER", poll_after or {})
         monkeypatch.setattr(tool_verify, "EXCLUDED", {})
         monkeypatch.setattr(tool_verify, "STORY", {})
@@ -251,13 +302,14 @@ class _Harness:
     def _call(self, tool, args):
         self.seen.append((tool, dict(args)))
         if tool == "doc_get":
-            return False, {"active": {"name": self.document, "document_id": None}}
+            return False, {"active": {"name": self.document, "document_id": None,
+                                      "document_handle": self.document_handle}}
         if tool == "design_get":
             return False, {"feature_count": self.features}
         return False, self.answer if self.answer is not None else {"n": 1}
 
-    def _write(self, rows, version, date, src_hash, path=None, notes=None, act_modes=None):
-        self.wrote.update(ledger=dict(rows), src_hash=src_hash)
+    def _write(self, rows, version, date, src_hash, path=None, notes=None, act_modes=None, attestation=None):
+        self.wrote.update(ledger=dict(rows), src_hash=src_hash, attestation=attestation)
         return "VERIFIED_TOOLS.md"
 
     def tools_called(self):
@@ -330,6 +382,20 @@ class TestResumableRun:
         assert "reload beat" not in first.tools_called()
         assert "reload beat" in second.tools_called()
 
+    def test_a_same_handle_survives_document_rename(self, monkeypatch, tmp_path):
+        first = _Harness(monkeypatch, tmp_path)
+        first.run(run_id="r1", acts_spec="ACT A")
+        second = _Harness(monkeypatch, tmp_path, document="Renamed document", features=8)
+        assert second.run(run_id="r1", resume=True) == 0
+        assert second.wrote["ledger"] == {"a_get": "called", "b_get": "covered"}
+
+    def test_a_resume_with_missing_current_handle_is_refused(self, monkeypatch, tmp_path, capsys):
+        first = _Harness(monkeypatch, tmp_path)
+        first.run(run_id="r1", acts_spec="ACT A")
+        second = _Harness(monkeypatch, tmp_path, document_handle=None)
+        assert second.run(run_id="r1", resume=True) == 1
+        assert not second.wrote and "no complete document handle" in capsys.readouterr().out
+
     def test_a_resume_after_the_source_moved_is_refused(self, monkeypatch, tmp_path, capsys):
         # the receipt binds ONE hash: a chunk judged under different source would ride under a stamp
         # no chunk was measured against.
@@ -345,11 +411,36 @@ class TestResumableRun:
         # document and every read is against geometry that was never made.
         first = _Harness(monkeypatch, tmp_path)
         first.run(run_id="r1", acts_spec="ACT A")
-        second = _Harness(monkeypatch, tmp_path, document="Something Else")
+        second = _Harness(monkeypatch, tmp_path, document="Untitled",
+                          document_handle="session:other-document")
         assert second.run(run_id="r1", resume=True) == 1
         assert "b_get" not in second.tools_called() and not second.wrote
         out = capsys.readouterr().out
-        assert "not the active one" in out and "Something Else" in out
+        assert "not the active one" in out and "session:other-document" in out
+
+    @pytest.mark.parametrize("bad_handle", ["session:a b", "session:", "session: ", True, 1,
+                                             {"handle": "session:valid"}],
+                             ids=["internal-whitespace", "bare-prefix", "trailing-whitespace",
+                                  "boolean", "integer", "mapping"])
+    def test_malformed_equal_handles_are_refused_before_remaining_acts(
+            self, monkeypatch, tmp_path, capsys, bad_handle):
+        first = _Harness(monkeypatch, tmp_path, document_handle=bad_handle)
+        first.run(run_id="r1", acts_spec="ACT A")
+        second = _Harness(monkeypatch, tmp_path, document_handle=bad_handle)
+        assert second.run(run_id="r1", resume=True) == 1
+        assert "b_get" not in second.tools_called() and not second.wrote
+        assert "no complete document handle" in capsys.readouterr().out
+
+    def test_a_legacy_identity_without_handle_is_refused(self, monkeypatch, tmp_path, capsys):
+        first = _Harness(monkeypatch, tmp_path)
+        first.run(run_id="r1", acts_spec="ACT A")
+        state = tool_verify.load_run_state("r1")
+        state["document"] = {"name": "Untitled", "document_id": None, "feature_count": 7}
+        tool_verify.save_run_state("r1", state)
+        second = _Harness(monkeypatch, tmp_path)
+        assert second.run(run_id="r1", resume=True) == 1
+        assert "b_get" not in second.tools_called() and not second.wrote
+        assert "no complete document handle" in capsys.readouterr().out
 
     def test_a_resume_of_an_unknown_run_is_refused_naming_the_file(self, monkeypatch, tmp_path,
                                                                    capsys):
@@ -385,10 +476,11 @@ class TestResumableRun:
         first = _Harness(monkeypatch, tmp_path)
         first.run(run_id="r1")
         verify_runner.save_run_state("r1", dict(saved[0], complete=False))   # as a kill left it
-        second = _Harness(monkeypatch, tmp_path, document="A Totally Different Document")
+        second = _Harness(monkeypatch, tmp_path, document="A Totally Different Document",
+                          document_handle="session:other-document")
         assert second.run(run_id="r1", resume=True) == 1
         assert not second.wrote and "b_get" not in second.tools_called()
-        assert "A Totally Different Document" in capsys.readouterr().out
+        assert "session:other-document" in capsys.readouterr().out
 
     def test_a_state_with_no_document_identity_is_refused(self, monkeypatch, tmp_path, capsys):
         # the belt to that brace: a state saved before any boundary (or by an older run) names no
@@ -398,7 +490,7 @@ class TestResumableRun:
         verify_runner.save_run_state("r1", dict(tool_verify.load_run_state("r1"), document=None))
         second = _Harness(monkeypatch, tmp_path)
         assert second.run(run_id="r1", resume=True) == 1
-        assert not second.wrote and "saved no document identity" in capsys.readouterr().out
+        assert not second.wrote and "no complete document handle" in capsys.readouterr().out
 
     def test_a_chunk_that_drove_no_act_says_so_on_the_stamp_line(self, monkeypatch, tmp_path,
                                                                 capsys):
@@ -454,7 +546,8 @@ class TestResumableRun:
                                                                      capsys):
         first = _Harness(monkeypatch, tmp_path)
         first.run(run_id="r1", acts_spec="ACT A")
-        second = _Harness(monkeypatch, tmp_path, document="Something Else")
+        second = _Harness(monkeypatch, tmp_path, document="Something Else",
+                          document_handle="session:other-document")
         assert second.run(run_id="r1", resume=True, acts_spec="ACT B") == 1
         assert "b_get" not in second.tools_called() and "not the active one" in capsys.readouterr().out
 
@@ -496,6 +589,111 @@ class TestResumableRun:
         with pytest.raises(TypeError) as refused:
             tool_verify.save_run_state("r1", {"ctx": {"good": 1, "handle": object()}})
         assert "handle" in str(refused.value) and "good" not in str(refused.value)
+
+    def test_an_interrupted_serialization_preserves_the_previous_checkpoint(
+            self, monkeypatch, tmp_path):
+        monkeypatch.setattr(verify_runner, "RESULTS_DIR", str(tmp_path))
+        previous = {"ctx": {"saved": 1}, "recall": {}, "acts_done": ["ACT A"]}
+        path = Path(tool_verify.save_run_state("r1", previous))
+        before = path.read_bytes()
+
+        real_dump = verify_runner.json.dump
+
+        def interrupted_dump(value, stream, indent=None):
+            if indent == 2:
+                stream.write('{"truncated":')
+                raise OSError("write interrupted")
+            return real_dump(value, stream, indent=indent)
+
+        monkeypatch.setattr(verify_runner.json, "dump", interrupted_dump)
+        with pytest.raises(OSError, match="interrupted"):
+            tool_verify.save_run_state("r1", {"ctx": {"new": 2}, "recall": {}})
+        assert path.read_bytes() == before
+        assert list(tmp_path.iterdir()) == [path]
+
+    @pytest.mark.parametrize("failure", ["write", "sync", "replace"])
+    @pytest.mark.parametrize("existing", [False, True], ids=["new", "existing"])
+    def test_a_failed_checkpoint_preserves_the_previous_state(
+            self, monkeypatch, tmp_path, failure, existing):
+        monkeypatch.setattr(verify_runner, "RESULTS_DIR", str(tmp_path))
+        path = Path(tool_verify.run_state_path("r1"))
+        before = None
+        if existing:
+            tool_verify.save_run_state("r1", {
+                "ctx": {"saved": 1}, "recall": {}, "acts_done": ["ACT A"]})
+            before = path.read_bytes()
+        if failure == "write":
+            real_fdopen = verify_runner.os.fdopen
+
+            class FailedWriter:
+                def __init__(self, *args, **kwargs):
+                    self.file = real_fdopen(*args, **kwargs)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    self.file.close()
+
+                def write(self, value):
+                    raise OSError("write failed")
+
+            monkeypatch.setattr(verify_runner.os, "fdopen", FailedWriter)
+        elif failure == "sync":
+            monkeypatch.setattr(verify_runner.os, "fsync",
+                                lambda fd: (_ for _ in ()).throw(OSError("sync failed")))
+        else:
+            monkeypatch.setattr(verify_runner.os, "replace",
+                                lambda source, target: (_ for _ in ()).throw(OSError("replace failed")))
+        with pytest.raises(OSError, match="failed"):
+            tool_verify.save_run_state("r1", {"ctx": {"new": 2}, "recall": {}})
+        if existing:
+            assert path.read_bytes() == before
+            assert list(tmp_path.iterdir()) == [path]
+        else:
+            assert not path.exists()
+            assert list(tmp_path.iterdir()) == []
+
+    def test_a_capability_skipped_act_is_checkpointed_before_the_next_act(
+            self, monkeypatch, tmp_path):
+        acts = [
+            ("ACT G", None, [("a_get", {}, "ok", None)], []),
+            ("ACT B", None, [("b_get", {}, lambda payload: payload["n"] == 1, None)], []),
+        ]
+        first = _Harness(monkeypatch, tmp_path, acts=acts)
+        monkeypatch.setattr(tool_verify, "ACT_NEEDS", {"ACT G": "fake_tier"})
+        probes = []
+        monkeypatch.setattr(verify_runner, "probe_capabilities",
+                            lambda capabilities: probes.append(tuple(capabilities))
+                            or {"fake_tier": False})
+        first_call = first._call
+
+        def interrupted_call(tool, args):
+            if tool == "b_get":
+                raise RuntimeError("chunk interrupted")
+            return first_call(tool, args)
+
+        monkeypatch.setattr(tool_verify, "call", interrupted_call)
+        with pytest.raises(RuntimeError, match="chunk interrupted"):
+            first.run(run_id="r1")
+        saved = tool_verify.load_run_state("r1")
+        assert saved["acts_done"] == ["ACT G"]
+        assert saved["act_modes"] == [["ACT G", "skipped(fake_tier not entitled)"]]
+        assert saved["gated"] == {"a_get": "fake_tier not entitled"}
+        assert saved["entitlements"] == {"fake_tier": False}
+        assert saved["source_hash"] == "0" * 64
+        assert saved["attestation"] == _ATTESTATION
+        assert saved["document"]["name"] == "Untitled"
+
+        second = _Harness(monkeypatch, tmp_path, acts=acts)
+        monkeypatch.setattr(tool_verify, "ACT_NEEDS", {"ACT G": "fake_tier"})
+        monkeypatch.setattr(verify_runner, "probe_capabilities",
+                            lambda capabilities: (_ for _ in ()).throw(
+                                AssertionError("completed gated act was repeated")))
+        assert second.run(run_id="r1", resume=True) == 0
+        assert "a_get" not in second.tools_called()
+        assert second.wrote["ledger"] == {
+            "a_get": "skipped: fake_tier not entitled", "b_get": "covered"}
 
 
 class TestSourceDriftDuringRun:
@@ -650,16 +848,18 @@ class TestPredicateKind:
         # the rows decides the ledger, so this is what a revert to zip(steps, ...) has to fail.
         ledger = {}
 
-        def fake_write(rows, version, date, src_hash, path=None, notes=None, act_modes=None):
+        def fake_write(rows, version, date, src_hash, path=None, notes=None, act_modes=None, attestation=None):
             ledger.update(rows)
             return "VERIFIED_TOOLS.md"
 
         monkeypatch.setattr(tool_verify, "call", lambda tool, args: (False, {"n": 1}))
         monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
-        monkeypatch.setattr(tool_verify, "health_gate", lambda: {"server": "ok", "version": "t"})
-        monkeypatch.setattr(tool_verify, "registered_tools", lambda: ["a_get", "b_get", "c_get"])
+        monkeypatch.setattr(tool_verify, "health_gate", _attested_health)
+        monkeypatch.setattr(tool_verify, "registered_tools", lambda _health=None: ["a_get", "b_get", "c_get"])
         monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
         monkeypatch.setattr(tool_verify, "write_verified", fake_write)
+        monkeypatch.setattr(tool_verify, "reload_smoke",
+                            lambda rows, notes, valued=None, **kw: _reloaded_attestation())
         monkeypatch.setattr(tool_verify, "POLL_AFTER", {})
         monkeypatch.setattr(tool_verify, "EXCLUDED", {})
         monkeypatch.setattr(tool_verify, "STORY", {})
@@ -890,7 +1090,7 @@ class TestCapabilityTier:
         out = {}
         seen = []
 
-        def fake_write(rows, version, date, src_hash, path=None, notes=None, act_modes=None):
+        def fake_write(rows, version, date, src_hash, path=None, notes=None, act_modes=None, attestation=None):
             out["ledger"] = dict(rows)
             out["act_modes"] = list(act_modes or [])
             return "VERIFIED_TOOLS.md"
@@ -905,13 +1105,13 @@ class TestCapabilityTier:
 
         monkeypatch.setattr(tool_verify, "call", call)
         monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
-        monkeypatch.setattr(tool_verify, "health_gate", lambda: {"server": "ok", "version": "t"})
-        monkeypatch.setattr(tool_verify, "registered_tools", lambda: sorted(tools))
+        monkeypatch.setattr(tool_verify, "health_gate", _attested_health)
+        monkeypatch.setattr(tool_verify, "registered_tools", lambda _health=None: sorted(tools))
         monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
         monkeypatch.setattr(tool_verify, "write_verified", fake_write)
         # the post-run reload beat is another act's business; stubbed so 'seen' is this tier's
         monkeypatch.setattr(tool_verify, "reload_smoke",
-                            lambda rows, notes, valued=None, **kw: None)
+                            lambda rows, notes, valued=None, **kw: _reloaded_attestation())
         monkeypatch.setattr(tool_verify, "POLL_AFTER", poll_after or {})
         monkeypatch.setattr(tool_verify, "EXCLUDED", {})
         monkeypatch.setattr(tool_verify, "STORY", {})
@@ -999,12 +1199,14 @@ class TestCapabilityTier:
             return (False, {}) if tool == "workspace_orient" else (False, {"n": 1})
         monkeypatch.setattr(tool_verify, "call", call)
         monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
-        monkeypatch.setattr(tool_verify, "health_gate", lambda: {"server": "ok", "version": "t"})
-        monkeypatch.setattr(tool_verify, "registered_tools", lambda: ["a_get", "workspace_orient"])
+        monkeypatch.setattr(tool_verify, "health_gate", _attested_health)
+        monkeypatch.setattr(tool_verify, "registered_tools", lambda _health=None: ["a_get", "workspace_orient"])
         monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
         ledger = {}
         monkeypatch.setattr(tool_verify, "write_verified",
                             lambda rows, v, d, h, **kw: ledger.update(rows))
+        monkeypatch.setattr(tool_verify, "reload_smoke",
+                            lambda rows, notes, valued=None, **kw: _reloaded_attestation())
         monkeypatch.setattr(tool_verify, "POLL_AFTER", {})
         monkeypatch.setattr(tool_verify, "EXCLUDED", {})
         monkeypatch.setattr(tool_verify, "STORY", {})
@@ -1119,7 +1321,9 @@ class TestFacadeLateBinding:
 
     def test_check_reads_the_stubbed_source_hash(self, monkeypatch, tmp_path):
         receipt = tmp_path / "VERIFIED_TOOLS.md"
-        stamp = "Stamp: source " + "ab" * 32 + " | Fusion 2705.1.4 | verified 2026-08-31" + chr(10)
+        stamp = ("Stamp: source " + "ab" * 32 + " | Fusion 2705.1.4 | verified fixture\n"
+                 + "Loaded: implementation " + "a" * 64 + " | schema " + "b" * 64
+                 + " | load fixture-load | session fixture-session\n")
         receipt.write_text(stamp, encoding="utf-8")
         monkeypatch.setattr(tool_verify, "source_hash", lambda root=None: "ab" * 32)
         assert tool_verify.check(verified_path=str(receipt)) == 0
@@ -1272,7 +1476,7 @@ class TestReloadBeat:
         # can follow it) and its covered row reaches the ledger.
         ledger = {}
 
-        def fake_write(rows, version, date, src_hash, path=None, notes=None, act_modes=None):
+        def fake_write(rows, version, date, src_hash, path=None, notes=None, act_modes=None, attestation=None):
             ledger.update(rows)
             return "VERIFIED_TOOLS.md"
 
@@ -1286,9 +1490,16 @@ class TestReloadBeat:
         monkeypatch.setattr(tool_verify, "call", call)
         monkeypatch.setattr(tool_verify, "_server_answers", _health(True, False, True))
         monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
-        monkeypatch.setattr(tool_verify, "health_gate", lambda: {"server": "ok", "version": "t"})
-        monkeypatch.setattr(tool_verify, "registered_tools",
-                            lambda: ["a_get", "sys_reload_addin"])
+        health_rows = iter([_attested_health(), _attested_health(),
+                            _attested_health(_reloaded_attestation())])
+        monkeypatch.setattr(tool_verify, "health_gate", lambda: next(health_rows))
+        registry_health = []
+
+        def registered(health=None):
+            registry_health.append(health)
+            return ["a_get", "sys_reload_addin"]
+
+        monkeypatch.setattr(tool_verify, "registered_tools", registered)
         monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
         monkeypatch.setattr(tool_verify, "write_verified", fake_write)
         monkeypatch.setattr(tool_verify, "POLL_AFTER", {})
@@ -1300,13 +1511,14 @@ class TestReloadBeat:
         assert tool_verify.run(write_json=False) == 0
         assert ledger == {"a_get": "covered", "sys_reload_addin": "covered"}
         assert seen == ["a_get", "sys_reload_addin", "sys_find_tool"]
+        assert [row["session_id"] for row in registry_health] == [
+            "fixture-session", "fixture-session-2"]
 
-    def test_an_unconfirmed_beat_leaves_the_skipped_row_standing(self, monkeypatch):
-        # the other half of the same site: the run stays green and the receipt keeps the tool's
-        # EXCLUDED row, so an unlanded reconnect never reads as coverage.
+    def test_an_unconfirmed_beat_blocks_the_receipt(self, monkeypatch):
+        # A run cannot publish when its deliberate reload did not establish a new session.
         ledger = {}
 
-        def fake_write(rows, version, date, src_hash, path=None, notes=None, act_modes=None):
+        def fake_write(rows, version, date, src_hash, path=None, notes=None, act_modes=None, attestation=None):
             ledger.update(rows)
             return "VERIFIED_TOOLS.md"
 
@@ -1316,9 +1528,9 @@ class TestReloadBeat:
                                                 else wire(tool, args)))
         monkeypatch.setattr(tool_verify, "_server_answers", _health(True))   # never goes down
         monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
-        monkeypatch.setattr(tool_verify, "health_gate", lambda: {"server": "ok", "version": "t"})
+        monkeypatch.setattr(tool_verify, "health_gate", _attested_health)
         monkeypatch.setattr(tool_verify, "registered_tools",
-                            lambda: ["a_get", "sys_reload_addin"])
+                            lambda _health=None: ["a_get", "sys_reload_addin"])
         monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
         monkeypatch.setattr(tool_verify, "write_verified", fake_write)
         monkeypatch.setattr(tool_verify, "POLL_AFTER", {})
@@ -1327,8 +1539,8 @@ class TestReloadBeat:
         monkeypatch.setattr(tool_verify, "ACTS",
                             [("ACT T", None, [("a_get", {}, lambda p: p["n"] == 1, None)], None)])
 
-        assert tool_verify.run(write_json=False) == 0
-        assert ledger == {"a_get": "covered", "sys_reload_addin": "skipped: not confirmed"}
+        assert tool_verify.run(write_json=False) == 1
+        assert ledger == {}
 
 
 class TestActSelection:
@@ -1376,8 +1588,8 @@ class TestActSelection:
         monkeypatch.setattr(tool_verify, "call",
                             lambda tool, args: (seen.append(tool), (False, {"n": 1}))[1])
         monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
-        monkeypatch.setattr(tool_verify, "health_gate", lambda: {"server": "ok", "version": "t"})
-        monkeypatch.setattr(tool_verify, "registered_tools", lambda: sorted(tools))
+        monkeypatch.setattr(tool_verify, "health_gate", _attested_health)
+        monkeypatch.setattr(tool_verify, "registered_tools", lambda _health=None: sorted(tools))
         monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
         monkeypatch.setattr(tool_verify, "write_verified",
                             lambda *a, **k: wrote.append(True) or "VERIFIED_TOOLS.md")
@@ -1423,3 +1635,30 @@ class TestActSelection:
                                         keep_open=True)
         lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
         assert seen == [] and lines[-1].endswith("; the story document is left open")
+
+
+class TestActualSchemaBinding:
+    def test_identity_requires_a_load_id_and_session_id(self):
+        missing_load = _attested_health()
+        missing_load["attestation"].pop("load_id")
+        empty_session = _attested_health()
+        empty_session["session_id"] = ""
+        assert verify_core.attestation_identity(missing_load) is None
+        assert verify_core.attestation_identity(empty_session) is None
+
+    def test_registry_rows_must_match_the_health_schema_and_session(self, monkeypatch):
+        rows = [{"name": "a_get", "description": "read", "inputSchema": {"type": "object"}}]
+        response = {"result": {"tools": rows}}
+        identity = dict(_ATTESTATION, schema_fingerprint=verify_core._schema_fingerprint(rows))
+        health = _attested_health(identity)
+        monkeypatch.setattr(verify_core, "_post",
+                            lambda payload, with_session=False: (response, identity["session_id"]))
+        assert verify_core.registered_tools(health) == ["a_get"]
+
+        wrong_schema = _attested_health(dict(identity, schema_fingerprint="c" * 64))
+        with pytest.raises(SystemExit, match="schema fingerprint"):
+            verify_core.registered_tools(wrong_schema)
+        monkeypatch.setattr(verify_core, "_post",
+                            lambda payload, with_session=False: (response, "another-session"))
+        with pytest.raises(SystemExit, match="session changed"):
+            verify_core.registered_tools(health)

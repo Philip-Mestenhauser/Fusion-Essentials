@@ -478,17 +478,66 @@ def _conftest_bindings(tree, conftest, shared):
     return set(bound) - taken
 
 
-def _stands_on_conftest(cls_node, local, bound, conftest, seen=()):
-    """True when the class inherits a shared fake - through a name this file BOUND to one, through
-    a dotted conftest attribute, or up a chain of local subclasses. A base the file defines ITSELF
-    is what the name resolves to, so `local` is read first."""
+def _named_classes(tree):
+    """Return every in-scope ClassDef with its separate lexical scope."""
+    found = []
+
+    def visit(node, scope):
+        child_scope = scope
+        if isinstance(node, ast.ClassDef):
+            # A class defined directly in another class body belongs to that namespace and remains
+            # with its owner; classes inside methods are function locals and stay in the inventory.
+            if not scope or scope[-1][0] != "class":
+                found.append((node, scope))
+            child_scope = scope + (("class", node),)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            child_scope = scope + (("function", node),)
+        for child in ast.iter_child_nodes(node):
+            visit(child, child_scope)
+
+    visit(tree, ())
+    return found
+
+
+def _scope_map(inventory):
+    """Return lexical scope by ClassDef identity without changing cached AST nodes."""
+    return {id(node): scope for node, scope in inventory}
+
+
+def _function_scope(scope):
+    """Return the enclosing function identities that participate in lexical lookup."""
+    return tuple(node for kind, node in scope if kind == "function")
+
+
+def _lexical_base(name, cls_node, inventory, scopes):
+    """Return the nearest class binding in the definition's lexical context."""
+    current = _function_scope(scopes[id(cls_node)])
+    candidates = []
+    for node, scope in inventory:
+        if node is cls_node or node.name != name:
+            continue
+        held = _function_scope(scope)
+        if held == current and node.lineno >= cls_node.lineno:
+            continue
+        if len(held) <= len(current) and current[:len(held)] == held:
+            candidates.append((len(held), node.lineno, node))
+    return max(candidates, default=(0, 0, None), key=lambda row: row[:2])[2]
+
+
+def _stands_on_conftest(cls_node, inventory, scopes, bound, conftest, seen=()):
+    """Return whether one class inherits a shared fake in its lexical context."""
+    marker = id(cls_node)
+    if marker in seen:
+        return False
     for base, dotted in _base_refs(cls_node):
         if dotted:
             if base in conftest:
                 return True
-        elif base in local and local[base] is not cls_node:
-            if base not in seen and _stands_on_conftest(local[base], local, bound, conftest,
-                                                        seen + (base,)):
+            continue
+        local = _lexical_base(base, cls_node, inventory, scopes)
+        if local is not None:
+            if _stands_on_conftest(local, inventory, scopes, bound, conftest,
+                                   seen + (marker,)):
                 return True
         elif base in bound:
             return True
@@ -496,43 +545,45 @@ def _stands_on_conftest(cls_node, local, bound, conftest, seen=()):
 
 
 def _standing_shared(conftest):
-    """The tests/unit/_*.py fake classes that stand on a conftest fake IN THEIR OWN file - the ones
-    another test file can legitimately reach a shared fake through by importing them."""
+    """Return importable helper-fake names that stand on a shared fake in their own file."""
     standing = set()
     for path in _corpus.py_files(_UNIT_DIR):
         if not os.path.basename(path).startswith("_"):
             continue
         tree = _corpus.tree(path)
         own = _named_classes(tree)
+        scopes = _scope_map(own)
         bound = _conftest_bindings(tree, conftest, set())
-        standing |= {n for n, node in own.items()
-                     if _stands_on_conftest(node, own, bound, conftest)}
+        standing |= {node.name for node, _scope in own
+                     if _stands_on_conftest(node, own, scopes, bound, conftest)}
     return standing
 
 
-def _named_classes(tree):
-    """Every class the file binds to a name of its own: module scope and inside a def. One defined
-    in another class BODY is a member of that namespace - the stand-in adsk modules
-    test_sys_get_api_doc introspects hold their types that way - and is left to its owner."""
-    inner = {id(child) for node in ast.walk(tree) if isinstance(node, ast.ClassDef)
-             for child in node.body if isinstance(child, ast.ClassDef)}
-    return {n.name: n for n in ast.walk(tree)
-            if isinstance(n, ast.ClassDef) and id(n) not in inner}
+def _class_label(node, scope, repeated):
+    """Return a diagnostic class label, qualifying names that occur more than once."""
+    if not repeated:
+        return node.name
+    names = [held.name for _kind, held in scope] + [node.name]
+    return ".".join(names) + " (line " + str(node.lineno) + ")"
 
 
 def _local_doubles(shapes, conftest):
-    """[(file, class, live type)] for every tests/unit class named after a MEASURED type that
-    stands on no conftest fake - the hand-rolled doubles the shape sweep never reaches."""
+    """Return local measured-type doubles that do not stand on a shared fake."""
     shared = _standing_shared(conftest)
     out = []
     for path in _corpus.py_files(_UNIT_DIR):
         tree = _corpus.tree(path)
         own = _named_classes(tree)
+        scopes = _scope_map(own)
         bound = _conftest_bindings(tree, conftest, shared)
-        for name, node in sorted(own.items()):
-            live = _stripped(name)
-            if live in shapes and not _stands_on_conftest(node, own, bound, conftest):
-                out.append((os.path.basename(path), name, live))
+        counts = {node.name: sum(other.name == node.name for other, _scope in own)
+                  for node, _scope in own}
+        for node, scope in sorted(own, key=lambda row: (row[0].name, row[0].lineno)):
+            live = _stripped(node.name)
+            if live in shapes and not _stands_on_conftest(
+                    node, own, scopes, bound, conftest):
+                out.append((os.path.basename(path),
+                            _class_label(node, scope, counts[node.name] > 1), live))
     return out
 
 
@@ -552,11 +603,13 @@ class TestUnitFakesStandOnTheSharedOnes:
         tree = ast.parse("from conftest import Sketch as _S\nfrom elsewhere import Plane\n"
                          "class A(_S): pass\nclass B: pass\nclass C(Plane): pass")
         bound = _conftest_bindings(tree, conftest, set())
+        own = _named_classes(tree)
+        scopes = _scope_map(own)
         derived, plain, collided = [n for n in tree.body if isinstance(n, ast.ClassDef)]
-        assert _stands_on_conftest(derived, {}, bound, conftest)
-        assert not _stands_on_conftest(plain, {}, bound, conftest)
+        assert _stands_on_conftest(derived, own, scopes, bound, conftest)
+        assert not _stands_on_conftest(plain, own, scopes, bound, conftest)
         # the hardening: `Plane` is a conftest class NAME, but this file bound it elsewhere
-        assert not _stands_on_conftest(collided, {}, bound, conftest)
+        assert not _stands_on_conftest(collided, own, scopes, bound, conftest)
         assert _shared_unit_classes(), "tests/unit/_*.py defines no class - the file walk is dead"
         in_scope = [n.name for path in _corpus.py_files(_UNIT_DIR)
                     for n in ast.walk(_corpus.tree(path))

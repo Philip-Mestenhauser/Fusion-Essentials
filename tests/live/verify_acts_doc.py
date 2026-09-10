@@ -493,7 +493,7 @@ def _poll_health(up, polls):
 
 
 def reload_smoke(rows, notes, valued=None, down_polls=_RELOAD_DOWN_POLLS,
-                 up_polls=_RELOAD_UP_POLLS):
+                 up_polls=_RELOAD_UP_POLLS, expected_attestation=None):
     """Reload the add-in, watch the server go down and come back, and read the fresh registry.
 
     Appends ONE row for sys_reload_addin and, only on a restart it OBSERVED end to end, registers
@@ -523,6 +523,22 @@ def reload_smoke(rows, notes, valued=None, down_polls=_RELOAD_DOWN_POLLS,
         print(f"  reload beat: /health did not answer again within {up_polls} probes - the add-in "
               "is down; start it from Fusion's Scripts and Add-Ins dialog (Shift+S)")
         return
+    current_attestation = None
+    if expected_attestation is not None:
+        current_health = facade("health_gate")()
+        current_attestation = facade("attestation_identity")(current_health)
+        same_build = all(current_attestation and current_attestation.get(field)
+                         == expected_attestation.get(field)
+                         for field in ("implementation_fingerprint", "schema_fingerprint"))
+        new_generation = all(current_attestation and current_attestation.get(field)
+                             != expected_attestation.get(field)
+                             for field in ("load_id", "session_id"))
+        if not same_build or not new_generation:
+            print("  reload beat: the new server did not prove the expected build and new session")
+            return
+        if "sys_reload_addin" not in facade("registered_tools")(current_health):
+            print("  reload beat: the restarted tools/list did not return sys_reload_addin")
+            return
     try:
         found = call("sys_find_tool", {"query": _RELOAD_SMOKE_QUERY})[1]
     except Exception as e:
@@ -542,3 +558,4 @@ def reload_smoke(rows, notes, valued=None, down_polls=_RELOAD_DOWN_POLLS,
     notes["sys_reload_addin"] = STORY.get("sys_reload_addin", "")
     if valued is not None:
         valued.add("sys_reload_addin")
+    return current_attestation

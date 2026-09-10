@@ -74,6 +74,8 @@ def _fingerprinted_paths():
     # the live act modules are generator INPUTS too: gen_strategies reads verify_acts_census's
     # CENSUS, so a PROVEN/MEASURED flip there rides a stale fingerprint without them.
     paths.update(glob.glob(os.path.join(TESTS_DIR, "live", "*.py")))
+    # gen_enforcement reads lint module docstrings for ENFORCEMENT_MAP.
+    paths.update(glob.glob(os.path.join(TESTS_DIR, "lints", "**", "*.py"), recursive=True))
     for root, _dirs, names in os.walk(_INPUT_TREE):
         if "__pycache__" in root:
             continue

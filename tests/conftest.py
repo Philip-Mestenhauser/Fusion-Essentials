@@ -20,6 +20,7 @@ workflow.
 """
 
 import contextlib
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -34,26 +35,59 @@ import pytest
 import live_api_facts as _api_facts
 
 
+class _SourceLoader(importlib.machinery.SourceFileLoader):
+    """Compile source bytes without consuming or producing disk bytecode."""
+
+    def get_code(self, fullname):
+        path = self.get_filename(fullname)
+        return self.source_to_code(self.get_data(path), path)
+
+
+class _SourceFinder:
+    """Select source-only loading for the harness's repository import roots."""
+
+    def __init__(self):
+        roots = (os.path.join(COMMANDS_DIR, "mcpServer"), TOOLS_DIR,
+                 os.path.join(REPO_ROOT, "tests", "live"))
+        self.roots = tuple(os.path.normcase(os.path.realpath(p)) + os.sep for p in roots)
+
+    def find_spec(self, fullname, path=None, target=None):
+        spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
+        if spec is not None and isinstance(spec.loader, importlib.machinery.SourceFileLoader):
+            origin = os.path.normcase(os.path.realpath(spec.origin))
+            if origin.startswith(self.roots):
+                spec.loader = _SourceLoader(fullname, spec.origin)
+                return spec
+        return None
+
+
+def _source_module(name, path, register=True):
+    """Execute current source, discarding the direct module if its import fails."""
+    spec = importlib.util.spec_from_file_location(name, path, loader=_SourceLoader(name, path))
+    module = importlib.util.module_from_spec(spec)
+    if register:
+        sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        if register and sys.modules.get(name) is module:
+            del sys.modules[name]
+        raise
+    return module
+
+
 @contextlib.contextmanager
 def _no_bytecode():
-    """Suppress .pyc writing for the source THIS harness loads (see load_tool/load_mcp_server).
-
-    The loaders below spec-load repo source directly, so Python would write __pycache__/*.pyc next
-    to it. That bytecode is validated against the source's mtime at ONE-SECOND resolution plus its
-    size, so editing-then-restoring a tool inside one second - what a break/confirm-red/restore
-    regression check does - can leave a .pyc that masks the restored source.
-
-    The suppression is scoped rather than process-wide because pytest gates its assertion-rewrite
-    cache on the SAME flag (_pytest/assertion/rewrite.py: `write = not sys.dont_write_bytecode`),
-    and a process-wide True makes every test module re-parse and re-rewrite on every run. Nothing
-    pytest rewrites is imported inside this block: it wraps the harness's own imports of the
-    adsk-free server packages and its spec-loads of tool/server modules.
-    """
+    """Use current repository source during harness imports and preserve other import behavior."""
     saved = sys.dont_write_bytecode
+    finder = _SourceFinder()
+    sys.meta_path.insert(0, finder)
     sys.dont_write_bytecode = True
     try:
         yield
     finally:
+        if finder in sys.meta_path:
+            sys.meta_path.remove(finder)
         sys.dont_write_bytecode = saved
 
 
@@ -262,12 +296,7 @@ def load_tool(module_name):
         # (install()/monkeypatch), so reusing it is safe.
         if full_name in sys.modules:
             return sys.modules[full_name]
-        spec = importlib.util.spec_from_file_location(
-            full_name, os.path.join(TOOLS_DIR, f"{module_name}.py")
-        )
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[full_name] = module
-        spec.loader.exec_module(module)
+        module = _source_module(full_name, os.path.join(TOOLS_DIR, f"{module_name}.py"))
         # Record the seams of everything that import just put in sys.modules - the module itself and
         # the substrate its `from . import _common`/`_inputs` chain pulled in - while they still hold
         # their as-imported values. See _capture_pristine_seams.
@@ -335,9 +364,7 @@ def load_tool_verify():
     One loader here rather than one per lint: the sweep's path moves as a unit."""
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live", "tool_verify.py")
     with _no_bytecode():
-        spec = importlib.util.spec_from_file_location("tool_verify", path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        mod = _source_module("tool_verify", path, register=False)
     return mod
 
 
@@ -401,11 +428,7 @@ def load_mcp_server():
         server_dir = os.path.join(COMMANDS_DIR, "mcpServer", "server")
         for mod_name in ("drawing_jobs", "task_manager", "mcp_server"):
             fq = f"{_SERVER_PKG_ROOT}.commands.mcpServer.server.{mod_name}"
-            spec = importlib.util.spec_from_file_location(
-                fq, os.path.join(server_dir, f"{mod_name}.py"))
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[fq] = module
-            spec.loader.exec_module(module)
+            _source_module(fq, os.path.join(server_dir, f"{mod_name}.py"))
     return sys.modules[full_name]
 
 

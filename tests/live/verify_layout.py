@@ -145,19 +145,22 @@ def _sketches_first(program, after):
                 continue
             move.add(i)
             move.update(draws)
+            owner_name = owner_of[i]
             owner = next((j for j in range(i - 1, -1, -1)
-                          if narr[j][0] == "model_create_component"), None)
-            if owner is not None and isinstance(narr[owner][1], dict) \
-                    and narr[owner][1].get("activate") and narr[owner][1].get("name"):
-                comps[owner] = narr[owner][1]["name"]
+                          if narr[j][0] == "model_create_component"
+                          and isinstance(narr[j][1], dict)
+                          and narr[j][1].get("name") == owner_name), None)
+            if owner is not None:
+                comps[owner] = owner_name
 
         kept = []
         for i, step in enumerate(narr):
             if i in comps:
                 hoisted.append(step)
-                phase_active = comps[i]
-                kept.append(("design_activate_component",
-                             {"occurrence": comps[i] + ":1"}, "ok", None))
+                if step[1].get("activate"):
+                    phase_active = comps[i]
+                    kept.append(("design_activate_component",
+                                 {"occurrence": comps[i] + ":1"}, "ok", None))
             elif i in move:
                 # The sketch phase runs the creates out of their original order, so whichever
                 # component happens to be open is NOT the one this sketch was authored in. Put the
@@ -236,13 +239,14 @@ def _sketch_reading_order(phase, slots):
     out, active = [], None
     for block in pinned + placed:
         want = owner_of(block)
-        # a block that CREATES its component activates it on the way in; anything else has to say
-        # where it belongs, or a root sketch lands inside whichever component was left open.
-        if not any(s[0] == "model_create_component" for s in block) and want != active:
-            out.append(("design_activate_component",
-                        {"occurrence": (want + ":1") if want else "root"}, "ok", None))
-        out.extend(block)
-        active = want
+        for step in block:
+            if step[0] == "sketch_create" and want != active:
+                out.append(("design_activate_component",
+                            {"occurrence": (want + ":1") if want else "root"}, "ok", None))
+                active = want
+            out.append(step)
+            if step[0] == "model_create_component" and step[1].get("activate"):
+                active = step[1]["name"]
     if out:
         out.append(("design_activate_component", {"occurrence": "root"}, "ok", None))
     return out
@@ -495,8 +499,10 @@ def _framed(steps):
         # measure of their SEPARATION, and zooming to 2.2x that is the whole-field photograph again.
         each = [_frame_box([m]) for m in members]
         own = max((max(b[1] - b[0], b[3] - b[2]) for b in each if b), default=0.0)
-        if any(_CHUNK_OF.get(str(m), str(m)).rstrip(":1") in _PATTERNED
-               or _CHUNK_OF.get(str(m), str(m)) in _PATTERNED for m in members):
+        pattern_names = [str(_CHUNK_OF.get(str(m), str(m))) for m in members]
+        if any(name in _PATTERNED
+               or (name.endswith(":1") and name[:-2] in _PATTERNED)
+               for name in pattern_names):
             own *= _FRAME_PATTERN_WIDEN
         span = max(own * _FRAME_CONTEXT, _FRAME_MIN_SPAN)
         if i in relation_at:
@@ -650,7 +656,10 @@ def _frame_neighbourhood(members, subject, built, target=None, cap=None):
             # buys it scale by making everything in shot a speck.
             if max(grown[1] - grown[0], grown[3] - grown[2]) > target * _FRAME_STRETCH:
                 continue
-            focus += [n for n in names if n not in focus]
+            additions = [n for n in names if n not in focus]
+            if len(focus) + len(additions) > cap:
+                continue
+            focus += additions
             box = grown
         return focus, box
 
@@ -675,7 +684,10 @@ def _frame_neighbourhood(members, subject, built, target=None, cap=None):
         # where every named subject reads as a speck.
         if span(grown) > target * _FRAME_STRETCH:
             continue
-        focus += [n for n in names if n not in focus]
+        additions = [n for n in names if n not in focus]
+        if len(focus) + len(additions) > cap:
+            continue
+        focus += additions
         box = grown
     return focus, box
 
@@ -1026,6 +1038,9 @@ def _place_slots(program):
     for a, b in _PLACE_WITH.items():
         if a in locked or b in locked:
             locked |= {a, b}
+    for group in _JOINT_GROUPS:
+        if any(c in locked for c in group):
+            locked.update(c for c in group if c in box)
 
     families, welded = {}, {}
     for chunk in order:
@@ -1084,7 +1099,11 @@ def _place_slots(program):
             at = clear(x, y, w, h)
             if at is None:
                 x, y, row_h = _FIELD_X0, y + row_h + _FIELD_GUTTER, 0.0
-                at = clear(x, y, w, h) or x
+                at = clear(x, y, w, h)
+                if at is None:
+                    raise ValueError(
+                        f"layout cannot place {chunk!r} collision-free within "
+                        f"{_FIELD_WIDTH:g} mm field width")
             shift = (at - x0, y - y0)
             # one offset for the whole welded group - the members keep their authored relative
             # positions, so the assembly arrives in its cell already put together.

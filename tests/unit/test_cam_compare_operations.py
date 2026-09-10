@@ -155,7 +155,9 @@ class TestGeneratingGuard:
         assert "1 of the 2 named operations still has generating to do (B)" in res["message"]
         assert "cam_get_status until completed=true" in res["message"]
         b.isGenerating = False
-        assert cc.handler(operation_a="A", operation_b="B")["isError"] is False
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        assert out["operation_a"] == "A" and out["operation_b"] == "B"
+        assert out["difference_count"] == 1
 
     def test_the_count_and_its_verb_agree_when_both_are_unsettled(self, install):
         # '1 ... still have' was the wart; the verb is interpolated off the count, so both spellings
@@ -172,7 +174,9 @@ class TestGeneratingGuard:
         a, b = _op("A", {"feed": "100"}), _op("B", {"feed": "200"})
         b.isGenerating = True                     # state 0 with a toolpath: the flag is lagging
         install([a, b])
-        assert cc.handler(operation_a="A", operation_b="B")["isError"] is False
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        assert out["operation_a"] == "A" and out["operation_b"] == "B"
+        assert out["difference_count"] == 1
 
 
 class TestDiffLogic:

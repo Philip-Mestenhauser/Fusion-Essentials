@@ -40,19 +40,21 @@ ENTRY_PATH = os.path.join(COMMANDS_DIR, "mcpServer", "entry.py")
 # The package entry.py's own relative imports resolve against (`from .guidance import resources`),
 # which is what lets one function be executed out of its AST and still reach the shipped package.
 ENTRY_PACKAGE = "mcpServer"
+_ENTRY_START_ERROR_LEVEL = object()
 
 
 class _FakeTaskManager:
     """Counts start/stop. It stands in for the add-in's own TaskManager, not for any adsk type, so
     conftest's shared adsk fakes have nothing to reuse here."""
 
-    def __init__(self):
+    def __init__(self, start_result=True):
         self.started = 0
         self.stopped = 0
+        self.start_result = start_result
 
     def start(self):
         self.started += 1
-        return True
+        return self.start_result
 
     def stop(self):
         self.stopped += 1
@@ -71,8 +73,9 @@ class _FakeServerModule:
         self._result = result
         self.seen = {}          # what start() actually handed the transport
 
-    def start_server(self, host, port, items=None, resources=None):
-        self.seen = {"host": host, "port": port, "items": items, "resources": resources}
+    def start_server(self, host, port, items=None, resources=None, attestation=None):
+        self.seen = {"host": host, "port": port, "items": items, "resources": resources,
+                     "attestation": attestation}
         if isinstance(self._result, Exception):
             raise self._result
         return self._result
@@ -94,9 +97,10 @@ def real_server_module():
     return load_mcp_server()
 
 
-def _run_start(real, *, result, collect_raises=None, ownership_raises=None, catalog=("resource",)):
+def _run_start(real, *, result, start_result=True, collect_raises=None, ownership_raises=None,
+               catalog=("resource",)):
     """Execute entry.start() against fakes; return the fake TaskManager and the collected log."""
-    tm = _FakeTaskManager()
+    tm = _FakeTaskManager(start_result=start_result)
     log = []
 
     def _collect_items():
@@ -109,14 +113,28 @@ def _run_start(real, *, result, collect_raises=None, ownership_raises=None, cata
             raise ownership_raises
 
     server_module = _FakeServerModule(result, real)
+    fake_levels = type("LogLevels", (), {"ErrorLogLevel": _ENTRY_START_ERROR_LEVEL})
+    fake_adsk = type("Adsk", (), {"core": type("Core", (), {"LogLevels": fake_levels})})
+
+    def _log(message, level=None):
+        log.append(("log", message))
+        if level is not None:
+            log.append(("log_level", level))
+
+    capture = type("Capture", (), {
+        "resume": staticmethod(lambda: log.append(("capture", "resume")) or True),
+        "finish": staticmethod(lambda: log.append(("capture", "finish"))),
+        "attest": staticmethod(lambda: {"complete": True})})()
     ns = {
         "TaskManager": tm,
         "mcp_server": server_module,
         "_collect_items": _collect_items,
         "_resource_catalog": lambda: list(catalog),
+        "loaded_attestation": capture,
         "_start_ownership_check": _start_ownership_check,
         "_warn_port_conflict": lambda reason: log.append(("warn", reason)),
-        "futil": type("F", (), {"log": staticmethod(lambda m: log.append(("log", m))),
+        "adsk": fake_adsk,
+        "futil": type("F", (), {"log": staticmethod(_log),
                                 "handle_error": staticmethod(
                                     lambda m: log.append(("error", m)))})(),
         "CMD_NAME": "MCP Server",
@@ -141,6 +159,7 @@ class TestStartStopsTheTaskManagerWhenNoServerRuns:
         assert tm.started == 1
         assert tm.stopped == 1, "the blanket except swallowed the failure and leaked the TaskManager"
         assert tm.running is False
+        assert [value for kind, value in log if kind == "capture"] == ["resume", "finish"]
         assert ("error", "MCP Server.start") in log, "the failure must still be reported"
 
     def test_a_raise_from_start_server_stops_the_task_manager(self, real_server_module):
@@ -152,6 +171,18 @@ class TestStartStopsTheTaskManagerWhenNoServerRuns:
                                 result={"status": real_server_module.START_PORT_IN_USE})
         assert tm.stopped == 1, "the port-conflict path must stop the TaskManager, and only once"
         assert any(kind == "warn" for kind, _ in log), "the user must still be warned"
+
+    def test_failed_task_manager_start_stops_without_collecting_or_binding(self, real_server_module):
+        tm, log, server = _run_start(
+            real_server_module, result=_ok_result(real_server_module), start_result=False,
+            collect_raises=RuntimeError("collection must not run after TaskManager start failure"))
+        assert (tm.started, tm.stopped) == (1, 1) and tm.running is False
+        assert server.seen == {}
+        assert not any(kind == "capture" for kind, _ in log)
+        assert ("error", "MCP Server.start") not in log
+        assert any("phase=task_manager_start" in message for kind, message in log if kind == "log")
+        assert [level for kind, level in log if kind == "log_level"] == [
+            _ENTRY_START_ERROR_LEVEL]
 
     def test_an_unknown_failure_status_stops_the_task_manager(self, real_server_module):
         tm, _log, _srv = _run_start(real_server_module, result={"status": "something-else",
@@ -180,6 +211,8 @@ class TestStartHandsTheServerItsResourceCatalog:
                                        catalog=[{"uri": "u", "text": "t"}])
         assert server.seen["resources"] == [{"uri": "u", "text": "t"}]
         assert server.seen["items"] == ["item"]
+        assert callable(server.seen["attestation"])
+        assert server.seen["attestation"]() == {"complete": True}
 
     def test_an_empty_catalog_is_still_passed_explicitly(self, real_server_module):
         # the server decides on the VALUE it is handed (an empty list advertises nothing), so an

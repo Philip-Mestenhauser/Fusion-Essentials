@@ -3,10 +3,12 @@ detachable effect, else verification=Verification(kind=...) from the closed set 
 reference it carries RESOLVES: an evidence_test node id pytest would collect and no other tool
 claims, a registered read poller, an observing receipt row, an OPEN ledger row. Gaps only shrink."""
 
-import ast
-import fnmatch
+import json
 import os
 import re
+import subprocess
+import sys
+import tempfile
 
 import pytest
 
@@ -194,17 +196,16 @@ class TestRungMeetsTheVerb:
                            "remove them:\n  " + "\n  ".join(stale))
 
 
-# A node id is resolved by PARSING its file with ast - neither importing the test module nor
-# running pytest's collection, so a reference costs one parse and a broken one cannot take the
-# lint down with it.
+# An evidence node id is spendable only when normal project discovery collects it. A bounded child
+# collection records pytest's structured session.items without executing tests.
 
 _DYNAMIC_TOOL = "sys_execute_script"          # the one caller-authored effect (the script hatch)
 _NODE_ID = re.compile(r"^tests/[\w/]+\.py(?:::\w+){1,2}$")
 _RECEIPT_REF = re.compile(r"^tests/live/[\w.]+\.md#\w+$")
 _DEFECT_ID = re.compile(r"^[A-Z][A-Z0-9]*-\d+$")
 # A receipt bucket that records the ABSENCE of an observation. A reference to one of these names a
-# row that exists but proves nothing, which is what a gap is for (the receipt's own header classes
-# a skipped row "Not verified - excused").
+# row that exists but proves nothing, which is what a gap is for (the receipt's own header classes a
+# skipped row "Not verified - excused").
 _EMPTY_BUCKETS = ("skipped", "pending")
 # An OPEN row of the defect ledger: an unticked checkbox opening the line, then the id.
 _OPEN_ROW = r"^- \[ \] {id}\b"
@@ -213,61 +214,64 @@ _OPEN_ROW = r"^- \[ \] {id}\b"
 # check skips rather than passes when it cannot find it.
 _LEDGER_NAME = "backlog.md"
 
-# pytest's COLLECTION rules, which are what make a node id spendable: python_files
-# (test_*.py / *_test.py), python_classes (Test*) and python_functions (test*) are its defaults,
-# and pytest.ini overrides none of them. A class carrying __init__ is skipped with a collection
-# warning rather than instantiated, so its methods never run either. Existing under a
-# test-shaped id is not the same as running: a fixture, a module helper, a private method, a
-# plain class's method and anything at all in conftest.py all parse and none of them is a test.
-_PYTEST_FILE_GLOBS = ("test_*.py", "*_test.py")
-_PYTEST_CLASS_PREFIX = "Test"
-_PYTEST_FUNC_PREFIX = "test"
+_COLLECTOR_PLUGIN = '''import json
+import os
 
 
-def _is_def(node, name):
-    return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+def pytest_collection_finish(session):
+    with open(os.environ["FUSION_EVIDENCE_NODE_IDS"], "w", encoding="utf-8") as stream:
+        json.dump([item.nodeid for item in session.items], stream)
+'''
 
 
-def _resolve_node_id(node_id):
-    """'' when the node id names a test pytest would COLLECT, else why it does not.
+def _collected_node_ids():
+    """The node ids normal project discovery collects, or a bounded collection failure."""
+    with tempfile.TemporaryDirectory(prefix="fusion-evidence-collection-") as temporary:
+        plugin_path = os.path.join(temporary, "_fusion_evidence_collector.py")
+        result_path = os.path.join(temporary, "node_ids.json")
+        with open(plugin_path, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(_COLLECTOR_PLUGIN)
+        env = os.environ.copy()
+        env.pop("PYTEST_ADDOPTS", None)
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["FUSION_EVIDENCE_NODE_IDS"] = result_path
+        env["PYTHONPATH"] = temporary + (
+            os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        command = [sys.executable, "-m", "pytest", "--collect-only", "-q", "--color=no",
+                   "-p", "no:cacheprovider", "-p", "_fusion_evidence_collector", "tests"]
+        try:
+            result = subprocess.run(command, cwd=REPO_ROOT, env=env, capture_output=True,
+                                    encoding="utf-8", errors="replace", timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return frozenset(), f"pytest collection could not finish: {exc}"
+        detail = (result.stdout + "\n" + result.stderr).strip()
+        if result.returncode not in (0, 5):
+            return frozenset(), (f"pytest collection exited {result.returncode}: "
+                                 + (detail[-1200:] or "no diagnostic output"))
+        try:
+            with open(result_path, encoding="utf-8") as stream:
+                node_ids = json.load(stream)
+        except (OSError, ValueError) as exc:
+            return frozenset(), f"pytest collection produced no readable node-id record: {exc}"
+        if not isinstance(node_ids, list) or not all(isinstance(node, str) for node in node_ids):
+            return frozenset(), "pytest collection produced a malformed node-id record"
+        return frozenset(node.replace("\\", "/") for node in node_ids), ""
 
-    Resolves '<file>.py::test_x' and '<file>.py::TestClass::test_x' by PARSING the file: the class
-    is looked up at module level and the test function inside it, so a renamed or deleted test is
-    a miss rather than a claim that still reads well. Every part is also held to the collection
-    rules above, so a symbol that exists but never runs is a miss too - the obligation a
-    declaration points at has to be one someone can spend."""
+
+def _resolve_node_id(node_id, collected=None, collection_problem=""):
+    """'' when normal pytest discovery collects the evidence node id, else why it does not."""
     if not _NODE_ID.match(node_id):
         return "not a 'tests/<file>.py::[Class::]test_name' node id"
-    parts = node_id.split("::")
-    base = os.path.basename(parts[0])
-    if not any(fnmatch.fnmatch(base, glob) for glob in _PYTEST_FILE_GLOBS):
-        return (f"{base} is not a file pytest collects "
-                f"({' / '.join(_PYTEST_FILE_GLOBS)}) - nothing in it runs as a test")
-    path = os.path.join(REPO_ROOT, *parts[0].split("/"))
+    path = os.path.join(REPO_ROOT, *node_id.split("::", 1)[0].split("/"))
     if not os.path.isfile(path):
-        return f"no such test file: {parts[0]}"
-    with open(path, encoding="utf-8") as fh:
-        tree = ast.parse(fh.read(), filename=path)
-    body, where = tree.body, parts[0]
-    if len(parts) == 3:
-        cls = next((n for n in tree.body
-                    if isinstance(n, ast.ClassDef) and n.name == parts[1]), None)
-        if cls is None:
-            return f"{parts[0]} defines no class {parts[1]}"
-        if not cls.name.startswith(_PYTEST_CLASS_PREFIX):
-            return (f"{parts[0]}'s {cls.name} is not a class pytest collects "
-                    f"({_PYTEST_CLASS_PREFIX}*)")
-        if any(_is_def(n, "__init__") for n in cls.body):
-            return (f"{parts[0]}'s {cls.name} defines __init__, so pytest skips the class and "
-                    "none of its methods run")
-        body, where = cls.body, f"{parts[0]}::{parts[1]}"
-    fn = parts[-1]
-    if not fn.startswith(_PYTEST_FUNC_PREFIX):
-        return (f"{fn} is not a name pytest collects ({_PYTEST_FUNC_PREFIX}*) - a fixture or "
-                "helper of that name is never run as this tool's proof")
-    if not any(_is_def(n, fn) for n in body):
-        return f"{where} defines no test named {fn}"
-    return ""
+        return f"no such test file: {node_id.split('::', 1)[0]}"
+    if collected is None:
+        collected, collection_problem = _collected_node_ids()
+    if collection_problem:
+        return collection_problem
+    if node_id in collected or any(node.startswith(node_id + "[") for node in collected):
+        return ""
+    return "pytest did not collect this node id under the project's normal tests/ discovery"
 
 
 def _resolve_receipt(ref):
@@ -353,14 +357,18 @@ class TestVerificationDeclarations:
                            f"{list(Verification.KINDS)}:\n  " + "\n  ".join(wrong))
 
     def test_every_declared_evidence_test_resolves(self):
+        declared = [(it.get_name(), _verification_of(it).evidence_test)
+                    for it in register_all_tools()
+                    if (_verification_of(it) is not None
+                        and _verification_of(it).evidence_test)]
+        collected, collection_problem = _collected_node_ids()
+        if collection_problem:
+            pytest.fail("evidence_test node ids could not be collected: " + collection_problem)
         broken = []
-        for it in register_all_tools():
-            v = _verification_of(it)
-            if v is None or not v.evidence_test:
-                continue
-            why = _resolve_node_id(v.evidence_test)
+        for tool_name, node_id in declared:
+            why = _resolve_node_id(node_id, collected, collection_problem)
             if why:
-                broken.append(f"{it.get_name()} -> {v.evidence_test}: {why}")
+                broken.append(f"{tool_name} -> {node_id}: {why}")
         assert not broken, (
             "these tools name an evidence_test that does not resolve - the test was renamed, moved "
             "or deleted, so the declaration claims a proof nobody can run. Point the declaration at "

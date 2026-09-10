@@ -161,7 +161,7 @@ cython_debug/
 CLAUDE.local.md
 
 # Local backlog and short-lived plans are private; keep open work in plans/backlog.md.
-# Temporary scripts/handoffs belong in .cache; retained evidence in outputs/review-archive.
+# Agent scratch files and task artifacts are private.
 /plans/
 .claude/plans/
 
@@ -183,5 +183,4 @@ tests/live/cloud_config.local.json
 # the archives are not.
 tests/live/results/
 
-# Retained local review evidence and private session receipts.
-/outputs/review-archive/
+/outputs/

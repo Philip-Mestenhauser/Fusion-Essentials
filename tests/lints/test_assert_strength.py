@@ -11,7 +11,7 @@ from pathlib import Path
 
 import _corpus
 
-TESTS = Path(__file__).parent
+TESTS = Path(__file__).parents[1]
 
 # test-id -> one-line audited reason a bare flag check is genuinely sufficient. Shrink-only.
 _EXEMPT = {}
@@ -43,7 +43,7 @@ def _asserts_by_call(fn):
         if isinstance(node, ast.Call):
             f = node.func
             name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
-            if name in ("raises", "fail") or name.startswith("assert"):
+            if name in ("raises", "fail") or name.startswith("assert_"):
                 return True
     return False
 

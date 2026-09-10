@@ -128,3 +128,40 @@ docstring says so.
 See [CLAUDE.md](CLAUDE.md) for the recipe - which pattern to copy (a rich read, a fuller fake object
 model, or a pure function), the mandatory test shape, and how to update a test when the behavior it
 pins changes.
+
+## Offline API change-impact report
+
+`api_change_report.py` promotes the API explorer's declaration parser and shares the exact-byte
+AST loader with `gen_api_surface.py`. It does not import `adsk`, contact Fusion, regenerate facts,
+or change live receipts. Capture each build from an explicit `adsk` directory containing `.py`
+bindings, then compare two snapshots with the same declaration representation:
+
+```powershell
+py -3 tests/api_change_report.py snapshot --bindings-dir "C:\path\to\Api\Python\packages\adsk" --build-label "2705.1.15" --out outputs/api-history/2705.1.15.json
+py -3 tests/api_change_report.py diff outputs/api-history/before.json outputs/api-history/after.json --out outputs/api-history/impact.json
+```
+
+The build label is caller-supplied, not loaded-build attestation. Snapshots record exact binding
+paths, byte SHA-256 hashes, scanner hashes, available modules, and absent known namespaces.
+A webdeploy channel/directory ID is recorded when present in the path. Outputs are exclusive-create:
+choose a new filename for another capture; existing snapshots and reports are never overwritten.
+Snapshots carry a content digest checked before comparison. Keep the original snapshots, rather
+than editing their labels or declarations. Earlier exploratory snapshot formats require recapture.
+
+The diff refuses incompatible formats, namespace scopes, or SWIG-versus-Python representations.
+It compares only namespaces available on both sides; a newly available or unavailable namespace
+is reported separately, never as a batch of symbol additions/removals. Changed records include
+method overload signatures, property readability/writability and setter signatures, enum/constant
+expressions or literal values, documentation hashes, and preview/retired/unsupported wording markers.
+SWIG references to native enum constants do not reveal their numeric values. Generic `*args`
+signatures and documentation markers are declarations, not verified runtime contracts.
+
+`--repo PATH` selects the source checkout to map against (default: this command's checkout).
+Affected tools and acceptance cases are explicitly `syntactic_candidate`: attribute names and
+local import chains identify leads; unit filenames, literal live rows, and explicit tool mentions
+identify candidate checks. Source hashes and line locations accompany them. This can overmatch
+common names and miss dynamic references or scenarios that never name a tool. Empty matches do
+not prove no impact, and candidate tests have not been run or certified sufficient by the report.
+A zero-change report proves only that the compared declaration records match.
+
+Focused verification: `py -3 -m pytest tests/unit/test_api_change_report.py tests/unit/test_generators.py -q`.

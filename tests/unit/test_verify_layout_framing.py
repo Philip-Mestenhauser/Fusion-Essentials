@@ -139,3 +139,149 @@ class TestSketchView:
         stale = ("view_set", {"action": "orient", "orientation": "iso-top-right",
                               "focus": "FarS"}, "ok", None)
         assert verify_layout._framed([stale])[0][1]["orientation"] == "front"
+
+
+def _component(name, low, high):
+    """One component with a line whose endpoints define its authored layout box."""
+    sketch = name + "Sketch"
+    return [
+        ("model_create_component", {"name": name, "activate": True}, "ok", None),
+        ("sketch_create", {"name": sketch, "plane": "xy"}, "ok", None),
+        ("sketch_add_geometry", {"sketch_name": sketch, "kind": "line",
+                                 "x1": low[0], "y1": low[1],
+                                 "x2": high[0], "y2": high[1]}, "ok", None),
+    ]
+
+
+class TestFocusCap:
+    def test_a_whole_known_neighbour_group_cannot_overrun_the_focus_cap(self):
+        focus, _box = verify_layout._frame_neighbourhood(
+            ["Subject"], [0.0, 1.0, 0.0, 1.0],
+            [(["NearA", "NearB", "NearC"], [10.0, 11.0, 0.0, 1.0])],
+            target=100.0, cap=2)
+        assert focus == ["Subject"]
+
+    def test_an_unknown_subject_still_enforces_the_focus_cap_by_whole_group(self):
+        focus, _box = verify_layout._frame_neighbourhood(
+            ["Unknown"], None,
+            [(["NearA", "NearB", "NearC"], [10.0, 11.0, 0.0, 1.0])],
+            target=100.0, cap=2)
+        assert focus == ["Unknown"]
+
+
+class TestPatternSuffix:
+    def test_a_plain_name_ending_in_one_is_not_treated_as_a_colon_one_occurrence(
+            self, monkeypatch):
+        monkeypatch.setattr(verify_layout, "_PATTERNED", {"Part"})
+        monkeypatch.setitem(verify_layout._PLACED_BOX, "Neighbor", [600.0, 700.0, 0.0, 100.0])
+        monkeypatch.setitem(verify_layout._PLACED_BOX, "Part11", [0.0, 100.0, 0.0, 100.0])
+        rows = verify_layout._framed(_made("Neighbor") + _made("Part11"))
+        assert _frames(rows)[-1] == ["Part11:1"]
+
+
+class TestCollisionRefusal:
+    def test_a_second_row_still_blocked_is_refused(self, monkeypatch):
+        monkeypatch.setattr(verify_layout, "_PLACE_ANCHORED",
+                            tuple(verify_layout._PLACE_ANCHORED) + ("Blocker",))
+        program = [("blocked", None,
+                    _component("Blocker", (200.0, 220.0), (1100.0, 500.0))
+                    + _component("Target", (1300.0, 1300.0), (1320.0, 1320.0)), None)]
+        with pytest.raises(ValueError, match="Target"):
+            verify_layout._place_slots(program)
+
+    def test_a_cell_wider_than_the_field_is_refused(self):
+        program = [("wide", None,
+                    _component("TooWide", (1200.0, 500.0), (2200.0, 520.0)), None)]
+        with pytest.raises(ValueError, match="TooWide"):
+            verify_layout._place_slots(program)
+
+
+class TestJointGroupLocking:
+    def test_locking_one_joint_member_keeps_every_member_on_authored_ground(self):
+        program = [("joint", None,
+                    _component("BallSphere", (-10.0, -10.0), (10.0, 10.0))
+                    + _component("BallPost", (500.0, 500.0), (520.0, 520.0)), None)]
+        assert verify_layout._place_slots(program) == {}
+
+
+class TestSketchHoistOwner:
+    def test_hoist_uses_recorded_active_owner_through_reading_order(self):
+        narrative = [
+            ("model_create_component", {"name": "OwnerA", "activate": True}, "ok", None),
+            ("model_create_component", {"name": "NearB", "activate": True}, "ok", None),
+            ("design_activate_component", {"occurrence": "OwnerA:1"}, "ok", None),
+            ("sketch_create", {"name": "OwnedSketch", "plane": "xy"}, "ok", None),
+            ("sketch_add_geometry", {"sketch_name": "OwnedSketch", "kind": "line",
+                                     "x1": 0.0, "y1": 0.0, "x2": 20.0, "y2": 0.0},
+             "ok", None),
+        ]
+        hoisted, _kept = verify_layout._sketches_first(
+            [("owners", None, narrative, None)], set())
+        created = [s[1]["name"] for s in hoisted if s[0] == "model_create_component"]
+        assert created == ["OwnerA"]
+        reading = verify_layout._sketch_reading_order(hoisted, {"OwnerA": (0.0, 0.0)})
+        reading_created = [s[1]["name"] for s in reading
+                           if s[0] == "model_create_component"]
+        assert reading_created == ["OwnerA"]
+
+class TestMappedPatternIdentity:
+    def test_an_exact_mapped_pattern_key_still_widens_the_frame(self, monkeypatch):
+        monkeypatch.setattr(verify_layout, "_PATTERNED", {"Pattern:1"})
+        monkeypatch.setitem(verify_layout._CHUNK_OF, "Alias", "Pattern:1")
+        monkeypatch.setitem(verify_layout._CHUNK_OF, "Alias:1", "Pattern:1")
+        monkeypatch.setitem(verify_layout._PLACED_BOX, "Pattern:1",
+                            [0.0, 100.0, 0.0, 100.0])
+        monkeypatch.setitem(verify_layout._PLACED_BOX, "Neighbor",
+                            [600.0, 700.0, 0.0, 100.0])
+        rows = verify_layout._framed(_made("Neighbor") + _made("Alias"))
+        assert _frames(rows)[-1] == ["Alias:1", "Neighbor:1"]
+
+
+class TestNonactivatingSketchOwner:
+    def test_hoist_creates_then_activates_a_recorded_owner(self):
+        narrative = [
+            ("model_create_component", {"name": "OwnerA", "activate": False}, "ok", None),
+            ("design_activate_component", {"occurrence": "OwnerA:1"}, "ok", None),
+            ("sketch_create", {"name": "OwnedSketch", "plane": "xy"}, "ok", None),
+            ("sketch_add_geometry", {"sketch_name": "OwnedSketch", "kind": "line",
+                                     "x1": 0.0, "y1": 0.0, "x2": 20.0, "y2": 0.0},
+             "ok", None),
+        ]
+        hoisted, _kept = verify_layout._sketches_first(
+            [("owner", None, narrative, None)], set())
+        reading = verify_layout._sketch_reading_order(hoisted, {"OwnerA": (0.0, 0.0)})
+        tools = [step[0] for step in reading]
+        create_at = tools.index("model_create_component")
+        activate_at = tools.index("design_activate_component")
+        sketch_at = tools.index("sketch_create")
+        assert create_at < activate_at < sketch_at
+        assert reading[create_at][1]["activate"] is False
+        assert reading[activate_at][1]["occurrence"] == "OwnerA:1"
+
+    @pytest.mark.parametrize("second_activates", [False, True])
+    def test_multiple_hoisted_creates_precede_their_sketch_activation(self, second_activates):
+        a = _component("A", (400.0, 400.0), (420.0, 420.0))
+        b = _component("B", (500.0, 500.0), (520.0, 520.0))
+        narrative = [
+            ("model_create_component", {"name": "A", "activate": False}, "ok", None),
+            ("model_create_component", {"name": "B", "activate": second_activates}, "ok", None),
+            ("design_activate_component", {"occurrence": "B:1"}, "ok", None),
+        ] + b[1:] + [
+            ("design_activate_component", {"occurrence": "A:1"}, "ok", None),
+        ] + a[1:]
+        hoisted, _kept = verify_layout._sketches_first(
+            [("owners", None, narrative, None)], set())
+        reading = verify_layout._sketch_reading_order(hoisted, {"A": (0, 0), "B": (100, 0)})
+        for rows in (hoisted, reading):
+            created, owners, active = set(), {}, None
+            for tool, args, _expected, _capture in rows:
+                if tool == "model_create_component":
+                    created.add(args["name"])
+                    if args.get("activate"):
+                        active = args["name"]
+                elif tool == "design_activate_component":
+                    active = args["occurrence"].removesuffix(":1")
+                    assert active == "root" or active in created
+                elif tool == "sketch_create":
+                    owners[args["name"]] = active
+            assert owners == {"ASketch": "A", "BSketch": "B"}

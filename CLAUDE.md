@@ -11,7 +11,7 @@ code is the source of truth — match the nearest existing tool when in doubt.
 ## Planning files
 
 Keep `plans` sparse. `plans/backlog.md` is the single ledger for actionable work; update an existing row instead of creating another plan or status report.
-Put temporary scripts and worker handoffs in `.cache`, deliverables in `outputs`, and retained review evidence in the ignored `outputs/review-archive` directory. Remove disposable scaffolding when a task finishes.
+Put agent scratch files, reports, evidence, exports and worker handoffs in the gitignored `outputs/` directory. Reserve `tests/live/evals/results/` for actual eval runs and `.cache` for tooling caches and isolated worktrees. Remove disposable scaffolding when a task finishes.
 
 ## Read vs Edit — the two kinds (and the read shapes)
 

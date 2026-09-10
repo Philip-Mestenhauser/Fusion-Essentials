@@ -31,6 +31,7 @@ run. Extend coverage by adding rows, not code.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -38,15 +39,19 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from tool_verify import call, health_gate, registered_tools  # noqa: E402  shared HTTP plumbing
+from tool_verify import (  # noqa: E402  shared HTTP plumbing
+    attestation_identity, call, health_gate, registered_tools)
 import cloud_config  # noqa: E402  the operator's hub/project/folder, never a literal in this file
 CLOUD_PROJECT = cloud_config.PROJECT
 
 LEDGER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERIFIED_API_FACTS.md")
 FACTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                      "live_api_facts.py")
-TOOLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))), "commands", "mcpServer", "tools")
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+TOOLS_DIR = os.path.join(REPO_ROOT, "commands", "mcpServer", "tools")
+_ATTESTATION_TCB = ("Fusion-Essentials.py", "lib/loaded_attestation.py")
+_ATTESTATION_FIELDS = ("implementation_fingerprint", "schema_fingerprint",
+                       "load_id", "session_id")
 
 # Every adsk enum FAMILY the tools reference, scraped from the tool sources so the sweep tracks the
 # codebase - a new enum a tool starts using is measured automatically, no row edit. The value-pinning
@@ -3877,9 +3882,9 @@ ROWS = [
         if set(hits) != WANT:
             named_trio = False
         shared = set()
-        for t in hits:
+        for i, t in enumerate(hits):
             cls = set(tdq.allClasses(False, t, desig))
-            shared = cls if not shared else (shared & cls)
+            shared = cls if i == 0 else (shared & cls)
         if len(hits) != 3 or not shared:
             same = False
             detail.append(desig + ": " + str(len(hits)) + " types, shared classes "
@@ -6985,15 +6990,74 @@ def _close_scratch(scratch_handle):
         return False
     return _scratch_row(rows, scratch_handle) is None
 
-def _fusion_version():
-    health_gate()
+def _fusion_version(health=None):
+    if health is None:
+        health_gate()
     is_error, payload = call("workspace_orient", {})
     if is_error or not isinstance(payload, dict) or "fusion_version" not in payload:
         sys.exit("workspace_orient did not return fusion_version - is the add-in current?")
     return payload["fusion_version"]
 
 
-_STAMP_RE = re.compile(r"^Stamp: Fusion (\S+) \| verified (\S+)$", re.M)
+_STAMP_RE = re.compile(r"^Stamp: Fusion (\S+) \| verified (\S+) \| source ([0-9a-f]{64})$", re.M)
+_LOADED_RE = re.compile(
+    r"^Loaded: implementation ([0-9a-f]{64}) \| schema ([0-9a-f]{64}) \| load (\S+) \| session (\S+)$",
+    re.M)
+
+
+def _measure_source_hash():
+    """Return the normalized hash of this harness and the capture trust boundary."""
+    entries = [("tests/live/measure_api.py", __file__)]
+    entries.extend((rel, os.path.join(REPO_ROOT, *rel.split("/")))
+                   for rel in _ATTESTATION_TCB)
+    hasher = hashlib.sha256()
+    for rel, source_path in entries:
+        with open(source_path, encoding="utf-8", newline=None) as fh:
+            source = fh.read().replace("\r\n", "\n").replace("\r", "\n")
+        hasher.update(rel.encode("utf-8") + b"\0" + source.encode("utf-8") + b"\0")
+    return hasher.hexdigest()
+
+
+def _current_attestation(health=None):
+    """Return a complete loaded identity from health or refuse the run."""
+    identity = attestation_identity(health if health is not None else health_gate())
+    if identity is None:
+        sys.exit("health did not provide a complete loaded implementation/schema identity")
+    return identity
+
+
+def _attestation_drift(expected, current):
+    """The first loaded identity field that changed, or None."""
+    if current is None:
+        return "loaded attestation became unavailable"
+    for field in _ATTESTATION_FIELDS:
+        if current.get(field) != expected.get(field):
+            return field + " changed"
+    return None
+
+
+def _ledger_cell(value):
+    return str(value).replace("|", "/")
+
+
+def _ledger_fields(row, result="PASS"):
+    return tuple(_ledger_cell(value) for value in
+                 (result, row["id"], row["claim"], row["encoded_in"]))
+
+
+def _ledger_row(row, status="PASS", detail=""):
+    result = status if status == "PASS" else "{0}: {1}".format(status, detail)
+    return "| " + " | ".join(_ledger_fields(row, result)) + " |"
+
+
+def _ledger_projection(text):
+    projection = []
+    for line in text.splitlines():
+        cells = line.split("|")
+        if len(cells) == 6 and not cells[0].strip() and not cells[-1].strip():
+            if cells[1].strip() not in ("result", "---"):
+                projection.append(tuple(cell.strip() for cell in cells[1:5]))
+    return projection
 
 
 def write_api_facts(facts, fusion_version, stamp_date, shapes=None):
@@ -7065,8 +7129,12 @@ def write_api_facts(facts, fusion_version, stamp_date, shapes=None):
     return FACTS
 
 
-def write_ledger(results, fusion_version, stamp_date):
+def write_ledger(results, fusion_version, stamp_date, source_hash, attestation):
     """Regenerate VERIFIED_API_FACTS.md from measurement results. results rows are (row, status, detail)."""
+    if not isinstance(attestation, dict) or not all(
+            isinstance(attestation.get(field), str) and attestation[field]
+            for field in _ATTESTATION_FIELDS):
+        raise ValueError("ledger needs the complete loaded implementation/schema/session identity")
     lines = [
         "# Live-verified mock contracts (generated by measure_api.py - do not edit)",
         "",
@@ -7083,16 +7151,17 @@ def write_ledger(results, fusion_version, stamp_date):
         "re-run to refresh the stamp. `--check` fails when the stamp differs from the installed",
         "Fusion or any row is not PASS.",
         "",
-        "Stamp: Fusion {0} | verified {1}".format(fusion_version, stamp_date),
+        "Stamp: Fusion {0} | verified {1} | source {2}".format(
+            fusion_version, stamp_date, source_hash),
+        "Loaded: implementation {0} | schema {1} | load {2} | session {3}".format(
+            attestation["implementation_fingerprint"], attestation["schema_fingerprint"],
+            attestation["load_id"], attestation["session_id"]),
         "",
         "| result | claim id | claim | encoded in |",
         "|---|---|---|---|",
     ]
     for row, status, detail in results:
-        result = status if status == "PASS" else "{0}: {1}".format(status, detail)
-        lines.append("| {0} | {1} | {2} | {3} |".format(
-            result.replace("|", "/"), row["id"], row["claim"].replace("|", "/"),
-            row["encoded_in"].replace("|", "/")))
+        lines.append(_ledger_row(row, status, detail))
     with open(LEDGER, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(lines) + "\n")
 
@@ -7105,20 +7174,39 @@ def check():
     with open(LEDGER, encoding="utf-8") as fh:
         text = fh.read()
     m = _STAMP_RE.search(text)
-    if not m:
-        print("VERIFIED_API_FACTS.md has no stamp line - regenerate it (run measure_api.py).")
+    loaded = _LOADED_RE.search(text)
+    if not m or not loaded:
+        print("VERIFIED_API_FACTS.md has no complete stamp/source/loaded identity - "
+              "regenerate it (run measure_api.py).")
         return 1
-    stamped_version, stamped_date = m.group(1), m.group(2)
+    stamped_version, stamped_date, stamped_source = m.group(1), m.group(2), m.group(3)
+    stamped_attestation = dict(zip(_ATTESTATION_FIELDS, loaded.groups()))
+    table_lines = [ln for ln in text.splitlines()
+                   if ln.startswith("|") and not ln.startswith(("| result", "|---"))]
     problems = [
+        "malformed ledger row: " + ln
+        for ln in table_lines
+        if len(ln.split("|")) != 6
+    ] + [
         "non-PASS row: " + ln
-        for ln in text.splitlines()
-        if ln.startswith("|") and not ln.startswith(("| result", "|---", "| PASS "))
+        for ln in table_lines
+        if not ln.startswith("| PASS ")
     ]
-    live = _fusion_version()
+    health = health_gate()
+    current_attestation = _current_attestation(health)
+    live = _fusion_version(health)
+    if _ledger_projection(text) != [_ledger_fields(row) for row in ROWS]:
+        problems.append("ledger rows do not match the current ROWS registry (id/claim/source/order)")
     if live != stamped_version:
         problems.append("stamp is Fusion {0} (verified {1}) but the installed Fusion is {2} - "
                         "re-run the measurements to refresh the stamp".format(
                             stamped_version, stamped_date, live))
+    if _measure_source_hash() != stamped_source:
+        problems.append("ledger source hash does not match the measurement/capture source - "
+                        "re-run the measurements to refresh the stamp")
+    for field in ("implementation_fingerprint", "schema_fingerprint"):
+        if stamped_attestation[field] != current_attestation[field]:
+            problems.append("ledger loaded {0} does not match the current server".format(field))
     if problems:
         print("\n".join(problems))
         return 1
@@ -7145,6 +7233,7 @@ def run_measurements(write_json, only=None):
             sys.exit("Unknown measurement row ID(s): " + ", ".join(unknown)
                      + ". Choose IDs from the ROWS registry in tests/live/measure_api.py; "
                      + "repeat --only for each selected row.")
+    source_hash = _measure_source_hash()
     # FIRST, before any read of the session: these rows find their project BY NAME, and unconfigured
     # each would fail on an empty name and take the all-PASS gate down with it. Nothing here needs
     # Fusion, so the refusal costs no connection and opens no scratch document.
@@ -7154,8 +7243,10 @@ def run_measurements(write_json, only=None):
                  "Write it holding {3}, or re-run with --only naming rows that do not read it."
                  .format(len(blocked), ", ".join(blocked), cloud_config.CONFIG_PATH,
                          cloud_config.CONFIG_SHAPE))
-    fusion_version = _fusion_version()
-    if "sys_execute_script" not in registered_tools():
+    health = health_gate()
+    pinned_attestation = _current_attestation(health)
+    fusion_version = _fusion_version(health)
+    if "sys_execute_script" not in registered_tools(health):
         sys.exit("sys_execute_script is not registered - enable allow_execute_api_script in the "
                  "mcpServer settings and reload the add-in, then re-run.")
     is_error, payload = call("doc_new", {})
@@ -7203,6 +7294,20 @@ def run_measurements(write_json, only=None):
     if not cleanup_ok:
         print("Measurement evidence NOT published: scratch cleanup was not confirmed.")
         return 1
+    if _measure_source_hash() != source_hash:
+        print("Measurement evidence NOT published: measurement/capture source "
+              "changed during the run.")
+        return 1
+    try:
+        current_attestation = _current_attestation()
+    except (Exception, SystemExit) as exc:
+        print("Measurement evidence NOT published: loaded attestation could not be read: "
+              + str(exc))
+        return 1
+    identity_problem = _attestation_drift(pinned_attestation, current_attestation)
+    if identity_problem:
+        print("Measurement evidence NOT published: " + identity_problem + " during the run.")
+        return 1
     stamp_date = time.strftime("%Y-%m-%d")
     # The ledger and live_api_facts.py describe ONE run and are written on the same condition:
     # a partial or failing run leaves both at the last complete run, so the stamp never claims
@@ -7214,7 +7319,7 @@ def run_measurements(write_json, only=None):
         print("\n{0} and live_api_facts.py NOT rewritten - this was a --only run of {1} row(s). "
               "Run the full sweep to republish.".format(os.path.basename(LEDGER), len(results)))
     elif all(s == "PASS" for _, s, _ in results):
-        write_ledger(results, fusion_version, stamp_date)
+        write_ledger(results, fusion_version, stamp_date, source_hash, pinned_attestation)
         print("\nwrote {0} (stamp: Fusion {1}, {2})".format(LEDGER, fusion_version, stamp_date))
         print("wrote {0} ({1} enum families, {2} not-an-enum families, {3} behavior flags, "
               "{4} shaped types)".format(

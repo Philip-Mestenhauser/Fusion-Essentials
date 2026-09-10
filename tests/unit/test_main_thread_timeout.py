@@ -158,12 +158,37 @@ class TestPostAndTheFireBoundary:
             "a post whose fire failed returned None - the caller has no task_id to cancel with, so "
             "the entry it left behind is unreachable until the TTL reap")
 
-    def test_a_false_fire_drops_the_task_and_reports_the_reason(self, tm, armed, monkeypatch):
-        dropped = []
-        self._fake_app(tm, monkeypatch, lambda _event_id, _payload: False)
-        assert armed.post("cmd", lambda data: None, {}, on_drop=dropped.append) is None
-        assert dropped == ["custom_event_not_fired"]
-        assert armed.get_pending_task_count() == 0
+    def test_a_false_fire_can_deliver_before_post_returns_once(self, tm, armed, monkeypatch):
+        fired = {}
+        ran = []
+
+        def _fire(_event_id, payload):
+            fired["payload"] = payload
+            tm.TaskEventHandler(armed._pending_tasks).notify(
+                types.SimpleNamespace(additionalInfo=payload))
+            return False
+
+        self._fake_app(tm, monkeypatch, _fire)
+        task_id = armed.post("cmd", lambda data: ran.append(data), {"x": 1})
+        assert task_id and ran == [{"x": 1}] and armed.get_pending_task_count() == 0
+        tm.TaskEventHandler(armed._pending_tasks).notify(
+            types.SimpleNamespace(additionalInfo=fired["payload"]))
+        assert ran == [{"x": 1}]
+
+    def test_cancel_wins_before_a_false_delivered_event(self, tm, armed, monkeypatch):
+        fired = {}
+        ran = []
+
+        def _fire(_event_id, payload):
+            fired["payload"] = payload
+            return False
+
+        self._fake_app(tm, monkeypatch, _fire)
+        task_id = armed.post("cmd", lambda data: ran.append(data), {})
+        assert armed.cancel(task_id) is True
+        tm.TaskEventHandler(armed._pending_tasks).notify(
+            types.SimpleNamespace(additionalInfo=fired["payload"]))
+        assert ran == [] and armed.get_pending_task_count() == 0
 
     def test_a_successful_fire_keeps_the_task_pending_for_notify(self, tm, armed, monkeypatch):
         seen = {}

@@ -795,6 +795,7 @@ class TestPocketFilter:
             flt = {"holes": True, key: 2.0} if key == "min_hole_diameter" else {key: 2.0}
             _op, res = self._run(monkeypatch, flt)
             assert res["isError"] is False, (key, res)
+            assert key in json.loads(res["content"][0]["text"])["pocket_filter_applied"], (key, res)
 
 
 # ── the sketch selection (whole sketches, by name) ───────────────────────────

@@ -9,7 +9,7 @@ sketch geometry and user parameters, never bodies.
 
 from verify_core import (
     EXPORT_DIR, SVG96_PATH, SVG_PATH, _datum_plane, _dim_measures, _extruded, _made_component,
-    _param_added, _param_favorited, _params_listed, _svg96_extent, _watch_all)
+    _param_added, _param_favorited, _params_listed, _refused, _svg96_extent, _watch_all)
 from verify_layout import _px, _py
 
 
@@ -750,6 +750,52 @@ _SKETCHWORK = [
     # the layout inputs shape NEW text only: passing one to an EDIT is refused, never ignored.
     ("sketch_set_text", {"text": "FIT", "sketch_name": "TextPaths", "angle_deg": 15},
      "refused", None),
+    ("sketch_create", {"plane": "xy", "name": "TextBinding"}, "ok", None),
+    ("param_add", {"name": "SweepLabel", "unit": "Text", "expression": "'ALPHA'"},
+     lambda p: p.get("parameter", {}).get("value") == "ALPHA", None),
+    ("sketch_set_text", {"sketch_name": "TextBinding", "text": "seed", "create": True,
+                         "x": 1200, "y": 120, "height": 5, "font_name": "Arial"},
+     lambda p: p.get("sketch_text_count") == 1, None),
+    ("sketch_set_text", {"sketch_name": "TextBinding", "index": 0, "parameter": "SweepLabel"},
+     lambda p: p.get("changed_count") == 1
+     and p["changed"][0].get("expression") == "SweepLabel", None),
+    ("sketch_get", {"sketch_name": "TextBinding", "include_entities": True},
+     lambda p: [(e.get("text"), e.get("text_expression"))
+                for e in p.get("entities", []) if e.get("type") == "text"]
+     == [("ALPHA", "SweepLabel")], None),
+    ("param_set", {"name": "SweepLabel", "expression": "'BETA'"},
+     lambda p: p.get("after", {}).get("value") == "BETA", None),
+    ("sketch_get", {"sketch_name": "TextBinding", "include_entities": True},
+     lambda p: [(e.get("text"), e.get("text_expression"))
+                for e in p.get("entities", []) if e.get("type") == "text"]
+     == [("BETA", "SweepLabel")], None),
+    ("sketch_set_text", {"sketch_name": "TextBinding", "index": 0, "text": ""},
+     lambda p: p.get("changed_count") == 1 and p["changed"][0].get("after") == "", None),
+    ("sketch_get", {"sketch_name": "TextBinding", "include_entities": True},
+     lambda p: [(e.get("text"), e.get("text_expression"))
+                for e in p.get("entities", []) if e.get("type") == "text"]
+     == [("", None)], None),
+    ("sketch_set_text", {"sketch_name": "TextBinding", "index": 0, "text": "   "},
+     lambda p: p.get("changed_count") == 1 and p["changed"][0].get("after") == "   ", None),
+    ("sketch_get", {"sketch_name": "TextBinding", "include_entities": True},
+     lambda p: [(e.get("text"), e.get("text_expression"))
+                for e in p.get("entities", []) if e.get("type") == "text"]
+     == [("   ", None)], None),
+    ("sketch_set_text", {"sketch_name": "TextBinding", "index": 0,
+                         "text": "", "parameter": "SweepLabel"},
+     lambda p: p.get("changed_count") == 1
+     and p["changed"][0].get("expression") == "SweepLabel", None),
+    ("sketch_get", {"sketch_name": "TextBinding", "include_entities": True},
+     lambda p: [(e.get("text"), e.get("text_expression"))
+                for e in p.get("entities", []) if e.get("type") == "text"]
+     == [("BETA", "SweepLabel")], None),
+    ("sketch_set_text", {"sketch_name": "TextBinding", "index": 0,
+                         "text": "WRONG", "parameter": "SweepLabel"},
+     _refused("two different string sources"), None),
+    ("sketch_get", {"sketch_name": "TextBinding", "include_entities": True},
+     lambda p: [(e.get("text"), e.get("text_expression"))
+                for e in p.get("entities", []) if e.get("type") == "text"]
+     == [("BETA", "SweepLabel")], None),
     # FONT: the one input that reaches the API twice - onto the INPUT before a create, onto the
     # SketchText itself on an edit. No API lists or validates the legal names, so Fusion's own
     # "invalid input font name" raise IS the whole check, and each refusal hands that sentence on

@@ -21,6 +21,7 @@ import pkgutil
 import adsk.core
 
 from ...lib import fusion360utils as futil
+from ...lib import loaded_attestation
 from ... import config
 from ... import shared_state
 from .server import mcp_server
@@ -239,11 +240,19 @@ def start():
     # otherwise reports and swallows, leaking the started TaskManager until the next add-in stop().
     server_running = False
     try:
-        TaskManager.start()
+        if TaskManager.start() is not True:
+            futil.log(f'{CMD_NAME}: phase=task_manager_start server not started',
+                      adsk.core.LogLevels.ErrorLogLevel)
+            return
 
-        items = _collect_items()
-        resources = _resource_catalog()
-        result = mcp_server.start_server(HOST, PORT, items=items, resources=resources)
+        loaded_attestation.resume()
+        try:
+            items = _collect_items()
+            resources = _resource_catalog()
+        finally:
+            loaded_attestation.finish()
+        result = mcp_server.start_server(HOST, PORT, items=items, resources=resources,
+                                         attestation=loaded_attestation.attest)
         status = result.get("status")
 
         if status == mcp_server.START_OK:

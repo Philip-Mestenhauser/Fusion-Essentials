@@ -12,6 +12,8 @@ import pytest
 TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(TESTS_DIR, "live"))
 import _dump_reader  # noqa: E402
+import verify_acts_dump  # noqa: E402
+import verify_acts_hub  # noqa: E402
 
 # A synthetic dump with the shape the real one has: an unnumbered header, the parameter block, an
 # unnumbered currentSection line, then the motion events each test appends.
@@ -55,8 +57,6 @@ _CUT3 = "571: onLinear(1, 2, -3, 500)"
 _RAPID3 = "573: onRapid(0, 0, 5)"
 _THREE_AXIS = (_CUT3, _RAPID3)
 _ARC3 = "575: onCircular(0, 0, 0, -3, 1, 2, -3, 500)"
-_ARC_PAST_X = "577: onCircular(1, 0, 0, -3, 11, 0, -3, 500)"
-_ARC_DEEP = "579: onCircular(0, 0, 0, -20, 1, 2, -20, 500)"
 
 # The rows a rotary wrap states: a tool axis square to +Z, and one leaning 3 degrees off square.
 _SQUARE = "587: onLinear5D(1, 2, -3, 1, 0, 0, 750, 2)"
@@ -73,6 +73,18 @@ _SAMPLE_ENV = "FE_DUMP_SAMPLE"
 def _dump(*motion):
     """A parsed synthetic dump carrying the given motion event lines."""
     return _dump_reader.parse_dump("\n".join((_HEAD,) + motion + (_TAIL,)))
+
+
+def _posted_dump(tmp_path, *motion):
+    """A successful cam_post payload naming a synthetic dump file."""
+    path = tmp_path / "posted.dmp"
+    path.write_text("\n".join((_HEAD,) + motion + (_TAIL,)), encoding="utf-8")
+    return {
+        "posted": True,
+        "program_name": "4002",
+        "file_count": 1,
+        "files": [{"file_path": str(path), "size_bytes": path.stat().st_size}],
+    }
 
 
 class TestParse:
@@ -189,13 +201,19 @@ class TestEnvelope:
         ok, facts = _dump_reader.envelope(_dump(_CUT3, "581: onLinear(11, 0, -3, 500)"))
         assert (ok, facts["cutting_rows"], facts["outside_count"]) == (False, 2, 1)
 
-    def test_an_arc_is_counted_as_a_cut_and_judged_by_its_endpoint(self):
-        ok, facts = _dump_reader.envelope(_dump(_CUT3, _ARC_PAST_X))
-        assert (ok, facts["cutting_rows"], facts["outside_count"]) == (False, 2, 1)
+    def test_an_arc_endpoint_outside_the_box_fails(self):
+        dump = _dump("580: onRapid(9, -2, -3)",
+                     "581: onCircular(false, 9, 0, -3, 11, 0, -3, 500)\n"
+                     "  sweep: 90deg\n  normal: X=0 Y=0 Z=1 (XY)")
+        ok, facts = _dump_reader.envelope(dump)
+        assert (ok, facts["cutting_rows"], facts["outside_count"]) == (False, 1, 1)
         assert facts["first_outside"]["x"] == 11.0
 
-    def test_an_arc_centre_outside_the_box_does_not_put_the_arc_outside(self):
-        ok, facts = _dump_reader.envelope(_dump("585: onCircular(0, 0, 50, -3, 1, 2, -3, 500)"))
+    def test_a_minor_arc_with_its_centre_outside_the_box_can_stay_inside(self):
+        dump = _dump("582: onRapid(-5, 0, -3)",
+                     "583: onCircular(false, 0, 12, -3, 5, 0, -3, 500)\n"
+                     "  sweep: 45.239730deg\n  normal: X=0 Y=0 Z=1 (XY)")
+        ok, facts = _dump_reader.envelope(dump)
         assert (ok, facts["cutting_rows"], facts["outside_count"]) == (True, 1, 0)
 
 
@@ -223,9 +241,12 @@ class TestFloor:
         assert _dump_reader.floor(_dump(_RAPID3, _CUT3), -2.99)[0] is False
 
     def test_an_arc_below_the_linear_moves_sets_the_lowest_z(self):
-        ok, facts = _dump_reader.floor(_dump(_CUT3, _ARC_DEEP), -20.0)
+        dump = _dump(_CUT3, "580: onRapid(2, 0, -20)",
+                     "581: onCircular(false, 0, 0, -20, 0, 2, -20, 500)\n"
+                     "  sweep: 90deg\n  normal: X=0 Y=0 Z=1 (XY)")
+        ok, facts = _dump_reader.floor(dump, -20.0)
         assert (ok, facts["lowest_z"], facts["cutting_rows"]) == (True, -20.0, 2)
-        assert _dump_reader.floor(_dump(_CUT3, _ARC_DEEP), -19.99)[0] is False
+        assert _dump_reader.floor(dump, -19.99)[0] is False
 
 
 class TestTilt:
@@ -277,10 +298,164 @@ class TestAxisBand:
         assert facts["angle_span_deg"][0] == pytest.approx(87.0, abs=1e-4)
 
     def test_the_band_admits_an_axis_exactly_that_far_off_and_refuses_one_step_more(self):
-        assert _dump_reader.axis_band(_dump(_RAPID), 90.0, 90.0) == (True, {
-            "target_deg": 90.0, "tol": 90.0, "axis_rows": 1, "unreadable_axes": 0,
-            "rows_without_an_axis": 0, "angle_span_deg": (0.0, 0.0)})
+        ok, facts = _dump_reader.axis_band(_dump(_RAPID), 90.0, 90.0)
+        assert ok is True
+        assert facts["angle_span_deg"] == (0.0, 0.0)
         assert _dump_reader.axis_band(_dump(_RAPID), 90.0, 89.999)[0] is False
+
+
+class TestFiniteMotion:
+    @pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+    @pytest.mark.parametrize("axis", ["i", "j", "k"])
+    def test_nonfinite_axes_fail_before_angle_clamping(self, value, axis):
+        row = {"i": 0.0, "j": 0.0, "k": 1.0, axis: float(value)}
+        assert _dump_reader._axis_angle(row) is None
+        motion = "600: onRapid5D(0, 0, 5, {i}, {j}, {k})".format(**row)
+        dump = _dump(_CUT, motion)
+        assert _dump_reader.tilt(dump)[0] is False
+        assert _dump_reader.axis_band(dump, 45.0, 45.0)[0] is False
+
+    @pytest.mark.parametrize("scale", [1e-300, 1e300])
+    def test_finite_axis_magnitude_does_not_change_its_direction(self, scale):
+        row = {"i": scale, "j": 0.0, "k": scale}
+        assert _dump_reader._axis_angle(row) == pytest.approx(45.0)
+
+    @pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+    def test_nonfinite_depth_cannot_disappear_behind_an_earlier_finite_minimum(self, value):
+        dump = _dump(_CUT, f"600: onLinear(0, 0, {value}, 500)")
+        assert _dump_reader.floor(dump, -20.0)[0] is False
+        assert _dump_reader.envelope(dump)[0] is False
+
+    @pytest.mark.parametrize("motion", [
+        "600: onLinear(0, 0, -3)",
+        "600: onLinear(0, 0, -3, nan)",
+        "600: onCircular(undefined, 0, 0, -3, 1, 2, -3, 500)",
+    ])
+    def test_incomplete_known_motion_invalidates_every_verdict(self, motion):
+        dump = _dump(_CUT, motion)
+        verdicts = (_dump_reader.envelope(dump), _dump_reader.floor(dump, -20.0),
+                    _dump_reader.tilt(dump), _dump_reader.axis_band(dump, 45.0, 45.0))
+        for ok, facts in verdicts:
+            assert ok is False
+            assert facts["unread_motion"]
+
+    @pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+    def test_nonfinite_stock_is_not_an_unbounded_envelope(self, value):
+        dump = _dump(_CUT, f"600: onParameter('stock-upper-x', {value})")
+        assert dump.box("stock") is None
+        assert _dump_reader.envelope(dump)[0] is False
+
+
+class TestExpandedMotion:
+    def test_an_expanded_cut_cannot_hide_outside_stock(self):
+        dump = _dump(_CUT, "600: EXPANDED onLinear(11, 0, -21, 500)")
+        assert _dump_reader.envelope(dump)[0] is False
+        assert _dump_reader.floor(dump, -20)[0] is False
+        inside = _dump("600: EXPANDED onLinear(1, 0, -3, 500)")
+        assert _dump_reader.envelope(inside)[0] is True
+        assert _dump_reader.floor(inside, -20)[0] is True
+
+    def test_unreadable_expanded_motion_invalidates_every_verdict(self):
+        dump = _dump(_CUT, "600: EXPANDED onLinear5D(0, 0, undefined, 0, 0, 1, 500)")
+        verdicts = (_dump_reader.envelope(dump), _dump_reader.floor(dump, -20),
+                    _dump_reader.tilt(dump), _dump_reader.axis_band(dump, 45, 45))
+        for ok, facts in verdicts:
+            assert ok is False
+            assert facts["unread_motion"] == {"onLinear5D": 1}
+
+    def test_an_expanded_arc_uses_its_own_metadata_and_extrema(self):
+        dump = _dump("600: EXPANDED onRapid(7, 0, -3)",
+                     "601: EXPANDED onCircular(false, 9, 0, -3, 9, 2, -3, 500)\n"
+                     "  sweep: 270deg\n  normal: X=0 Y=0 Z=1 (XY)")
+        ok, facts = _dump_reader.envelope(dump)
+        assert ok is False
+        assert facts["unverified_paths"] == []
+        assert facts["first_outside_point"] == {"x": 11, "y": 0, "z": -3}
+
+
+class TestArcPaths:
+    @pytest.mark.parametrize("start, centre, end, plane, major_clockwise, witness", [
+        ("7, 0, -3", "9, 0, -3", "9, 2, -3", "XY", False, {"x": 11, "y": 0, "z": -3}),
+        ("9, 2, -3", "9, 0, -3", "7, 0, -3", "XY", True, {"x": 11, "y": 0, "z": -3}),
+        ("0, 7, -3", "0, 9, -3", "0, 9, -1", "YZ", False, {"x": 0, "y": 11, "z": -3}),
+        ("-2, 0, -19", "0, 0, -19", "0, 0, -17", "ZX", True, {"x": 0, "y": 0, "z": -21}),
+    ])
+    def test_a_major_arc_exits_stock_where_the_reverse_minor_arc_stays_inside(
+            self, start, centre, end, plane, major_clockwise, witness):
+        for clockwise, sweep, expected in ((major_clockwise, 270, False),
+                                           (not major_clockwise, 90, True)):
+            normal = {"XY": (0, 0, 1), "YZ": (1, 0, 0), "ZX": (0, 1, 0)}[plane]
+            nx, ny, nz = (-v if clockwise else v for v in normal)
+            dump = _dump(f"600: onRapid({start})",
+                         f"601: onCircular({str(clockwise).lower()}, {centre}, {end}, 500)\n"
+                         f"  sweep: {sweep}deg\n  normal: X={nx} Y={ny} Z={nz} ({plane})")
+            ok, facts = _dump_reader.envelope(dump)
+            assert ok is expected
+            assert facts["unverified_paths"] == []
+            if not expected:
+                assert facts["outside_count"] == 1
+                assert facts["first_outside_point"] == witness
+
+    def test_a_full_circle_checks_extrema_even_when_its_endpoints_coincide(self):
+        dump = _dump("600: onRapid(7, 0, -3)",
+                     "601: onCircular(false, 9, 0, -3, 7, 0, -3, 500)\n"
+                     "  sweep: 360deg\n  normal: X=0 Y=0 Z=1 (XY)")
+        assert _dump_reader.envelope(dump)[0] is False
+        assert _dump_reader.envelope(dump, tol=1.0)[0] is True
+
+    def test_a_vertical_major_arc_dips_below_both_endpoints(self):
+        dump = _dump("600: onRapid(-2, 0, -19)",
+                     "601: onCircular(true, 0, 0, -19, 0, 0, -17, 500)\n"
+                     "  sweep: 270deg\n  normal: X=0 Y=-1 Z=0 (ZX)")
+        ok, facts = _dump_reader.floor(dump, -20)
+        assert ok is False
+        assert facts["lowest_z"] == -21.0
+        assert _dump_reader.floor(dump, -21)[0] is True
+
+    @pytest.mark.parametrize("prefix, suffix", [
+        ([], "  sweep: 90deg\n  normal: X=0 Y=0 Z=1 (XY)"),
+        (["600: onRapid(7, 0, -3)"], ""),
+        (["600: onRapid(7, 0, -3)", "601: onSection()"],
+         "  sweep: 90deg\n  normal: X=0 Y=0 Z=1 (XY)"),
+        (["600: onRapid(7, 0, -3)"], "  sweep: 90deg\n  normal: X=0.1 Y=0 Z=0.9"),
+        (["600: onRapid(7, 0, -3)"], "  sweep: nandeg\n  normal: X=0 Y=0 Z=1 (XY)"),
+        (["600: onRapid(7, 0, -3)"], "  sweep: 90deg\n  normal: X=0 Y=0 Z=1 (XY)\n  spiral"),
+        (["600: onRapid(7, 0, -3)"],
+         "  sweep: 90deg\n  normal: X=0 Y=0 Z=1 (XY)\n  helical pitch: 1"),
+    ])
+    def test_unverifiable_arcs_do_not_inherit_endpoint_success(self, prefix, suffix):
+        dump = _dump(*prefix, "603: onCircular(true, 9, 0, -3, 9, 2, -3, 500)\n" + suffix)
+        for ok, facts in (_dump_reader.envelope(dump), _dump_reader.floor(dump, -20)):
+            assert ok is False
+            assert facts["unverified_paths"][0]["reason"]
+
+
+class TestLiveDumpConsumers:
+    def test_the_five_axis_consumer_accepts_a_valid_tilted_dump(self, tmp_path):
+        payload = _posted_dump(tmp_path, _CUT)
+        assert verify_acts_dump._dumped_5d("Tilted", "4002", 80.0)(payload) is True
+
+    def test_the_five_axis_consumer_refuses_an_unreadable_known_motion(self, tmp_path):
+        payload = _posted_dump(
+            tmp_path,
+            _CUT,
+            "565: onLinear5D(1, 2, undefined, 0, 0, 1, 750, 2)",
+        )
+        with pytest.raises(AssertionError):
+            verify_acts_dump._dumped_5d("Tilted", "4002", 80.0)(payload)
+
+    def test_the_rotary_consumer_accepts_a_valid_square_dump(self, tmp_path):
+        payload = _posted_dump(tmp_path, _SQUARE)
+        assert verify_acts_hub._dumped_rotary("Rotary", "4002")(payload) is True
+
+    def test_the_rotary_consumer_refuses_an_unreadable_known_motion(self, tmp_path):
+        payload = _posted_dump(
+            tmp_path,
+            _SQUARE,
+            "589: onRapid5D(0, 0, undefined, 0, 1, 0)",
+        )
+        with pytest.raises(AssertionError):
+            verify_acts_hub._dumped_rotary("Rotary", "4002")(payload)
 
 
 class TestPostedSample:

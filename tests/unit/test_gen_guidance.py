@@ -143,7 +143,7 @@ def _problems(doc, names=_NAMES):
     return gen_guidance.validate(doc, names)
 
 
-def _one(problems, needle):
+def assert_diagnostic(problems, needle):
     hits = [p for p in problems if needle in p]
     assert hits, f"no problem mentioning {needle!r} in {problems}"
     return hits
@@ -316,84 +316,84 @@ class TestValidationBites:
     def test_an_unknown_prove_tool_fails_against_the_live_registry(self, shipped, tool_names):
         doc = copy.deepcopy(shipped)
         doc["sections"][0]["rules"][0]["prove"][0]["tool"] = "doc_get_everything"
-        _one(gen_guidance.validate(doc, tool_names), "doc_get_everything")
+        assert_diagnostic(gen_guidance.validate(doc, tool_names), "doc_get_everything")
 
     def test_a_prove_step_with_no_observation_is_reported(self):
         doc = _doc()
         _section(doc, "plan")["rules"][0]["prove"] = [{"tool": "doc_get", "observe": "  "}]
-        _one(_problems(doc), "needs a non-empty 'observe'")
+        assert_diagnostic(_problems(doc), "needs a non-empty 'observe'")
 
     def test_a_duplicate_rule_id_is_reported_naming_both_sections(self):
         doc = _doc()
         _section(doc, "model")["rules"][0]["id"] = "plan-rule"
         _section(doc, "model")["rules"][0]["section"] = "model"
-        hits = _one(_problems(doc), "duplicate rule id 'plan-rule'")
+        hits = assert_diagnostic(_problems(doc), "duplicate rule id 'plan-rule'")
         assert "'plan'" in hits[0] and "'model'" in hits[0]
 
     def test_a_rule_filed_under_the_wrong_section_is_reported(self):
         doc = _doc()
         _section(doc, "sketch")["rules"][0]["section"] = "model"
-        _one(_problems(doc), "declares section 'model' but sits in 'sketch'")
+        assert_diagnostic(_problems(doc), "declares section 'model' but sits in 'sketch'")
 
     def test_sections_out_of_order_are_reported(self):
         doc = _doc()
         doc["sections"][1], doc["sections"][2] = doc["sections"][2], doc["sections"][1]
-        _one(_problems(doc), "sections must be exactly")
+        assert_diagnostic(_problems(doc), "sections must be exactly")
 
     def test_a_missing_required_field_is_reported(self):
         for field in gen_guidance.RULE_FIELDS:
             doc = _doc()
             del _section(doc, "plan")["rules"][0][field]
-            _one(_problems(doc), f"is missing '{field}'")
+            assert_diagnostic(_problems(doc), f"is missing '{field}'")
 
     def test_an_unknown_scenario_is_reported(self):
         doc = _doc()
         _section(doc, "plan")["rules"][0]["scenarios"] = ["alpha", "gamma"]
-        _one(_problems(doc), "unknown scenario(s) ['gamma']")
+        assert_diagnostic(_problems(doc), "unknown scenario(s) ['gamma']")
 
     def test_unsorted_or_duplicated_rule_scenarios_are_reported(self):
         # the needle names the RULE: the document-level enum carries a message this one is a
         # prefix of, so a looser needle would pass on either branch firing.
         doc = _doc()
         _section(doc, "plan")["rules"][0]["scenarios"] = ["beta", "alpha"]
-        _one(_problems(doc), "rule 'plan-rule' 'scenarios' must be sorted")
+        assert_diagnostic(_problems(doc), "rule 'plan-rule' 'scenarios' must be sorted")
         doc = _doc()
         _section(doc, "plan")["rules"][0]["scenarios"] = ["alpha", "alpha"]
-        _one(_problems(doc), "rule 'plan-rule' 'scenarios' must be sorted")
+        assert_diagnostic(_problems(doc), "rule 'plan-rule' 'scenarios' must be sorted")
 
     def test_a_rule_with_an_empty_scenario_list_is_reported(self):
         doc = _doc()
         _section(doc, "plan")["rules"][0]["scenarios"] = []
-        _one(_problems(doc), "rule 'plan-rule' needs a non-empty 'scenarios' list")
+        assert_diagnostic(_problems(doc), "rule 'plan-rule' needs a non-empty 'scenarios' list")
 
     def test_a_scenario_no_rule_claims_is_reported(self):
         doc = _doc(scenarios=["alpha", "beta", "gamma"])
-        _one(_problems(doc), "scenario 'gamma' is declared but no rule or recipe applies to it")
+        assert_diagnostic(_problems(doc), "scenario 'gamma' is declared but no rule or recipe applies to it")
 
     def test_a_kernel_rule_that_is_not_universal_is_reported(self):
         doc = _doc()
         _section(doc, gen_guidance.KERNEL)["rules"][0]["scenarios"] = ["alpha"]
-        _one(_problems(doc), "must declare every scenario")
+        assert_diagnostic(_problems(doc), "must declare every scenario")
 
     def test_a_kernel_rule_carrying_an_example_is_reported(self):
         doc = _doc()
         _section(doc, gen_guidance.KERNEL)["rules"][0]["example"] = "a worked case"
-        _one(_problems(doc), "carries an example")
+        assert_diagnostic(_problems(doc), "carries an example")
 
     def test_an_unknown_kind_is_reported(self):
         doc = _doc()
         _section(doc, "plan")["rules"][0]["kind"] = "best_practice"
-        _one(_problems(doc), "declares kind 'best_practice'")
+        assert_diagnostic(_problems(doc), "declares kind 'best_practice'")
 
     def test_a_non_ascii_string_is_reported_with_its_path(self):
         doc = _doc()
         _section(doc, "plan")["rules"][0]["do"] = "tilt the face 5°"
-        _one(_problems(doc), "guidance.sections[1].rules[0].do carries non-ASCII")
+        assert_diagnostic(_problems(doc), "guidance.sections[1].rules[0].do carries non-ASCII")
 
     def test_a_bad_rule_id_is_reported(self):
         doc = _doc()
         _section(doc, "plan")["rules"][0]["id"] = "Plan_Rule"
-        _one(_problems(doc), "id must be lowercase letters, digits and '-'")
+        assert_diagnostic(_problems(doc), "id must be lowercase letters, digits and '-'")
 
     def test_an_empty_when_do_or_except_is_reported(self):
         # a present-but-blank clause renders as a sentence with a hole in it, which the
@@ -401,22 +401,22 @@ class TestValidationBites:
         for field in ("when", "do", "except"):
             doc = _doc()
             _section(doc, "plan")["rules"][0][field] = "   "
-            _one(_problems(doc), f"rule 'plan-rule' '{field}' must be a non-empty string")
+            assert_diagnostic(_problems(doc), f"rule 'plan-rule' '{field}' must be a non-empty string")
 
     def test_a_rule_with_no_prove_step_is_reported(self):
         doc = _doc()
         _section(doc, "plan")["rules"][0]["prove"] = []
-        _one(_problems(doc), "rule 'plan-rule' needs at least one 'prove' step")
+        assert_diagnostic(_problems(doc), "rule 'plan-rule' needs at least one 'prove' step")
 
     def test_a_prove_step_that_is_not_an_object_is_reported(self):
         doc = _doc()
         _section(doc, "plan")["rules"][0]["prove"] = [["doc_get", "what changed"]]
-        _one(_problems(doc), "prove step must carry 'tool' and 'observe'")
+        assert_diagnostic(_problems(doc), "prove step must carry 'tool' and 'observe'")
 
     def test_an_empty_example_is_reported(self):
         doc = _doc()
         _section(doc, "plan")["rules"][0]["example"] = "  "
-        _one(_problems(doc), "'example' must be a non-empty string when present")
+        assert_diagnostic(_problems(doc), "'example' must be a non-empty string when present")
 
 
 class TestRecipeValidationBites:
@@ -433,40 +433,40 @@ class TestRecipeValidationBites:
     def test_an_unregistered_step_tool_is_reported(self):
         doc = _doc()
         self._first(doc)["steps"][1]["tool"] = "design_get_everything"
-        _one(_problems(doc), "steps through 'design_get_everything'")
+        assert_diagnostic(_problems(doc), "steps through 'design_get_everything'")
 
     def test_a_step_with_no_action_or_no_read_back_is_reported(self):
         for field in ("do", "read_back"):
             doc = _doc()
             self._first(doc)["steps"][0][field] = "   "
-            _one(_problems(doc), f"step 'doc_get' needs a non-empty '{field}'")
+            assert_diagnostic(_problems(doc), f"step 'doc_get' needs a non-empty '{field}'")
 
     def test_a_step_that_is_not_an_object_is_reported(self):
         doc = _doc()
         self._first(doc)["steps"][0] = ["doc_get", "read it"]
-        _one(_problems(doc), "step must carry 'tool', 'do' and 'read_back'")
+        assert_diagnostic(_problems(doc), "step must carry 'tool', 'do' and 'read_back'")
 
     def test_a_missing_required_recipe_field_is_reported(self):
         for field in gen_guidance.RECIPE_FIELDS:
             doc = _doc()
             del self._first(doc)[field]
-            _one(_problems(doc), f"is missing '{field}'")
+            assert_diagnostic(_problems(doc), f"is missing '{field}'")
 
     def test_a_blank_title_or_use_when_is_reported(self):
         for field in ("title", "use_when"):
             doc = _doc()
             self._first(doc)[field] = "  "
-            _one(_problems(doc), f"'{field}' must be a non-empty string")
+            assert_diagnostic(_problems(doc), f"'{field}' must be a non-empty string")
 
     def test_a_recipe_filed_under_the_wrong_section_is_reported(self):
         doc = _doc()
         self._first(doc)["section"] = "plan"
-        _one(_problems(doc), f"declares section 'plan' but sits in '{_RECIPE_SECTION}'")
+        assert_diagnostic(_problems(doc), f"declares section 'plan' but sits in '{_RECIPE_SECTION}'")
 
     def test_a_duplicate_recipe_id_is_reported_naming_both_sections(self):
         doc = _doc()
         _section(doc, "plan")["recipes"] = [_recipe(_POINTED_AT, "plan")]
-        hits = _one(_problems(doc), f"duplicate recipe id '{_POINTED_AT}'")
+        hits = assert_diagnostic(_problems(doc), f"duplicate recipe id '{_POINTED_AT}'")
         assert "'plan'" in hits[0] and f"'{_RECIPE_SECTION}'" in hits[0]
 
     def test_a_recipe_id_colliding_with_a_rule_id_is_reported(self):
@@ -475,30 +475,30 @@ class TestRecipeValidationBites:
         doc = _doc()
         self._recipes(doc, _recipe(_POINTED_AT, _RECIPE_SECTION),
                       _recipe("plan-rule", _RECIPE_SECTION))
-        _one(_problems(doc), "recipe id 'plan-rule' is already a rule id in 'plan'")
+        assert_diagnostic(_problems(doc), "recipe id 'plan-rule' is already a rule id in 'plan'")
 
     def test_a_rule_id_colliding_with_an_earlier_recipe_id_is_reported(self):
         doc = _doc()
         _section(doc, "plan")["recipes"] = [_recipe("later-rule", "plan")]
         _section(doc, "validate")["rules"][0]["id"] = "later-rule"
-        _one(_problems(doc), "rule id 'later-rule' is already a recipe id in 'plan'")
+        assert_diagnostic(_problems(doc), "rule id 'later-rule' is already a recipe id in 'plan'")
 
     def test_a_bad_recipe_id_is_reported(self):
         doc = _doc()
         self._recipes(doc, _recipe(_POINTED_AT, _RECIPE_SECTION),
                       _recipe("Choose_A_Strategy", _RECIPE_SECTION))
-        _one(_problems(doc), "id must be lowercase letters, digits and '-'")
+        assert_diagnostic(_problems(doc), "id must be lowercase letters, digits and '-'")
 
     def test_a_blank_bar_field_is_reported(self):
         for field in ("measure", "eyes"):
             doc = _doc()
             self._first(doc)["bar"][field] = "  "
-            _one(_problems(doc), f"'bar.{field}' must be a non-empty string")
+            assert_diagnostic(_problems(doc), f"'bar.{field}' must be a non-empty string")
 
     def test_a_bar_that_is_not_an_object_is_reported(self):
         doc = _doc()
         self._first(doc)["bar"] = "done when it looks right"
-        _one(_problems(doc), "'bar' must carry 'measure' and 'eyes'")
+        assert_diagnostic(_problems(doc), "'bar' must carry 'measure' and 'eyes'")
 
     def test_an_exemplar_missing_a_field_is_reported(self):
         for field in gen_guidance.EXEMPLAR_FIELDS:
@@ -507,14 +507,14 @@ class TestRecipeValidationBites:
                         "look_at": "L", "access": "A"}
             del exemplar[field]
             self._first(doc)["exemplar"] = exemplar
-            _one(_problems(doc), f"'exemplar.{field}' must be a non-empty string")
+            assert_diagnostic(_problems(doc), f"'exemplar.{field}' must be a non-empty string")
 
     def test_an_exemplar_urn_that_is_not_a_lineage_urn_is_reported(self):
         # a version urn names ONE version and goes stale the next time the sample is saved.
         doc = _doc()
         self._first(doc)["exemplar"] = {"document": "D", "urn": "urn:adsk.wipprod:dm.file:abc",
                                         "look_at": "L", "access": "A"}
-        _one(_problems(doc), "does not start with 'urn:adsk.wipprod:dm.lineage:'")
+        assert_diagnostic(_problems(doc), "does not start with 'urn:adsk.wipprod:dm.lineage:'")
 
     def test_a_valid_exemplar_is_accepted(self):
         doc = _doc()
@@ -526,18 +526,18 @@ class TestRecipeValidationBites:
         doc = _doc()
         _section(doc, gen_guidance.KERNEL)["recipes"] = [_recipe("kernel-recipe",
                                                                  gen_guidance.KERNEL)]
-        _one(_problems(doc), "the kernel carries no recipes")
+        assert_diagnostic(_problems(doc), "the kernel carries no recipes")
 
     def test_unsorted_recipe_scenarios_are_reported_by_the_same_rule_as_a_rules(self):
         doc = _doc()
         self._first(doc)["scenarios"] = ["beta", "alpha"]
-        _one(_problems(doc), f"recipe '{_POINTED_AT}' 'scenarios' must be sorted")
+        assert_diagnostic(_problems(doc), f"recipe '{_POINTED_AT}' 'scenarios' must be sorted")
 
     def test_a_scenario_reached_only_by_a_recipe_is_routed(self):
         # the routing check reads BOTH record kinds: a scenario no rule names is still reached when
         # a recipe names it, and demanding a rule as well would refuse a valid document.
         doc = _doc(scenarios=["alpha", "beta", "gamma"])
-        _one(_problems(doc), "scenario 'gamma' is declared but no rule or recipe applies to it")
+        assert_diagnostic(_problems(doc), "scenario 'gamma' is declared but no rule or recipe applies to it")
         _section(doc, _RECIPE_SECTION)["recipes"][0]["scenarios"] = ["alpha", "gamma"]
         assert not [p for p in _problems(doc) if "no rule or recipe applies" in p]
         assert [r["id"] for r in gen_guidance.recipes_for(doc, "gamma")] == [_POINTED_AT]
@@ -547,12 +547,12 @@ class TestRecipeValidationBites:
         # pointing at a call the server refuses.
         doc = _doc()
         _section(doc, _RECIPE_SECTION)["recipes"] = []
-        _one(_problems(doc), f"points at recipe '{_POINTED_AT}'")
+        assert_diagnostic(_problems(doc), f"points at recipe '{_POINTED_AT}'")
 
     def test_a_section_without_a_use_when_line_is_reported(self):
         doc = _doc()
         _section(doc, "sketch")["use_when"] = "  "
-        _one(_problems(doc), "section 'sketch' needs a 'use_when' line")
+        assert_diagnostic(_problems(doc), "section 'sketch' needs a 'use_when' line")
 
 
 class TestDocumentLevelBites:
@@ -561,28 +561,28 @@ class TestDocumentLevelBites:
 
     def test_each_blank_top_level_field_is_reported(self):
         for key in ("guidance_id", "name", "title", "description", "summary"):
-            _one(_problems(_doc(**{key: "   "})), f"top-level '{key}' must be a non-empty string")
+            assert_diagnostic(_problems(_doc(**{key: "   "})), f"top-level '{key}' must be a non-empty string")
 
     def test_a_document_declaring_no_scenario_is_reported(self):
-        _one(_problems(_doc(scenarios=[])), "'scenarios' must declare at least one scenario")
+        assert_diagnostic(_problems(_doc(scenarios=[])), "'scenarios' must declare at least one scenario")
 
     def test_a_blank_scenario_id_is_reported(self):
-        _one(_problems(_doc(scenarios=["alpha", "  "])),
+        assert_diagnostic(_problems(_doc(scenarios=["alpha", "  "])),
              "every entry in 'scenarios' must be a non-empty id string")
 
     def test_the_scenario_enum_must_be_sorted_and_free_of_duplicates(self):
-        _one(_problems(_doc(scenarios=["beta", "alpha"])), "so routing is deterministic")
-        _one(_problems(_doc(scenarios=["alpha", "alpha", "beta"])), "so routing is deterministic")
+        assert_diagnostic(_problems(_doc(scenarios=["beta", "alpha"])), "so routing is deterministic")
+        assert_diagnostic(_problems(_doc(scenarios=["alpha", "alpha", "beta"])), "so routing is deterministic")
 
     def test_a_section_without_a_title_is_reported(self):
         doc = _doc()
         _section(doc, "sketch")["title"] = "  "
-        _one(_problems(doc), "section 'sketch' needs a title")
+        assert_diagnostic(_problems(doc), "section 'sketch' needs a title")
 
     def test_a_section_with_no_rules_is_reported(self):
         doc = _doc()
         _section(doc, "model")["rules"] = []
-        _one(_problems(doc), "section 'model' has no rules")
+        assert_diagnostic(_problems(doc), "section 'model' has no rules")
 
 
 class TestSizeCapsBiteAtTheirBoundary:
@@ -603,7 +603,7 @@ class TestSizeCapsBiteAtTheirBoundary:
         over = _doc()
         _section(over, gen_guidance.KERNEL)["rules"] = self._kernel_of(
             gen_guidance.KERNEL_MAX_RULES + 1)
-        _one(_problems(over), f"the kernel holds {gen_guidance.KERNEL_MAX_RULES + 1} rules")
+        assert_diagnostic(_problems(over), f"the kernel holds {gen_guidance.KERNEL_MAX_RULES + 1} rules")
 
     def _kernel_padded(self, target):
         doc = _doc()
@@ -623,17 +623,17 @@ class TestSizeCapsBiteAtTheirBoundary:
     def test_the_kernel_word_cap(self):
         assert _problems(self._kernel_padded(gen_guidance.KERNEL_MAX_WORDS)) == []
         over = self._kernel_padded(gen_guidance.KERNEL_MAX_WORDS + 1)
-        _one(_problems(over), f"the kernel renders {gen_guidance.KERNEL_MAX_WORDS + 1} words")
+        assert_diagnostic(_problems(over), f"the kernel renders {gen_guidance.KERNEL_MAX_WORDS + 1} words")
 
     def test_the_skill_map_word_cap(self):
         assert _problems(self._map_padded(gen_guidance.SKILL_MAP_MAX_WORDS)) == []
         over = self._map_padded(gen_guidance.SKILL_MAP_MAX_WORDS + 1)
-        _one(_problems(over), f"the skill map renders {gen_guidance.SKILL_MAP_MAX_WORDS + 1} words")
+        assert_diagnostic(_problems(over), f"the skill map renders {gen_guidance.SKILL_MAP_MAX_WORDS + 1} words")
 
     def test_the_recipe_word_cap(self):
         assert _problems(self._recipe_padded(gen_guidance.RECIPE_MAX_WORDS)) == []
         over = self._recipe_padded(gen_guidance.RECIPE_MAX_WORDS + 1)
-        _one(_problems(over),
+        assert_diagnostic(_problems(over),
              f"recipe '{_POINTED_AT}' renders {gen_guidance.RECIPE_MAX_WORDS + 1} words")
 
     def test_the_recipes_per_section_cap(self):
@@ -645,7 +645,7 @@ class TestSizeCapsBiteAtTheirBoundary:
         assert _problems(at_cap) == []
         over = copy.deepcopy(at_cap)
         _section(over, _RECIPE_SECTION)["recipes"].append(_recipe("one-more", _RECIPE_SECTION))
-        _one(_problems(over), f"section '{_RECIPE_SECTION}' holds "
+        assert_diagnostic(_problems(over), f"section '{_RECIPE_SECTION}' holds "
                               f"{gen_guidance.MAX_RECIPES_PER_SECTION + 1} recipes")
 
     def test_the_recipe_step_count_bounds(self):
@@ -657,7 +657,7 @@ class TestSizeCapsBiteAtTheirBoundary:
         for count in (gen_guidance.MIN_RECIPE_STEPS - 1, gen_guidance.MAX_RECIPE_STEPS + 1):
             doc = _doc()
             _section(doc, _RECIPE_SECTION)["recipes"][0]["steps"] = [dict(step)] * count
-            _one(_problems(doc), f"holds {count} steps")
+            assert_diagnostic(_problems(doc), f"holds {count} steps")
 
     def test_the_per_section_rule_cap(self):
         # the cap is on ANY section, not just the kernel: 'plan' carries the probe so the kernel's
@@ -667,7 +667,7 @@ class TestSizeCapsBiteAtTheirBoundary:
         assert _problems(at_cap) == []
         over = _doc()
         _section(over, "plan")["rules"] = self._plan_of(gen_guidance.MAX_SECTION_RULES + 1)
-        _one(_problems(over),
+        assert_diagnostic(_problems(over),
              f"section 'plan' holds {gen_guidance.MAX_SECTION_RULES + 1} rules")
 
     def test_examples_are_free(self):
@@ -708,7 +708,7 @@ class TestTheSectionCapIsOneNumberOnBothSides:
     def test_the_first_section_the_gate_refuses_is_the_first_one_that_truncates(self, monkeypatch):
         doc = _doc()
         _section(doc, "plan")["rules"] = self._plan_rules(gen_guidance.MAX_SECTION_RULES + 1)
-        _one(_problems(doc), "section 'plan' holds")
+        assert_diagnostic(_problems(doc), "section 'plan' holds")
         out = self._served(monkeypatch, doc)
         assert out["truncated"] is True
         assert out["rule_total"] == gen_guidance.MAX_SECTION_RULES + 1

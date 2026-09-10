@@ -305,7 +305,9 @@ class TestHonesty:
     def test_inside_volume_increase_is_not_rescued_by_more_faces(self):
         body = BRepBody(volume=1.0, face_count=6)
         _install(body, FakeShellFeatures(body, volume_delta=-0.744, faces_added=6))
-        assert sh.handler(thickness=2, direction="inside")["isError"] is True
+        res = sh.handler(thickness=2, direction="inside")
+        assert res["isError"] is True
+        assert "effect is unverified" in res["message"] and "faces 6 -> 12" in res["message"]
 
     def test_submicron_thickness_rounding_does_not_refuse_a_matching_feature(self):
         body = BRepBody(volume=1.0, face_count=6)

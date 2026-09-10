@@ -51,6 +51,31 @@ def _make_tool_item(name, handler, *, required=("a",), optional=("b",), run_on_m
     return Item.create_tool_item(tool=tool, handler=handler, run_on_main_thread=run_on_main_thread)
 
 
+def _number_tool_item(name, handler):
+    """A strict tool with a real numeric wire property for transport tests."""
+    from mcpServer.mcp_primitives.item import Item
+    from mcpServer.mcp_primitives.tool import Tool
+
+    tool = Tool.create_simple(name=name, description="numeric test tool")
+    tool.add_input_property("value", {"type": "number"}).add_required_input("value")
+    tool.strict_schema()
+    return Item.create_tool_item(tool=tool, handler=handler, run_on_main_thread=False)
+
+
+def _nested_number_tool_item(name, handler):
+    """A strict tool with matched nested numeric object and array properties."""
+    from mcpServer.mcp_primitives.item import Item
+    from mcpServer.mcp_primitives.tool import Tool
+
+    tool = Tool.create_simple(name=name, description="nested numeric test tool")
+    tool.add_input_property("payload", {"type": "object",
+                                        "properties": {"nested": {"type": "number"}},
+                                        "required": ["nested"]}).add_required_input("payload")
+    tool.add_input_property("values", {"type": "array", "items": {"type": "number"}})
+    tool.strict_schema()
+    return Item.create_tool_item(tool=tool, handler=handler, run_on_main_thread=False)
+
+
 def _bare_tool_item(name, handler, run_on_main_thread=False):
     """A tool Item built from a Tool with NO input_schema at all (properties/required absent)."""
     from mcpServer.mcp_primitives.item import Item
@@ -325,22 +350,30 @@ class TestToolsCallEnumValidation:
         assert "versions" in result["message"]              # the valid values are listed
 
     def test_array_of_enum_prop_accepts_all_valid_elements(self, server):
-        server.register(_enum_tool_item("x", lambda **kw: _ok()))
+        seen = []
+        server.register(_enum_tool_item("x", lambda **kw: seen.append(kw) or _ok()))
         assert _call(server, "x", {"include": ["versions", "xref_tree"]})["result"]["isError"] is False
+        assert seen == [{"include": ["versions", "xref_tree"]}]
 
     def test_non_enum_property_is_not_gated(self, server):
-        server.register(_enum_tool_item("x", lambda **kw: _ok()))
+        seen = []
+        server.register(_enum_tool_item("x", lambda **kw: seen.append(kw) or _ok()))
         assert _call(server, "x", {"target": "anything at all"})["result"]["isError"] is False
+        assert seen == [{"target": "anything at all"}]
 
     def test_tool_without_enums_is_unaffected(self, server):
         # the default fixture tool declares no enum anywhere; every value passes the gate.
-        server.register(_make_tool_item("plain", lambda **kw: _ok()))
+        seen = []
+        server.register(_make_tool_item("plain", lambda **kw: seen.append(kw) or _ok()))
         assert _call(server, "plain", {"a": "faces"})["result"]["isError"] is False
+        assert seen == [{"a": "faces"}]
 
     def test_none_for_an_optional_enum_prop_is_not_rejected(self, server):
         # an explicit null = unset; the handler's default applies, same as omitting the key.
-        server.register(_enum_tool_item("x", lambda **kw: _ok()))
+        seen = []
+        server.register(_enum_tool_item("x", lambda **kw: seen.append(kw) or _ok()))
         assert _call(server, "x", {"kind": None})["result"]["isError"] is False
+        assert seen == [{"kind": None}]
 
     def test_unhashable_value_for_an_enum_prop_is_a_named_error_not_a_typeerror(self, server):
         server.register(_enum_tool_item("x", lambda **kw: _ok()))
@@ -411,8 +444,9 @@ class _ScriptedTasks:
     def start(self):
         return True
 
-    def post(self, command, callback, data):
+    def post(self, command, callback, data, on_drop=None):
         self.callback, self.data = callback, data
+        self.on_drop = on_drop
         if self.run_after_s is not None:
             import threading
             threading.Timer(self.run_after_s, lambda: callback(data)).start()
@@ -489,6 +523,48 @@ class TestExecuteOnMainThread:
         out = _execute(server, mcp_server_module, monkeypatch, tasks,
                        lambda **kw: {"slow": True}, enforce_timeout=False)
         assert out == {"slow": True}
+
+    def test_false_event_then_notify_returns_the_actual_result(
+            self, server, mcp_server_module, task_manager, monkeypatch):
+        import sys
+        module = sys.modules[task_manager.__module__]
+        monkeypatch.setattr(module.app.fireCustomEvent, "return_value", False)
+
+        async def run():
+            waiting = asyncio.create_task(server._execute_on_main_thread(
+                lambda **kw: {"ran": kw}, {"a": "1"}, enforce_timeout=False))
+            for _ in range(20):
+                if task_manager.get_pending_task_count() == 1:
+                    break
+                await asyncio.sleep(0.01)
+            with task_manager._tasks_lock:
+                task_id = next(iter(task_manager._pending_tasks))
+            _notify(task_manager, mcp_server_module, task_id)
+            return await asyncio.wait_for(waiting, timeout=1.0)
+
+        assert asyncio.run(run()) == {"ran": {"a": "1"}}
+
+    def test_reaped_uninterruptible_waiter_exits_and_late_notify_cannot_run(
+            self, server, mcp_server_module, task_manager):
+        ran = []
+
+        async def run():
+            waiting = asyncio.create_task(server._execute_on_main_thread(
+                lambda **kw: ran.append(kw), {"a": "1"}, enforce_timeout=False))
+            for _ in range(20):
+                if task_manager.get_pending_task_count() == 1:
+                    break
+                await asyncio.sleep(0.01)
+            with task_manager._tasks_lock:
+                task_id = next(iter(task_manager._pending_tasks))
+                task_manager._pending_tasks[task_id]["created"] -= 400.0
+            assert task_manager._reap_stale() == 1
+            with pytest.raises(Exception, match="dropped before it started"):
+                await asyncio.wait_for(waiting, timeout=1.0)
+            _notify(task_manager, mcp_server_module, task_id)
+
+        asyncio.run(run())
+        assert ran == []
 
 
 # ── TaskManager: post / claim / cancel / reap on the real class ──────────────
@@ -576,22 +652,27 @@ class _PostProbe:
     """The slice of MCPHandler that do_POST's PARSE step touches: a body to read, a send_error to
     capture the refusal, and just enough of the accept path for a well-formed body to reach 202."""
 
-    def __init__(self, body: bytes):
+    def __init__(self, body: bytes, mcp_server=None):
         self.path = '/mcp'
         self.headers = {'Content-Length': str(len(body))}
         self.rfile = io.BytesIO(body)
+        self.wfile = io.BytesIO()
         self.errors = []
         self.responses = []
 
         async def _accept(_request):
             return None                 # a notification - do_POST answers 202 with no body
-        self.mcp_server = types.SimpleNamespace(handle_request=_accept, session_id="s1")
+        self.mcp_server = mcp_server or types.SimpleNamespace(handle_request=_accept, session_id="s1")
 
     def _origin_ok(self):
         return True
 
     def send_error(self, code, message=None):
         self.errors.append((code, message))
+
+    def _send_json(self, response):
+        self.send_response(200)
+        self.wfile.write(json.dumps(response).encode("utf-8"))
 
     def send_response(self, code, message=None):
         self.responses.append(code)
@@ -603,9 +684,9 @@ class _PostProbe:
         pass
 
 
-def _post(mcp_server_module, body: bytes):
+def _post(mcp_server_module, body: bytes, server=None):
     """The real do_POST driven over `body`; returns the probe it wrote its answer into."""
-    probe = _PostProbe(body)
+    probe = _PostProbe(body, server)
     mcp_server_module.MCPHandler.do_POST(probe)
     return probe
 
@@ -630,6 +711,50 @@ class TestJsonConstantRefusal:
         parsed = json.loads('{"length": -0.0, "big": 1e308}',
                             parse_constant=mcp_server_module._refuse_json_constant)
         assert parsed == {"length": -0.0, "big": 1e308}
+
+    @pytest.mark.parametrize("payload", [
+        '{"length": 1.7976931348623159e308}',
+        '{"length": -1.7976931348623159e308}',
+        '{"nested": {"length": 1.7976931348623159e308}}'])
+    def test_json_loads_with_the_float_hook_refuses_overflow(self, mcp_server_module, payload):
+        with pytest.raises(ValueError, match="finite"):
+            json.loads(payload, parse_constant=mcp_server_module._refuse_json_constant,
+                       parse_float=mcp_server_module._refuse_json_float)
+
+    def test_json_loads_float_hook_preserves_max_finite_and_integers(self, mcp_server_module):
+        parsed = json.loads('{"length": 1.7976931348623157e308, "whole": 9007199254740993}',
+                            parse_constant=mcp_server_module._refuse_json_constant,
+                            parse_float=mcp_server_module._refuse_json_float)
+        assert parsed["length"] == 1.7976931348623157e308
+        assert parsed["whole"] == 9007199254740993
+
+    @pytest.mark.parametrize("value", ["1.7976931348623159e308", "-1.7976931348623159e308"])
+    def test_http_overflow_is_refused_before_real_numeric_tool_dispatch(self, mcp_server_module, value):
+        calls = []
+        tool_server = mcp_server_module.SimpleMCPServer()
+        tool_server.register(_number_tool_item("number_probe",
+                                               lambda **kwargs: calls.append(kwargs) or _ok()))
+        body = ('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"number_probe",'
+                '"arguments":{"value":%s}}}' % value).encode()
+        probe = _post(mcp_server_module, body, tool_server)
+        assert probe.responses == [] and probe.errors[0][0] == 400
+        assert calls == [] and value in probe.errors[0][1]
+
+    def test_http_nested_finite_values_dispatch_and_nested_overflow_does_not(self, mcp_server_module):
+        calls = []
+        tool_server = mcp_server_module.SimpleMCPServer()
+        tool_server.register(_nested_number_tool_item("nested_probe",
+                                                     lambda **kwargs: calls.append(kwargs) or _ok()))
+        finite = ('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nested_probe",'
+                  '"arguments":{"payload":{"nested":1.7976931348623157e308},'
+                  '"values":[-1.0,1e308]}}}').encode()
+        probe = _post(mcp_server_module, finite, tool_server)
+        assert probe.errors == [] and probe.responses == [200]
+        assert len(calls) == 1 and calls[0]["payload"]["nested"] == 1.7976931348623157e308
+
+        overflow = finite.replace(b"1.7976931348623157e308", b"1.7976931348623159e308")
+        probe = _post(mcp_server_module, overflow, tool_server)
+        assert probe.responses == [] and probe.errors[0][0] == 400 and len(calls) == 1
 
     @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
     def test_a_post_carrying_the_literal_is_refused_400_naming_it(self, mcp_server_module, literal):
@@ -686,3 +811,47 @@ class TestOriginGuard:
     ])
     def test_loopback_origin_is_allowed(self, mcp_server_module, origin):
         assert _origin_allowed(mcp_server_module, origin) is True
+
+
+def test_health_revalidates_loaded_source_instead_of_caching_startup_success(
+        mcp_server_module, tmp_path):
+    import sys
+    from lib import loaded_attestation
+
+    name = "loaded_attestation_health_case"
+    path = tmp_path / (name + ".py")
+    path.write_text("VALUE = 'old'\n", encoding="utf-8")
+    try:
+        loaded_attestation.begin(str(tmp_path))
+        module = types.ModuleType(name)
+        module.__file__ = str(path)
+        sys.modules[name] = module
+        exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+        loaded_attestation.finish()
+        server = mcp_server_module.SimpleMCPServer(attestation=loaded_attestation.attest)
+        assert server.health()["attestation"]["complete"] is True
+        path.write_text("VALUE = 'new'\n", encoding="utf-8")
+        current = server.health()["attestation"]
+        assert current["complete"] is False
+        assert any("differs from source" in problem for problem in current["problems"])
+    finally:
+        loaded_attestation.finish()
+        sys.modules.pop(name, None)
+
+
+def test_health_read_does_not_end_an_active_capture(mcp_server_module, tmp_path):
+    import sys
+    from lib import loaded_attestation
+
+    prior = sys.getprofile()
+    try:
+        loaded_attestation.begin(str(tmp_path))
+        installed = sys.getprofile()
+        server = mcp_server_module.SimpleMCPServer(attestation=loaded_attestation.attest)
+        current = server.health()["attestation"]
+        assert current["complete"] is False
+        assert current["problems"] == ["capture window is still active"]
+        assert sys.getprofile() is installed
+    finally:
+        loaded_attestation.finish()
+        assert sys.getprofile() is prior

@@ -98,13 +98,17 @@ def facade(name):
     return ns[name]
 
 
-def _post(payload):
+def _post(payload, with_session=False):
     req = urllib.request.Request(
         MCP, data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json",
                  "Accept": "application/json, text/event-stream"})
     with urllib.request.urlopen(req, timeout=120) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        body = json.loads(resp.read().decode("utf-8"))
+        if with_session:
+            headers = getattr(resp, "headers", {})
+            return body, headers.get("Mcp-Session-Id")
+        return body
 
 
 def call(tool, arguments):
@@ -127,18 +131,59 @@ def call(tool, arguments):
         return False, text
 
 
+def attestation_identity(health):
+    """The complete loaded implementation, schema, and session identity from one health row."""
+    attestation = health.get("attestation") if isinstance(health, dict) else None
+    fields = ("implementation_fingerprint", "schema_fingerprint", "load_id")
+    if (not isinstance(attestation, dict) or not isinstance(health.get("session_id"), str)
+            or not health.get("session_id")):
+        return None
+    if attestation.get("complete") is not True or attestation.get("loaded_matches_source") is not True:
+        return None
+    if not all(isinstance(attestation.get(field), str)
+               and re.fullmatch(r"[0-9a-f]{64}", attestation[field]) for field in fields[:2]):
+        return None
+    if not isinstance(attestation.get("load_id"), str) or not attestation.get("load_id"):
+        return None
+    return {"implementation_fingerprint": attestation["implementation_fingerprint"],
+            "schema_fingerprint": attestation["schema_fingerprint"],
+            "load_id": attestation["load_id"], "session_id": health["session_id"]}
+
+
 def health_gate():
     with urllib.request.urlopen(BASE + "/health", timeout=5) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     if data.get("server") != SERVER_NAME:
         sys.exit(f"Refusing to run: {BASE} is answering as {data.get('server')!r}, "
                  f"not {SERVER_NAME!r}. Is Autodesk's built-in server on this port?")
+    if attestation_identity(data) is None:
+        sys.exit("Refusing to run: /health has no complete loaded implementation/schema attestation.")
     return data
 
 
-def registered_tools():
-    out = _post({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
-    return sorted(t["name"] for t in out["result"]["tools"])
+def _schema_fingerprint(rows):
+    """Canonical fingerprint of the tools/list rows the harness consumed."""
+    ordered = sorted(rows, key=lambda row: row.get("name", ""))
+    body = json.dumps(ordered, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(body.encode("ascii")).hexdigest()
+
+
+def registered_tools(health=None):
+    out, response_session = _post(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+        with_session=True)
+    rows = (out.get("result") or {}).get("tools") if isinstance(out, dict) else None
+    if not isinstance(rows, list) or any(not isinstance(row, dict)
+                                              or not isinstance(row.get("name"), str)
+                                              or not row["name"] for row in rows):
+        sys.exit("Refusing to run: tools/list did not return a complete tool registry.")
+    if health is not None:
+        identity = attestation_identity(health)
+        if identity is None or response_session != identity["session_id"]:
+            sys.exit("Refusing to run: the server session changed between health and tools/list.")
+        if _schema_fingerprint(rows) != identity["schema_fingerprint"]:
+            sys.exit("Refusing to run: tools/list does not match the attested schema fingerprint.")
+    return sorted(row["name"] for row in rows)
 
 
 # --- the DAG ----------------------------------------------------------------------------------

@@ -131,12 +131,13 @@ class TestActiveIdentity:
         assert d.datafile_reads == 1                        # ... from a single dataFile fetch
 
     def test_active_block_carries_the_version_lag_sentence(self, _install):
-        # ONE sentence covers both lagging surfaces (this block's version_number/latest + xref_tree's
-        # current/latest) and names version_id / version_confirmed as authoritative.
+        # ONE sentence covers every held-handle version field and directs cloud identity reads to a
+        # fresh data_get; only an affirmative fresh-comparison save verdict confirms advancement.
         d = _Doc("Bracket", data_file=_DataFile(vnum=2, latest=2))
         _install(d)
         note = _payload(dg.handler())["active"]["version_lag_note"]
-        assert "version_id" in note and "version_confirmed" in note
+        assert "version_id" in note and "fresh data_get" in note
+        assert "version_confirmed is true only" in note and "false/pending is unknown" in note
         assert "xref_tree" in note and "LAG" in note
 
     def test_unsaved_active_block_has_no_version_lag_sentence(self, _install):

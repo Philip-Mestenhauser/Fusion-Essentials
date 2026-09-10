@@ -81,19 +81,48 @@ a primitive to its handler + execution metadata, the registry); and the tool mod
 
 ---
 
-## This is a Fusion add-in (no standalone "run" / test harness)
+## Contributor setup and verification
 
-- The code runs **inside Fusion's embedded Python**, not a standalone interpreter, so
-  `import adsk` only works from within Fusion. To static-check or unit-test logic outside
-  Fusion, stub `adsk.*` and the repo packages (`config`, `lib.fusion360utils`,
-  `shared_state`) in `sys.modules` — build a faithful temp-package tree under a fake add-in
-  root so imports resolve.
-- For syntax/AST checks, use Fusion's bundled Python:
-  `C:\Users\<user>\AppData\Local\Autodesk\webdeploy\production\<hash>\Python\python.exe`
-  (the path varies by Fusion build).
-- Keep the MCP server modular under `commands/mcpServer/`, dual-license new files
-  (MIT/Apache headers), follow the existing conventions below, and keep the security
-  posture defensible.
+Install/run/update/remove the add-in using the [README](README.md#installation). Fusion runs the
+add-in with its embedded Python; running `Fusion-Essentials.py` in a terminal or installing an
+unrelated `adsk` package does not provide a Fusion session. The Windows contributor commands below
+use a separate Python 3.13 installation with the `py` launcher, pip and venv. Git is needed for a
+contributor checkout; Node and a separately installed MCP SDK are not needed for these tests.
+
+From the repository root in PowerShell, create an isolated environment without activating it:
+
+```powershell
+py -3.13 -m venv .cache/contributor-python
+.\.cache\contributor-python\Scripts\python.exe -m pip install pytest
+.\.cache\contributor-python\Scripts\python.exe -m pytest tests/unit -q
+```
+
+Dependency installation needs access to a Python package source; the unit-test command itself runs
+offline, without Fusion or an MCP client. `tests/conftest.py` supplies the fake `adsk` objects and the
+committed API facts. Keep the same interpreter for subsequent commands. To iterate on one tool,
+replace `tests/unit` with its test file. Coverage and cold-agent eval dependencies are separate,
+optional workflows, not prerequisites for this route.
+Put agent scratch files and task artifacts in the gitignored `outputs/` directory; reserve
+`tests/live/evals/results/` for actual eval runs.
+
+| Check | What it requires and establishes |
+|---|---|
+| `python -m pytest tests/unit -q` | Handler and framework regressions against fakes; no native geometry or live acceptance claim. |
+| `python tests/check_all.py --offline` | Generator checks, full unit/lint suite and source-matched live receipt; still requires installed Fusion binding files. Only the final live gate is skipped. |
+| `python tests/check_all.py` | Maintainer acceptance with installed bindings, a matching live receipt and a reachable, correctly loaded Fusion add-in. |
+
+In this table, `python` means the environment's `.cache/contributor-python/Scripts/python.exe`.
+Plain `pytest` without the `tests/unit` path also collects lints that consult installed bindings.
+A contributor without Fusion can submit the unit result and identify pending native checks; do not
+refresh or edit generated facts or receipts to make that checkout appear live-verified. Tool source
+changes invalidate the receipt until the maintainer loads and exercises that code. `--offline` is
+not a workaround for absent binding files or a stale receipt.
+
+Windows is the validated development platform. The manifest also targets macOS; that declaration
+does not establish an equivalent tested contributor or native execution path. Keep production code
+under `commands/mcpServer/` modular and dual-licensed (MIT/Apache headers). Read
+[tests/CLAUDE.md](tests/CLAUDE.md) before adding tests and the
+[tool-authoring guide](commands/mcpServer/tools/CLAUDE.md) before adding tools.
 
 ## Add-in command convention (how features are structured)
 
@@ -136,9 +165,9 @@ a primitive to its handler + execution metadata, the registry); and the tool mod
 
 ### Behavior that isn't obvious from the code
 
-- The server binds **`127.0.0.1:27182`**, path **`/mcp`** — Fusion's own well-known MCP port.
-  Whoever binds first wins; if Fusion's built-in MCP server holds it, the add-in detects this
-  and warns the user.
+- The server binds **`127.0.0.1:27182`**, path **`/mcp`**. Startup checks port ownership;
+  another listener on that address prevents startup. Do not assume Fusion's built-in MCP server
+  always uses that port. Confirm the Essentials server identity through `/health`.
 - What each tool does, and the exact `adsk.*` it calls, is not restated here: a tool's own
   `description` is its contract, and `sys_get_api_doc` searches the installed API's real signatures.
   This section keeps only the behaviors NOT visible from a description or the code.
@@ -208,9 +237,9 @@ Unreferenced symbols and unused imports are enforced continuously by `test_dead_
 names are what make deadness statically provable). UNREACHABLE BRANCHES need runtime evidence
 instead: generate candidates with branch coverage over the suite -
 
-```bash
-py -3 -m pip install pytest-cov
-py -3 -m pytest -q --cov=commands.mcpServer --cov-branch --cov-report=html
+```powershell
+.\.cache\contributor-python\Scripts\python.exe -m pip install pytest-cov
+.\.cache\contributor-python\Scripts\python.exe -m pytest -q --cov=commands.mcpServer --cov-branch --cov-report=html
 ```
 
 then review never-executed branches in `htmlcov/`. An uncovered branch is either dead code or a
@@ -219,10 +248,10 @@ wrapper paths is legitimately partial. The agent-facing surface has its own gene
 audit: the "Blindspots" section of [tests/generated/TOOL_POINTER_MAP.md](tests/generated/TOOL_POINTER_MAP.md)
 (orphan tools, guidance pointing at tools that do not exist).
 
-For CAN'T-FAIL tests (assertions no code change would ever flip), the periodic detector is
-mutation testing: `py -3 -m pip install mutmut`, point it at one tool module at a time, and
-treat every surviving mutant as a missing assertion. Too slow to gate on; the continuous floor is
-`test_assert_strength.py` (a test may not rely on a bare isError flag alone).
+To check that a regression test can detect its intended defect, temporarily change the condition it
+exercises, run that test, and restore the source. Use the bounded procedure in
+[tests/CLAUDE.md](tests/CLAUDE.md#prove-a-test-actually-bites); `test_assert_strength.py` also rejects
+assertions that rely only on a bare error flag.
 
 ### Testing a tool
 
@@ -243,24 +272,25 @@ because mocks can't catch a wrong `adsk.*` signature, geometry-touching tools ar
   captured (so a regression to a wrong method name / argument fails here).
 - **Cover the guards too** — unknown-units / no-active-design / out-of-range inputs, not just the happy
   path. The error contract (`isError`, `message`) is part of the tool's behavior.
-- **Run it:** `py -3 -m pytest tests/unit/test_<tool>.py -q` while iterating; before calling any
-  change done, run THE button - `py -3 tests/check_all.py` - which chains the generator checks, the
+- **Run it:** `.\.cache\contributor-python\Scripts\python.exe -m pytest tests/unit/test_<tool>.py -q` while iterating; before calling any
+  change done, run THE button - `.\.cache\contributor-python\Scripts\python.exe tests/check_all.py` - which chains the generator checks, the
   whole suite, the live-run receipt check, and the live gate, each failure naming its own repair.
-  No Fusion on this machine? `--offline` skips the live gate visibly (the summary says the mocks
-  were not re-confirmed).
+  Without a live session, `--offline` skips the final live gate but still needs installed bindings
+  and a current receipt. For the contributor route without Fusion, run `tests/unit` as above and
+  report the remaining maintainer checks.
 - **Changed tool source?** The receipt check goes red until the live suite has seen your code:
-  run `py -3 tests/live/tool_verify.py` with Fusion up (a green run rewrites
+  run `.\.cache\contributor-python\Scripts\python.exe tests/live/tool_verify.py` with Fusion up (a green run rewrites
   `tests/live/VERIFIED_TOOLS.md` - commit it with your change). Reload the add-in first so the live
   session runs the code you just edited. Read the receipt's buckets honestly: a `covered` tool had
   a step whose predicate read a VALUE off the payload; a `called` tool only passed bare `ok` steps
   (the call did not fail - nothing about its effect was read). A new step for an Edit tool should
   read the effect back, not just `ok`.
-- **Regenerate the docs:** `py -3 tests/gen_all.py` rebuilds everything under `tests/generated/`
+- **Regenerate the docs:** `.\.cache\contributor-python\Scripts\python.exe tests/gen_all.py` rebuilds everything under `tests/generated/`
   (TOOL_MANIFEST + the CLAUDE.md maps from the registry, TOOL_POINTER_MAP from source,
   PERMISSION_POSTURE from the write annotations); run it whenever check_all says an artifact is stale.
 - **New adsk API?** If your tool references an enum family the generated `live_api_facts.py` has
   not measured, the suite goes red with the one command that fixes it: run
-  `py -3 tests/live/measure_api.py` with Fusion up, then commit the regenerated facts.
+  `.\.cache\contributor-python\Scripts\python.exe tests/live/measure_api.py` with Fusion up, then commit the regenerated facts.
 
 See [commands/mcpServer/README.md](commands/mcpServer/README.md) for the user-facing setup,
 the full tool list, and the security model.
