@@ -102,15 +102,12 @@ def handler() -> dict:
         "capabilities": _capabilities_block(),
         "gated": {
             "tools": gated_tools,
-            # The rows here are the ones that CAN be server-disabled, so the client-deny diagnosis
-            # holds only for a row reading enabled_now true; for a false one the server is the
-            # answer, and its own enable_path is beside it.
-            "note": ("A gated tool with enabled_now false is disabled ON THIS SERVER - the client "
-                     "cannot see it until the checkbox at its enable_path is ticked. A tool this "
-                     "map names as present (enabled_now true, or any tool in 'families') that the "
-                     "client reports as 'No such tool available' is hidden by CLIENT permission "
-                     "config (a deny rule), not missing from the server - check the client's "
-                     "permissions."),
+            "note": ("A gated tool with enabled_now false is disabled here; use enable_path. "
+                     "For a tool this map names as present, 'No such tool available' can mean a "
+                     "stale client tool list or deny rule. Compare schema_fingerprint with the "
+                     "prior map; after a change, reconnect or refresh tools, then exercise the "
+                     "changed input. The fingerprint identifies server schema, not whether the "
+                     "client consumed it."),
         },
         "note": ("The BREADTH map (what families exist + each one's entry tool). To go deeper, search "
                  "within a family with sys_find_tool (e.g. sys_find_tool('surface')). sys_get_guidance "

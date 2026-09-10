@@ -132,27 +132,26 @@ class TestStaleCachedSchemaWarning:
                             lambda *a, **k: types.SimpleNamespace(start=lambda: None))
         text = ra.handler()["content"][0]["text"]
         assert "json-array" in text
-        assert "comma-mangles" in text
+        assert "comma-mangle" in text
         assert "reconnect" in text.lower()
         # the claim distinguishes scalar (safe) from array (unsafe) - not a blanket "reconnect always".
         assert "scalar" in text.lower()
 
 
 class TestReloadResponseTeachesReconnect:
-    """The reload response is the moment an agent decides what to do while the server restarts. The
-    truth: the client reconnects AUTOMATICALLY, so the right move is simply the next tool call - the
-    note must teach that (and name a cheap confirmation read), never send agents to shell-poll
-    /health."""
+    """The reload response tells the caller how to refresh its schema and observe the new server."""
 
-    def test_note_teaches_next_tool_call_not_health_polling(self, monkeypatch):
+    def test_note_teaches_schema_refresh_and_not_health_polling(self, monkeypatch):
         _install_event(monkeypatch)
         monkeypatch.setattr(ra.threading, "Timer",
                             lambda *a, **k: types.SimpleNamespace(start=lambda: None))
         res = ra.handler()
         assert res["isError"] is False
         text = res["content"][0]["text"]
-        assert "reconnects automatically" in text
-        assert "sys_capability_map" in text
+        assert "reconnect or refresh" in text
+        assert "sys_capability_map" in text and "schema_fingerprint" in text
+        assert "only exercising a changed input proves the client consumed it" in text
+        assert "reconnects automatically" not in text
         assert "Do not poll /health" in text
         # machine-readable pointer for clients that read fields, not prose
         assert res["next"] == "sys_capability_map"

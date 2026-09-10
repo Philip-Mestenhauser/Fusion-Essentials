@@ -182,11 +182,12 @@ def handler() -> dict:
     "content": [{
             "type": "text",
         "text": (
-                "Reload scheduled. Make your next tool call after ~3 seconds - the connection "
-                "reconnects automatically (a cheap confirmation read: sys_capability_map). "
-                "Do not poll /health from a shell. A client still holding the pre-reload schema "
-                "comma-mangles a json-array argument for a property that cache lacks (a scalar "
-                "still passes) - reconnect before calling a tool whose inputs changed."
+                "Reload scheduled. Wait ~3 seconds, then reconnect or refresh this server's tool "
+                "list before further calls. Call sys_capability_map and compare its "
+                "schema_fingerprint with the value read before reload. That identifies the server "
+                "schema, but only exercising a changed input proves the client consumed it. Do not "
+                "poll /health from a shell. A stale client schema can comma-mangle a json-array "
+                "argument whose property it lacks while a scalar still passes."
             ),
         }],
     "isError": False,

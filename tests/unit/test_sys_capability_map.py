@@ -145,28 +145,24 @@ class TestGatedTools:
         out = _payload(cm.handler())
         assert [t["tool"] for t in out["gated"]["tools"]] == ["a_tool", "z_tool"]
 
-    def test_gated_note_teaches_the_client_side_deny_case(self, monkeypatch):
-        # a tool this map NAMES that the client still reports missing is a CLIENT permission deny,
-        # not a server gap - the note is a general diagnostic rule, not a claim about one tool.
+    def test_gated_note_names_stale_schema_and_client_deny(self):
         _install(["sys_capability_map"])
-        out = _payload(cm.handler())
-        note = out["gated"]["note"]
+        note = _payload(cm.handler())["gated"]["note"]
         assert "No such tool available" in note
-        assert "client" in note.lower()
-        assert "server" in note.lower()
+        assert "stale client tool list" in note
+        assert "deny rule" in note
+        assert "schema_fingerprint" in note
+        assert "reconnect or refresh" in note
+        assert "not whether the client consumed it" in note
 
-    def test_the_note_qualifies_the_client_deny_diagnosis_by_enabled_now(self, monkeypatch):
-        # this is the ONE block whose rows can be SERVER-disabled: a row reading enabled_now false
-        # is missing because the server's own checkbox is off (its enable_path sits beside it), so
-        # sending that case to the client's permission config is a wrong diagnosis.
+    def test_the_note_keeps_server_disabled_distinct_from_present_but_hidden(
+            self, monkeypatch):
         monkeypatch.setattr(cm, "GATED_TOOLS", {"sys_execute_script": "Allow AI to execute scripts"})
         monkeypatch.setattr(cm, "has_tool", lambda name: False)
         _install(["sys_capability_map"])
         out = _payload(cm.handler())
         note = out["gated"]["note"]
         assert out["gated"]["tools"][0]["enabled_now"] is False
-        assert "enabled_now false" in note and "enable_path" in note
-        # the client-deny sentence is scoped to a tool that IS present, never left unqualified
-        client_claim = note[note.index("No such tool available"):]
-        assert "enabled_now true" in note[:note.index("No such tool available")]
-        assert "CLIENT permission config" in client_claim
+        assert "disabled here" in note and "enable_path" in note
+        present = note[note.index("For a tool this map names as present"):]
+        assert "stale client tool list" in present and "deny rule" in present

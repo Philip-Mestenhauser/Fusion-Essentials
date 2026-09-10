@@ -562,3 +562,148 @@ class TestTheSharedRasterFixture:
             head = fh.read(8)
         assert head == b"\x89PNG\r\n\x1a\n"
         assert os.path.getsize(path) > 0
+
+
+class TestUploadSettleRunner:
+    """The authored cloud act waits for its exact upload before dependent mutations."""
+
+    @pytest.fixture
+    def run_upload(self, monkeypatch):
+        import verify_runner as runner
+
+        def run(statuses, upload_handle="upN", upload_error=False, split=False):
+            wire, sleeps, pending = [], [], list(statuses)
+            ctx = {"upload_handle": "upOLD", "cloud_file": "urn:stale",
+                   "cloud_file_name": "stale.png"}
+            folder_deletes = []
+
+            def call(tool, args):
+                wire.append((tool, dict(args)))
+                if tool == "data_get_upload_status":
+                    item = pending.pop(0)
+                    if isinstance(item, Exception):
+                        raise item
+                    return item
+                if tool == "doc_get":
+                    home = {"name": "home", "document_handle": "session:home", "is_active": True}
+                    return False, {"active": home, "open_documents": [home], "open_count": 1}
+                if tool == "data_create_folder":
+                    name = args["folder_name"]
+                    return False, {"created": True, "name": name, "id": "urn:" + name,
+                                   "path": args["parent_folder"] + "/" + name,
+                                   "auto_created_parents": []}
+                if tool == "data_upload_file":
+                    if upload_error:
+                        return True, "upload refused"
+                    return False, {"upload_started": True, "upload_handle": upload_handle,
+                                   "destination_folder": args["folder"]}
+                if tool == "data_get":
+                    if "file" in args:
+                        return False, {"file": {"name": "target.png", "id": args["file"]},
+                                       "location": {"parent_folder": {"path": acts.RUN_PATH}},
+                                       "state": {"is_complete": True}}
+                    if "folder" in args:
+                        if len(folder_deletes) == 3:
+                            return True, "not found: no subfolder " + acts.RUN_FOLDER
+                        return False, {"folder_exists": True}
+                    return False, {"active_hub": acts.HUB, "projects": [{"name": acts.PROJECT}],
+                                   "project_count": 1}
+                if tool == "data_move_file":
+                    return False, {"moved": True, "to_folder": acts.MOVED_PATH, "verified_by": "id"}
+                if tool == "data_download_file":
+                    return False, {"downloaded": True, "size_bytes": 8}
+                if tool == "data_delete_file":
+                    return False, {"deleted": True, "name": "target.png", "forced": False,
+                                   "document_id": args["document_id"]}
+                if tool == "data_delete_folder":
+                    folder_deletes.append(args["folder_id"])
+                    if len(folder_deletes) == 1 and args["confirm_name"] == acts.RUN_FOLDER:
+                        return True, ("is not empty: immediate files: 0, subfolders: 1; "
+                                      "1 file(s) and 1 subfolder(s) total; recursive_confirm")
+                    return False, {"deleted": True, "name": args["confirm_name"], "recursive": False,
+                                   "contained_files": 0, "contained_subfolders": 0}
+                raise AssertionError("unexpected tool: " + tool)
+
+            monkeypatch.setattr(tool_verify, "call", call)
+            monkeypatch.setattr(runner.time, "sleep", sleeps.append)
+            monkeypatch.setattr(runner, "_UPLOAD_SETTLE_POLLS", 3)
+            timings = {}
+            if split:
+                end = next(i + 1 for i, s in enumerate(acts._CLOUD_DATA)
+                           if s[0] == "data_get_upload_status")
+                rows = runner.run_steps(acts._CLOUD_DATA[:end], ctx, sleep_s=0, timings=timings)
+                ctx = json.loads(json.dumps(ctx))
+                rows += runner.run_steps(acts._CLOUD_DATA[end:], ctx, sleep_s=0, timings=timings)
+            else:
+                rows = runner.run_steps(acts._CLOUD_DATA, ctx, sleep_s=0, timings=timings)
+            return rows, ctx, wire, sleeps, timings
+        return run
+
+    def test_final_response_drives_the_whole_act_without_repolling_terminal(self, run_upload):
+        initial = (False, {"handle": "upN", "state": "uploading", "file_id": "urn:decoy"})
+        processing = (False, {"handle": "upN", "state": "processing"})
+        terminal = (False, {"handle": "upN", "state": "complete", "file_id": "urn:terminal"})
+        rows, ctx, wire, sleeps, timings = run_upload([initial, processing, terminal])
+        assert all(row[1] in ("pass", "expected-refusal") for row in rows)
+        assert ctx["cloud_file"] == "urn:terminal"
+        polls = [i for i, (tool, args) in enumerate(wire) if tool == "data_get_upload_status"]
+        assert len(polls) == 3
+        assert all(wire[i][1] == {"handle": "upN"} for i in polls)
+        assert sleeps == [5.0, 5.0] and timings["data_get_upload_status"][1] == 3
+        assert len([row for row in rows if row[0] == "data_get_upload_status"]) == 1
+        for i, (tool, args) in enumerate(wire):
+            if tool in ("data_move_file", "data_download_file", "data_delete_file", "data_delete_folder"):
+                assert i > polls[-1]
+                assert args.get("file", args.get("document_id", "urn:terminal")) == "urn:terminal"
+        assert initial[1]["file_id"] == "urn:decoy" and initial[1]["state"] == "uploading"
+
+    @pytest.mark.parametrize("status, fragment", [
+        ((False, {"handle": "upN", "state": "failed"}), "reported failed"),
+        ((False, {"state": "complete", "file_id": "urn:missing"}), "does not match"),
+        ((False, {"handle": "upN", "state": "mystery"}), "unknown state"),
+        ((False, {"handle": "upX", "state": "complete", "file_id": "urn:other"}), "does not match"),
+        ((True, "transient wire error"), "transient wire error"),
+        (RuntimeError("transport"), "status read raised"),
+        ((False, None), "not an object"),
+        ((False, {"handle": "upN", "state": "complete"}), "lineage URN"),
+        ((False, {"handle": "upN", "state": "complete", "file_id": "urn:"}), "lineage URN"),
+    ])
+    def test_failed_later_read_blocks_all_dependent_mutations(self, run_upload, status, fragment):
+        initial = (False, {"handle": "upN", "state": "processing"})
+        rows, ctx, wire, sleeps, _timings = run_upload([initial, status])
+        result = next(row for row in rows if row[0] == "data_get_upload_status")
+        assert result[1] == "FAIL" and fragment in result[2]
+        assert "cloud_file" not in ctx and "cloud_file_name" not in ctx
+        assert len([t for t, _a in wire if t == "data_get_upload_status"]) == 2
+        assert sleeps == [5.0]
+        assert not [t for t, _a in wire if t in (
+            "data_move_file", "data_download_file", "data_delete_file", "data_delete_folder")]
+
+    @pytest.mark.parametrize("handle", [None, "", " ", "latest", " upN "])
+    def test_invalid_handle_never_dispatches_status_or_uses_prior_lineage(self, run_upload, handle):
+        _rows, ctx, wire, _sleeps, _timings = run_upload([], upload_handle=handle)
+        assert "cloud_file" not in ctx and "cloud_file_name" not in ctx
+        assert not [t for t, _a in wire if t in (
+            "data_get_upload_status", "data_move_file", "data_download_file",
+            "data_delete_file", "data_delete_folder")]
+
+    def test_refused_upload_cannot_reuse_an_old_handle(self, run_upload):
+        _rows, ctx, wire, _sleeps, _timings = run_upload([], upload_error=True)
+        assert "upload_handle" not in ctx and "cloud_file" not in ctx
+        assert not [t for t, _a in wire if t in ("data_get_upload_status", "data_delete_folder")]
+
+    def test_exhaustion_survives_serialized_continuation_without_global_cleanup_policy(self, run_upload):
+        import verify_runner as runner
+
+        pending = (False, {"handle": "upN", "state": "processing"})
+        rows, ctx, wire, sleeps, _timings = run_upload([pending] * 3, split=True)
+        result = next(row for row in rows if row[0] == "data_get_upload_status")
+        assert result[1] == "FAIL" and "after 3 reads" in result[2]
+        assert sleeps == [5.0, 5.0] and "cloud_file" not in ctx
+        assert "run_folder_id" in ctx and "moved_folder_id" in ctx
+        folder_rows = [row for row in rows if row[0] == "data_delete_folder"]
+        assert len(folder_rows) == 3 and all(row[1] == "blocked" for row in folder_rows)
+        assert not [t for t, _a in wire if t == "data_delete_folder"]
+        safe = ("data_delete_folder", {"folder_id": "urn:unrelated", "confirm_name": "Other"}, "ok", None)
+        assert runner.run_steps([safe], ctx, sleep_s=0)[0][1] == "pass"
+        assert wire[-1] == ("data_delete_folder", safe[1])

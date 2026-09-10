@@ -228,6 +228,33 @@ class SimpleMCPServer:
                           f"{uri!r}")
         self._resources_by_uri = {r["uri"]: r for r in self.resources}
 
+    def schema_fingerprint(self):
+        """The canonical fingerprint of the tools/list rows this instance currently serves."""
+        return _schema_fingerprint(_wire_tool_rows(self.tools))
+
+    def _with_schema_fingerprint(self, result):
+        """Add this serving instance's schema identity to a valid capability-map result."""
+        if not isinstance(result, dict) or result.get("isError") is not False:
+            return result
+        content = result.get("content")
+        if (not isinstance(content, list) or not content
+                or not isinstance(content[0], dict)
+                or content[0].get("type") != "text"
+                or not isinstance(content[0].get("text"), str)):
+            return result
+        try:
+            payload = json.loads(content[0]["text"])
+        except (TypeError, ValueError):
+            return result
+        if not isinstance(payload, dict):
+            return result
+        payload["schema_fingerprint"] = self.schema_fingerprint()
+        disclosed = dict(result)
+        disclosed["content"] = list(content)
+        disclosed["content"][0] = dict(content[0])
+        disclosed["content"][0]["text"] = json.dumps(payload, indent=2)
+        return disclosed
+
     def health(self):
         """The server health row with its current session and registered-schema identity."""
         try:
@@ -236,7 +263,7 @@ class SimpleMCPServer:
         except Exception as exc:
             attestation = {"complete": False, "loaded_matches_source": False,
                            "problems": ["loaded attestation failed: " + type(exc).__name__]}
-        attestation["schema_fingerprint"] = _schema_fingerprint(_wire_tool_rows(self.tools))
+        attestation["schema_fingerprint"] = self.schema_fingerprint()
         return {"status": "healthy", "server": self.name,
                 "version": self.server_info["version"], "session_id": self.session_id,
                 "attestation": attestation}
@@ -366,6 +393,8 @@ class SimpleMCPServer:
                     enforce_timeout=item.enforce_timeout)
             else:
                 result = item.handler(**execution_arguments)
+            if tool_name == "sys_capability_map":
+                result = self._with_schema_fingerprint(result)
             return {"jsonrpc": "2.0", "id": request_id, "result": result}
         except Exception as e:
             # A tool EXECUTION failure (including the curated timeout messages from

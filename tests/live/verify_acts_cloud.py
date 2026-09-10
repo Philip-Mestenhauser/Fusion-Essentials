@@ -65,6 +65,26 @@ def _lit(args):
     return lambda _ctx, _a=args: dict(_a)
 
 
+def _upload_args(ctx):
+    """Start a fresh upload attempt and clear lineage captured by an earlier attempt."""
+    for key in ("upload_handle", "cloud_file", "cloud_file_name"):
+        ctx.pop(key, None)
+    return {"file_path": MARKER_PNG, "project": PROJECT, "folder": RUN_PATH}
+
+
+def _upload_status_args(ctx):
+    """Read the current attempt's exact minted upload handle and invalidate stale lineage."""
+    for key in ("cloud_file", "cloud_file_name"):
+        ctx.pop(key, None)
+    return {"handle": _ctx_get(ctx, "upload_handle", "the upload")}
+
+
+def _dependent_folder_args(ctx, folder_key, name):
+    """Build cleanup args only after the current upload has produced its file lineage."""
+    _ctx_get(ctx, "cloud_file", "the uploaded file")
+    return {"folder_id": _ctx_get(ctx, folder_key, "the folder"), "confirm_name": name}
+
+
 # --- predicates: each reads keys the tool PUBLISHES, and reports what it read ------------------
 
 def _hub_is(hub, project):
@@ -121,7 +141,8 @@ def _upload_complete(p):
                       "file_id": p.get("file_id"), "version_number": p.get("version_number"),
                       "elapsed_seconds": p.get("elapsed_seconds")},
                      p.get("state") == "complete"
-                     and str(p.get("file_id") or "").startswith("urn:"))
+                     and isinstance(p.get("file_id"), str)
+                     and p["file_id"].startswith("urn:") and len(p["file_id"]) > 4)
 
 
 def _file_record(folder_path, complete=True):
@@ -612,13 +633,10 @@ _CLOUD_DATA = [
     ("data_create_folder", {"folder_name": MOVED_FOLDER, "project": PROJECT,
                             "parent_folder": RUN_PATH},
      _folder_created(MOVED_FOLDER, RUN_PATH), ("moved_folder_id", lambda p: p["id"])),
-    ("data_upload_file", {"file_path": MARKER_PNG, "project": PROJECT, "folder": RUN_PATH},
+    ("data_upload_file", _upload_args,
      _upload_started(RUN_PATH), ("upload_handle", lambda p: p["upload_handle"])),
-    # the upload is asynchronous and the poll is non-blocking, so the hold is here rather than inside
-    # either call. A state short of 'complete' fails the row below and is reported as what it is;
-    # nothing downstream runs against a file that has not landed.
-    _dwell(8.0),
-    ("data_get_upload_status", lambda c: {"handle": _ctx_get(c, "upload_handle", "the upload")},
+    # The runner supplies the terminal response to the predicate and saved-value extractor.
+    ("data_get_upload_status", _upload_status_args,
      _upload_complete, ("cloud_file", lambda p: p["file_id"])),
     ("data_get", lambda c: {"file": _ctx_get(c, "cloud_file", "the uploaded file")},
      _file_record(RUN_PATH), ("cloud_file_name", lambda p: p["file"]["name"])),
@@ -633,18 +651,15 @@ _CLOUD_DATA = [
     # the guard measured at this moment - the run folder holds no file of its own and one subfolder,
     # and one file and one subfolder in the subtree below it - so a preview that under-counts what a
     # wipe would take reds here rather than reading as the same refusal.
-    ("data_delete_folder", lambda c: {"folder_id": _ctx_get(c, "run_folder_id", "the run folder"),
-                                      "confirm_name": RUN_FOLDER},
+    ("data_delete_folder", lambda c: _dependent_folder_args(c, "run_folder_id", RUN_FOLDER),
      _refused("is not empty", "immediate files: 0, subfolders: 1",
               "1 file(s) and 1 subfolder(s) total", "recursive_confirm"), None),
     ("data_delete_file", lambda c: {"document_id": _ctx_get(c, "cloud_file", "the uploaded file"),
                                     "confirm_name": _ctx_get(c, "cloud_file_name", "its name")},
      _file_deleted, None),
-    ("data_delete_folder", lambda c: {"folder_id": _ctx_get(c, "moved_folder_id", "the move target"),
-                                      "confirm_name": MOVED_FOLDER},
+    ("data_delete_folder", lambda c: _dependent_folder_args(c, "moved_folder_id", MOVED_FOLDER),
      _folder_deleted(MOVED_FOLDER), None),
-    ("data_delete_folder", lambda c: {"folder_id": _ctx_get(c, "run_folder_id", "the run folder"),
-                                      "confirm_name": RUN_FOLDER},
+    ("data_delete_folder", lambda c: _dependent_folder_args(c, "run_folder_id", RUN_FOLDER),
      _folder_deleted(RUN_FOLDER), None),
     # THE DELETE RECEIPT, standing apart from what the delete calls reported about themselves: the
     # run folder is addressed DIRECTLY and the project answers that it has no such subfolder. A

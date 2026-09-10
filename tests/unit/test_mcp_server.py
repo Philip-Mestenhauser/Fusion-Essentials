@@ -15,7 +15,7 @@ import types
 
 import pytest
 
-from conftest import load_mcp_server
+from conftest import load_mcp_server, load_tool
 
 
 @pytest.fixture
@@ -128,6 +128,77 @@ class TestBareWireMarker:
         assert bare["inputSchema"].get("additionalProperties") is False
         marker.unlink()
         assert server._handle_tools_list(1)["result"]["tools"][0]["description"] == "synthetic enum tool"
+
+
+class TestCapabilityMapSchemaIdentity:
+    def _map_payload(self, server):
+        response = _call(server, "sys_capability_map", {})
+        assert response["result"]["isError"] is False
+        return json.loads(response["result"]["content"][0]["text"])
+
+    def test_dispatch_uses_serving_instance_schema_not_the_handler_registry(
+            self, mcp_server_module, monkeypatch):
+        capability_map = load_tool("sys_capability_map")
+        registry_only = _make_tool_item(
+            "registry_only_get", lambda **kw: _ok(), required=(), optional=())
+        monkeypatch.setattr(capability_map, "get_tools", lambda: [registry_only])
+        server = mcp_server_module.SimpleMCPServer()
+        server.register(capability_map.item)
+        server.register(_make_tool_item("served_probe", lambda **kw: _ok()))
+
+        payload = self._map_payload(server)
+        assert payload["families"][0]["family"] == "registry"
+        assert payload["schema_fingerprint"] == server.health()["attestation"][
+            "schema_fingerprint"]
+        assert payload["schema_fingerprint"] != mcp_server_module._schema_fingerprint(
+            mcp_server_module._wire_tool_rows({"registry_only_get": registry_only}))
+
+    def test_order_is_stable_and_an_input_schema_change_changes_identity(
+            self, mcp_server_module):
+        capability_map = load_tool("sys_capability_map")
+        first_probe = _make_tool_item("served_probe", lambda **kw: _ok(), required=("a",))
+        changed_probe = _make_tool_item("served_probe", lambda **kw: _ok(), required=("changed",))
+        first = mcp_server_module.SimpleMCPServer()
+        reversed_order = mcp_server_module.SimpleMCPServer()
+        changed = mcp_server_module.SimpleMCPServer()
+        for item in (capability_map.item, first_probe):
+            first.register(item)
+        for item in (first_probe, capability_map.item):
+            reversed_order.register(item)
+        for item in (capability_map.item, changed_probe):
+            changed.register(item)
+
+        first_id = self._map_payload(first)["schema_fingerprint"]
+        assert first_id == self._map_payload(reversed_order)["schema_fingerprint"]
+        assert first_id != self._map_payload(changed)["schema_fingerprint"]
+
+    def test_bare_wire_projection_has_its_own_actual_served_identity(
+            self, mcp_server_module, tmp_path, monkeypatch):
+        capability_map = load_tool("sys_capability_map")
+        server = mcp_server_module.SimpleMCPServer()
+        server.register(capability_map.item)
+        server.register(_make_tool_item("served_probe", lambda **kw: _ok()))
+        marker = tmp_path / ".wire_bare"
+        monkeypatch.setattr(mcp_server_module, "BARE_WIRE_MARKER", str(marker))
+
+        full = self._map_payload(server)["schema_fingerprint"]
+        assert full == server.health()["attestation"]["schema_fingerprint"]
+        marker.write_text("on", encoding="utf-8")
+        bare = self._map_payload(server)["schema_fingerprint"]
+        assert bare == server.health()["attestation"]["schema_fingerprint"]
+        assert bare != full
+
+    @pytest.mark.parametrize("result", [
+        {"content": [{"type": "text", "text": "not json"}], "isError": False},
+        {"content": [{"type": "text", "text": "failed"}], "isError": True,
+         "message": "failed"},
+    ])
+    def test_malformed_or_error_results_are_not_reclassified(
+            self, mcp_server_module, result):
+        server = mcp_server_module.SimpleMCPServer()
+        server.register(_make_tool_item(
+            "sys_capability_map", lambda **kw: result, required=(), optional=()))
+        assert _call(server, "sys_capability_map", {})["result"] == result
 
 
 class TestInitializeProtocolVersionNegotiation:

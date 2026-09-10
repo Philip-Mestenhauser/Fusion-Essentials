@@ -510,6 +510,41 @@ def _shoot(label, out_dir, seq, expected_document=_NO_EXPECT):
     return None if is_error else path
 
 
+_UPLOAD_SETTLE_POLLS = 12
+_UPLOAD_SETTLE_GAP_S = 5.0
+
+
+def _settle_upload_status(call, arguments):
+    """Return one exact upload's final response and dispatch count after bounded reads."""
+    requested = arguments.get("handle")
+    if (not isinstance(requested, str) or not requested.strip()
+            or requested != requested.strip() or requested.lower() == "latest"):
+        return True, "upload settle requires a nonempty exact upload handle", 0
+    for poll in range(_UPLOAD_SETTLE_POLLS):
+        if poll:
+            time.sleep(_UPLOAD_SETTLE_GAP_S)
+        try:
+            is_error, current = call("data_get_upload_status", dict(arguments))
+        except Exception as exc:
+            return True, "upload %r status read raised: %s" % (requested, exc), poll + 1
+        if is_error:
+            return True, "upload %r status read failed: %s" % (requested, current), poll + 1
+        if not isinstance(current, dict):
+            return True, "upload %r status payload is not an object" % requested, poll + 1
+        returned = current.get("handle")
+        if returned != requested:
+            return True, "upload handle %r does not match requested %r" % (returned, requested), poll + 1
+        state = current.get("state")
+        if state == "complete":
+            return False, current, poll + 1
+        if state == "failed":
+            return True, "upload %r reported failed: %s" % (requested, current), poll + 1
+        if state not in ("uploading", "processing"):
+            return True, "upload %r has unknown state %r" % (requested, state), poll + 1
+    return True, "upload %r did not settle after %s reads; last state %r" % (
+        requested, _UPLOAD_SETTLE_POLLS, state), _UPLOAD_SETTLE_POLLS
+
+
 def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, timings=None,
               shots_dir=None, act="", document_pin=None, guarded_tools=None):
     """Run and judge one sequence while guarding writes to one exact document."""
@@ -627,10 +662,14 @@ def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, tim
         print(f"    -> {tool} {act}".rstrip()
               + (f" {json.dumps(arguments)[:120]}" if trace else ""), flush=True)
         t0 = time.time()
-        is_error, payload = call(tool, arguments)
+        if tool == "data_get_upload_status":
+            is_error, payload, calls = _settle_upload_status(call, arguments)
+        else:
+            is_error, payload = call(tool, arguments)
+            calls = 1
         if timings is not None:
             spent, count = timings.get(tool, (0.0, 0))
-            timings[tool] = (spent + time.time() - t0, count + 1)
+            timings[tool] = (spent + time.time() - t0, count + calls)
 
         identity_problem = None
         if tool == "doc_get" and not deliberate_refusal:
