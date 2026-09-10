@@ -1888,3 +1888,19 @@ class TestDataFileResolution:
         assert res["isError"] is True
         assert "the active document reports no cloud project." in res["message"]
         assert "Could not find a configured part 'Bracket'" in res["message"]
+
+    def test_an_unreadable_sibling_name_reaches_the_handler_refusal(self, monkeypatch):
+        class _BlindName(_FakeDataFile):
+            @property
+            def name(self):
+                raise RuntimeError("3 : file name unreadable")
+
+        design = _Design(configured=True)
+        _install(monkeypatch, design)
+        self._no_urn(monkeypatch)
+        project = self._project_holding(monkeypatch, _FakeDataFile("Bracket", ["Medium"]))
+        project.rootFolder._files.append(_BlindName("Hidden", ["Large"]))
+        before = design.rootComponent.occurrences.count
+        res = dc.handler(action="add_insert", insert_part="Bracket")
+        assert res["isError"] is True and "name(s) were unreadable" in res["message"]
+        assert design.rootComponent.occurrences.count == before

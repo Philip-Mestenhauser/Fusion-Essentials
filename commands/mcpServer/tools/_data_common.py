@@ -57,9 +57,10 @@ def _find_project(data, name=None, project_id=None):
         if nm:
             available.append(nm)
         try:
-            if project_id and p.id == project_id:
-                return p, available
-            if name and nm and nm.strip().lower() == name.strip().lower():
+            if project_id:
+                if p.id == project_id:
+                    return p, available
+            elif name and nm and nm.strip().lower() == name.strip().lower():
                 return p, available
         except Exception:
             continue
@@ -186,18 +187,44 @@ _UPLOAD_STATE = {0: "processing", 1: "finished", 2: "failed"}
 
 
 def _files_in_folder_by_name(folder, name):
-    """EVERY immediate child DataFile of `folder` carrying `name` (case-insensitive, whole name). A
-    folder CAN hold several files of one name - two saveAs calls into one folder under one name
-    produce two DISTINCT lineages - so a name is not an identity here and the caller decides."""
+    """Return (readable exact-name children, incomplete-census problem or None)."""
     want = (name or "").strip().lower()
     out = []
     try:
-        for f in folder.dataFiles.asArray():
-            if (safe(lambda f=f: f.name) or "").strip().lower() == want:
-                out.append(f)
-    except Exception:
-        pass
-    return out
+        files = folder.dataFiles.asArray()
+        iterator = iter(files)
+    except Exception as exc:
+        where = _folder_path_string(folder) or "(project root)"
+        return out, (f"Could not completely read files in '{where}': its child-file listing failed "
+                     f"({str(exc)[:160]}).")
+
+    unread_names = 0
+    while True:
+        try:
+            f = next(iterator)
+        except StopIteration:
+            break
+        except Exception as exc:
+            where = _folder_path_string(folder) or "(project root)"
+            known = f" Known matching lineage URNs: {_same_name_rows(out)}." if out else ""
+            return out, (f"Could not completely read files in '{where}': iterating its child-file "
+                         f"listing failed ({str(exc)[:160]}).{known}")
+        try:
+            raw_name = f.name
+        except Exception:
+            unread_names += 1
+            continue
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            unread_names += 1
+            continue
+        if raw_name.strip().lower() == want:
+            out.append(f)
+    if unread_names:
+        where = _folder_path_string(folder) or "(project root)"
+        known = f" Known matching lineage URNs: {_same_name_rows(out)}." if out else ""
+        return out, (f"Could not completely read files in '{where}': {unread_names} child file "
+                     f"name(s) were unreadable.{known}")
+    return out, None
 
 
 def _same_name_rows(matches):
@@ -222,7 +249,9 @@ def _file_in_folder_by_name(folder, name):
     """The ONE immediate child DataFile of `folder` carrying `name`: (file, None) for exactly one
     match, (None, None) when nothing carries it, (None, sentence) when several do - never one of
     several, since those are different lineages. The caller appends its own remedy."""
-    matches = _files_in_folder_by_name(folder, name)
+    matches, problem = _files_in_folder_by_name(folder, name)
+    if problem:
+        return None, problem
     if len(matches) == 1:
         return matches[0], None
     if matches:

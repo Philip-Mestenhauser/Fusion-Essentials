@@ -50,6 +50,12 @@ class _LateUrnFile(FakeDataFile):
         pass                     # the settling schedule above is what this file's id reports
 
 
+class _BlindNameFile(FakeDataFile):
+    @property
+    def name(self):
+        raise RuntimeError("3 : file name unreadable")
+
+
 class _BlindIdFile(FakeDataFile):
     """A DataFile whose NAME reads but whose lineage id does not - the cloud read that fails one
     step past the name. It is still a file carrying that name, so every same-name count includes
@@ -114,6 +120,31 @@ class FakeSaveAsDoc(FakeFusionDocument):
     def saveas_args(self):
         """The (name, folder, description, tag) the last saveAs was called with, None if none ran."""
         return self._saves[-1][1] if self._saves else None
+
+
+class _UnreadAfterSaveDoc(FakeSaveAsDoc):
+    def __init__(self, *args, post_mode="listing", **kwargs):
+        super().__init__(*args, **kwargs)
+        self._post_mode = post_mode
+
+    def saveAs(self, name, folder, description="", tag=""):
+        try:
+            return super().saveAs(name, folder, description, tag)
+        finally:
+            if self._post_mode == "listing":
+                folder._files_raise = "3 : listing unreadable"
+            else:
+                folder._files.append(_BlindNameFile("Hidden", file_id="urn:hidden"))
+
+
+class _UnreadSavedStateDoc(_UnreadAfterSaveDoc):
+    @property
+    def isSaved(self):
+        raise RuntimeError("3 : saved state unreadable")
+
+    @isSaved.setter
+    def isSaved(self, value):
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -372,6 +403,74 @@ class TestSaveDocumentAs:
         _install([proj], active=doc)
         out = _payload(dm.handler(name="PartA_CAM", project="CAM"))
         assert "name_collision" not in out
+
+    def test_unreadable_preflight_refuses_without_duplicate_opt_in(self, _install):
+        proj = FakeProject("CAM")
+        proj.rootFolder._files_raise = "3 : listing unreadable"
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:new")
+        _install([proj], active=doc)
+        res = dm.handler(name="PartA_CAM", project="CAM")
+        assert res["isError"] is True and "cannot verify" in res["message"]
+        assert doc.saveas_args is None
+
+    def test_duplicate_opt_in_can_proceed_but_discloses_unknown_preflight(self, _install):
+        proj = FakeProject("CAM")
+        proj.rootFolder._files_raise = "3 : listing unreadable"
+        doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:new")
+        _install([proj], active=doc)
+        out = _payload(dm.handler(name="PartA_CAM", project="CAM", allow_duplicate_name=True))
+        assert out["saved"] is True and doc.saveas_args is not None
+        assert "name_census_incomplete" in out and "NAME CENSUS INCOMPLETE" in out["note"]
+        assert "name_collision" not in out
+
+    def test_duplicate_opt_in_does_not_turn_unknown_preflight_into_error_recovery(self, _install):
+        proj = FakeProject("CAM")
+        proj.rootFolder._files_raise = "3 : listing unreadable"
+        doc = FakeSaveAsDoc(save_ok=False)
+        _install([proj], active=doc)
+        res = dm.handler(name="PartA_CAM", project="CAM", allow_duplicate_name=True)
+        assert res["isError"] is True and "whether a file landed is unconfirmed" in res["message"]
+        assert doc.saveas_args is not None
+
+    @pytest.mark.parametrize("raises", [False, True])
+    def test_unreadable_post_read_reports_landing_as_unconfirmed(self, raises, _install):
+        proj = FakeProject("CAM")
+        doc = _UnreadAfterSaveDoc(save_ok=False, raise_on_save=raises, land_on_save=True)
+        _install([proj], active=doc)
+        res = dm.handler(name="PartA_CAM", project="CAM")
+        assert res["isError"] is True and "whether a file landed is unconfirmed" in res["message"]
+        assert "No change made" not in res["message"] and len(proj.rootFolder._files) == 1
+
+    def test_partial_post_census_proves_effect_but_not_lineage_or_total(self, _install):
+        proj = FakeProject("CAM")
+        doc = _UnreadAfterSaveDoc(save_ok=False, land_on_save=True, post_mode="name")
+        _install([proj], active=doc)
+        out = _payload(dm.handler(name="PartA_CAM", project="CAM"))
+        assert out["saved"] is True and out["document_id"] is None
+        assert out["known_same_name_document_ids"] == ["urn:adsk.file:landed"]
+        assert "same_name_document_ids" not in out
+        assert "not an exhaustive count" in out["note"]
+
+    def test_fresh_document_lineage_recovers_despite_unread_post_census(
+            self, monkeypatch, _install):
+        proj = FakeProject("CAM")
+        target = FakeDataFolder("Made")
+        monkeypatch.setattr(dm, "_ensure_folder_path", lambda root, parts: (target, ["Made"]))
+        doc = _UnreadAfterSaveDoc(save_ok=False, new_urn="urn:adsk.lineage:fresh")
+        _install([proj], active=doc)
+        out = _payload(dm.handler(name="PartA_CAM", project="CAM",
+                                  folder="Made", create_path=True))
+        assert out["saved"] is True and out["document_id"] == "urn:adsk.lineage:fresh"
+        assert out["auto_created_parents"] == ["Made"]
+        assert "name_census_incomplete" in out
+
+    def test_unknown_prior_saved_state_cannot_prove_fresh_lineage(self, _install):
+        proj = FakeProject("CAM")
+        doc = _UnreadSavedStateDoc(save_ok=False, new_urn="urn:adsk.lineage:old-or-new")
+        _install([proj], active=doc)
+        res = dm.handler(name="PartA_CAM", project="CAM")
+        assert res["isError"] is True and "unconfirmed" in res["message"]
+        assert "old-or-new" not in json.dumps(res)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

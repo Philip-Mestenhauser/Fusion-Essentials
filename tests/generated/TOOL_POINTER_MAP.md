@@ -1220,6 +1220,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide 'document_id' (lineage URN, preferred) or 'name'.
 - Provide 'project' (name) or 'project_id' for the destination.
 - Destination project not found:
+- Copy was not attempted. Retry after the folder is readable or copy into a different 'folder'.
 - Copy into a different 'folder'
 - ' already exists in '
 - ). Copy into a different 'folder'
@@ -1233,7 +1234,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ). The walk is bounded because each folder is a slow cloud fetch on Fusion's main thread. Pass document_id (the lineage URN, from data_get
 - By-name search stopped at its budget: visited
 - ' without covering it (
-- Use data_get, or pass document_id (URN).
+- . Refusing because an unread file name or folder can hide a same-name twin. Retry after the folders are readable, pass document_id (URN), or narrow the search with source_folder='<path>'.
+- By-name source search could not completely read
+- ; matches read so far:
+- . Use data_get, or pass document_id (URN).
 - files share it in project '
 - . Fusion allows same-name files in different folders; refusing rather than copying the wrong one. Pass document_id (the lineage URN above) to copy one exactly.
 - Could not access destination project root:
@@ -1374,25 +1378,30 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `doc_save_as`
 - The saved document becomes the active document. Its 'document_id' is the lineage URN - the stable identity to address it by (doc_open/doc_activate/data_delete_file); a NAME can be shared by several...
-- NAME COLLISION - see 'name_collision'.
+- NAME CENSUS INCOMPLETE - allow_duplicate_name authorized the save despite an incomplete pre-save collision check.
 - Provide 'name' for the saved document.
 - Provide 'project' (name) or 'project_id' for the destination.
 - No active document to save. Open a document first.
 - Destination project not found:
+- doc_save_as cannot verify that the destination name is free. Retry after the folder is readable, choose another folder, or pass allow_duplicate_name=true only if creating a same-name fork is intent...
 - doc_save_as would add yet ANOTHER file of that name (a new lineage) - refused by default. To add a version to one of the files above, open that URN (doc_open) and use doc_save; to create a same-nam...
 - ' already exists in '
 - ). doc_save_as would FORK a SECOND file with the same name (a new lineage) - refused by default. To add a version to the EXISTING file, open it by that URN (doc_open) and use doc_save; to deliberat...
 - saveAs reported an error but the file DID land in the destination (verified by reading the saved document/folder back) - reporting success rather than a false negative, which would send a retry int...
 - Fusion declined to save '
-- ' to the destination. No change made.
+- ' (saveAs returned false). The complete name readback did not establish whether this call landed, so no success is reported.
+- NAME COLLISION - see 'name_collision'.
+- Could not access destination project root:
+- saveAs returned false for '
+- ', and the destination name census was incomplete, so whether a file landed is unconfirmed:
 - A different file named '
 - ' already existed in this folder (
 - ); this saveAs created a SECOND file with the same name (a new lineage - Fusion allows this). To add a version to the EXISTING file instead, open it (doc_open by that URN) and use doc_save; or dele...
-- Could not access destination project root:
-- ); this saveAs added another one (a new lineage - Fusion allows this). To add a version to one of them instead, open that URN (doc_open) and use doc_save. Address files by URN, not name, from here.
 - Destination folder path not found: '
 - '). Folders at project root:
 - . Pass create_path=true, or use data_get(include=['folders']) to see the structure.
+- ), and the destination name census was incomplete, so whether a file landed is unconfirmed:
+- ); this saveAs added another one (a new lineage - Fusion allows this). To add a version to one of them instead, open that URN (doc_open) and use doc_save. Address files by URN, not name, from here.
 - Could not prepare destination path '
 
 ### `doc_save_milestone`

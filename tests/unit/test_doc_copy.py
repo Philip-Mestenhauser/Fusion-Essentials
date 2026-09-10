@@ -31,6 +31,12 @@ def FakeFile(name, fid="urn:adsk.file:src", child_refs=None, copy_returns=True, 
                         rename_ok=rename_ok)
 
 
+class _BlindNameFile(FakeDataFile):
+    @property
+    def name(self):
+        raise RuntimeError("3 : file name unreadable")
+
+
 class _DeafRename(FakeDataFile):
     """A copy whose name setter SWALLOWS the write - it neither raises nor keeps the value, the one
     shape a rename that only checks for an exception reports as landed."""
@@ -207,6 +213,44 @@ class TestCopyDocument:
             folder="MCP Test Parts", create_path=True, name="PartA_CAM"))
         assert out["auto_created_parents"] == ["MCP Test Parts"]
         assert out["destination_folder"] == "MCP Test Parts"
+
+    def test_unreadable_destination_refuses_before_copy(self, _install):
+        src = FakeFile("Template", fid="urn:adsk.file:src")
+        proj = FakeProject("CAM")
+        proj.rootFolder._files_raise = "3 : listing unreadable"
+        _install([proj], by_id={"urn:adsk.file:src": src})
+        res = dm.handler(document_id="urn:adsk.file:src", project="CAM")
+        assert res["isError"] is True and "could not completely read" in res["message"].lower()
+        assert proj.rootFolder._files == []
+
+    def test_destination_census_failure_discloses_created_parents(self, monkeypatch, _install):
+        src = FakeFile("Template", fid="urn:adsk.file:src")
+        proj = FakeProject("CAM")
+        target = FakeDataFolder("Made", files_raise="3 : listing unreadable")
+        monkeypatch.setattr(dm, "_ensure_folder_path", lambda root, parts: (target, ["Made"]))
+        _install([proj], by_id={"urn:adsk.file:src": src})
+        res = dm.handler(document_id="urn:adsk.file:src", project="CAM",
+                         folder="Made", create_path=True)
+        assert res["isError"] is True
+        assert "already created" in res["message"] and "Made" in res["message"]
+        assert target._files == []
+
+    @pytest.mark.parametrize("copy_failure", ["false", "raise"])
+    def test_copy_failure_after_path_creation_discloses_retained_parents(
+            self, copy_failure, monkeypatch, _install):
+        src = FakeFile("Template", fid="urn:adsk.file:src",
+                       copy_returns=copy_failure != "false")
+        if copy_failure == "raise":
+            monkeypatch.setattr(src, "copy", lambda target: (_ for _ in ()).throw(
+                RuntimeError("3 : copy failed")))
+        proj = FakeProject("CAM")
+        target = FakeDataFolder("Made")
+        monkeypatch.setattr(dm, "_ensure_folder_path", lambda root, parts: (target, ["Made"]))
+        _install([proj], by_id={"urn:adsk.file:src": src})
+        res = dm.handler(document_id="urn:adsk.file:src", project="CAM",
+                         folder="Made", create_path=True)
+        assert res["isError"] is True and "already created" in res["message"]
+        assert "Made" in res["message"] and target._files == []
 
     # --- copy-by-NAME source resolution (lines 110-121) ---
 
@@ -403,13 +447,28 @@ class TestCopyByNameUnreadFolders:
         *_rest, unread = dm._find_file_by_name(proj.rootFolder, "Template")
         assert unread == []
 
-    def test_a_copy_over_an_unread_folder_carries_the_hole(self, monkeypatch, _install):
-        _install([self._library(), FakeProject("CAM")])
-        out = _payload(dm.handler(
-            name="Template", source_project="Library", project="CAM"))
-        assert out["copied"] is True                      # the copy still happened
-        assert out["source_folders_unreadable"] == ["Archive"]
-        assert "same-name twin" in out["note"] and "document_id" in out["note"]
+    def test_a_copy_over_an_unread_folder_is_refused_before_destination_prep(
+            self, monkeypatch, _install):
+        prepared = []
+        monkeypatch.setattr(dm, "_ensure_folder_path",
+                            lambda root, parts: prepared.append(parts))
+        destination = FakeProject("CAM")
+        _install([self._library(), destination])
+        res = dm.handler(name="Template", source_project="Library", project="CAM",
+                         folder="Made", create_path=True)
+        assert res["isError"] is True and "same-name twin" in res["message"]
+        assert "document_id" in res["message"] and prepared == []
+        assert destination.rootFolder._files == []
+
+    def test_an_unreadable_source_file_name_is_the_same_fail_closed_hole(self, _install):
+        library = FakeProject("Library", pid="p-lib")
+        library.rootFolder._files.append(FakeFile("Template", fid="urn:known"))
+        library.rootFolder._files.append(_BlindNameFile("Hidden", file_id="urn:hidden"))
+        destination = FakeProject("CAM")
+        _install([library, destination])
+        res = dm.handler(name="Template", source_project="Library", project="CAM")
+        assert res["isError"] is True and "unread file name" in res["message"]
+        assert "urn:known" in res["message"] and destination.rootFolder._files == []
 
     def test_a_fully_read_copy_carries_no_unread_key(self, monkeypatch, _install):
         _install([self._library(unread_child=False), FakeProject("CAM")])
@@ -424,7 +483,7 @@ class TestCopyByNameUnreadFolders:
         res = dm.handler(
             name="Template", source_project="Library", project="CAM")
         assert res["isError"] is True
-        assert "1 folder(s) could not be read" in res["message"]
+        assert "could not completely read 1 folder(s)" in res["message"]
         assert "Archive" in res["message"]
 
     def test_a_miss_with_every_folder_read_states_no_hole(self, monkeypatch, _install):

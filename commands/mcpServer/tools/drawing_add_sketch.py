@@ -6,6 +6,9 @@ rectangles, arcs, circles, ellipses). Drawing-sketch coordinates are in the DRAW
 units - millimetres under ISO, inches under ASME - not the API's centimetres. WRITES the drawing.
 """
 
+import math
+from fractions import Fraction
+
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
@@ -40,17 +43,35 @@ _COLLECTIONS = ("lines", "rectangles", "arcs", "circles", "ellipses")
 _POINT_FORM = {
     "rectangle": "two opposite corners",
     "arc": "start, a point on it, end",
-    "ellipse": "center, a major-axis point, a point on it",
+    "ellipse": "center, a major-axis point, a point defining minor-axis distance",
     "circle": "the center, with a numeric 'radius' beside it",
 }
 
 
-def _point(raw):
-    """One [x, y] pair as floats, or None when it is not a point."""
-    try:
-        return float(raw[0]), float(raw[1])
-    except Exception:
+def _scalar(raw):
+    """A finite numeric scalar as an unrounded float, or None when invalid."""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _point(raw):
+    """One [x, y] pair as finite unrounded floats, or None when invalid."""
+    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+        return None
+    x, y = _scalar(raw[0]), _scalar(raw[1])
+    return (x, y) if x is not None and y is not None else None
+
+
+def _arc_determinant(points):
+    """Exact collinearity determinant built from the normalized float coordinates."""
+    (x0, y0), (x1, y1), (x2, y2) = (
+        tuple(Fraction.from_float(value) for value in point) for point in points)
+    return (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
 
 
 def _plan(geometry):
@@ -77,23 +98,42 @@ def _plan(geometry):
                                 f"Got {raw_points!r}.")
         points = []
         for j, raw in enumerate(raw_points):
+            if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+                return None, None, f"geometry[{i}].points[{j}] is not an [x, y] pair: {raw!r}."
             pt = _point(raw)
             if pt is None:
-                return None, None, f"geometry[{i}].points[{j}] is not an [x, y] pair: {raw!r}."
+                return None, None, (f"geometry[{i}].points[{j}] must contain finite numeric x and y "
+                                    f"values: {raw!r}.")
             points.append(pt)
         if kind == "line":
             if len(points) < need:
                 return None, None, (f"geometry[{i}] ('line') needs at least {need} points - a chain of "
                                     f"N points draws N-1 segments. Got {len(points)}.")
+            for j in range(1, len(points)):
+                if points[j] == points[j - 1]:
+                    return None, None, (f"geometry[{i}] ('line') has consecutive duplicate points at "
+                                        f"indices {j - 1} and {j}.")
         elif len(points) != need:
             return None, None, (f"geometry[{i}] ('{kind}') needs exactly {need} points "
                                 f"({_POINT_FORM[kind]}). Got {len(points)}.")
+        if kind == "rectangle":
+            if points[0][0] == points[1][0] or points[0][1] == points[1][1]:
+                return None, None, (f"geometry[{i}] ('rectangle') needs opposite corners with "
+                                    "different x and y coordinates.")
+        elif kind == "arc":
+            if len(set(points)) != 3:
+                return None, None, f"geometry[{i}] ('arc') needs three distinct points."
+            if _arc_determinant(points) == 0:
+                return None, None, f"geometry[{i}] ('arc') points must not be collinear."
+        elif kind == "ellipse":
+            if points[0] == points[1] or points[0] == points[2]:
+                return None, None, (f"geometry[{i}] ('ellipse') needs the center distinct from both "
+                                    "defining points.")
         radius = spec.get("radius")
         if kind == "circle":
-            try:
-                radius = float(radius)
-            except (TypeError, ValueError):
-                return None, None, (f"geometry[{i}] ('circle') needs a numeric 'radius'. "
+            radius = _scalar(radius)
+            if radius is None:
+                return None, None, (f"geometry[{i}] ('circle') needs a finite numeric 'radius'. "
                                     f"Got {spec.get('radius')!r}.")
             if radius <= 0:
                 return None, None, f"geometry[{i}] ('circle') needs a radius greater than 0. Got {radius}."

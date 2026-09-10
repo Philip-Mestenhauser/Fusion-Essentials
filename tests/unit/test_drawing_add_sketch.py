@@ -203,7 +203,7 @@ class TestPlanFirst:
 
     def test_a_circle_needs_a_positive_numeric_radius(self, wire):
         wire()
-        assert "needs a numeric 'radius'" in error_message(
+        assert "needs a finite numeric 'radius'" in error_message(
             dw.handler(geometry=[{"kind": "circle", "points": [[0, 0]]}]))
         assert "greater than 0. Got -2.0" in error_message(
             dw.handler(geometry=[{"kind": "circle", "points": [[0, 0]], "radius": -2}]))
@@ -315,3 +315,50 @@ class TestToolDescription:
         # points are not interchangeable, so the refusal an undercount meets spells them out
         message = dw._plan([{"kind": "arc", "points": [[0, 0], [1, 1]]}])[2]
         assert "start, a point on it, end" in message and "Got 2" in message
+
+
+class TestStrictGeometryGuards:
+    @pytest.mark.parametrize("bad,needle", [
+        ({"kind": "circle", "points": [[float("nan"), 0]], "radius": 5}, "finite"),
+        ({"kind": "circle", "points": [[float("inf"), 0]], "radius": 5}, "finite"),
+        ({"kind": "circle", "points": [[0, 0]], "radius": float("nan")}, "finite"),
+        ({"kind": "circle", "points": [["2.5", 0]], "radius": 5}, "finite"),
+        ({"kind": "circle", "points": [[True, 0]], "radius": 5}, "finite"),
+        ({"kind": "circle", "points": [[0, 0, 1]], "radius": 5}, "[x, y] pair"),
+        ({"kind": "circle", "points": [[0, 0]], "radius": "5"}, "finite numeric"),
+        ({"kind": "circle", "points": [[0, 0]], "radius": True}, "finite numeric"),
+        ({"kind": "line", "points": [[0, 0], [0, 0], [10, 0]]}, "duplicate"),
+        ({"kind": "rectangle", "points": [[0, 0], [0, 10]]}, "different x and y"),
+        ({"kind": "rectangle", "points": [[0, 0], [10, 0]]}, "different x and y"),
+        ({"kind": "arc", "points": [[0, 0], [0, 0], [10, 0]]}, "distinct"),
+        ({"kind": "arc", "points": [[0, 0], [5, 0], [10, 0]]}, "collinear"),
+        ({"kind": "ellipse", "points": [[0, 0], [0, 0], [0, 10]]}, "center distinct"),
+        ({"kind": "ellipse", "points": [[0, 0], [10, 0], [0, 0]]}, "center distinct"),
+    ])
+    def test_invalid_row_after_valid_predecessor_is_rejected_before_mutation(
+            self, wire, bad, needle):
+        state = wire()
+        msg = error_message(dw.handler(geometry=[_CIRCLE, bad]))
+        assert "geometry[1]" in msg and needle in msg
+        assert state.sheets[0].sketches._requested == []
+        assert state.sketch._drawn == []
+
+    def test_tiny_circle_and_arc_keep_unrounded_coordinates(self, wire, monkeypatch):
+        state = wire()
+        monkeypatch.setattr(adsk.core.Point2D, "create", lambda x, y: (x, y))
+        out = payload(dw.handler(geometry=[
+            {"kind": "circle", "points": [[1e-200, -1e-200]], "radius": 1e-200},
+            {"kind": "arc", "points": [[0.0, 0.0], [1e-200, 1e-200], [2e-200, 0.0]]},
+        ]))
+        assert out["curves_landed"] == 2
+        assert state.sketch._drawn[0][1] == ((1e-200, -1e-200), 1e-200)
+        assert state.sketch._drawn[1][1] == ((0.0, 0.0), (1e-200, 1e-200), (2e-200, 0.0))
+
+    def test_reversed_rectangle_and_collinear_nonzero_ellipse_are_valid(self, wire):
+        state = wire()
+        out = payload(dw.handler(geometry=[
+            {"kind": "rectangle", "points": [[20, 15], [0, 0]]},
+            {"kind": "ellipse", "points": [[0, 0], [10, 0], [5, 0]]},
+        ]))
+        assert out["curves_landed"] == 2
+        assert [kind for kind, _ in state.sketch._drawn] == ["rectangles", "ellipses"]

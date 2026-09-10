@@ -7,6 +7,8 @@ exactly what to pin down - plus the AI-agent save marker and resolve_file_refere
 refusal when a NAME matches several files. No live Fusion needed.
 """
 
+import json
+
 import pytest
 
 from conftest import (FakeApplication, FakeData, FakeDataFile, FakeDataFolder, FakeDataProject,
@@ -19,6 +21,88 @@ def _file(name, urn):
     """One cloud file carrying the fields the name walk collects off it."""
     return FakeDataFile(name, file_id=urn, version_id=urn + "?version=1", extension="txt",
                         web_url="https://x/" + urn)
+
+
+class _BlindNameFile(FakeDataFile):
+    @property
+    def name(self):
+        raise RuntimeError("3 : file name unreadable")
+
+
+@pytest.fixture
+def project_pair(monkeypatch):
+    """An earlier name match and a later exact-ID match, each carrying the same file name."""
+    wrong_file = _file("same.txt", "urn:wrong")
+    right_file = _file("same.txt", "urn:right")
+    wrong = FakeDataProject(
+        "Requested Name", project_id="project-wrong",
+        root_folder=FakeDataFolder("Wrong Root", files=[wrong_file], is_root=True))
+    right = FakeDataProject(
+        "Other Name", project_id="project-right",
+        root_folder=FakeDataFolder("Right Root", files=[right_file], is_root=True))
+    data = FakeData(projects=[wrong, right],
+                    files_by_id={"urn:wrong": wrong_file, "urn:right": right_file})
+    app = FakeApplication(data=data)
+    data_read = load_tool("_data_read")
+    monkeypatch.setattr(dm, "app", app)
+    monkeypatch.setattr(data_read, "app", app)
+    return data, wrong, right, load_tool("data_get")
+
+
+class TestProjectIdPrecedence:
+    def test_explicit_id_outranks_a_conflicting_name_through_data_get(self, project_pair):
+        _data, _wrong, right, data_get = project_pair
+        result = data_get.handler(project="Requested Name", project_id="project-right")
+        assert result["isError"] is False, result
+        out = json.loads(result["content"][0]["text"])
+        assert out["project"] == {"name": right.name, "id": right.id}
+        assert [row["name"] for row in out["files"]] == ["same.txt"]
+        assert out["files"][0]["id"] == "urn:right"
+
+    def test_a_missing_explicit_id_never_falls_back_to_the_name(self, project_pair):
+        _data, wrong, right, _data_get = project_pair
+        got, meta, err = dm.resolve_file_reference(
+            "same.txt", project=wrong.name, project_id="project-missing")
+        assert got is None and meta is None
+        assert "Project not found: project-missing" in err
+        assert wrong.name in err and right.name in err
+
+    def test_name_only_matching_remains_case_insensitive(self, project_pair):
+        data, wrong, _right, _data_get = project_pair
+        got, _available = dm._find_project(data, name="requested name")
+        assert got is wrong
+
+
+class TestImmediateFolderFileCensus:
+    def test_an_unreadable_collection_is_not_an_empty_folder(self):
+        folder = FakeDataFolder("Root", is_root=True, files_raise="3 : listing unreadable")
+        matches, problem = dm._files_in_folder_by_name(folder, "Part")
+        assert matches == [] and "child-file listing failed" in problem
+        assert dm._file_in_folder_by_name(folder, "Part") == (None, problem)
+
+    def test_an_unreadable_name_preserves_known_matches_but_refuses_resolution(self):
+        known = _file("Part", "urn:known")
+        folder = FakeDataFolder("Root", files=[known], is_root=True)
+        folder._files.append(_BlindNameFile("Hidden", file_id="urn:hidden"))
+        matches, problem = dm._files_in_folder_by_name(folder, "Part")
+        assert matches == [known]
+        assert "1 child file name(s) were unreadable" in problem and "urn:known" in problem
+        assert dm._file_in_folder_by_name(folder, "Part") == (None, problem)
+
+    def test_iteration_failure_preserves_a_readable_prefix_as_partial_only(self):
+        known = _file("Part", "urn:known")
+
+        class _Files:
+            def asArray(self):
+                def rows():
+                    yield known
+                    raise RuntimeError("3 : iteration unreadable")
+                return rows()
+
+        folder = type("Folder", (), {"dataFiles": _Files(), "isRoot": True})()
+        matches, problem = dm._files_in_folder_by_name(folder, "Part")
+        assert matches == [known] and "iterating its child-file listing failed" in problem
+        assert dm._file_in_folder_by_name(folder, "Part") == (None, problem)
 
 
 # ── _split_path: tolerant segmentation ─────────────────────────────────────

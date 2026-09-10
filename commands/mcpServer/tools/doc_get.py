@@ -15,7 +15,7 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
-from ._common import ok, error, safe, terse, counted, design, all_components, iter_collection
+from ._common import ok, error, safe, terse, counted, design
 from . import _common
 from . import _data_read
 from . import _doc_common
@@ -343,12 +343,44 @@ def _unresolved_row(occ, parent_path, depth, detail, counters):
                         f"reference has no readable source document or version: {detail}")}
 
 
-def _unresolved_children(occ, parent_path, depth, refs, cap, counters, state):
-    """Append a row for each unresolved reference among `occ`'s COMPONENT-LOCAL children.
-    childOccurrences silently DROPS an occurrence whose reference is broken while
-    component.occurrences still holds it, and isReferencedComponent reads FALSE on one."""
-    comp = safe(lambda: occ.component)
-    for child in iter_collection(safe(lambda: comp.occurrences) if comp else None):
+def _collection_status(coll, state):
+    """Return (count, lazy slots), marking unreadable membership as incomplete."""
+    count = counted(lambda: coll.count) if coll is not None else None
+    if count is None or count < 0:
+        state["walk_complete"] = False
+        return None, iter(())
+
+    def items():
+        for i in range(count):
+            if state["truncated"]:
+                return
+            item = safe(lambda i=i: coll.item(i))
+            if item is None:
+                state["walk_complete"] = False
+            yield item
+
+    return count, items()
+
+
+def _read_reference_flag(occ, state):
+    """Return the boolean reference flag, or mark unknown classification incomplete."""
+    value = safe(lambda: occ.isReferencedComponent)
+    if not isinstance(value, bool):
+        state["walk_complete"] = False
+        return None
+    return value
+
+
+def _unresolved_children(occ, parent_path, depth, refs, cap, counters, state, limit):
+    """Append unresolved component-local children within the occurrence depth limit."""
+    count, items = _collection_status(safe(lambda: occ.component.occurrences), state)
+    if limit is not None and depth > limit:
+        if count:
+            state["depth_capped"] = True
+        return
+    for child in items:
+        if child is None:
+            continue
         is_broken, detail = _common.broken_reference(child)
         if not is_broken:
             continue
@@ -371,23 +403,39 @@ def _derive_row(comp, feat, counters):
     return row
 
 
-def _walk_derive_rows(d, refs, cap, counters, state):
-    """Append one row per DeriveFeature across EVERY component (root + sub-components, via the shared
-    _common.all_components walk) to refs, sharing the cap/counters/truncated state with the occurrence
-    walk above - the rollup (all_current/stale_count/unreadable_count/truncated) covers BOTH kinds."""
-    for comp in all_components(d):
-        if state["truncated"]:
-            return
-        derive_feats = safe(lambda c=comp: c.features.deriveFeatures)
-        n = safe(lambda df=derive_feats: df.count, 0) if derive_feats is not None else 0
-        for i in range(n or 0):
+def _walk_derive_rows(d, root, refs, cap, counters, state):
+    """Append derive rows in component order, retaining root data on a partial enumeration."""
+    if state["truncated"]:
+        return
+
+    def components():
+        _, items = _collection_status(safe(lambda: d.allComponents), state)
+        root_seen = False
+        for comp in items:
+            if comp is None:
+                continue
+            relation = _common.same_component(comp, root)
+            if relation is None:
+                state["walk_complete"] = False
+                continue
+            if relation is True:
+                if root_seen:
+                    continue
+                root_seen = True
+            yield comp
+        if not root_seen and not state["truncated"]:
+            state["walk_complete"] = False
+            yield root
+
+    for comp in components():
+        count, items = _collection_status(safe(lambda: comp.features.deriveFeatures), state)
+        for _ in range(count or 0):
             if len(refs) >= cap:
                 state["truncated"] = True
                 return
-            feat = safe(lambda df=derive_feats, i=i: df.item(i))
-            if feat is None:
-                continue
-            refs.append(_derive_row(comp, feat, counters))
+            feat = next(items)
+            if feat is not None:
+                refs.append(_derive_row(comp, feat, counters))
 
 
 def _slice_xref_tree(xref_max=_XREF_CAP, max_depth=None):
@@ -404,21 +452,19 @@ def _slice_xref_tree(xref_max=_XREF_CAP, max_depth=None):
         return {"available": False, "note": "The active design has no root component."}
     refs = []
     counters = {"stale": 0, "unreadable": 0}
-    state = {"truncated": False, "depth_capped": False}
+    state = {"truncated": False, "depth_capped": False, "walk_complete": True}
     cap = max(1, int(xref_max))
     limit = None if max_depth is None else max(1, int(max_depth))
 
     def walk(occs, depth, parent_path):
-        if state["truncated"] or occs is None:
+        if state["truncated"]:
             return
+        count, items = _collection_status(occs, state)
         if limit is not None and depth > limit:
-            state["depth_capped"] = True
+            if count:
+                state["depth_capped"] = True
             return
-        n = safe(lambda: occs.count, 0)
-        for i in range(n):
-            if state["truncated"]:
-                return
-            occ = safe(lambda i=i: occs.item(i))
+        for occ in items:
             if occ is None:
                 continue
             is_broken, detail = _common.broken_reference(occ)
@@ -430,24 +476,24 @@ def _slice_xref_tree(xref_max=_XREF_CAP, max_depth=None):
                     return
                 refs.append(_unresolved_row(occ, parent_path, depth, detail, counters))
                 continue
-            if safe(lambda occ=occ: occ.isReferencedComponent, False):
+            if _read_reference_flag(occ, state) is True:
                 if len(refs) >= cap:
                     state["truncated"] = True # stop collecting; the rollup is now partial
                     return
                 refs.append(_xref_row(occ, depth, counters))
             path = safe(lambda occ=occ: occ.fullPathName) or parent_path
-            _unresolved_children(occ, path, depth + 1, refs, cap, counters, state)
+            _unresolved_children(occ, path, depth + 1, refs, cap, counters, state, limit)
             walk(safe(lambda occ=occ: occ.childOccurrences), depth + 1, path)
 
     walk(safe(lambda: root.occurrences), 1, safe(lambda: root.name))
-    _walk_derive_rows(d, refs, cap, counters, state)
-    complete = not (state["truncated"] or state["depth_capped"])
+    _walk_derive_rows(d, root, refs, cap, counters, state)
+    complete = state["walk_complete"] and not (state["truncated"] or state["depth_capped"])
     all_current = complete and counters["stale"] == 0 and counters["unreadable"] == 0
     unresolved = [r for r in refs if r.get("kind") == "unresolved"]
     note = ("Covers three link kinds: kind='xref' (referenced occurrences), kind='derive' (derive "
             "features) and kind='unresolved' (an occurrence whose referenced component could not be "
             "loaded). all_current is authoritative ONLY on a complete walk; it is false whenever any "
-            "ref is stale, any ref is unreadable, or the walk was capped (truncated/depth_capped). "
+            "ref is stale, any ref is unreadable, or walk_complete is false. "
             "reference_link_count counts LINKS - one per referencing occurrence plus one per derive "
             "feature - which is a different noun from workspace_orient's "
             "references.referenced_documents (referenced DOCUMENTS), so the two legitimately differ. "
@@ -458,8 +504,10 @@ def _slice_xref_tree(xref_max=_XREF_CAP, max_depth=None):
                  "doc_update_xref cannot refresh it. It is also absent from the document's "
                  "documentReferences and from childOccurrences, so no freshness read can see it; "
                  "open the browser tree in Fusion and hover the flagged node for the reason.")
+    if not state["walk_complete"]:
+        note += " Some reference data could not be read; retry doc_get."
     if not complete:
-        note += " Walk was partial - all_current reflects only the examined refs."
+        note += " walk_complete=false: the walk was partial and all_current is not established."
     return {
         "available": True,
         # The noun is IN the key: LINKS, not documents (workspace_orient's
@@ -469,6 +517,7 @@ def _slice_xref_tree(xref_max=_XREF_CAP, max_depth=None):
         "stale_count": counters["stale"],
         "unreadable_count": counters["unreadable"],
         "all_current": all_current,
+        "walk_complete": complete,
         "truncated": state["truncated"],
         "depth_capped": state["depth_capped"],
         "references": refs,

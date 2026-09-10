@@ -9,8 +9,9 @@ from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import counted, ok, error, read_flag, safe
 from ._data_common import (
-    _MAX_XREFS, _data, _file_in_folder_by_name, _find_project, _split_path,
+    _MAX_XREFS, _data, _files_in_folder_by_name, _find_project, _split_path,
     _resolve_folder_path, _ensure_folder_path, _folder_path_string,
+    _same_name_refusal, _retained_parents,
 )
 
 
@@ -53,11 +54,17 @@ def _find_file_by_name(root_folder, name):
         unreadable_here = False
         try:
             for f in folder.dataFiles.asArray():
-                nm = safe(lambda f=f: f.name)
-                if nm:
-                    seen.append(nm)
-                    if nm.strip().lower() == want:
-                        matches.append((f, _folder_path_string(folder)))
+                try:
+                    nm = f.name
+                except Exception:
+                    unreadable_here = True
+                    continue
+                if not isinstance(nm, str) or not nm.strip():
+                    unreadable_here = True
+                    continue
+                seen.append(nm)
+                if nm.strip().lower() == want:
+                    matches.append((f, _folder_path_string(folder)))
         except Exception:
             unreadable_here = True
         try:
@@ -141,14 +148,22 @@ def handler(document_id: str = "", name: str = "",
                 "each folder is a slow cloud fetch on Fusion's main thread. Pass document_id (the "
                 "lineage URN, from data_get" + (" or the matches above" if found else "") + ") to "
                 "skip the walk, or narrow it with source_folder='<path>'.")
+        if unread:
+            found = "; ".join(
+                f"'{safe(lambda f=f: f.name)}' in '{path or '(project root)'}' "
+                f"(URN {safe(lambda f=f: f.id)})" for f, path in matches)
+            return error(
+                f"By-name source search could not completely read {len(unread)} folder(s) "
+                f"({', '.join(unread)}) under {scope_label} of project "
+                f"'{safe(lambda: sproj.name)}'"
+                + (f"; matches read so far: {found}" if found else "")
+                + ". Refusing because an unread file name or folder can hide a same-name twin. "
+                "Retry after the folders are readable, pass document_id (URN), or narrow the "
+                "search with source_folder='<path>'.")
         if not matches:
-            # A folder that would not enumerate leaves a hole in the search space, so "not found"
-            # would be a verdict this walk never reached - say which happened.
-            hole = (f" {len(unread)} folder(s) could not be read ({', '.join(unread)}), so the "
-                    "name may sit in one of them." if unread else "")
             return error(f"Document '{name}' not found under {scope_label} of source project "
                           f"'{safe(lambda: sproj.name)}'. Files seen: "
-                          f"{', '.join(seen[:30]) or '(none)'}.{hole} "
+                          f"{', '.join(seen[:30]) or '(none)'}. "
                           "Use data_get, or pass document_id (URN).")
         if len(matches) > 1:
             rows = "; ".join(
@@ -206,23 +221,31 @@ def handler(document_id: str = "", name: str = "",
                      "data_get) to free 'name' for the copy.")
 
     # Duplicate guard scoped to the destination folder, against the FINAL name (what will collide).
-    existing, same_name_refusal = _file_in_folder_by_name(target, final_name)
-    if same_name_refusal:
-        return error(same_name_refusal + " Copy into a different 'folder'" + rename_remedy)
+    existing_files, census_problem = _files_in_folder_by_name(target, final_name)
+    if census_problem:
+        return error(census_problem + " Copy was not attempted. Retry after the folder is readable "
+                     "or copy into a different 'folder'." + _retained_parents(auto_created))
+    if len(existing_files) > 1:
+        return error(_same_name_refusal(target, final_name, existing_files)
+                     + " Copy into a different 'folder'" + rename_remedy
+                     + _retained_parents(auto_created))
+    existing = existing_files[0] if existing_files else None
     if existing:
         return error(f"A file named '{final_name}' already exists in "
                       f"'{_folder_path_string(target) or '(project root)'}' "
                       f"(id {safe(lambda: existing.id)}). Copy into a different 'folder'"
-                      + rename_remedy)
+                      + rename_remedy + _retained_parents(auto_created))
 
     xrefs, xref_count = _xref_summary(src)
 
     try:
         copied = src.copy(target)  # adsk.core: DataFile.copy(targetFolder) -> DataFile
     except Exception as e:
-        return error(f"Copy failed for document '{src_name}': {e}")
+        return error(f"Copy failed for document '{src_name}': {e}"
+                     + _retained_parents(auto_created))
     if not copied:
-        return error(f"Copy returned nothing for document '{src_name}'.")
+        return error(f"Copy returned nothing for document '{src_name}'."
+                     + _retained_parents(auto_created))
 
     # Apply the requested rename. DataFile.copy() does not accept a name, so the copy lands with
     # the SOURCE's name; set it here (DataFile.name has a setter). Report if the rename fails so a
@@ -262,13 +285,6 @@ def handler(document_id: str = "", name: str = "",
         result["note"] += (" The source's child references could not be READ, so "
                            "external_reference_count is null (not zero) and 'external_references' is "
                            "empty for that reason, not because the source carries none.")
-    if unread:
-        # The by-name search left a hole: the uniqueness this copy acted on was decided over a
-        # search space that did not fully open, so the caller hears it on the SUCCESS path too.
-        result["source_folders_unreadable"] = unread
-        result["note"] += (f" The by-name source search could not read {len(unread)} folder(s) "
-                           f"({', '.join(unread)}), so a same-name twin there would not have been "
-                           "seen - address the source by document_id (URN) if that matters.")
     if rename_error:
         result["rename_warning"] = rename_error
     return ok(result)

@@ -809,12 +809,16 @@ class TestXrefTreeWalkGuards:
         out = dg._slice_xref_tree()
         assert out["reference_link_count"] == 1
         assert out["references"][0]["path"] == "A:1"
+        assert out["walk_complete"] is False and out["all_current"] is False
+        assert out["unreadable_count"] == 0
 
     def test_an_item_the_collection_will_not_hand_over_is_skipped(self, monkeypatch):
         keeper = _Occ("A:1", is_ref=True, dref=_DRef("A", 1, 1, False))
         _use_design(monkeypatch, _Root([None, keeper]))
         out = dg._slice_xref_tree()
         assert out["reference_link_count"] == 1
+        assert out["walk_complete"] is False and out["all_current"] is False
+        assert out["unreadable_count"] == 0
 
     def test_the_cap_reached_in_a_NESTED_branch_stops_the_outer_walk_too(self, monkeypatch):
         # once truncated, the remaining siblings are not even VISITED - a walk that kept descending
@@ -822,13 +826,22 @@ class TestXrefTreeWalkGuards:
         deep = [_Occ(f"Sub:1+X{i}:1", is_ref=True, dref=_DRef("X", 1, 1, False)) for i in (1, 2)]
         sub = _Occ("Sub:1", is_ref=False, children=deep)
         tail = _SpyOcc("Tail:1")
-        _use_design(monkeypatch, _Root([sub, tail]))
+        root = _Root([sub, tail])
+        original, reads = root.occurrences.item, []
+
+        def item(i):
+            reads.append(i)
+            return original(i)
+
+        monkeypatch.setattr(root.occurrences, "item", item)
+        _use_design(monkeypatch, root)
         out = dg._slice_xref_tree(xref_max=1)
         assert out["truncated"] is True
         assert out["reference_link_count"] == 1
         assert [r["path"] for r in out["references"]] == ["Sub:1+X1:1"]
         assert out["all_current"] is False
         assert tail.reads == 0        # the sibling after the cap was never touched
+        assert reads == [0]           # even fetching the outer sibling would exceed the stop
 
     def test_a_reference_whose_freshness_fields_will_not_read_is_unreadable_not_current(self, monkeypatch):
         # the DocumentReference EXISTS but its isOutOfDate does not read: publishing out_of_date
@@ -876,14 +889,13 @@ class TestXrefTreeDerive:
         assert out["reference_link_count"] == 0
         assert out["all_current"] is True
 
-    def test_component_without_features_attribute_no_crash(self, monkeypatch):
-        # a component exposing no .features at all (not just an empty deriveFeatures) must not crash
-        # the walk - every attribute access in the derive walk is guarded by safe().
-        bare = MakeComp("Root")                  # a component carrying no features collection
+    def test_component_without_features_attribute_is_incomplete(self, monkeypatch):
+        # A missing derive collection is unknown coverage, not proof that the component has no links.
+        bare = MakeComp("Root")
         _use_design(monkeypatch, bare)
         out = dg._slice_xref_tree()
         assert out["reference_link_count"] == 0
-        assert out["all_current"] is True
+        assert out["walk_complete"] is False and out["all_current"] is False
 
     def test_unreadable_derive_reference_blocks_all_current(self, monkeypatch):
         feat = _DeriveFeat("Derive1", dref=None)   # a derive feature whose documentReference is unreadable
@@ -1067,3 +1079,73 @@ class TestSliceRouter:
         out = _payload(dg.handler(include=["used_in"]))
         assert out["used_in"] == {"marker": "U"}
         assert "versions" not in out and "xref_tree" not in out
+
+
+@pytest.fixture
+def xref_read(_install, monkeypatch):
+    def read(root, **kwargs):
+        _install(_Doc("Assembly", data_file=_DataFile()))
+        _use_design(monkeypatch, root)
+        return _payload(dg.handler(include=["xref_tree"], **kwargs))["xref_tree"]
+    return read
+
+
+class TestXrefTreeCoverageStatus:
+    def test_unknown_reference_flag_keeps_readable_sibling_but_blocks_verdict(
+            self, xref_read, monkeypatch):
+        good = _Occ("Good:1", is_ref=True, dref=_DRef("Good", 1, 1, False))
+        unknown = _Occ("Unknown:1", is_ref=False)
+        monkeypatch.setattr(unknown, "isReferencedComponent", "unknown")
+        out = xref_read(_Root([good, unknown]))
+        assert [r["path"] for r in out["references"]] == ["Good:1"]
+        assert out["walk_complete"] is False and out["all_current"] is False
+        assert out["unreadable_count"] == 0
+
+    def test_empty_leaf_at_depth_cap_is_complete(self, xref_read):
+        leaf = _Occ("Leaf:1", is_ref=True, dref=_DRef("Leaf", 1, 1, False))
+        out = xref_read(_Root([leaf]), max_depth=1)
+        assert out["depth_capped"] is False
+        assert out["walk_complete"] is True and out["all_current"] is True
+
+    def test_unreadable_root_collection_keeps_derive_row_but_blocks_verdict(
+            self, xref_read, monkeypatch):
+        root = _Root([], derive_feats=[_DeriveFeat("D1", _DRef("Src", 1, 1, False))])
+        monkeypatch.setattr(root, "occurrences", _NamedCollection(raises="occurrences unreadable"))
+        out = xref_read(root)
+        assert [r["kind"] for r in out["references"]] == ["derive"]
+        assert out["walk_complete"] is False and out["all_current"] is False
+
+    @pytest.mark.parametrize("failure", ["none", "count", "item"])
+    def test_partial_component_enumeration_retains_root_without_certifying_coverage(
+            self, xref_read, monkeypatch, failure):
+        root = _Root([], derive_feats=[_DeriveFeat("D1", _DRef("Src", 1, 1, False))])
+        coll = (None if failure == "none" else _NamedCollection(
+            [None], raises="count unreadable" if failure == "count" else None))
+        monkeypatch.setattr(MakeDesign, "allComponents", property(lambda self: coll))
+        out = xref_read(root)
+        assert [r["path"] for r in out["references"]] == ["Root:D1"]
+        assert out["walk_complete"] is False and out["all_current"] is False
+        assert out["unreadable_count"] == 0
+        assert out["truncated"] is False and out["depth_capped"] is False
+
+    def test_derive_cap_stops_before_reading_another_feature(self, xref_read, monkeypatch):
+        root = _Root([], derive_feats=[_DeriveFeat("D1", _DRef("Src", 1, 1, False)),
+                                       _DeriveFeat("D2", _DRef("Tail", 1, 1, False))])
+        coll = root.features.deriveFeatures
+        original, reads = coll.item, []
+
+        def item(i):
+            reads.append(i)
+            return original(i)
+
+        monkeypatch.setattr(coll, "item", item)
+        out = xref_read(root, xref_max=1)
+        assert [r["path"] for r in out["references"]] == ["Root:D1"]
+        assert reads == [0]
+        assert out["truncated"] is True and out["walk_complete"] is False
+
+    def test_depth_limit_does_not_visit_component_local_unresolved_children(self, xref_read):
+        child = _SpyOcc("Deep:1")
+        out = xref_read(_Root([_Occ("Sub:1", comp_local=[child])]), max_depth=1)
+        assert child.reads == 0 and out["references"] == []
+        assert out["depth_capped"] is True and out["walk_complete"] is False

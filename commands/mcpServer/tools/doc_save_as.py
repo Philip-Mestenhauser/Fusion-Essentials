@@ -18,6 +18,7 @@ from . import _export
 from ._data_common import (
     _agent_description, _data, _files_in_folder_by_name, _find_project, _same_name_refusal,
     _same_name_rows, _split_path, _resolve_folder_path, _ensure_folder_path, _folder_path_string,
+    _retained_parents,
 )
 
 app = adsk.core.Application.get()
@@ -122,7 +123,14 @@ def handler(name: str = "", project: str = "", project_id: str = "",
     # Fusion PERMITS same-name documents (identity is the lineage URN, not the name), and saveAs on
     # a colliding name FORKS a new lineage - so a pre-existing same-name file is refused by default,
     # the fork available deliberately via allow_duplicate_name=true.
-    existing_files = _files_in_folder_by_name(target, name)
+    existing_files, preflight_problem = _files_in_folder_by_name(target, name)
+    if preflight_problem and not allow_duplicate_name:
+        return error(
+            preflight_problem + " doc_save_as cannot verify that the destination name is free. "
+            "Retry after the folder is readable, choose another folder, or pass "
+            "allow_duplicate_name=true only if creating a same-name fork is intentional."
+            + _retained_parents(auto_created))
+    preflight_complete = preflight_problem is None
     existing = existing_files[0] if len(existing_files) == 1 else None
     existing_id = safe(lambda: existing.id) if existing else None
     if len(existing_files) > 1 and not allow_duplicate_name:
@@ -130,45 +138,45 @@ def handler(name: str = "", project: str = "", project_id: str = "",
             _same_name_refusal(target, name, existing_files) + " doc_save_as would add yet ANOTHER "
             "file of that name (a new lineage) - refused by default. To add a version to one of the "
             "files above, open that URN (doc_open) and use doc_save; to create a same-name file "
-            "anyway, pass allow_duplicate_name=true.")
+            "anyway, pass allow_duplicate_name=true." + _retained_parents(auto_created))
     if existing and not allow_duplicate_name:
         return error(
             f"A file named '{name}' already exists in "
             f"'{_folder_path_string(target) or '(project root)'}' (URN {existing_id}). doc_save_as "
             "would FORK a SECOND file with the same name (a new lineage) - refused by default. To "
             "add a version to the EXISTING file, open it by that URN (doc_open) and use doc_save; to "
-            "deliberately create a same-name fork anyway, pass allow_duplicate_name=true.")
+            "deliberately create a same-name fork anyway, pass allow_duplicate_name=true."
+            + _retained_parents(auto_created))
 
     def _landed_after_error(wait_s):
-        """Read back whether a saveAs that RAISED (or returned false) nevertheless landed:
-        (landed, same_name_now, seconds_waited), landed being the file's id/urn, True when it landed
-        under no single id, else None. A pre-existing urn on an already-saved doc is NOT trusted - it
-        would false-positive an allow_duplicate_name fork. `wait_s` bounds the URN read."""
-        now = _files_in_folder_by_name(target, name)
-        if now and not existing_files:
-            if len(now) == 1:
-                return safe(lambda: now[0].id) or True, [], None
-            # Several files carry the name now where none did before: this call landed, but WHICH
-            # lineage it wrote is not readable off the folder, so every candidate travels up.
-            return True, now, None
-        if not was_saved:
+        """Return (landed proof, readable matches, wait seconds, post-census problem)."""
+        now, post_problem = _files_in_folder_by_name(target, name)
+        if now and preflight_complete and not existing_files:
+            if len(now) == 1 and post_problem is None:
+                return safe(lambda: now[0].id) or True, [], None, None
+            # A complete empty pre-census proves readable matches appeared, but an incomplete
+            # post-census cannot identify one lineage or establish an exhaustive count.
+            return True, now, None, post_problem
+        if was_saved is False:
             urn, waited = _settled_lineage_urn(doc, wait_s)
             if urn:
-                return urn, [], waited
-        return None, [], None
+                return urn, [], waited, post_problem
+        return None, [], None, post_problem
 
-    def _landed_ok(file_id, how, same_name_now=(), waited=None):
+    def _landed_ok(file_id, how, same_name_now=(), waited=None, post_problem=None):
         # doc.dataFile.id names this call's file ONLY for a never-saved document, else null - never
         # a wrong URN. This re-probe spends the FULL window even from the declined path: files under
         # that name DID land, so a URN is settling behind them.
         resolved, waited = ((file_id, waited) if isinstance(file_id, str)
-                            else (_settled_lineage_urn(doc) if not was_saved else (None, None)))
+                            else (_settled_lineage_urn(doc)
+                                  if was_saved is False else (None, None)))
         payload = {
             "saved": True,
             "name": name,
             "was_previously_saved": was_saved,
             "destination_project": safe(lambda: proj.name),
             "destination_folder": (_folder_path_string(target) or "(project root)"),
+            "auto_created_parents": auto_created,
             "document_id": resolved,
             "recovered_from_error": True,
             "note": ("saveAs reported an error but the file DID land in the destination (verified by "
@@ -177,7 +185,16 @@ def handler(name: str = "", project: str = "", project_id: str = "",
         }
         if waited is not None:
             payload["urn_wait_seconds"] = waited
-        if same_name_now:
+        if same_name_now and post_problem:
+            payload["known_same_name_document_ids"] = [safe(lambda f=f: f.id)
+                                                        for f in same_name_now]
+            payload["name_census_incomplete"] = post_problem
+            payload["note"] += (
+                f" At least {len(same_name_now)} readable file(s) named '{name}' appeared where a "
+                "complete pre-save census found none, but the post-save census was incomplete; "
+                "the known IDs are not an exhaustive count or proof of this call's lineage. "
+                + post_problem)
+        elif same_name_now:
             # One entry per file, null where the id would not read - the count and the URNs are the
             # only handles on the duplicate this recovery just measured.
             payload["same_name_document_ids"] = [safe(lambda f=f: f.id) for f in same_name_now]
@@ -185,10 +202,18 @@ def handler(name: str = "", project: str = "", project_id: str = "",
                 f" {len(same_name_now)} files named '{name}' are in that folder now where none was "
                 f"before, so which lineage THIS call wrote is not readable from the folder: "
                 f"{_same_name_rows(same_name_now)}.")
+        elif post_problem:
+            payload["name_census_incomplete"] = post_problem
+            payload["note"] += (" The post-save name census was incomplete; recovery uses only the "
+                                "independently settled document lineage. " + post_problem)
         if resolved is None:
             payload["note"] += (" 'document_id' is null - nothing read back names this call's file "
                                 "exactly. List the folder with data_get(project, folder) and address "
                                 "the file you meant by its URN.")
+        if preflight_problem:
+            payload["preflight_name_census_incomplete"] = preflight_problem
+            payload["note"] += (" The caller allowed a same-name fork while the pre-save name "
+                                "census was incomplete: " + preflight_problem)
         return ok(payload)
 
     try:
@@ -196,15 +221,30 @@ def handler(name: str = "", project: str = "", project_id: str = "",
     except Exception as e:
         # saveAs can raise (observed: InternalValidationError) AFTER the file landed - re-read before
         # failing, and give the URN the full window, since a commit may be settling behind the raise.
-        landed, same_name_now, waited = _landed_after_error(_URN_WAIT_S)
+        landed, same_name_now, waited, post_problem = _landed_after_error(_URN_WAIT_S)
         if landed:
-            return _landed_ok(landed, f"Original error: {str(e)[:160]}", same_name_now, waited)
-        return error(f"saveAs failed for '{name}': {e}")
+            return _landed_ok(landed, f"Original error: {str(e)[:160]}", same_name_now, waited,
+                              post_problem)
+        uncertainty = preflight_problem or post_problem
+        if uncertainty:
+            return error(f"saveAs raised for '{name}' ({str(e)[:160]}), and the destination name "
+                         f"census was incomplete, so whether a file landed is unconfirmed: "
+                         f"{uncertainty}" + _retained_parents(auto_created))
+        return error(f"saveAs failed for '{name}': {e}" + _retained_parents(auto_created))
     if not did:
-        landed, same_name_now, waited = _landed_after_error(_DECLINED_PROBE_S)
+        landed, same_name_now, waited, post_problem = _landed_after_error(_DECLINED_PROBE_S)
         if landed:
-            return _landed_ok(landed, "saveAs returned false.", same_name_now, waited)
-        return error(f"Fusion declined to save '{name}' to the destination. No change made.")
+            return _landed_ok(landed, "saveAs returned false.", same_name_now, waited,
+                              post_problem)
+        uncertainty = preflight_problem or post_problem
+        if uncertainty:
+            return error(f"saveAs returned false for '{name}', and the destination name census "
+                         f"was incomplete, so whether a file landed is unconfirmed: {uncertainty}"
+                         + _retained_parents(auto_created))
+        return error(f"Fusion declined to save '{name}' (saveAs returned false). The complete "
+                     "name readback did not establish whether this call landed, so no success is "
+                     "reported."
+                     + _retained_parents(auto_created))
 
     # Report the lineage URN this save wrote - the stable identity that ADDRESSES the file (a name
     # can be shared). It resolves asynchronously, so the call waits for it rather than returning null.
@@ -227,7 +267,11 @@ def handler(name: str = "", project: str = "", project_id: str = "",
         "document_id": new_id,   # the lineage URN of the file just written (null only if not yet settled)
         "urn_wait_seconds": urn_wait,
     }
-    if existing_id and existing_id != new_id:
+    if preflight_problem:
+        result["name_census_incomplete"] = preflight_problem
+        note = ("NAME CENSUS INCOMPLETE - allow_duplicate_name authorized the save despite an "
+                "incomplete pre-save collision check. " + preflight_problem + " " + note)
+    elif existing_id and existing_id != new_id:
         result["name_collision"] = {
             "existing_document_id": existing_id,
             "warning": (f"A different file named '{name}' already existed in this folder "
