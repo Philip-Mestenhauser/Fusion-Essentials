@@ -9,6 +9,8 @@ own walk.
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from conftest import (FakeCAMFolder, FakeOperation, FakeSetup, FakeTool, _NamedCollection,
                       load_tool, make_cam)
 
@@ -275,3 +277,74 @@ class TestApplyTemplateToolStatus:
         assert out["operations"][0]["tool"] is None
         assert out["operations"][0]["tool_description_unread"] is True
         assert out["tool_unselected"] == [] and out["ready"] is True
+
+
+class _TemplateInputDouble:
+    """CreateFromCAMTemplateInput has no measured shared fake; mode failures are injected."""
+
+    def __init__(self, initial, fault):
+        self.camTemplate = None
+        self._mode = initial
+        self._fault = fault
+
+    @property
+    def mode(self):
+        if self._fault == "unreadable":
+            raise RuntimeError("mode read failed")
+        if self._fault == "missing":
+            raise AttributeError("mode")
+        return self._mode
+
+    @mode.setter
+    def mode(self, value):
+        if self._fault == "setter":
+            raise RuntimeError("mode setter failed")
+        if self._fault != "mismatch":
+            self._mode = value
+
+
+@pytest.fixture
+def mode_apply(monkeypatch):
+    def apply(generate="generate", missing_member=False, fault=None):
+        setup = _ApplySetup("Setup1", adds=[("Face1", "#1 - 16mm Flat Endmill")])
+        modes = ct.adsk.cam.AutomaticGenerationModes
+        requested = getattr(modes, ct._GEN_MODES[generate])
+        alternate = getattr(modes, ct._GEN_MODES["skip" if generate == "generate" else "generate"])
+        input_obj = _TemplateInputDouble(alternate, fault)
+        _wire_apply(monkeypatch, setup)
+        if missing_member:
+            monkeypatch.setattr(ct.adsk.cam, "AutomaticGenerationModes", SimpleNamespace())
+        monkeypatch.setattr(ct.adsk.cam, "CreateFromCAMTemplateInput",
+                            SimpleNamespace(create=lambda: input_obj))
+        result = ct.handler(setup="Setup1", template_name="T", generate=generate)
+        return setup, input_obj, result, requested
+    return apply
+
+
+class TestApplyTemplateGenerationMode:
+    @pytest.mark.parametrize("generate,member", [("skip", "SkipGeneration"),
+                                               ("generate", "ForceGeneration")])
+    def test_missing_selected_mode_is_rejected_before_apply(self, mode_apply, generate, member):
+        setup, _input, result, _mode = mode_apply(generate, missing_member=True)
+        assert result["isError"] is True and member in result["message"]
+        assert setup.applied == [] and setup.allOperations.count == 0
+
+    def test_existing_falsy_mode_is_assigned_and_apply_still_reads_ready(self, mode_apply):
+        setup, input_obj, result, mode = mode_apply()
+        out = _payload(result)
+        assert not mode
+        assert len(setup.applied) == 1 and setup.applied[0] is input_obj
+        assert input_obj.mode == mode
+        assert out["generation_mode"] == "generate"
+        assert out["ready"] is True and out["operations_added"] == 1
+
+    @pytest.mark.parametrize("fault,needle", [
+        ("mismatch", "did not take"), ("missing", "did not take"),
+        ("unreadable", "did not take"), ("setter", "Could not set"),
+    ])
+    def test_mode_assignment_or_readback_failure_is_rejected_before_apply(self, mode_apply,
+                                                                        fault, needle):
+        setup, _input, result, _mode = mode_apply(fault=fault)
+        assert result["isError"] is True and needle in result["message"]
+        assert "AutomaticGenerationModes.ForceGeneration" in result["message"]
+        assert setup.applied == [] and setup.allOperations.count == 0

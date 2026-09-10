@@ -63,6 +63,10 @@ def _landed(**kwargs):
     return kernel.wrap(ddf.handler, [kernel.FileLanded("file_path")])(**kwargs)
 
 
+def _staging_dirs(folder):
+    return list(folder.glob(".fusion-download-*"))
+
+
 class TestFusionNativeRefusal:
     def test_f3d_is_refused_by_name_with_the_export_pointer(self, resolves, tmp_path):
         resolves(_cloud_file(name="Bracket.f3d", file_extension="f3d"))
@@ -104,8 +108,28 @@ class TestPathHandling:
         df = _cloud_file(writes="hello")
         resolves(df)
         out = _payload(ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path)))
-        assert df._calls == [(str(tmp_path / "probe_note.txt"), None)]   # handler=None = synchronous
+        assert len(df._calls) == 1 and df._calls[0][1] is None
+        staged = df._calls[0][0]
+        assert os.path.basename(staged) == "probe_note.txt"
+        assert staged != str(tmp_path / "probe_note.txt")
         assert out["file_path"] == str(tmp_path / "probe_note.txt")
+        assert _staging_dirs(tmp_path) == []
+
+    def test_the_destination_does_not_appear_while_the_transfer_is_running(self, resolves,
+                                                                           tmp_path):
+        target = tmp_path / "probe_note.txt"
+        df = _cloud_file()
+
+        def download(path, handler):
+            assert handler is None and not target.exists()
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("fresh")
+            return True
+
+        df.download = download
+        resolves(df)
+        out = _payload(ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path)))
+        assert out["file_path"] == str(target) and target.read_text(encoding="utf-8") == "fresh"
 
     def test_file_name_overrides_the_local_name(self, resolves, tmp_path):
         df = _cloud_file(writes="hello")
@@ -177,34 +201,51 @@ class TestStaleFileTrap:
         assert target.read_text(encoding="utf-8") == "previous"     # untouched
         assert df._calls == []                                       # and never downloaded
 
-    def test_overwrite_removes_the_stale_file_first_so_the_gate_is_real(self, resolves, tmp_path):
-        # download() writes NOTHING here. With the stale file removed up front, the landed gate has
-        # nothing to mistake for this download's result and the call fails honestly.
+    def test_overwrite_keeps_the_prior_file_when_the_download_writes_nothing(
+            self, resolves, tmp_path):
         target = tmp_path / "probe_note.txt"
-        target.write_text("previous", encoding="utf-8")
+        target.write_bytes(b"previous")
         resolves(_cloud_file(writes=None))
         res = _landed(file="urn:lin:AAA", destination_folder=str(tmp_path), overwrite=True)
         assert "no file was written" in error_message(res)
-        assert not target.exists()
+        assert target.read_bytes() == b"previous"
+        assert _staging_dirs(tmp_path) == []
 
-    def test_a_stale_file_that_cannot_be_removed_stops_the_call(self, resolves, tmp_path,
-                                                                monkeypatch):
-        # Downloading over a file the remove failed on would leave the landed gate reading the
-        # STALE file as this download's result.
+    def test_a_download_that_cannot_be_published_leaves_the_prior_bytes(
+            self, resolves, tmp_path, monkeypatch):
         target = tmp_path / "probe_note.txt"
-        target.write_text("previous", encoding="utf-8")
+        target.write_bytes(b"previous")
         df = _cloud_file(writes="fresh")
         resolves(df)
 
-        def refuse(path):
+        def refuse(source, destination):
+            assert destination == str(target)
             raise OSError("file is locked")
 
-        monkeypatch.setattr(ddf.os, "remove", refuse)
+        monkeypatch.setattr(ddf.os, "replace", refuse)
         msg = error_message(ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path),
                                         overwrite=True))
-        assert f"Could not replace the existing '{target}'" in msg and "file is locked" in msg
-        assert df._calls == []
-        assert target.read_text(encoding="utf-8") == "previous"
+        assert f"Could not publish the downloaded file to '{target}'" in msg
+        assert "file is locked" in msg and len(df._calls) == 1
+        assert target.read_bytes() == b"previous"
+        assert _staging_dirs(tmp_path) == []
+
+    def test_a_destination_appearing_during_transfer_is_not_overwritten(self, resolves, tmp_path):
+        target = tmp_path / "probe_note.txt"
+        df = _cloud_file()
+
+        def download(path, handler):
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("fresh")
+            target.write_bytes(b"intruder")
+            return True
+
+        df.download = download
+        resolves(df)
+        msg = error_message(ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path)))
+        assert "appeared while the download was in progress" in msg
+        assert target.read_bytes() == b"intruder"
+        assert _staging_dirs(tmp_path) == []
 
     def test_overwrite_replaces_the_content(self, resolves, tmp_path):
         target = tmp_path / "probe_note.txt"
@@ -213,7 +254,8 @@ class TestStaleFileTrap:
         out = _payload(_landed(file="urn:lin:AAA", destination_folder=str(tmp_path), overwrite=True))
         assert target.read_text(encoding="utf-8") == "fresh"
         assert out["size_bytes"] == 5
-        assert out["overwrote_existing"] is True        # a file really was removed first
+        assert out["overwrote_existing"] is True
+        assert _staging_dirs(tmp_path) == []
 
     def test_overwrite_over_an_empty_destination_reports_no_overwrite(self, resolves, tmp_path):
         # overwrote_existing is the OBSERVED removal, not an echo of the input flag: nothing was
@@ -225,19 +267,48 @@ class TestStaleFileTrap:
 
 
 class TestFailureIsNeverASuccess:
-    def test_a_false_return_is_an_error(self, resolves, tmp_path):
-        resolves(_cloud_file(writes="hello", returns=False))
+    def test_a_false_return_after_a_partial_write_keeps_the_prior_file(self, resolves, tmp_path):
+        target = tmp_path / "probe_note.txt"
+        target.write_bytes(b"previous")
+        resolves(_cloud_file(writes="partial", returns=False))
         assert "returned false" in error_message(
-            ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path)))
+            ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path), overwrite=True))
+        assert target.read_bytes() == b"previous"
+        assert _staging_dirs(tmp_path) == []
 
-    def test_a_raising_download_is_reported_with_its_reason(self, resolves, tmp_path):
+    def test_a_raising_download_after_a_partial_write_keeps_the_prior_file(
+            self, resolves, tmp_path):
+        target = tmp_path / "probe_note.txt"
+        target.write_bytes(b"previous")
+
         def boom(path, handler):
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("partial")
             raise RuntimeError("network is down")
+
         df = _cloud_file()
         df.download = boom
         resolves(df)
         assert "network is down" in error_message(
-            ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path)))
+            ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path), overwrite=True))
+        assert target.read_bytes() == b"previous"
+        assert _staging_dirs(tmp_path) == []
+
+    def test_cleanup_failure_after_publication_is_disclosed_as_partial(
+            self, resolves, tmp_path, monkeypatch):
+        original = ddf.shutil.rmtree
+        resolves(_cloud_file(writes="fresh"))
+
+        def refuse(path):
+            raise OSError("cleanup denied")
+
+        monkeypatch.setattr(ddf.shutil, "rmtree", refuse)
+        out = _payload(_landed(file="urn:lin:AAA", destination_folder=str(tmp_path)))
+        stage_dir = _staging_dirs(tmp_path)[0]
+        assert out["downloaded"] is True
+        assert str(tmp_path / "probe_note.txt") in out["note"]
+        assert str(stage_dir) in out["note"] and "cleanup denied" in out["note"]
+        original(stage_dir)
 
     def test_true_with_nothing_on_disk_fails_the_landed_gate(self, resolves, tmp_path):
         # The platform can answer true and write nothing - the postcondition is what catches it.

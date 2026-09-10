@@ -348,14 +348,16 @@ class TestVisibility:
         assert occ.isIsolated is True
 
     def test_isolate_requires_single_match(self, monkeypatch):
-        # two EXPLICIT, unambiguous targets in one list -> each resolves fine, but isolate refuses
-        # more than one match (this is the "needs exactly one" guard, distinct from ambiguity refusal).
-        a = FakeOcc("Bolt:1", full_path="Sub1+Bolt:1")
-        b = FakeOcc("Bolt:2", full_path="Sub2+Bolt:2")
-        _install(monkeypatch, [a, b])
-        res = iv.handler(action="isolate", target=["Sub1+Bolt:1", "Sub2+Bolt:2"])
+        occs = [FakeOcc(f"Leaf:{i}", full_path=f"Rig+Leaf:{i}", bulb=i % 2 == 0)
+                for i in range(1, 13)]
+        _install(monkeypatch, occs)
+        before = [(occ.isLightBulbOn, occ.isIsolated) for occ in occs]
+        res = iv.handler(action="isolate", target=[occ.fullPathName for occ in occs])
         assert res["isError"] is True
-        assert "needs exactly one" in res["message"]
+        assert "needs exactly one" in res["message"] and "12 targets resolved" in res["message"]
+        assert "fuller" not in res["message"]
+        assert "hide unwanted occurrences" in res["message"] and "show selected" in res["message"]
+        assert [(occ.isLightBulbOn, occ.isIsolated) for occ in occs] == before
 
     def test_ambiguous_substring_refused_not_first_match(self, monkeypatch):
         # a bare substring matching SEVERAL occurrences must ERROR (naming the ambiguity), never

@@ -9,7 +9,7 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import named_with_remainder, ok, error, safe
+from ._common import named_with_remainder, ok, error, safe, set_verified
 from ._cam_common import get_cam, find_setup, tree_nodes
 from ._cam_templates import _LOCATION, _find_template_by_name, _template_library
 from . import _inputs
@@ -180,8 +180,11 @@ def handler(setup: str = "", template_url: str = "",
         ti.camTemplate = template
         mode_name = _GEN_MODES[gen_key]
         mode_val = safe(lambda: getattr(adsk.cam.AutomaticGenerationModes, mode_name))
-        if mode_val is not None:
-            ti.mode = mode_val
+        mode_err = set_verified(
+            ti, "mode", mode_val, f"AutomaticGenerationModes.{mode_name}",
+            "CreateFromCAMTemplateInput")
+        if mode_err:
+            return error(mode_err)
         created = target_setup.createFromCAMTemplate2(ti)
     except Exception as e:
         return error(f"Failed to apply template: {e}")

@@ -9,6 +9,8 @@ until the transfer finishes.
 """
 
 import os
+import shutil
+import tempfile
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
@@ -17,6 +19,7 @@ from ._common import ok, error, safe
 from ._data_common import (FUSION_NATIVE_EXTENSIONS, name_extension, resolve_file_reference,
                            _folder_path_string)
 from . import _assert
+from . import _export
 from . import _outputs
 
 # What this tool RETURNS. size_bytes is SUPPLIED by the FileLanded postcondition's evidence (it stats
@@ -58,20 +61,13 @@ def handler(file: str = "", project: str = "", folder: str = "", destination_fol
                      "comes from 'destination_folder'.")
     path = os.path.join(dest, out_name)
 
-    # A file already at the target makes "it exists on disk" prove nothing: a stale file satisfies the
-    # landed check for a download that never wrote. So an existing path is refused, and an authorized
-    # overwrite REMOVES it first - either way the landed check stays real evidence.
-    removed = False                 # the OBSERVED removal, not the caller's overwrite flag
-    if os.path.isfile(path):
-        if not overwrite:
-            return error(f"'{path}' already exists. Pass overwrite=true to replace it, or set "
-                         "'file_name'. (Refusing keeps a stale file from being reported as this "
-                         "download's result.)")
-        try:
-            os.remove(path)
-        except Exception as ex:
-            return error(f"Could not replace the existing '{path}': {ex}")
-        removed = True
+    # Download into a same-filesystem staging directory, so a failed transfer never writes through
+    # the destination and a validated file can be published in one filesystem operation.
+    had_existing = os.path.isfile(path)
+    if had_existing and not overwrite:
+        return error(f"'{path}' already exists. Pass overwrite=true to replace it, or set "
+                     "'file_name'. (Refusing keeps a stale file from being reported as this "
+                     "download's result.)")
 
     if not os.path.isdir(dest):
         try:
@@ -80,18 +76,61 @@ def handler(file: str = "", project: str = "", folder: str = "", destination_fol
             return error(f"Could not create destination folder '{dest}': {ex}")
 
     try:
-        # handler=None is the SYNCHRONOUS form: this call does not return until the transfer is done
-        # or has failed, and Fusion is frozen throughout.
-        did = df.download(path, None)
+        stage_dir = tempfile.mkdtemp(prefix=".fusion-download-", dir=dest)
     except Exception as ex:
-        return error(f"Download failed for '{name}': {ex}")
-    if not did:
-        return error(f"DataFile.download returned false for '{name}' - nothing was downloaded. "
-                     "Fusion designs cannot be downloaded (use design_export); check the file is "
-                     "fully processed (data_get(file=...) reports state.is_complete).")
+        return error(f"Could not create download staging directory in '{dest}': {ex}")
+    stage_path = os.path.join(stage_dir, out_name)
+    failure = None
+    cleanup_error = None
+    replaced = False
+    try:
+        try:
+            # handler=None is the SYNCHRONOUS form: this call does not return until the transfer is
+            # done or has failed, and Fusion is frozen throughout.
+            did = df.download(stage_path, None)
+        except Exception as ex:
+            failure = f"Download failed for '{name}': {ex}"
+        else:
+            if not did:
+                failure = (f"DataFile.download returned false for '{name}' - no file was "
+                           "published. Fusion designs cannot be downloaded (use design_export); "
+                           "check the file is fully processed (data_get(file=...) reports "
+                           "state.is_complete).")
+            else:
+                _size, landed_error = _export.verify_written(stage_path)
+                if landed_error:
+                    failure = f"Download failed validation before publication: {landed_error}."
+                else:
+                    replaced = had_existing or os.path.isfile(path)
+                    try:
+                        if overwrite:
+                            os.replace(stage_path, path)
+                        elif os.name == "nt":
+                            os.rename(stage_path, path)
+                        else:
+                            os.link(stage_path, path)
+                    except FileExistsError:
+                        failure = (f"'{path}' appeared while the download was in progress; "
+                                   "publication was refused. Pass overwrite=true to replace it, "
+                                   "or set 'file_name'.")
+                    except Exception as ex:
+                        failure = f"Could not publish the downloaded file to '{path}': {ex}"
+    finally:
+        try:
+            shutil.rmtree(stage_dir)
+        except Exception as ex:
+            cleanup_error = ex
+
+    if failure:
+        if cleanup_error:
+            failure += f" Staging cleanup also failed at '{stage_dir}': {cleanup_error}"
+        return error(failure)
 
     note = ("Downloaded synchronously (Fusion was frozen for the transfer) and gated on a non-empty "
             "file landing on disk - see size_bytes.")
+    if cleanup_error:
+        note += (f" The final file was published at '{path}', but staging cleanup failed; remove "
+                 f"the leftover staging path '{stage_dir}': {cleanup_error}")
     if (meta or {}).get("scope_truncated"):
         note += (" Matched by NAME inside a capped listing - files beyond the cap were never "
                  "compared, so check 'source' is the file you meant; a lineage URN is exact.")
@@ -114,7 +153,7 @@ def handler(file: str = "", project: str = "", folder: str = "", destination_fol
         "source": {"project": safe(lambda: df.parentProject.name),
                    "folder_path": _folder_path_string(safe(lambda: df.parentFolder)) or "(project root)",
                    "id": (meta or {}).get("urn")},
-        "overwrote_existing": removed,
+        "overwrote_existing": replaced,
         "note": note,
     })
 

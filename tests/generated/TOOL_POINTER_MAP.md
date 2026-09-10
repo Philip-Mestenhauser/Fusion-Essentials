@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 188  |  **description breadcrumbs:** 269  |  **note/error breadcrumbs:** 470
+**Tools:** 188  |  **description breadcrumbs:** 268  |  **note/error breadcrumbs:** 469
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -36,12 +36,12 @@ close orphans, factor duplicated guards into shared helpers.
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
 - `doc_new`  <- 82  (desc 0, note 82)
-- `find_geometry`  <- 39  (desc 14, note 25)
+- `find_geometry`  <- 38  (desc 13, note 25)
 - `design_delete_feature`  <- 37  (desc 16, note 21)
 - `design_get`  <- 35  (desc 9, note 26)
 - `view_screenshot`  <- 34  (desc 5, note 29)
 - `cam_get`  <- 24  (desc 11, note 13)
-- `data_get`  <- 24  (desc 10, note 14)
+- `data_get`  <- 23  (desc 10, note 13)
 - `doc_open`  <- 22  (desc 5, note 17)
 - `sketch_get`  <- 22  (desc 5, note 17)
 - `sketch_create`  <- 21  (desc 7, note 14)
@@ -788,11 +788,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - The cloud file's name could not be read - pass 'file_name' to choose the local filename explicitly.
 - 'file_name' must be a bare filename, not a path: '
 - '. The folder comes from 'destination_folder'.
-- DataFile.download returned false for '
-- ' - nothing was downloaded. Fusion designs cannot be downloaded (use design_export); check the file is fully processed (data_get(file=...) reports state.is_complete).
 - ' already exists. Pass overwrite=true to replace it, or set 'file_name'. (Refusing keeps a stale file from being reported as this download's result.)
-- Download failed for '
-- Could not replace the existing '
+- Could not create download staging directory in '
 - Could not create destination folder '
 
 ### `data_get`
@@ -3145,7 +3142,8 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Visibility changed. view_screenshot to view. Body bulbs are NOT captured by snapshot/restore - undo a body with the opposite hide/show.
 - PARTIAL: only the first
 - occurrences were checked - an isolation past the cap is still set.
-- occurrences; isolate needs exactly one. Use a fuller name/path.
+- isolate needs exactly one occurrence;
+- targets resolved. For several, use snapshot, clear_isolation, then hide unwanted occurrences and show selected occurrence lists. restore reapplies saved occurrence visibility.
 - ' but isLightBulbOn reads back
 - - the change did not take.
 - ' but isIsolated reads back

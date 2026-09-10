@@ -37,12 +37,12 @@ _ACTIONS = ("snapshot", "orient", "isolate", "show", "hide", "clear_isolation", 
 _MAX_OCC = 1000
 
 _TARGET = _inputs.OccurrenceRefList("target",
-        description="Occurrence(s) to isolate/show/hide - a fullPathName/name, or a list of them.")
+        description="One occurrence to isolate, by fullPathName/name or handle.")
 # hide/show also reach single BODIES, which occurrence-granular visibility cannot; isolate stays
 # occurrence-only. with_kinds so the handler branches occurrence-vs-body.
 _VIS_TARGET = _inputs.TargetRefList("target", with_kinds=True,
-        contract=("A list of occurrences (handle/fullPathName/name) and/or - hide/show only - bodies "
-                  "(find_geometry 'handle' or body name); ambiguous names are refused."))
+        contract=("isolate: exactly one occurrence. show/hide: one or more occurrences or bodies. "
+                  "Use handles or unambiguous names/paths."))
 _FOCUS = _inputs.OccurrenceRef("focus",
         description="Occurrence or sketch name to frame the view on (orient).")
 
@@ -579,8 +579,9 @@ def _do_visibility(design, action, target):
         if target_err:
             return error(target_err)
         if len(matches) > 1:
-            return error(f"'{target}' matched {len(matches)} occurrences; isolate needs exactly one. "
-                          "Use a fuller name/path.")
+            return error(f"isolate needs exactly one occurrence; {len(matches)} targets resolved. "
+                         "For several, use snapshot, clear_isolation, then hide unwanted occurrences "
+                         "and show selected occurrence lists. restore reapplies saved occurrence visibility.")
         pairs = [(o, "occurrence") for o in matches]
     else:
         # hide/show also reach single BODIES - the only lever for a ROOT-level body or one body of a
