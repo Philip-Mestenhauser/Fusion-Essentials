@@ -606,6 +606,67 @@ class TestSplitByOccurrence:
         assert [f["occurrence"] for f in files] == ["Good:1"]
         assert errors == [{"occurrence": "Bad:1", "error": "it exploded"}]
 
+    def test_generated_suffix_collision_keeps_each_disk_payload(self, tmp_path):
+        payloads = {"A:1": b"first", "A:2": b"second", "A_2:1": b"third"}
+
+        def write_one(occ, path):
+            data = payloads[occ.name]
+            with open(path, "wb") as handle:
+                handle.write(data)
+            return len(data), None
+
+        files, errors = ex.split_by_occurrence(
+            [_Occ("A:1"), _Occ("A:2"), _Occ("A_2:1")], str(tmp_path), ".stl", write_one
+        )
+
+        assert errors == []
+        assert [os.path.basename(f["file_path"]) for f in files] == [
+            "A.stl", "A_2.stl", "A_2_2.stl"
+        ]
+        assert (tmp_path / "A.stl").read_bytes() == b"first"
+        assert (tmp_path / "A_2.stl").read_bytes() == b"second"
+        assert (tmp_path / "A_2_2.stl").read_bytes() == b"third"
+
+    def test_case_variant_paths_are_reserved_case_insensitively(self, tmp_path, monkeypatch):
+        original_normcase = ex.os.path.normcase
+        monkeypatch.setattr(ex.os.path, "normcase", lambda path: original_normcase(path).lower())
+
+        def write_one(occ, path):
+            data = occ.name.encode("utf-8")
+            with open(path, "wb") as handle:
+                handle.write(data)
+            return len(data), None
+
+        files, errors = ex.split_by_occurrence(
+            [_Occ("Part:1"), _Occ("part:1")], str(tmp_path), ".stl", write_one
+        )
+
+        assert errors == []
+        assert [os.path.basename(f["file_path"]) for f in files] == ["Part.stl", "part_2.stl"]
+        assert (tmp_path / "Part.stl").read_bytes() == b"Part:1"
+        assert (tmp_path / "part_2.stl").read_bytes() == b"part:1"
+
+    def test_failed_writer_attempt_still_reserves_its_path(self, tmp_path):
+        calls = []
+
+        def write_one(occ, path):
+            calls.append(path)
+            if occ.name == "Part:1":
+                return None, "write failed"
+            data = b"landed"
+            with open(path, "wb") as handle:
+                handle.write(data)
+            return len(data), None
+
+        files, errors = ex.split_by_occurrence(
+            [_Occ("Part:1"), _Occ("Part:2")], str(tmp_path), ".stl", write_one
+        )
+
+        assert errors == [{"occurrence": "Part:1", "error": "write failed"}]
+        assert files[0]["file_path"].endswith("Part_2.stl")
+        assert calls[0].endswith("Part.stl")
+        assert (tmp_path / "Part_2.stl").read_bytes() == b"landed"
+
     def test_empty_occurrence_list_yields_nothing(self):
         files, errors = ex.split_by_occurrence([], "C:/out", ".stl", lambda occ, path: (1, None))
         assert files == [] and errors == []

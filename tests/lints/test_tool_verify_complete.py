@@ -55,7 +55,7 @@ def _footprints(verify, steps_of):
             args = step[1]
             if chunk is None or not isinstance(args, dict):
                 continue
-            for x, y in verify._place_points(args, frame):
+            for x, y in verify._place_points(args, frame, step[0]):
                 b = box.setdefault(chunk, [None, None, None, None])
                 if x is not None:
                     b[0] = x if b[0] is None else min(b[0], x)
@@ -73,6 +73,24 @@ def _hits(a, b):
 class TestToolVerifyLayout:
     """The layout pass gives every chunk of the story a cell of its own. These are the properties a
     viewer depends on - one subject per frame - and the ones a new chunk can silently break."""
+
+    def test_coordinate_makers_have_a_readable_placement(self):
+        verify = _load_verify()
+        missing = []
+        for name, _pre, narrative, fallback in verify._ACT_PROGRAM:
+            for lane, steps in (("narrative", narrative), ("fallback", fallback or [])):
+                for step, _chunk, _cursor, frame in verify._place_walk(steps):
+                    tool, args, expect, _save = step
+                    expect = verify._unparked(expect)
+                    deliberate_refusal = isinstance(expect, verify._Refusal) or expect == "refused"
+                    if (tool not in ("sketch_add_geometry", "sketch_add_3d_line")
+                            or callable(args) or deliberate_refusal):
+                        continue
+                    if not isinstance(args, dict) or not verify._place_points(args, "xy", tool):
+                        missing.append(f"{name} {lane}: {tool}")
+        assert not missing, (
+            "successful literal sketch geometry steps have no placement coordinate understood by "
+            "verify_layout._place_points:\n  " + "\n  ".join(missing))
 
     def test_no_two_placed_chunks_share_ground(self):
         # A declared JOINT GROUP is exempt: its members are one assembly, dealt one cell and one
@@ -157,8 +175,8 @@ class TestToolVerifyLayout:
             for before, after, frame in zip(narr, moved, frames):
                 if not isinstance(before[1], dict):
                     continue
-                was = verify._place_points(before[1], frame)
-                now = verify._place_points(after[1], frame)
+                was = verify._place_points(before[1], frame, before[0])
+                now = verify._place_points(after[1], frame, before[0])
                 if len(was) != len(now):
                     skewed.append(f"{name}: {before[0]} lost a position in the move")
                     continue

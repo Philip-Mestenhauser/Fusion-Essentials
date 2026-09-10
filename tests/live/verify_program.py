@@ -641,7 +641,7 @@ STORY = {
     "surface_patch": ("close the opened bore with a patch, then the same rim at 'tangent' "
                       "continuity and again through one interior RAIL whose landed count is read "
                       "off the input; rails paired with the multi-loop form refused"),
-    "sketch_project": ("project the machining boundary; then section the cap on a datum plane with per-source attribution naming the parallel face that contributed nothing, project the cap sketch's line onto the top face reading the reference linkage back, and meet the same-sketch and missing-direction refusals. SKIPPED(rig): the cross-document to_surface beat - a 'source_sketch' in a SECOND document carrying the same entityToken as a local one - needs that second document, and every tool that opens or references one (doc_open, doc_insert_derive, doc_insert_occurrence, doc_copy) is excluded here as cloud tier; this sweep runs one unsaved document"),
+    "sketch_project": ("project the machining boundary; then section the cap on a datum plane with per-source attribution naming the parallel face that contributed nothing, project the cap sketch's line onto the top face reading the reference linkage back, and meet the same-sketch and missing-direction refusals. SKIPPED(rig): the cross-document to_surface identity fixture is not scripted"),
     "surface_trim": "trim a sheet with a cylinder cutter",
     "surface_untrim": "untrim the internal hole loop",
     "surface_create_ruled": ("rule off a sheet's top rim - tangent, normal, along a direction "
@@ -1064,14 +1064,12 @@ EXCLUDED = {
     "design_configure": "configuration table needs a SAVED document (a DataFile to carry it); opt-in tier - the appearance/material columns need that document too, and a body's material reads back only after the geometry catches up with the activation",
     # The rest of the cloud tier. The tools that write into an operator's hub are DRIVEN by ACT 11a-c
     # behind the cloud_tier capability, so an unconfigured run reports them skipped(cloud_tier not
-    # entitled) rather than listed here; these three are not driven even with a config.
+    # entitled) rather than listed here; these two are not driven even with a config.
     "data_create_project": ("mints a real project in the operator's hub - the config names an "
                             "EXISTING project, and a project is not this tier's to create"),
     "data_switch_hub": ("closes every open document, the story document among them - the cloud_tier "
                         "probe refuses a config naming a hub other than the active one instead of "
                         "switching to it"),
-    "doc_insert_derive": ("needs an ALREADY-OPEN saved cloud source to derive from, and a derive "
-                          "link outlives the source this tier deletes at the end of its run"),
 }
 
 # Registered tools NOT yet scripted into STEPS - the honest "todo" ledger. SHRINK-ONLY: scripting a

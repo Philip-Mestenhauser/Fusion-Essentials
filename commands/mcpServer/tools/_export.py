@@ -204,15 +204,20 @@ def failure_detail(errors, limit=_MAX_DETAILED_FAILURES):
 def split_by_occurrence(occs, out_dir, ext, write_one):
     """Write one file per occurrence via write_one(occ, path) -> (size_bytes_or_None, error_or_None):
     (files, errors), one record each. Filenames are sanitized occurrence names with ext appended,
-    de-duplicated when two occurrences sanitize to the same stem."""
-    files, errors, used = [], [], {}
+    de-duplicated when two occurrences produce the same final path."""
+    files, errors, used_paths = [], [], set()
     for occ in occs:
         name = safe(lambda occ=occ: occ.name)
         stem = sanitize(name)
-        used[stem] = used.get(stem, 0) + 1
-        if used[stem] > 1:
-            stem = f"{stem}_{used[stem]}"
-        path = os.path.join(out_dir, stem + ext)
+        suffix = 1
+        while True:
+            candidate_stem = stem if suffix == 1 else f"{stem}_{suffix}"
+            path = os.path.join(out_dir, candidate_stem + ext)
+            path_key = os.path.normcase(os.path.abspath(path))
+            if path_key not in used_paths:
+                used_paths.add(path_key)
+                break
+            suffix += 1
         size, eerr = write_one(occ, path)
         if eerr:
             errors.append({"occurrence": name, "error": eerr})
