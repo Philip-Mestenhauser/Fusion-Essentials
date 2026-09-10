@@ -498,6 +498,63 @@ class TestResumableRun:
         assert "handle" in str(refused.value) and "good" not in str(refused.value)
 
 
+class TestSourceDriftDuringRun:
+    def test_source_change_during_act_without_run_id_blocks_receipt(self, monkeypatch, tmp_path):
+        h = _Harness(monkeypatch, tmp_path)
+        digest = ["0" * 64]
+        monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: digest[0])
+        real_call = h._call
+        def call(tool, args):
+            result = real_call(tool, args)
+            if tool == "a_get":
+                digest[0] = "f" * 64
+            return result
+        monkeypatch.setattr(tool_verify, "call", call)
+        assert h.run() == 1
+        assert not h.wrote and "b_get" not in h.tools_called()
+
+    def test_source_change_during_act_blocks_receipt_and_checkpoint(self, monkeypatch, tmp_path):
+        h = _Harness(monkeypatch, tmp_path)
+        digest = ["0" * 64]
+        monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: digest[0])
+        real_call = h._call
+        def call(tool, args):
+            result = real_call(tool, args)
+            if tool == "a_get":
+                digest[0] = "f" * 64
+            return result
+        monkeypatch.setattr(tool_verify, "call", call)
+        assert h.run(run_id="drift") == 1
+        assert not h.wrote and not os.path.exists(verify_runner.run_state_path("drift"))
+
+    def test_source_change_during_reload_blocks_receipt(self, monkeypatch, tmp_path):
+        h = _Harness(monkeypatch, tmp_path)
+        digest = ["0" * 64]
+        monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: digest[0])
+        def reload(*args, **kwargs):
+            digest[0] = "f" * 64
+        monkeypatch.setattr(tool_verify, "reload_smoke", reload)
+        assert h.run() == 1
+        assert not h.wrote
+
+    def test_stable_hash_is_saved_at_checkpoint(self, monkeypatch, tmp_path):
+        h = _Harness(monkeypatch, tmp_path)
+        assert h.run(run_id="stable", acts_spec="ACT A") == 0
+        assert tool_verify.load_run_state("stable")["source_hash"] == "0" * 64
+
+    def test_source_change_on_gated_act_blocks_checkpoint(self, monkeypatch, tmp_path):
+        h = _Harness(monkeypatch, tmp_path, acts=[("ACT G", None, [("a_get", {}, "ok", None)], [])])
+        digest = ["0" * 64]
+        monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: digest[0])
+        monkeypatch.setattr(tool_verify, "ACT_NEEDS", {"ACT G": "fake_tier"})
+        def probe(_caps):
+            digest[0] = "f" * 64
+            return {"fake_tier": False}
+        monkeypatch.setattr(verify_runner, "probe_capabilities", probe)
+        assert h.run(run_id="gated") == 1
+        assert not h.wrote and not os.path.exists(verify_runner.run_state_path("gated"))
+
+
 class TestPredicateKind:
     """The classifier behind the split: it reads the step's EXPECTATION object, nothing else."""
 

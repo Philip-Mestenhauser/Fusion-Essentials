@@ -624,7 +624,8 @@ item = Item.create_tool_item(
     verification=Verification(
         kind="effect", rung="value",
         evidence_test="tests/unit/test_drawing_create.py::TestGuards"
-                      "::test_missing_file_id_on_created_drawing_errors"))
+                      "::test_missing_file_id_on_created_drawing_errors"),
+    deferred_capable=True)
 
 
 def register_tool():

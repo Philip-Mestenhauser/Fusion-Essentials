@@ -20,7 +20,7 @@ DEFAULT_CAP = 50
 MAX_CAP = 200
 
 _CONSUMERS = {
-    "materials": "A material name feeds model_set_material.",
+    "materials": "Pass name as material, plus library and material_id, to model_set_material.",
     "appearances": "A document appearance name feeds design_configure(action='set_appearance').",
 }
 
@@ -53,17 +53,20 @@ def catalog_census():
 
 
 def find_library(name):
-    """Resolve ONE loaded library by EXACT case-insensitive name -> (library, error_or_None); a
-    duplicate name is refused, a miss lists the loaded names."""
-    want = (name or "").strip().lower()
-    hits, names = [], []
+    """Resolve a library by exact id or case-insensitive name, refusing multiple matches."""
+    raw = (name or "").strip()
+    want = raw.lower()
+    hits, ids, names = [], [], []
     for lib in libraries():
         nm = safe(lambda l=lib: l.name)
+        if safe(lambda l=lib: l.id) == raw:
+            ids.append(lib)
         if not nm:
             continue
         names.append(nm)
         if nm.lower() == want:
             hits.append(lib)
+    hits = ids or hits
     if len(hits) == 1:
         return hits[0], None
     listed = ", ".join(f"'{n}'" for n in names) or "none"
@@ -156,7 +159,7 @@ def browse(design, kind, library="", name_filter="", max_results=0):
                                        or r["appearance_count"] is None)}
     note = [
         "Library rows are a census - counts only, no contents.",
-        f"Pass library='<name>' for one library's {kind}; name_filter= narrows them and "
+        f"Pass library='<name or id>' for one library's {kind}; name_filter= narrows them and "
         f"max_results= sizes the page (default {DEFAULT_CAP}, cap {MAX_CAP}).",
         "Names repeat, and 'id' names the source asset rather than the entry - document rows "
         "copied from one base share an id, so name and id together identify an entry.",

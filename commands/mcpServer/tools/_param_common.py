@@ -3,6 +3,8 @@
 
 """The design-PARAMETER substrate: the row every param_* tool publishes, and the by-name lookup."""
 
+import re
+
 from ._common import safe
 from . import _common
 
@@ -12,6 +14,55 @@ MAP_BLURB = (
     "parameter's own and naming the frame it could not convert into; _owner_facts - a MODEL "
     "parameter's maker, each key absent when it did not read; _find_parameter - the exact by-name "
     "lookup, user parameters first")
+
+
+_NUMBER = re.compile(r"(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
+_IDENTIFIER = re.compile(r"[^\W\d]\w*")
+
+
+def _expression_tokens(expression):
+    """Yield expression tokens outside single-quoted literals; this is not a parser."""
+    text = expression if isinstance(expression, str) else ""
+    i, size = 0, len(text)
+    while i < size:
+        char = text[i]
+        if char.isspace():
+            start = i
+            while i < size and text[i].isspace():
+                i += 1
+            yield "space", text[start:i]
+            continue
+        if char == "'":
+            start = i
+            i += 1
+            while i < size and text[i] != "'":
+                i += 1
+            if i < size:
+                i += 1
+            yield "quoted", text[start:i]
+            continue
+        number = _NUMBER.match(text, i)
+        if number:
+            i = number.end()
+            yield "number", number.group(0)
+            continue
+        identifier = _IDENTIFIER.match(text, i)
+        if identifier:
+            i = identifier.end()
+            yield "identifier", identifier.group(0)
+            continue
+        yield "other", char
+        i += 1
+
+
+def _normalized_expression(expression):
+    """The non-space lexical tokens of an expression; this is not a full Fusion parser."""
+    return tuple((kind, text) for kind, text in _expression_tokens(expression) if kind != "space")
+
+
+def _expression_identifiers(expression):
+    """The unquoted identifier tokens in an expression; this is not a full Fusion parser."""
+    return {text for kind, text in _expression_tokens(expression) if kind == "identifier"}
 
 
 def _owner_facts(p) -> dict:

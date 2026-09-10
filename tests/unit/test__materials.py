@@ -117,6 +117,12 @@ class TestFindLibrary:
         lib, err = mat.find_library("fusion material library")
         assert err is None and lib.id == "lib-1"
 
+    def test_census_id_resolves_duplicate_library_names(self, libs):
+        libs(_library("Shared", "lib-1"), _library("Shared", "lib-2"))
+        rows, _ = mat.catalog_census()
+        lib, err = mat.find_library(rows[1]["id"])
+        assert err is None and lib.id == "lib-2"
+
     def test_partial_name_is_not_a_match(self, libs):
         # a substring must NOT resolve - 'Fusion' would otherwise silently pick one of several
         # 'Fusion ...' libraries.

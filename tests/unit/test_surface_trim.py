@@ -33,7 +33,8 @@ def _body(name="Surf1", is_solid=False, area=None, solid_readable=True):
 def _wire(trim_features, handle_map=None):
     """Install a design whose active component carries `trim_features`, with `handle_map` behind
     the geometry handles."""
-    comp = MakeComp()
+    bodies = [b for b in (handle_map or {}).values() if isinstance(b, BRepBody)]
+    comp = MakeComp(bodies=bodies)
     comp.features = types.SimpleNamespace(trimFeatures=trim_features)
     install(se, make_design(comp=comp, tokens=dict(handle_map or {})))
     return comp
@@ -329,27 +330,45 @@ class TestSurfaceTrim:
         assert tf.last_input is None        # never opened a transaction
 
 
-class TestTrimPhantomGuardDisclosure:
+class TestTrimVisibleScope:
 
-    def test_a_committed_trim_discloses_what_the_guard_checked(self):
-        # the guard is ONE-SIDED: a foreign cell larger than every target cell but smaller than the
-        # target's whole area passes it. The payload must not let a caller read a committed trim as
-        # "no foreign cell was involved".
-        tf = FakeTrimFeatures(result_bodies=[_body("Surf1", area=12.0)],
-                              cell_areas=(4.0, 12.0, 6.0))
-        _wire(tf, handle_map={"S": _body(area=16.0), "T": BRepFace(None)})
-        out = payload(se.handler(surface="S", trim_tool="T"))
-        assert out["phantom_cell_guard"] == "kept_area_not_above_target_area"
-        assert "smaller than" in out["note"] and "NOT detected" in out["note"]
+    def test_foreign_smaller_surface_refuses_before_transaction(self):
+        tf = FakeTrimFeatures(cell_areas=(0.2, 0.8, 0.5, 0.5))
+        _wire(tf, handle_map={"S": _body(area=1.0), "T": BRepFace(None),
+                              "B": _body("Nearby", area=1.0)})
+        res = se.handler(surface="S", trim_tool="T")
+        assert res["isError"] is True and "Nearby" in res["message"]
+        assert "view_set" in res["message"]
+        assert tf.last_input is None
 
-    def test_an_unreadable_target_area_says_the_guard_never_ran(self):
-        # surf.area does not read -> the gate's own condition is false, so nothing was checked
-        tf = FakeTrimFeatures(result_bodies=[_body("Surf1", area=12.0)],
-                              cell_areas=(4.0, 12.0, 6.0))
-        _wire(tf, handle_map={"S": _body(), "T": BRepFace(None)})
+    def test_hidden_neighbor_allows_trim_without_changing_its_visibility(self):
+        tf = FakeTrimFeatures(result_bodies=[_body(area=0.8)], cell_areas=(0.2, 0.8))
+        neighbor = _body("Nearby", area=1.0)
+        neighbor.isLightBulbOn = False
+        _wire(tf, handle_map={"S": _body(area=1.0), "T": BRepFace(None), "B": neighbor})
         out = payload(se.handler(surface="S", trim_tool="T"))
-        assert out["phantom_cell_guard"] == "not_applied"
-        assert "NOT applied" in out["note"]
+        assert out["trimmed"] is True
+        assert out["surface_scope"] == "no_other_visible_surfaces"
+        assert neighbor.isLightBulbOn is False and neighbor.area == 1.0
+
+    def test_incomplete_body_census_refuses_before_transaction(self):
+        tf = FakeTrimFeatures()
+        comp = _wire(tf, handle_map={"S": _body(), "T": BRepFace(None)})
+        def unread(_index):
+            raise RuntimeError("stale body")
+        comp.bRepBodies.item = unread
+        res = se.handler(surface="S", trim_tool="T")
+        assert res["isError"] is True and "scope" in res["message"]
+        assert tf.last_input is None
+
+    def test_hidden_target_refuses_before_transaction(self):
+        tf = FakeTrimFeatures()
+        target = _body()
+        target.isLightBulbOn = False
+        _wire(tf, handle_map={"S": target, "T": BRepFace(None)})
+        res = se.handler(surface="S", trim_tool="T")
+        assert res["isError"] is True and "target surface must be visible" in res["message"]
+        assert tf.last_input is None
 
 
 class TestSolidVerdictOverBodyFacts:

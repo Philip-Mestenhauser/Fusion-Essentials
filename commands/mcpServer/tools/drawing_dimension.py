@@ -1,7 +1,7 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Auto-dimension one view on the ACTIVE drawing's active sheet (Sheet.createAutoDimensionInput +
+"""Auto-dimension one view on a sheet of the ACTIVE drawing (Sheet.createAutoDimensionInput +
 Sheet.autoDimension). adsk.drawing carries no dimension entity class, so the dimensions produced
 cannot be counted or read back - the call's own boolean plus the document's modified flag are the
 whole verifiable effect, and the sheet must be exported (drawing_export) to see them. WRITES.
@@ -45,7 +45,7 @@ _NO_READBACK_NOTE = (
     "open it in Fusion to see what was placed.")
 
 
-def handler(view: int = None, strategy: str = "baseline", datum: str = "bottom_left") -> dict:
+def handler(view: int = None, strategy: str = "baseline", datum: str = "bottom_left", sheet: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     vals, verr = _inputs.resolve_inputs([_STRATEGY, _DATUM],
                                         {"strategy": strategy, "datum": datum})
@@ -57,9 +57,9 @@ def handler(view: int = None, strategy: str = "baseline", datum: str = "bottom_l
     if dwg is None:
         return error("No drawing to dimension: the active document is not a drawing. Open the "
                      "drawing (doc_open by file_id) and make it active, then retry.")
-    sheet = safe(lambda: dwg.activeSheet)
-    if sheet is None:
-        return error("The active drawing has no active sheet to dimension.")
+    sheet, sheet_error = _drawing_common.resolve_sheet(dwg, (sheet or "").strip())
+    if sheet_error:
+        return error(sheet_error)
 
     views = safe(lambda: sheet.views)
     count = safe(lambda: views.count, 0) or 0
@@ -156,7 +156,7 @@ def handler(view: int = None, strategy: str = "baseline", datum: str = "bottom_l
 
 
 TOOL_DESCRIPTION = (
-    "Auto-dimension one view on the active drawing's active sheet - the API's only route to "
+    "Auto-dimension one view on a named sheet of the active drawing - the API's route to "
     "dimensions."
 )
 
@@ -165,7 +165,9 @@ FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)
 tool = (
     Tool.create_simple(name="drawing_dimension", description=FULL_DESCRIPTION)
     .add_input_property("view", {"type": "integer",
-            "description": "0-based index on the active sheet."})
+            "description": "0-based index on the selected sheet."})
+    .add_input_property("sheet", {"type": "string",
+            "description": "Exact sheet name; omit for the active sheet."})
     .add_input_property(*_STRATEGY.as_property())
     .add_input_property(*_DATUM.as_property())
     .strict_schema()

@@ -97,22 +97,34 @@ def handler(name: str = "", include_model_parameters: bool = False,
         notes.append(f"Listed {len(user_params)} of {kept} matching rows. " + _NARROW_NOTE)
 
     if include_model_parameters:
-        model_params, model_kept = [], 0
-        seen = {p["name"] for p in user_params}
+        model_params, model_kept, examined = [], 0, 0
+        model_walk_truncated = False
         try:
-            for p in design.allParameters:
-                if model_kept >= _MAX_PARAMS:
+            for p in islice(design.allParameters, _MAX_PARAMS + 1):
+                examined += 1
+                if examined > _MAX_PARAMS:
+                    model_walk_truncated = True
                     break
-                nm = safe(lambda: p.name)
-                if nm and nm in seen:
-                    continue  # already listed as a user parameter
+                nm = safe(lambda p=p: p.name)
+                if not isinstance(nm, str) or not nm:
+                    return error("Could not read a parameter name while classifying model parameters.")
+                try:
+                    is_user = design.userParameters.itemByName(nm)
+                except Exception as e:
+                    return error(f"Could not classify parameter '{nm}' as user or model: {e}")
+                if is_user:
+                    continue
                 model_kept += 1
                 if len(model_params) < _ROWS_CAP:
                     model_params.append(_param_summary(p))
-        except Exception:
-            pass
+        except Exception as e:
+            return error(f"Could not read model parameters: {e}")
         payload["model_parameter_count"] = model_kept
         payload["model_parameters"] = model_params
+        if model_walk_truncated:
+            payload["model_walk_truncated"] = True
+            notes.append(f"The model parameter walk stopped at {_MAX_PARAMS} of at least {examined} rows, so "
+                         "'model_parameter_count' covers only the observed subset.")
         if model_kept > len(model_params):
             payload["model_parameters_truncated"] = True
             notes.append(f"Listed {len(model_params)} of {model_kept} model parameters. "

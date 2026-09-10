@@ -914,6 +914,15 @@ class TestFullProps:
         assert out["rotation_to_principal_rad"]["rx"] == 0.1
         assert out["principal_axes"]["z"] == [0, 0, 1]
 
+    def test_nonfinite_physical_values_are_null_and_strict_json(self):
+        pp = _make_pp()
+        pp.getXYZMomentsOfInertia = lambda: (True, float("nan"), 0.0, float("inf"), 0.0, 0.0, 0.0)
+        out = mi._full_props(pp, 0.1)
+        assert out["inertia_world"]["Ixx"] is None
+        assert out["inertia_world"]["Iyy"] == 0.0
+        assert out["inertia_world"]["Izz"] is None
+        json.dumps(out, allow_nan=False)
+
     def test_failed_sub_reads_omit_their_blocks(self):
         # each get*() returns (retVal, ...) - a False retVal means the read failed, so its block is
         # omitted rather than reporting zeros as if measured.

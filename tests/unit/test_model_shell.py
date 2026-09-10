@@ -156,6 +156,46 @@ class TestDirection:
         assert out["inside_thickness"] == 1.0
         assert out["outside_thickness"] == 1.0
 
+    def test_unreadable_inactive_thickness_does_not_refuse(self, monkeypatch):
+        body = BRepBody(volume=100.0)
+        sf = FakeShellFeatures(body)
+        original_add = sf.add
+        def add(inp):
+            feature = original_add(inp)
+            feature.insideThickness = None
+            return feature
+        monkeypatch.setattr(sf, "add", add)
+        _install(body, sf)
+        out = _payload(sh.handler(thickness=2, units="mm", direction="outside"))
+        assert out["shelled"] is True
+        assert "inside_thickness" not in out
+
+    def test_readable_inactive_thickness_mismatch_refuses(self, monkeypatch):
+        body = BRepBody(volume=100.0)
+        sf = FakeShellFeatures(body)
+        original_add = sf.add
+        def add(inp):
+            feature = original_add(inp)
+            feature.insideThickness.value = 0.1
+            return feature
+        monkeypatch.setattr(sf, "add", add)
+        _install(body, sf)
+        res = sh.handler(thickness=2, units="mm", direction="outside")
+        assert res["isError"] is True and "unverified" in res["message"]
+
+    def test_missing_requested_thickness_refuses_for_both(self, monkeypatch):
+        body = BRepBody(volume=100.0)
+        sf = FakeShellFeatures(body)
+        original_add = sf.add
+        def add(inp):
+            feature = original_add(inp)
+            feature.insideThickness = None
+            return feature
+        monkeypatch.setattr(sf, "add", add)
+        _install(body, sf)
+        res = sh.handler(thickness=2, units="mm", direction="both")
+        assert res["isError"] is True and "unverified" in res["message"]
+
     def test_cm_units_scale_thickness(self):
         body = BRepBody(volume=100.0)
         sf = FakeShellFeatures(body)
@@ -214,7 +254,8 @@ class TestHonesty:
         _install(body, sf)
         res = sh.handler(thickness=2, units="mm")
         assert res["isError"] is True
-        assert "the read-back volume did not drop (100 cm3 before, 100 cm3 after)" in res["message"]
+        assert "volume 100 -> 100 cm3" in res["message"]
+        assert "Shell1" in res["message"] and "Nothing was rolled back" in res["message"]
 
     def test_the_no_op_error_states_the_read_and_not_a_guessed_cause(self):
         # Nothing in the handler reads the thickness against the geometry, so naming the thickness
@@ -243,8 +284,47 @@ class TestHonesty:
         _install(body, FakeShellFeatures(body, volume_delta=0.0, faces_added=0))
         res = sh.handler(thickness=2, units="mm")
         assert res["isError"] is True
-        assert "the face count read back identical (6 before and after)" in res["message"]
+        assert "faces 6 -> 6" in res["message"]
         assert "volume" not in res["message"]
+
+    def test_outward_shell_accepts_the_recorded_volume_increase(self):
+        body = BRepBody(name="Cube10mm", volume=1.0, face_count=6)
+        _install(body, FakeShellFeatures(body, volume_delta=-0.744, faces_added=6))
+        out = _payload(sh.handler(thickness=2, direction="outside"))
+        assert out["shelled"] is True and body.volume == 1.744
+        assert out["outside_thickness"] == 2.0 and out["volume_removed_cm3"] == -0.744
+
+    def test_equal_volume_outward_shell_requires_another_geometry_change(self):
+        body = BRepBody(volume=1.0, face_count=6)
+        _install(body, FakeShellFeatures(body, volume_delta=0.0, faces_added=6))
+        assert _payload(sh.handler(thickness=1, direction="outside"))["faces_delta"] == 6
+        body = BRepBody(volume=1.0, face_count=6)
+        _install(body, FakeShellFeatures(body, volume_delta=0.0, faces_added=0))
+        assert sh.handler(thickness=1, direction="outside")["isError"] is True
+
+    def test_inside_volume_increase_is_not_rescued_by_more_faces(self):
+        body = BRepBody(volume=1.0, face_count=6)
+        _install(body, FakeShellFeatures(body, volume_delta=-0.744, faces_added=6))
+        assert sh.handler(thickness=2, direction="inside")["isError"] is True
+
+    def test_submicron_thickness_rounding_does_not_refuse_a_matching_feature(self):
+        body = BRepBody(volume=1.0, face_count=6)
+        _install(body, FakeShellFeatures(body, volume_delta=0.2))
+        assert _payload(sh.handler(thickness=1.23456789))["shelled"] is True
+
+    def test_changed_geometry_with_wrong_thickness_is_unverified(self, monkeypatch):
+        body = BRepBody(volume=1.0, face_count=6)
+        features = FakeShellFeatures(body, volume_delta=-0.744)
+        original_add = features.add
+        def add(inp):
+            feature = original_add(inp)
+            feature.outsideThickness.value = 0.1
+            return feature
+        monkeypatch.setattr(features, "add", add)
+        _install(body, features)
+        result = sh.handler(thickness=2, direction="outside")
+        assert result["isError"] and "unverified" in result["message"]
+        assert body.volume == 1.744 and "Nothing was rolled back" in result["message"]
 
     def test_no_feature_returned_is_error(self):
         body = BRepBody()

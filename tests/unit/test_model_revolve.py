@@ -29,12 +29,24 @@ def _sketch(name, profile_count=1, line_count=2, compute_deferred=False):
 
 
 class FakeRevInput:
-    def __init__(self, profile, axis, operation):
+    def __init__(self, profile, axis, operation, participant_error=None):
         self.profile = profile
         self.axis = axis
         self.operation = operation
+        self.participant_error = participant_error
         self.angle_extent = None
         self.two_sides = None
+        self._participant_bodies = None
+        self.participant_set_after_extent = None
+    @property
+    def participantBodies(self):
+        raise AttributeError("participantBodies is write-only")
+    @participantBodies.setter
+    def participantBodies(self, bodies):
+        if self.participant_error is not None:
+            raise self.participant_error
+        self.participant_set_after_extent = self.angle_extent is not None or self.two_sides is not None
+        self._participant_bodies = list(bodies)
     def setAngleExtent(self, isSymmetric, angle):
         self.angle_extent = (isSymmetric, angle)
         return True
@@ -56,11 +68,18 @@ class FakeRevFeatures:
     def __init__(self):
         self.last_input = None
         self.add_calls = 0            # counted separately: a feature can be BUILT on a collection
+        self.participant_error = None
+        self.participant_bodies_at_add = None
+        self.on_add = None
     def createInput(self, profile, axis, operation):      # whose createInput was never called
-        self.last_input = FakeRevInput(profile, axis, operation)
+        self.last_input = FakeRevInput(profile, axis, operation, self.participant_error)
         return self.last_input
     def add(self, inp):
         self.add_calls += 1
+        self.participant_bodies_at_add = (None if inp._participant_bodies is None
+                                          else list(inp._participant_bodies))
+        if self.on_add is not None:
+            self.on_add(inp)
         return FakeRevFeature()
 
 
@@ -84,6 +103,14 @@ def _install(sketches):
 
 
 class TestGuards:
+    @pytest.mark.parametrize("operation", ["new", "join"])
+    def test_target_bodies_refused_for_non_participating_operations(self, operation):
+        _install([_sketch("S")])
+        res = rv.handler(sketch_name="S", operation=operation,
+                         target_bodies=["Body1"])
+        assert res["isError"] is True
+        assert "only applies to cut/intersect" in res["message"]
+
     def test_unknown_operation(self):
         _install([_sketch("S")])
         res = rv.handler(sketch_name="S", operation="weld")
@@ -427,11 +454,44 @@ def _host_bodies(*bodies):
 def _add_moving_volume(rf, *changes):
     """Make revolveFeatures.add apply (body, new_volume) pairs - the material effect a real
     cut/intersect has between the pre- and post-mutation reads."""
-    def _add(inp):
+    def _move(_inp):
         for body, volume in changes:
             body.volume = volume
-        return FakeRevFeature()
-    rf.add = _add
+    rf.on_add = _move
+
+
+class TestScopedParticipants:
+    def test_scoped_cut_watches_the_cross_component_target_and_leaves_host_unchanged(self, wire,
+                                                                                     monkeypatch):
+        rf = wire([_sketch("S")])
+        host = rv.app.activeProduct.rootComponent
+        host_body = BRepBody("Host", volume=12.0, parent_component=host)
+        _host_bodies(host_body)
+        target_owner = _comp([], FakeRevFeatures(), name="TargetPart", token="TOKEN:TargetPart")
+        target = BRepBody("CutMe", volume=8.0, parent_component=target_owner)
+        monkeypatch.setattr(rv._TARGET_BODIES, "resolve", lambda _raw: ([target], None))
+        _add_moving_volume(rf, (target, 6.5))
+
+        out = payload(rv.handler(sketch_name="S", operation="cut",
+                                 target_bodies=["TargetPart:CutMe"]))
+
+        assert rf.participant_bodies_at_add == [target]
+        assert rf.last_input.participant_set_after_extent is True
+        assert target.volume == 6.5 and host_body.volume == 12.0
+        assert out["volume_delta_cm3"] == -1.5
+        assert out["scoped_to_bodies"] == ["TargetPart:CutMe"]
+        assert "target_bodies" not in out
+
+    def test_participant_setter_failure_never_adds_a_revolve(self, wire, monkeypatch):
+        rf = wire([_sketch("S")])
+        target = BRepBody("CutMe", parent_component=_comp([], FakeRevFeatures(), name="TargetPart"))
+        monkeypatch.setattr(rv._TARGET_BODIES, "resolve", lambda _raw: ([target], None))
+        rf.participant_error = RuntimeError("participant assignment rejected")
+
+        res = rv.handler(sketch_name="S", operation="cut", target_bodies=["TargetPart:CutMe"])
+
+        assert res["isError"] is True and "participant assignment rejected" in res["message"]
+        assert rf.add_calls == 0
 
 
 class TestCutMovesMaterial:
@@ -482,6 +542,23 @@ class TestCutMovesMaterial:
         _host_bodies(BRepBody("Bar", volume=None))
         out = payload(rv.handler(sketch_name="S", operation="cut"))
         assert out["revolved"] is True and "volume_delta_cm3" not in out
+
+    def test_a_split_body_suppresses_the_incomplete_held_body_delta(self, wire):
+        rf = wire([_sketch("S")])
+        host = rv.app.activeProduct.rootComponent
+        original = BRepBody("Body1", volume=1.0, parent_component=host)
+        _host_bodies(original)
+
+        def _split(_inp):
+            original.volume = 0.874336294
+            host.bRepBodies._items.append(
+                BRepBody("Body2", volume=0.031415927, parent_component=host))
+
+        rf.on_add = _split
+        out = payload(rv.handler(sketch_name="S", operation="cut"))
+        assert out["revolved"] is True
+        assert "volume_delta_cm3" not in out
+        assert "body count changed" in out["note"]
 
 
 # -- a join whose result body is not one the component already held ------------------------------

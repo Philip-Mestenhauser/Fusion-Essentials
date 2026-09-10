@@ -100,6 +100,19 @@ class TestEnumMaps:
 
 
 class TestHappyPath:
+    def test_an_inactive_named_sheet_is_targeted(self, env, monkeypatch):
+        front = FakeSheet("Front", views=[FakeView("front")])
+        detail = FakeSheet("Detail", views=[FakeView("detail")])
+        env.document = make_drawing(sheets=[front, detail], active=1)
+        make_drawing_session(monkeypatch, env.document)
+        _payload(dim.handler(view=0, sheet="Front"))
+        assert front._auto_calls and not detail._auto_calls
+
+    def test_a_missing_named_sheet_refuses_before_mutation(self, env):
+        res = dim.handler(view=0, sheet="Missing")
+        assert res["isError"] is True
+        assert env.sheet._auto_calls == []
+
     def test_dimensions_the_requested_view_with_the_requested_strategy_and_datum(self, env):
         out = _payload(dim.handler(view=2, strategy="chain", datum="top_right"))
         assert out["dimensioned"] is True

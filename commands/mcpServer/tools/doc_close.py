@@ -125,7 +125,7 @@ tool = (
         description=TOOL_DESCRIPTION,
     )
     .add_input_property("name", {"type": "string",
-            "description": "A name, a URN / web URL, or 'open:N' (doc_get); omit = active."})
+            "description": "A name, a URN / web URL, document_handle, or 'open:N' (doc_get); omit = active."})
     .add_input_property("save_changes", {"type": "boolean"})
     .add_input_property("close_all", {"type": "boolean",
             "description": "Also closes referenced documents that have no tab."})

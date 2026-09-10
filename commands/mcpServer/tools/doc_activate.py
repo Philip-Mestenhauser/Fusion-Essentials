@@ -35,6 +35,8 @@ def handler(name: str = "") -> dict:
         "activated": True if is_active else ("pending" if did else False),
         "document_name": safe(lambda: d.name),
         "is_active": is_active,
+        "acted_on": ({"name": safe(lambda: d.name), "document_id": safe(lambda: d.dataFile.id)}
+                     if is_active else None),
     }
     if did and not is_active:
         out["note"] = ("Switch ACCEPTED but not yet active - activation is async and hasn't propagated. "
@@ -50,7 +52,7 @@ tool = (
         name="doc_activate",
         description=TOOL_DESCRIPTION,
         input_param_name="name",
-        input_param_description="Doc to activate: a display name, a URN / web URL, or 'open:N' (doc_get).",
+        input_param_description="Doc to activate: a display name, a URN / web URL, document_handle, or 'open:N' (doc_get).",
     ).strict_schema()
 )
 item = Item.create_tool_item(

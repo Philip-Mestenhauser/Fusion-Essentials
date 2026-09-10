@@ -246,6 +246,37 @@ class TestApiSurfaceCheckNeedsBindings:
         assert "webdeploy" in capsys.readouterr().err
 
 
+    def test_explicit_bindings_dir_wins_and_requires_all_api_modules(self, tmp_path, monkeypatch):
+        explicit = tmp_path / "explicit" / "adsk"
+        explicit.mkdir(parents=True)
+        for name in gen_api_surface._MODULES:
+            (explicit / (name + ".py")).write_text("", encoding="utf-8")
+        monkeypatch.setattr(gen_api_surface, "_BINDING_GLOBS", (str(tmp_path / "other"),))
+        assert gen_api_surface.find_bindings(str(explicit)) == os.path.abspath(str(explicit))
+
+    @pytest.mark.parametrize("shape", ["missing", "incomplete"])
+    def test_explicit_bindings_dir_invalid_fails_visibly(self, tmp_path, shape):
+        explicit = tmp_path / "adsk"
+        if shape == "incomplete":
+            explicit.mkdir()
+            (explicit / "core.py").write_text("", encoding="utf-8")
+        with pytest.raises(SystemExit) as exc:
+            gen_api_surface.find_bindings(str(explicit))
+        assert "Explicit --bindings-dir is invalid" in str(exc.value)
+
+    def test_main_forwards_explicit_bindings_dir(self, tmp_path, monkeypatch):
+        seen = []
+        expected = str(tmp_path / "adsk")
+        monkeypatch.setattr(
+            gen_api_surface, "build",
+            lambda path=None: (seen.append(path) or ("root", {}, {}, set())))
+        monkeypatch.setattr(gen_api_surface, "_render", lambda *args: "")
+        out = tmp_path / "surface.py"
+        out.write_text("", encoding="utf-8")
+        monkeypatch.setattr(gen_api_surface, "OUT_PATH", str(out))
+        assert gen_api_surface.main(["--check", "--bindings-dir", expected]) == 0
+        assert seen == [expected]
+
 # ── gen_api_surface: a measured runtime return beats a broken binding annotation ──
 
 class TestMeasuredFactoryReturns:

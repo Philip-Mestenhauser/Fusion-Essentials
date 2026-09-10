@@ -50,6 +50,7 @@ class TaskManager:
     # the single most concurrency-sensitive object in the server.
     _pending_tasks: Dict[str, Dict[str, Any]] = {}
     _tasks_lock = threading.Lock()
+    _lifecycle_lock = threading.Lock()
     _is_running = False
 
     def __new__(cls):
@@ -60,78 +61,104 @@ class TaskManager:
     @classmethod
     def start(cls) -> bool:
         if not app:
-            futil.log('TaskManager: Fusion application not available')
+            futil.log('TaskManager.start: phase=application_check Fusion is unavailable')
             return False
-        if cls._is_running:
-            return True
-        try:
-            # Re-registering an existing event id raises; unregister first to be safe
-            # across reloads.
-            try:
-                app.unregisterCustomEvent(CUSTOM_EVENT_ID)
-            except Exception:
-                pass
-            cls._custom_event = app.registerCustomEvent(CUSTOM_EVENT_ID)
-            cls._event_handler = TaskEventHandler(cls._pending_tasks)
-            cls._custom_event.add(cls._event_handler)
-            cls._is_running = True
-            futil.log('TaskManager: started')
-            return True
-        except Exception:
-            futil.handle_error('TaskManager.start')
-            return False
+        with cls._lifecycle_lock:
+            with cls._tasks_lock:
+                if cls._is_running:
+                    return True
+                try:
+                    try:
+                        app.unregisterCustomEvent(CUSTOM_EVENT_ID)
+                    except Exception:
+                        pass
+                    cls._custom_event = app.registerCustomEvent(CUSTOM_EVENT_ID)
+                    cls._event_handler = TaskEventHandler(cls._pending_tasks)
+                    cls._custom_event.add(cls._event_handler)
+                    cls._is_running = True
+                    futil.log('TaskManager: started')
+                    return True
+                except Exception:
+                    futil.handle_error('TaskManager.start: phase=event_registration')
+                    return False
 
     @classmethod
     def stop(cls) -> bool:
-        if not cls._is_running:
-            return True
-        try:
-            if cls._custom_event and cls._event_handler:
-                cls._custom_event.remove(cls._event_handler)
-            try:
-                app.unregisterCustomEvent(CUSTOM_EVENT_ID)
-            except Exception:
-                pass
-            cls._event_handler = None
-            cls._custom_event = None
+        with cls._lifecycle_lock:
             with cls._tasks_lock:
+                if not cls._is_running:
+                    return True
+                cls._is_running = False
+                custom_event = cls._custom_event
+                event_handler = cls._event_handler
+                cls._event_handler = None
+                cls._custom_event = None
+                dropped = list(cls._pending_tasks.values())
                 cls._pending_tasks.clear()
-            cls._is_running = False
-            futil.log('TaskManager: stopped')
-            return True
-        except Exception:
-            futil.handle_error('TaskManager.stop')
-            return False
+            for task in dropped:
+                cls._notify_drop(task, "task_manager_stopped_before_claim")
+            try:
+                if custom_event and event_handler:
+                    custom_event.remove(event_handler)
+                try:
+                    app.unregisterCustomEvent(CUSTOM_EVENT_ID)
+                except Exception:
+                    pass
+                futil.log('TaskManager: stopped')
+                return True
+            except Exception:
+                futil.handle_error('TaskManager.stop: phase=event_teardown')
+                return False
 
     @classmethod
-    def post(cls, command: str, callback: Callable[[Dict[str, Any]], None], data: Dict[str, Any]) -> Optional[str]:
-        if not cls._is_running:
-            futil.log('TaskManager: not running, cannot post task')
-            return None
-        if not callable(callback):
-            futil.log('TaskManager: callback must be callable')
+    def post(cls, command: str, callback: Callable[[Dict[str, Any]], None],
+             data: Dict[str, Any], on_drop=None) -> Optional[str]:
+        if not callable(callback) or (on_drop is not None and not callable(on_drop)):
+            futil.log('TaskManager.post: phase=callback_validation callback is not callable')
             return None
         try:
-            cls._reap_stale()          # drop any orphaned (dropped-event) tasks before adding one
+            cls._reap_stale()
             task_id = str(uuid.uuid4())
             with cls._tasks_lock:
+                if not cls._is_running:
+                    futil.log('TaskManager.post: phase=running_check manager is stopped')
+                    return None
                 cls._pending_tasks[task_id] = {'command': command, 'callback': callback,
-                                               'data': data, 'created': time.monotonic()}
+                                               'data': data, 'created': time.monotonic(),
+                                               'on_drop': on_drop}
             event_data = {'task_id': task_id, 'command': command, 'data': data}
             try:
-                app.fireCustomEvent(cls._custom_event.eventId, json.dumps(event_data))
+                fired = app.fireCustomEvent(cls._custom_event.eventId, json.dumps(event_data))
+                if fired is not True:
+                    futil.log(
+                        "TaskManager.post: phase=fire_custom_event returned "
+                        f"{fired!r} ({type(fired).__name__}); task dropped",
+                        adsk.core.LogLevels.ErrorLogLevel)
+                    with cls._tasks_lock:
+                        dropped = cls._pending_tasks.pop(task_id, None)
+                    cls._notify_drop(dropped, "custom_event_not_fired")
+                    return None
             except Exception:
                 # The entry is inserted BEFORE the fire so notify() can never arrive to a missing
                 # task. If the fire itself fails, no event will ever claim that entry, and post()
                 # returns None - so the caller has no task_id to cancel() with. Remove it here or it
                 # lingers until the TTL reap.
                 with cls._tasks_lock:
-                    cls._pending_tasks.pop(task_id, None)
+                    dropped = cls._pending_tasks.pop(task_id, None)
+                cls._notify_drop(dropped, "custom_event_fire_failed")
                 raise
             return task_id
         except Exception:
             futil.handle_error('TaskManager.post')
             return None
+
+    @staticmethod
+    def _notify_drop(task, reason):
+        if task and callable(task.get('on_drop')):
+            try:
+                task['on_drop'](reason)
+            except Exception:
+                futil.handle_error('TaskManager.on_drop')
 
     @classmethod
     def _reap_stale(cls, ttl: float = _PENDING_TASK_TTL_S) -> int:
@@ -148,8 +175,9 @@ class TaskManager:
         with cls._tasks_lock:
             stale = [tid for tid, t in cls._pending_tasks.items()
                      if now - t.get('created', now) > ttl]
-            for tid in stale:
-                cls._pending_tasks.pop(tid, None)
+            dropped = [cls._pending_tasks.pop(tid, None) for tid in stale]
+        for task in dropped:
+            cls._notify_drop(task, "pending_task_reaped")
         if stale:
             futil.log(f'TaskManager: reaped {len(stale)} orphaned pending task(s) (dropped events)')
         return len(stale)
@@ -174,7 +202,8 @@ class TaskManager:
 
     @classmethod
     def is_running(cls) -> bool:
-        return cls._is_running
+        with cls._tasks_lock:
+            return cls._is_running
 
     @classmethod
     def get_pending_task_count(cls) -> int:

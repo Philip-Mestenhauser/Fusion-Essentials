@@ -619,7 +619,7 @@ def is_empty_toolpath(facts: dict) -> bool:
 
 def toolpath_present_tally(ops):
     """(rows reading hasToolpath True, rows whose flag did not read) over a list of operations."""
-    # An NC program's filteredOperations holds every operation in its scope; hasToolpath is what
+    # An NC program's filteredOperations holds unsuppressed operations in its scope; hasToolpath
     # separates the ones carrying a path from the ones that read back with none.
     present = unread = 0
     for row in (ops or []):

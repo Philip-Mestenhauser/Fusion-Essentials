@@ -90,3 +90,10 @@ class TestActivateDocument:
         assert "P1-Gimbal (urn:adsk.wipprod:dm.lineage:AAA)" in res["message"]
         assert "P1-Gimbal (urn:adsk.wipprod:dm.lineage:BBB)" in res["message"]
         assert a._activates == 0 and b._activates == 0
+
+
+def test_pending_activation_does_not_stamp_the_previous_document(install_app):
+    a, b = _doc("A"), _doc("B")
+    install_app([a, b], active=a)
+    out = _payload(dc._write_guard.wrap(dm.handler)(name="B"))
+    assert out["activated"] == "pending" and out["acted_on"] is None

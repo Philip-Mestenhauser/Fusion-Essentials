@@ -210,6 +210,32 @@ class TestMove:
         assert inner.moved_into is outer
 
 
+class TestNestedFolderTargets:
+    def test_nested_folder_can_be_renamed_and_receive_an_operation(self, monkeypatch):
+        inner = _Folder("Inner")
+        op = _Op("Face1")
+        setup = _Setup("Setup1", ops=[op], folders=[_Folder("Outer", folders=[inner])])
+        _install(monkeypatch, [setup])
+        _payload(cf.handler(action="rename", setup="Setup1", folder="Inner", new_name="Finish"))
+        out = _payload(cf.handler(action="move", setup="Setup1",
+                                  folder="Finish", operations=["Face1"]))
+        assert inner.name == "Finish" and op.moved_into is inner and out["moved"] == 1
+
+    def test_duplicate_nested_destinations_refuse_before_move(self, monkeypatch):
+        left, right, op = _Folder("Finish"), _Folder("Finish"), _Op("Face1")
+        setup = _Setup("Setup1", ops=[op], folders=[_Folder("A", folders=[left]),
+                                                   _Folder("B", folders=[right])])
+        _install(monkeypatch, [setup])
+        result = cf.handler(action="move", setup="Setup1", folder="Finish", operations=["Face1"])
+        assert result["isError"] is True and "ambiguous" in result["message"].lower()
+        assert op.moved_into is None
+        result = cf.handler(action="rename", setup="Setup1", folder="Finish", new_name="Changed")
+        assert result["isError"] is True and left.name == right.name == "Finish"
+        _payload(cf.handler(action="move", setup="Setup1", folder="Finish#2",
+                            operations=["Face1"]))
+        assert op.moved_into is right
+
+
 class _RefusingOp(_Op):
     """moveInto() returns False - Fusion refused the move (e.g. not allowed for this op type)."""
     def moveInto(self, parent):

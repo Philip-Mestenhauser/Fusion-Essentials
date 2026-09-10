@@ -302,6 +302,27 @@ class TestProfileHandle:
         assert ex._looks_like_handle("all") is False
         assert ex._looks_like_handle([0, 1]) is False
 
+    def test_handle_uses_its_profile_before_the_newest_open_sketch(self, monkeypatch):
+        import adsk.fusion
+        monkeypatch.setattr(adsk.fusion, "Profile", Profile, raising=False)
+        token = "PROFILE_TOKEN_" + "x" * 40
+        profile = Profile("selected", entity_token=token)
+        older = _sketch("Selected", profiles=[profile])
+        profile.parentSketch = older
+        newer = _sketch("Newest", profile_count=0, curve_count=1)
+        ef = FakeExtrudeFeatures()
+        install(ex, make_design(comp=_component("Root", sketches=[older, newer], ef=ef),
+                                tokens={token: profile}))
+        _wire_adsk()
+
+        out = _payload(ex.handler(profile_index=token + "|@profile:0,0,0",
+                                  sketch_name="Newest", distance=5))
+        bare = _payload(ex.handler(profile_index=token, distance=5))
+
+        assert ef.last_input.profile is profile
+        assert out["sketch"] == "Selected" and out["as_surface"] is False
+        assert bare["sketch"] == "Selected" and bare["as_surface"] is False
+
 
 class TestAllIncludesEnclosedRegions:
     """'all' takes every closed region with no containment analysis, so a region ENCLOSED by another

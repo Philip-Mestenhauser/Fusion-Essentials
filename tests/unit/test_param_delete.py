@@ -61,6 +61,26 @@ class TestDeleteHandler:
         assert out["deleted"] is True
         assert part._deleted is True
 
+    def test_quoted_literals_and_scientific_notation_are_not_dependencies(self, monkeypatch):
+        part = FakeUserParameter(name="PartX", expression="10 mm")
+        label = FakeUserParameter(name="Label", expression="'PartX'")
+        exponent = FakeUserParameter(name="e", expression="1e-3")
+        up = FakeUserParameters([part, label, exponent])
+        design = _design(up, make_timeline(), all_params=[part, label, exponent])
+        _stub_design(monkeypatch, design)
+        out = _payload(params.handler(name="PartX"))
+        assert out["deleted"] is True
+        out = _payload(params.handler(name="e"))
+        assert out["deleted"] is True
+
+    def test_unicode_identifier_is_a_real_dependency_token(self, monkeypatch):
+        dimension = FakeUserParameter(name="Δ", expression="10 mm")
+        consumer = FakeUserParameter(name="Calc", expression="Δ / 2")
+        up = FakeUserParameters([dimension, consumer])
+        _stub_design(monkeypatch, _design(up, make_timeline(), all_params=[dimension, consumer]))
+        res = params.handler(name="Δ")
+        assert res["isError"] is True and "referenced by: Calc" in res["message"]
+
     def test_delete_unknown_param_errors(self, monkeypatch):
         design = _design(FakeUserParameters([]), make_timeline())
         _stub_design(monkeypatch, design)

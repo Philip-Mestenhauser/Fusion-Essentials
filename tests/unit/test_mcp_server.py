@@ -500,6 +500,8 @@ def task_manager(mcp_server_module):
     tm = mcp_server_module.TaskManager
     tm.stop()
     tm.start()
+    import sys
+    sys.modules[tm.__module__].app.fireCustomEvent.return_value = True
     yield tm
     tm.stop()
 

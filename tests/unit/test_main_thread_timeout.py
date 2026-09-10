@@ -23,6 +23,7 @@ import importlib.util
 import json
 import os
 import sys
+import threading
 import types
 
 import pytest
@@ -104,12 +105,15 @@ class TestReapStale:
         TM = tm.TaskManager
         TM._pending_tasks.clear()
         now = time.monotonic()
-        TM._pending_tasks["old"] = {"callback": lambda d: None, "data": {}, "created": now - 9999}
+        dropped = []
+        TM._pending_tasks["old"] = {"callback": lambda d: None, "data": {},
+                                          "created": now - 9999, "on_drop": dropped.append}
         TM._pending_tasks["fresh"] = {"callback": lambda d: None, "data": {}, "created": now}
         reaped = TM._reap_stale(ttl=300.0)
         assert reaped == 1
         assert "old" not in TM._pending_tasks      # orphan dropped
         assert "fresh" in TM._pending_tasks         # live task untouched
+        assert dropped == ["pending_task_reaped"]
 
     def test_reap_is_a_noop_when_all_fresh(self, tm):
         import time
@@ -154,6 +158,13 @@ class TestPostAndTheFireBoundary:
             "a post whose fire failed returned None - the caller has no task_id to cancel with, so "
             "the entry it left behind is unreachable until the TTL reap")
 
+    def test_a_false_fire_drops_the_task_and_reports_the_reason(self, tm, armed, monkeypatch):
+        dropped = []
+        self._fake_app(tm, monkeypatch, lambda _event_id, _payload: False)
+        assert armed.post("cmd", lambda data: None, {}, on_drop=dropped.append) is None
+        assert dropped == ["custom_event_not_fired"]
+        assert armed.get_pending_task_count() == 0
+
     def test_a_successful_fire_keeps_the_task_pending_for_notify(self, tm, armed, monkeypatch):
         seen = {}
 
@@ -162,6 +173,7 @@ class TestPostAndTheFireBoundary:
             seen["count_at_fire"] = len(armed._pending_tasks)
             seen["payload"] = json.loads(payload)
             seen["event_id"] = event_id
+            return True
 
         self._fake_app(tm, monkeypatch, _fire)
         task_id = armed.post("cmd", lambda data: None, {"x": 1})
@@ -194,6 +206,27 @@ class TestPostAndTheFireBoundary:
         monkeypatch.setattr(TM, "_is_running", False)
         assert TM.post("cmd", lambda data: None, {}) is None
         assert TM.get_pending_task_count() == 0
+
+    def test_stop_wins_before_a_concurrent_post_inserts(self, tm, armed, monkeypatch):
+        entered = threading.Event()
+        release = threading.Event()
+        answer = []
+
+        def paused_reap(cls, ttl=300.0):
+            entered.set()
+            assert release.wait(2)
+            return 0
+
+        monkeypatch.setattr(armed, "_reap_stale", classmethod(paused_reap))
+        worker = threading.Thread(
+            target=lambda: answer.append(armed.post("cmd", lambda data: None, {})))
+        worker.start()
+        assert entered.wait(2)
+        assert armed.stop() is True
+        release.set()
+        worker.join(2)
+        assert answer == [None]
+        assert armed.get_pending_task_count() == 0
 
 
 # ── Item.enforce_timeout flag (no deep imports needed) ──────────────────────

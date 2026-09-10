@@ -34,6 +34,7 @@ _VEC_TO_KEY = {(1, 0, 0): "x", (0, 1, 0): "y", (0, 0, 1): "z"}
 # the axis, and a face resolved to a direction vector would drop the axis POSITION - a cylinder at
 # x=30 would revolve about the world axis through the origin.
 _AXIS = _inputs.AxisRef("axis", face_entity=True, default="z")
+_TARGET_BODIES = _inputs.BodyRefList("target_bodies", required=False)
 
 
 def _in_context(ent, comp, design):
@@ -95,7 +96,7 @@ def _axis_entity(design, comp, sketch, axis):
 
 def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
             angle_deg: float = 360.0, operation: str = "new", symmetric: bool = False,
-            second_angle_deg: float = 0.0, component: str = "") -> dict:
+            second_angle_deg: float = 0.0, component: str = "", target_bodies=None) -> dict:
     """See TOOL_DESCRIPTION."""
     op_key = (operation or "new").strip().lower()
     if op_key not in _common.OPERATIONS:
@@ -155,6 +156,14 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
     if not axis_entity:
         return error(f"Could not resolve axis '{axis}': {axis_label or 'use x | y | z, a straight-edge/sketch handle, or line:<index>.'}")
 
+    scoped_bodies = None
+    if target_bodies not in (None, "", []):
+        if op_key not in ("cut", "intersect"):
+            return error("'target_bodies' only applies to cut/intersect operations.")
+        scoped_bodies, berr = _TARGET_BODIES.resolve(target_bodies)
+        if berr:
+            return error(berr)
+
     op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
     try:
         rev_input = host.features.revolveFeatures.createInput(profile, axis_entity, op)
@@ -178,11 +187,21 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
     except Exception as e:
         return error(f"Could not set revolve angle: {e}")
 
+    if scoped_bodies is not None:
+        try:
+            rev_input.participantBodies = list(scoped_bodies)
+        except Exception as e:
+            return error(f"Could not set target_bodies before revolve: {e}")
+
     # cut/intersect MATERIAL evidence: the volumes the operation must move, sampled BEFORE the add.
     # A revolve reports a healthy feature for a profile that sweeps through empty air, so the feature
     # object alone cannot say material changed - only this before/after pair can.
-    check_bodies = _cut_check_bodies(host) if op_key in ("cut", "intersect") else []
+    check_bodies = ((list(scoped_bodies) if scoped_bodies is not None else _cut_check_bodies(host))
+                    if op_key in ("cut", "intersect") else [])
     vol_before = _geom.volumes(check_bodies)
+    count_hosts = ([host] if check_bodies and scoped_bodies is None else
+                   [safe(lambda b=b: b.parentComponent) for b in check_bodies])
+    body_counts_before = [(c, _common.body_count(c)) for c in count_hosts if c is not None]
     # A join is told "grew a body" from "made a second one" by the host's body NAMES before the add.
     bodies_before = _common.component_body_names(host) if op_key == "join" else None
 
@@ -198,15 +217,20 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
         return error(_common.no_feature_error(design, "Revolve"))
 
     volume_delta_cm3 = None
+    body_count_changed = False
     if check_bodies:
         delta, readable = _geom.volume_delta(check_bodies, vol_before)
+        count_changes = [(before, _common.body_count(c)) for c, before in body_counts_before]
+        body_count_changed = any(before is not None and after is not None and before != after
+                                 for before, after in count_changes)
         # A body whose volume read BEFORE and reads unreadable now was consumed whole - a real effect
         # that contributes no delta, so it must not be counted as "nothing moved".
         consumed = [b for b in check_bodies
                     if vol_before.get(id(b)) is not None and _geom.signed_volume(b) is None]
-        if readable:
+        if readable and not body_count_changed:
             volume_delta_cm3 = round(delta, 6)
-        if readable and not consumed and abs(delta) < _common.NO_VOLUME_CHANGE_CM3:
+        if (readable and not consumed and not body_count_changed
+                and abs(delta) < _common.NO_VOLUME_CHANGE_CM3):
             where = safe(lambda: host.name) or "the host component"
             return error(f"Revolve reported success but this {op_key} changed nothing - every solid "
                          f"body in '{where}' measures the volume it had before and none was "
@@ -218,6 +242,14 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
     body_names = [f["name"] for f in _common.body_facts(_common.result_bodies(feature))]
 
     note = "Profile revolved into a solid. Pair with view_screenshot (iso) to view it."
+    if scoped_bodies is not None:
+        note += (" 'scoped_to_bodies' lists the configured participant bodies; Fusion does not "
+                 "expose a readback for this input.")
+    elif op_key in ("cut", "intersect"):
+        note += " With no target_bodies, Fusion considers every intersected body."
+    if body_count_changed:
+        note += (" The body count changed, so volume_delta_cm3 is omitted; held-body volumes do "
+                 "not describe the resulting body set.")
     if op_key == "new":
         adv = root_body_advisory(design, host)
         if adv:
@@ -240,6 +272,8 @@ def handler(sketch_name: str = "", profile_index=0, axis: str = "z",
         "result_bodies": body_names,
         "note": note,
     }
+    if scoped_bodies is not None:
+        payload["scoped_to_bodies"] = [_inputs.qualified_body_name(b) for b in scoped_bodies]
     # Absent, never null: a null would read as "no material moved".
     if volume_delta_cm3 is not None:
         payload["volume_delta_cm3"] = volume_delta_cm3
@@ -260,6 +294,7 @@ revolve_tool = (
             "profile's sketch."})
     .add_input_property("angle_deg", {"type": "number"})
     .add_input_property("second_angle_deg", {"type": "number"})
+    .add_input_property("target_bodies", _TARGET_BODIES.schema())
     .add_input_property(*_inputs.boolean_op(default="new").as_property())
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("symmetric", {"type": "boolean"})

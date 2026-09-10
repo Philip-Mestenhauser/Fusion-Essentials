@@ -241,7 +241,7 @@ tool = (
 # operation that can run past the server's call timeout; the file-landed gate is the real proof of
 # success, so we wait for it rather than false-failing on a timeout.
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
-                             enforce_timeout=False,
+                             enforce_timeout=False, deferred_capable=True,
                              postconditions=[_assert.FileLanded("file_path")])
 
 

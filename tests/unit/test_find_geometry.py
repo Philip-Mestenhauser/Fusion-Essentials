@@ -613,7 +613,9 @@ class TestBodyNameTargets:
         # A typo in the qualified form must not fall through to "that component's single body" - the
         # caller would silently get a body they never named. The scope resolved, so say what it holds.
         pin = _named_body("Pin", "TOK_A", "PIN_FACE")
-        _install([FakeOcc("Frame:1", "Frame", [pin])])
+        frame = FakeComp("Frame", [pin])
+        design = _install([FakeOcc("Frame:1", frame, [pin])])
+        design._all_components.append(frame)
         res = fg.handler(target="Frame:Pinn")
         assert res["isError"] is True
         assert "holds no body named 'Pinn'" in res["message"] and "'Pin'" in res["message"]

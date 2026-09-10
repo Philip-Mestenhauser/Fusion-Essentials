@@ -19,6 +19,7 @@ from ._common import ok, error, safe, terse, counted, design, all_components, it
 from . import _common
 from . import _data_read
 from . import _doc_common
+from . import _write_guard
 from . import _outputs
 
 app = adsk.core.Application.get()
@@ -62,6 +63,7 @@ def _active_document_facts():
     has_df = df is not None
     info = {
         "name": safe(lambda: doc.name),
+        "document_handle": _write_guard.document_handle(doc),
         "is_saved": is_saved,
         "is_modified": is_modified,
         "fusion_version_saved_with": safe(lambda: doc.version),
@@ -137,9 +139,9 @@ def _open_documents(max_results=_OPEN_DOCS_CAP):
                 "is_visible": safe(lambda d=d: d.isVisible),
                 "is_saved": is_saved,
                 "is_modified": is_modified,
+                "document_handle": _write_guard.document_handle(d),
             }, _DOC_NOISE)
-            # open_index is the STABLE session address a caller passes as 'open:N' to doc_activate /
-            # doc_close - the only way to reach an UNSAVED doc that shares a name and has no URN.
+            # The opaque handle identifies a document across index shifts; open:N remains positional.
             row["open_index"] = i
             rows.append(row)
         # exception = unsaved work: NEVER-SAVED (no DataFile) OR modified-since-save - what a
@@ -587,19 +589,13 @@ def _session_projection(active, max_results):
     """(payload, note) for the DEFAULT projection: the `active` record the handler resolved plus the
     session's open-document list. Read from memory - the include= slices are the cloud reads."""
     rows, summary, truncated = _open_documents(max_results)
-    note = ("active = the focused document (document_id is its lineage URN, for doc_copy/doc_open). "
-                 "open_documents is a SUPERSET of visible tabs - referenced/dependency docs load as real "
-                 "Documents (is_visible=true means loaded, not tabbed). Healthy docs show just their name "
-                 "+ open_index; an unsaved/modified/hidden one keeps the flag. A row's 'open_index' is a "
-                 "stable session address - pass 'open:N' to doc_activate/doc_close to reach an UNSAVED doc "
-                 "that shares a name and has no URN. This is the SESSION; for cloud "
-                 "projects/files see data_get. include=['versions'] adds the active doc's cloud version "
-                 "history with each version's milestone flag/name (newest-first, capped); "
-                 "include=['xref_tree'] adds the recursive freshness "
-                 "rollup for referenced components (kind='xref') AND derive links (kind='derive') "
-                 "(all_current + stale_count); "
-                 "include=['used_in'] adds the reverse view - documents that USE this one (drawings "
-                 "made from it, parent assemblies that insert it), with a by-type rollup.")
+    note = ("active is the focused document; document_id is its cloud lineage URN. "
+            "document_handle addresses the exact open document, saved or unsaved: use it with "
+            "doc_activate, doc_close and expect_document. It survives saves/tab movement but expires "
+            "on close or add-in reload; refresh with doc_get. open_index is positional and can shift. "
+            "open_documents includes loaded dependencies, not just visible tabs. "
+            "For cloud files use data_get. include=['versions'] adds version history; "
+            "include=['xref_tree'] adds reference freshness; include=['used_in'] lists documents using this file.")
     if truncated:
         note += f" open_documents was capped at {max_results} of {summary['open_count']}; raise max_results to see the rest."
     # A row that answered no document is disclosed as such, since it is the one row the 'open:N'

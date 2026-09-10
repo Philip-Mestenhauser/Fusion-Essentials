@@ -72,8 +72,8 @@ def handler(body_name: str = "", thickness: float = 1.0, units: str = "mm",
         removed_faces = 0
 
     body_label = safe(lambda: body.name) if body else None
-    # Pre-mutation read-back: shelling hollows the body, so its volume drops (and face count rises).
-    vol_before = _geom.signed_volume(body) if body else None
+    # Record volume and topology before mutation; shell direction changes the volume invariant.
+    vol_before = _common.measured(lambda: _geom.signed_volume(body), places=12) if body else None
     faces_before = safe(lambda: body.faces.count, None) if body else None
 
     # isTangentChain=False so exactly the passed faces are removed (no tangent-face propagation).
@@ -93,32 +93,42 @@ def handler(body_name: str = "", thickness: float = 1.0, units: str = "mm",
             design, "Shell", "(The body could not be hollowed at this thickness.)"))
 
     # Post-mutation read-back: prove the body was actually hollowed rather than trust the API's success.
-    vol_after = _geom.signed_volume(body) if body else None
+    vol_after = _common.measured(lambda: _geom.signed_volume(body), places=12) if body else None
     faces_after = safe(lambda: body.faces.count, None) if body else None
     is_solid = safe(lambda: body.isSolid, None) if body else None
 
-    changed = None
-    if isinstance(vol_before, (int, float)) and isinstance(vol_after, (int, float)):
-        changed = vol_after < vol_before - _common.NO_VOLUME_CHANGE_CM3
-    elif isinstance(faces_before, int) and isinstance(faces_after, int):
-        changed = faces_after != faces_before
-    if changed is False:
-        # A no-op that the API still reported as success - surface it as failure, never a false ok.
-        # The message names the read that convicted, since only ONE of the two was compared.
-        if isinstance(vol_before, (int, float)) and isinstance(vol_after, (int, float)):
-            observed = (f"the read-back volume did not drop ({vol_before:.6g} cm3 before, "
-                        f"{vol_after:.6g} cm3 after)")
-        else:
-            observed = f"the face count read back identical ({faces_after} before and after)"
-        return error(f"Shell reported success on body '{body_label}' but {observed}. Read the body "
-                     "back with model_inspect, or cut a cross-section with view_section, to see "
-                     "what the feature did.")
+    # Outward walls can increase, decrease, or preserve the original solid's volume.
+    changes = []
+    wrong_direction = False
+    if vol_before is not None and vol_after is not None:
+        delta = vol_after - vol_before
+        wrong_direction = dir_key == "inside" and delta > _common.NO_VOLUME_CHANGE_CM3
+        changes.append(delta < -_common.NO_VOLUME_CHANGE_CM3 if dir_key == "inside"
+                       else abs(delta) > _common.NO_VOLUME_CHANGE_CM3)
+    if isinstance(faces_before, int) and isinstance(faces_after, int):
+        changes.append(faces_after != faces_before)
+    obs_inside = _common.measured(lambda: feature.insideThickness.value, places=12)
+    obs_outside = _common.measured(lambda: feature.outsideThickness.value, places=12)
+    def _thickness_matches(observed, requested):
+        if requested > 0.0:
+            return observed is not None and abs(observed - requested) <= 1e-9
+        return observed is None or abs(observed) <= 1e-9
+
+    thickness_matches = (_thickness_matches(obs_inside, inside_t)
+                         and _thickness_matches(obs_outside, outside_t))
+    if not any(changes) or not thickness_matches or wrong_direction:
+        observations = []
+        if vol_before is not None and vol_after is not None:
+            observations.append(f"volume {vol_before:.6g} -> {vol_after:.6g} cm3")
+        if isinstance(faces_before, int) and isinstance(faces_after, int):
+            observations.append(f"faces {faces_before} -> {faces_after}")
+        observations.append(f"inside/outside thickness {obs_inside}/{obs_outside} cm")
+        return error(f"Shell returned feature '{safe(lambda: feature.name)}' on '{body_label}', "
+                     f"but its effect is unverified: {', '.join(observations)}. Nothing was rolled "
+                     "back. Inspect the retained feature with model_inspect and view_section "
+                     "before retrying.")
 
     result_bodies = [f["name"] for f in _common.body_facts(_common.result_bodies(feature))]
-
-    # Observed thicknesses read back off the feature's ModelParameters (cm -> display units).
-    obs_inside = safe(lambda: feature.insideThickness.value, None)
-    obs_outside = safe(lambda: feature.outsideThickness.value, None)
 
     payload = {
         "shelled": True,

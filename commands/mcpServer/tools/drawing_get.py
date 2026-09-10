@@ -59,7 +59,9 @@ def _views_rows(sheet, cap):
     carries - it has no name, scale or position, and its populated viewCurves collection hands back
     ViewCurve instances with no readable geometry."""
     views = safe(lambda: sheet.views)
-    count = safe(lambda: views.count, 0) or 0
+    count = _common.counted(lambda: views.count)
+    if count is None:
+        return None, False
     rows = []
     for i in range(min(count, cap)):
         v = safe(lambda i=i: views.item(i))
@@ -84,13 +86,17 @@ def handler(include=None, sheet: str = "") -> dict:
                      f"This read offers: {', '.join(_SLICES)}.")
     want_views = "views" in raw
 
-    dwg = _drawing_common.active_drawing()
+    dd = _drawing_common.active_drawing_document()
+    dwg = safe(lambda: dd.drawing) if dd is not None else None
     if dwg is None:
         return error("The active document is not a 2D drawing. Activate the drawing document "
                      "first (doc_activate), then read it.")
 
-    doc_name = safe(lambda: adsk.core.Application.get().activeDocument.name)
+    current_app = adsk.core.Application.get()
+    doc_name = safe(lambda: dd.name)
     standard = _drawing_common.standard_label(dwg)
+    sheets = safe(lambda: dwg.sheets)
+    sheet_count = _common.counted(lambda: sheets.count)
     # ONE activeSheet read for the whole payload: the property can return DIFFERENT sheets across
     # close-together reads, so one read is what makes active_sheet and every is_active flag a
     # consistent snapshot.
@@ -100,29 +106,37 @@ def handler(include=None, sheet: str = "") -> dict:
         "standard": standard,
         "dimension_display_unit": _drawing_common.sheet_units(dwg),
         "coordinate_unit": _drawing_common.coordinate_unit(dwg),
-        "sheet_count": _common.counted(lambda: dwg.sheets.count),
+        "sheet_count": sheet_count,
         "active_sheet": active_name,
+        "is_modified": _common.read_flag(lambda: dd.isModified),
+        "active_command_id": safe(lambda: current_app.userInterface.activeCommand),
     }
 
     if sheet:
+        if sheet_count is None:
+            return error(f"The drawing's sheet count could not be read, so sheet name '{sheet}' "
+                         "cannot be resolved. Retry drawing_get after the drawing finishes updating.")
         target, serr = _drawing_common.resolve_sheet(dwg, sheet)
         if serr:
             return error(serr)
         sheets_to_read = [(None, target)]
+    elif sheet_count is None:
+        sheets_to_read = None
     else:
-        coll = safe(lambda: dwg.sheets)
-        n = safe(lambda: coll.count, 0) or 0
-        sheets_to_read = [(i, safe(lambda i=i: coll.item(i))) for i in range(n)]
+        sheets_to_read = [(i, safe(lambda i=i: sheets.item(i))) for i in range(sheet_count)]
 
-    rows = []
-    for idx, s in sheets_to_read:
+    rows = None if sheets_to_read is None else []
+    for idx, s in sheets_to_read or []:
         if s is None:
             rows.append(None)
             continue
         facts = _drawing_common.sheet_facts(s)
         if idx is not None:
-            facts["export_index"] = idx + 1
-        facts["is_active"] = bool(active_name) and active_name == facts.get("name")
+            facts["collection_index"] = idx + 1
+            facts["export_index"] = None
+        sheet_name = facts.get("name")
+        facts["is_active"] = (None if active_name is None or sheet_name is None
+                              else active_name == sheet_name)
         custom = _custom_size_facts(s)
         if custom is not None and facts.get("sheet_size") is None:
             facts["custom_size"] = dict(custom, unit=_drawing_common.coordinate_unit(dwg))
@@ -135,17 +149,16 @@ def handler(include=None, sheet: str = "") -> dict:
     payload["sheets"] = rows
 
     payload["note"] = (
-        "export_index is 1-based - the address drawing_export's "
-        "sheet_range and drawing_edit_sheet take. Sheet width/height are ALWAYS mm; a custom-size "
-        "sheet reads sheet_size null. include=['views'] adds per-view rows: index + type. A view's "
-        "viewCurves collection is populated but its items expose no readable geometry, and view "
-        "names, scales, positions and placed DIMENSIONS have no read API.")
+        "collection_index is 1-based in the native collection; export_index is unknown. Export all "
+        "sheets and inspect the PDF before choosing a page range. Width/height are mm; custom-size "
+        "sheets read sheet_size null. include=['views'] adds index/type. viewCurves exposes no readable "
+        "geometry. View names, scales, positions and placed dimensions have no read API.")
     return ok(payload)
 
 
 TOOL_DESCRIPTION = (
     "Read the ACTIVE 2D drawing: standard, units, and a sheet listing with per-sheet facts and a "
-    "1-based export_index."
+    "1-based collection_index (export order unavailable)."
 )
 
 tool = (

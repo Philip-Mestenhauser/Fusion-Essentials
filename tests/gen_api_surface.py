@@ -13,6 +13,7 @@ and that needs the member list as data - which is what this writes.
 Regenerate: py -3 tests/gen_api_surface.py   (reads the installed Fusion Python bindings)
 """
 
+import argparse
 import ast
 import glob
 import os
@@ -62,8 +63,17 @@ _EXTRA_CLASSES = (
 )
 
 
-def find_bindings():
-    """The installed adsk package directory (newest by mtime), or None."""
+def find_bindings(bindings_dir=None):
+    """Return an explicit adsk package directory, or the newest installed one by default."""
+    if bindings_dir is not None:
+        root = os.path.abspath(os.path.expanduser(bindings_dir))
+        missing = [name + ".py" for name in _MODULES
+                   if not os.path.isfile(os.path.join(root, name + ".py"))]
+        if not os.path.isdir(root) or missing:
+            detail = ("directory does not exist" if not os.path.isdir(root) else
+                     "missing required modules: " + ", ".join(missing))
+            raise SystemExit("Explicit --bindings-dir is invalid: " + root + " (" + detail + ")")
+        return root
     hits = []
     for pattern in _BINDING_GLOBS:
         hits.extend(glob.glob(pattern))
@@ -154,8 +164,8 @@ def apply_measured_returns(factories, measured=None):
     return out
 
 
-def build():
-    root = find_bindings()
+def build(bindings_dir=None):
+    root = find_bindings() if bindings_dir is None else find_bindings(bindings_dir)
     if root is None:
         return None, None, None, None
     properties, factories, bools, other = {}, {}, set(), set()
@@ -264,8 +274,13 @@ def _fail(msg):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    check = "--check" in argv
-    root, properties, factories, bools = build()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--check", action="store_true")
+    ap.add_argument("--bindings-dir", metavar="PATH",
+                    help="use this adsk package directory instead of newest installed bindings")
+    args = ap.parse_args(argv)
+    root, properties, factories, bools = build(args.bindings_dir)
+    check = args.check
     if root is None:
         # No bindings means the surface CANNOT be recomputed, so nothing here can tell a current
         # tests/api_surface.py from one generated against a Fusion release ago - and the lint that

@@ -160,9 +160,8 @@ cython_debug/
 .claude/agents/
 CLAUDE.local.md
 
-# Plans / review scaffolding: stand-up-the-work notes, useful while work is in flight, removed once
-# it ships. Top-level /plans is the preferred home (the harness prompts for approval on every write
-# inside .claude/); plans that land under .claude/plans/ stay untracked all the same.
+# Local backlog and short-lived plans are private; keep open work in plans/backlog.md.
+# Temporary scripts/handoffs belong in .cache; retained evidence in outputs/review-archive.
 /plans/
 .claude/plans/
 
@@ -184,6 +183,5 @@ tests/live/cloud_config.local.json
 # the archives are not.
 tests/live/results/
 
-# Working plans / open findings / audit notes: owner-visible, never shipped. Squashed before
-# publish; durable outcomes land as code, lints, or tracked ledgers - never as tracked prose plans.
-/plans/
+# Retained local review evidence and private session receipts.
+/outputs/review-archive/

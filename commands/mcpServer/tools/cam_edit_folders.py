@@ -80,9 +80,10 @@ def _do_rename(setup, folder, new_name):
     new_name = (new_name or "").strip()
     if not folder or not new_name:
         return error("Provide 'folder' (the existing folder) and 'new_name'.")
-    f = safe(lambda: setup.folders.itemByName(folder))
-    if not f:
-        return error(f"No folder named '{folder}' in setup '{safe(lambda: setup.name)}'.")
+    node, ferr = resolve_cam_node(None, folder, kinds=("folder",), setup=setup, label="folder")
+    if ferr:
+        return error(ferr)
+    f = node.obj
     try:
         f.name = new_name
     except Exception as e:
@@ -97,9 +98,10 @@ def _do_move(setup, folder, operations):
     operations = operations or []
     if not folder or not operations:
         return error("Provide 'folder' (destination) and 'operations' (names to move into it).")
-    dest = safe(lambda: setup.folders.itemByName(folder))
-    if not dest:
-        return error(f"No folder named '{folder}' in setup '{safe(lambda: setup.name)}'.")
+    node, ferr = resolve_cam_node(None, folder, kinds=("folder",), setup=setup, label="folder")
+    if ferr:
+        return error(ferr)
+    dest = node.obj
     # Resolve ALL operations before moving any (setup-scoped: the shared resolver refuses a name
     # duplicated within the setup and lists the available names on a miss - nothing has moved yet).
     resolved = []
@@ -191,7 +193,7 @@ tool = (
     .add_input_property("action", {"type": "string", "enum": list(_ACTIONS)})
     .add_input_property("setup", {"type": "string", "description": "Setup name (from cam_get)."})
     .add_input_property("name", {"type": "string", "description": "New folder name (create)."})
-    .add_input_property("folder", {"type": "string", "description": "Target folder (rename / move)."})
+    .add_input_property("folder", {"type": "string", "description": "Exact folder name; duplicate refusals return name#n selectors."})
     .add_input_property("new_name", {"type": "string", "description": "New name (rename)."})
     .add_input_property("operations", {"type": "array", "items": {"type": "string"},
             "description": "Operation names to move in (move)."})

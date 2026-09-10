@@ -10,18 +10,14 @@ reports.
 
 import difflib
 
-import adsk.core
-import adsk.fusion
-
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, iter_collection, ok, safe
 from . import _common
 from . import _inputs
+from . import _materials
 from . import _outputs
-
-app = adsk.core.Application.get()
 
 # A physical material lives on a BRepBody, a MeshBody or a Component (whole design = root
 # component); a FACE carries none. MeshBody.material is settable and echoes on read-back, and an
@@ -34,58 +30,56 @@ RETURNS = [
 ]
 
 
-def _catalog(design):
-    """Every physical material searchable, as (material, name, scope): the document's own materials
-    first (scope 'document'), then each loaded material library (scope = the library name)."""
+def _catalog(design, selected=None):
+    """Physical materials as (object, name, scope), optionally restricted to one catalog owner."""
+    owners = ([selected] if selected else [(design, "document")] + [
+        (lib, safe(lambda lib=lib: lib.name) or "library") for lib in _materials.libraries()])
     out = []
-    for m in iter_collection(safe(lambda: design.materials)):
-        nm = safe(lambda m=m: m.name)
-        if nm:
-            out.append((m, nm, "document"))
-    for lib in iter_collection(safe(lambda: app.materialLibraries)):
-        lib_name = safe(lambda lib=lib: lib.name) or "library"
-        for m in iter_collection(safe(lambda lib=lib: lib.materials)):
-            nm = safe(lambda m=m: m.name)
-            if nm:
-                out.append((m, nm, lib_name))
+    for owner, scope in owners:
+        for mat in iter_collection(_materials.collection(owner, "materials")):
+            name = safe(lambda mat=mat: mat.name)
+            if name:
+                out.append((mat, name, scope))
     return out
 
 
-def _find_material(design, name):
-    """Resolve a physical material by EXACT name (case-insensitive) across document + libraries.
-    Returns (material, scope, error_or_None). A document-scope match wins outright (it is the copy
-    already imported into the document, never ambiguous). No match -> an error naming the nearest
-    candidates; a name in 2+ libraries -> an ambiguity refusal listing where each lives."""
+def _find_material(design, name, library="", material_id=""):
+    """Resolve an exact material name and optional source selectors, refusing multiple matches."""
     want = (name or "").strip()
     if not want:
-        return None, None, "Provide 'material' - a physical material name (e.g. 'Steel', 'Aluminum 6061')."
-    catalog = _catalog(design)
+        return None, None, "Provide 'material' - a name from design_get(include=['materials'])."
+    selected = None
+    if library:
+        if library.strip().lower() == "document":
+            selected = (design, "document")
+        else:
+            lib, lerr = _materials.find_library(library)
+            if lerr:
+                return None, None, lerr
+            selected = (lib, safe(lambda: lib.name))
+    catalog = _catalog(design, selected)
     if not catalog:
-        return None, None, ("No materials available (the document has none and no material library is "
-                            "loaded). Open a design with a material library loaded.")
+        return None, None, "No materials available in the requested catalog scope."
     wl = want.lower()
-    exact = [(m, nm, scope) for (m, nm, scope) in catalog if nm.lower() == wl]
-
-    doc_hits = [t for t in exact if t[2] == "document"]
-    if doc_hits:
-        m, _nm, scope = doc_hits[0]
-        return m, scope, None
-
+    exact = [(m, nm, scope) for m, nm, scope in catalog if nm.lower() == wl
+             and (not material_id or safe(lambda m=m: m.id) == material_id)]
+    doc_hits = [row for row in exact if row[2] == "document"]
+    if doc_hits and not library:
+        exact = doc_hits
     if not exact:
-        names = sorted({nm for (_m, nm, _s) in catalog})
+        names = sorted({nm for _m, nm, _s in catalog})
         near = difflib.get_close_matches(want, names, n=6, cutoff=0.4)
-        if not near:
-            near = [nm for nm in names if wl in nm.lower()][:6]
         hint = (" Nearest: " + ", ".join(f"'{n}'" for n in near)) if near else ""
-        return None, None, f"No material named '{want}' in the document or any loaded library.{hint}"
-
+        selector = f" with material_id='{material_id}'" if material_id else ""
+        return None, None, f"No material named '{want}'{selector} in the requested catalog scope.{hint}"
     if len(exact) > 1:
-        listed = ", ".join(f"'{nm}' (in {scope})" for (_m, nm, scope) in exact[:6])
-        return None, None, (f"'{want}' is ambiguous - it exists in more than one library: {listed}. "
-                            "Copy the one you want into the document first, or unload the others.")
-
-    m, _nm, scope = exact[0]
-    return m, scope, None
+        listed = ", ".join(f"'{nm}' (in {scope}, id={safe(lambda m=m: m.id)})"
+                           for m, nm, scope in exact[:6])
+        return None, None, (f"'{want}' is ambiguous: {listed}. Pass 'library' and 'material_id' "
+                            "from design_get(include=['materials']); use library='document' "
+                            "for a document copy.")
+    mat, _name, scope = exact[0]
+    return mat, scope, None
 
 
 def _density_kg_per_m3(entity):
@@ -108,14 +102,15 @@ def _body_label(row):
     return f"{comp}/{row.get('body')}" if comp else str(row.get("body"))
 
 
-def handler(target: str = "", material: str = "") -> dict:
+def handler(target: str = "", material: str = "", library: str = "",
+            material_id: str = "") -> dict:
     """Assign a physical material to the resolved target, then read back each body's material + density
     to prove it took. WRITES."""
     design = _common.design()
     if not design:
         return error("No active design with geometry.")
 
-    mat, scope, merr = _find_material(design, material)
+    mat, scope, merr = _find_material(design, material, library, material_id)
     if merr:
         return error(merr)
 
@@ -163,7 +158,13 @@ def handler(target: str = "", material: str = "") -> dict:
     if not bodies:
         return error(f"{desc} has no bodies to assign a material to.")
 
-    want_name = safe(lambda: mat.name) or (material or "").strip()
+    want_name = safe(lambda: mat.name)
+    selected_id = safe(lambda: mat.id)
+    if not want_name or not selected_id:
+        return error("Selected material source identity is unavailable (name or id could not be read); "
+                     "refusing mutation. Read design_get(include=['materials']) and retry with a "
+                     "source carrying both fields.")
+    selected_source = {"name": want_name, "id": selected_id, "library": scope}
     applied = []
     failed = []
     for owner, b in bodies:
@@ -175,20 +176,22 @@ def handler(target: str = "", material: str = "") -> dict:
         except Exception as e:
             failed.append({"body": bname, "component": owner, "error": str(e)})
             continue
-        # Verify the assignment actually took: read the body's material back. A silent no-op (the API
-        # returned but nothing changed) leaves a name that doesn't match the one requested - treat that
-        # as failure. Fusion may suffix a duplicated name ('Steel (2)'), so accept a startswith match.
-        got = safe(lambda b=b: b.material.name)
-        if not got or not (got == want_name or got.lower().startswith(want_name.lower())):
+        # Verify the assigned material by exact readback of its source name and nonempty asset ID.
+        actual = safe(lambda b=b: b.material)
+        got = safe(lambda actual=actual: actual.name) if actual is not None else None
+        got_id = safe(lambda actual=actual: actual.id) if actual is not None else None
+        if got != want_name or got_id != selected_id:
             failed.append({"body": bname, "component": owner,
-                           "error": f"assignment did not take (material reads '{got}')"})
+                           "error": (f"assignment effect is UNVERIFIED: selected name='{want_name}', "
+                                     f"id='{selected_id}'; actual name='{got}', id='{got_id}'")})
             continue
         applied.append({"body": bname, "component": owner, "material": got,
+                        "material_id": got_id,
                         "density_kg_per_m3": _density_kg_per_m3(b)})
 
     if not applied:
         first = (f"{_body_label(failed[0])}: {failed[0]['error']}" if failed else "unknown error")
-        return error(f"Could not assign material '{want_name}' to any body of {desc}: {first}.")
+        return error(f"No body assignment was verified for material '{want_name}' on {desc}: {first}.")
 
     note = (f"Physical material '{want_name}' assigned (source: {scope}). model_inspect mass/density "
             "now reflects this material. This is NOT color - use appearance_set for cosmetic color.")
@@ -209,6 +212,7 @@ def handler(target: str = "", material: str = "") -> dict:
         "kind": kind,
         "material": want_name,
         "source": scope,
+        "selected_source": selected_source,
         "density_kg_per_m3": applied[0]["density_kg_per_m3"],
         "applied_to": applied,
         "note": note,
@@ -233,7 +237,11 @@ tool = (
     Tool.create_simple(name="model_set_material", description=_DESC)
     .add_input_property(*_TARGET.as_property())
     .add_input_property("material", {"type": "string",
-            "description": "e.g. 'Steel', 'Aluminum 6061'."})
+            "description": "Exact name from design_get materials."})
+    .add_input_property("library", {"type": "string",
+            "description": "Library name/id, or 'document'."})
+    .add_input_property("material_id", {"type": "string",
+            "description": "Source asset id; combine with material name."})
     .strict_schema()
 )
 item = Item.create_tool_item(

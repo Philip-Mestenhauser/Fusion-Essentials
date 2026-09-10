@@ -22,6 +22,20 @@ def _ref(is_out_of_date, version):
     return FakeDocumentReference(out_of_date=is_out_of_date, version=version)
 
 
+class _UnreadStaleness:
+    version = 7
+
+    @property
+    def isOutOfDate(self):
+        raise RuntimeError("staleness unavailable")
+
+
+class _UnreadCount:
+    @property
+    def count(self):
+        raise RuntimeError("reference count unavailable")
+
+
 du = load_tool("drawing_update")
 kernel = load_tool("_assert")
 ex = load_tool("_export")            # the postcondition's settle wait pumps through pump_until
@@ -90,6 +104,13 @@ class TestHappyPath:
         for spec in du.RETURNS:
             assert spec.assert_present(out) == "", spec.assert_present(out)
 
+    def test_unread_modified_state_remains_null_after_refresh(self, install):
+        install(references=[_ref(True, 1)], references_after=[_ref(False, 2)],
+                modified_raises="modified unavailable")
+        out = _payload(du.handler())
+        assert out["document_modified"] is None
+        assert "is modified in-session" not in out["note"]
+
 
 class TestNoOp:
     def test_current_references_do_not_refresh(self, install):
@@ -129,6 +150,15 @@ class TestReferenceIndexAlignment:
         assert out["is_up_to_date"] is None
         assert "unknown" in out["note"]
 
+    def test_an_unreadable_staleness_flag_is_null_not_fresh(self, install):
+        doc = install(references=[_UnreadStaleness()])
+        out = _payload(du.handler())
+        assert doc._update_calls == 0
+        assert out["references"] == [
+            {"index": 0, "is_out_of_date": None, "version": 7}]
+        assert out["unread_references"] == 1
+        assert out["is_up_to_date"] is None
+
 
 class TestHonestyGate:
     def test_still_stale_after_refresh_is_an_error(self, install, settle):
@@ -167,6 +197,51 @@ class TestHonestyGate:
         assert "could not be read" in res["message"].lower()
         assert doc._update_calls == 0
 
+    def test_unreadable_reference_count_refuses_to_refresh_blind(self, install, monkeypatch):
+        doc = install(references=[_ref(True, 1)])
+        monkeypatch.setattr(type(doc), "documentReferences",
+                            property(lambda _self: _UnreadCount()))
+        res = du.handler()
+        assert res["isError"] is True
+        assert "could not be read" in res["message"].lower()
+        assert doc._update_calls == 0
+
+    def test_unread_item_after_refresh_stays_unconfirmed(self, install):
+        install(references=[_ref(True, 1), _ref(False, 2)],
+                references_after=[_ref(False, 3), _ref(False, 2)], unreadable_at=1)
+        out = _payload(kernel.wrap(du.handler, [kernel.ReferencesFresh()])())
+        assert out["references_confirmed"] is False
+        assert "stale_references_after" not in out
+
+    def test_unread_staleness_after_refresh_stays_unconfirmed(self, install):
+        install(references=[_ref(True, 1)], references_after=[_UnreadStaleness()])
+        out = _payload(kernel.wrap(du.handler, [kernel.ReferencesFresh()])())
+        assert out["is_up_to_date"] is None
+        assert out["references_confirmed"] is False
+        assert "stale_references_after" not in out
+
+    def test_known_stale_after_refresh_still_bites_beside_an_unread_item(self, install, settle):
+        install(references=[_ref(True, 1), _ref(False, 2)],
+                references_after=[_ref(True, 1), _ref(False, 2)], unreadable_at=1)
+        res = kernel.wrap(du.handler, [kernel.ReferencesFresh()])()
+        assert res["isError"] is True
+        assert "still out of date" in res["message"].lower()
+
+    def test_unread_count_after_refresh_stays_unconfirmed(self, install, monkeypatch):
+        doc = install(references=[_ref(True, 1)], references_after=[_ref(False, 2)])
+        original = type(doc).documentReferences
+
+        def _references(current):
+            if current._updated:
+                return _UnreadCount()
+            return original.fget(current)
+
+        monkeypatch.setattr(type(doc), "documentReferences", property(_references))
+        out = _payload(kernel.wrap(du.handler, [kernel.ReferencesFresh()])())
+        assert out["is_up_to_date"] is None
+        assert out["references_confirmed"] is False
+        assert "stale_references_after" not in out
+
 
 class TestReferenceSettleRace:
     """The refresh lands asynchronously, so the freshness re-read is a bounded settle wait: a
@@ -185,6 +260,7 @@ class TestReferenceSettleRace:
         # the payload's rows are the handler's IMMEDIATE sample, taken before the wait: still stale
         # here, which is why the settled verdict is stale_references_after, not the rows.
         assert out["references"][0]["is_out_of_date"] is True
+        assert out["is_up_to_date"] is None  # immediate stale is not the settled verdict
 
     def test_a_reference_that_never_freshens_still_errors_with_the_settle_fact(self, install, settle):
         doc = install(references=[_ref(True, 1)], references_after=[_ref(True, 1)])

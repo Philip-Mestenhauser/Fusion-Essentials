@@ -10,7 +10,7 @@ from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error
 from . import _common
-from ._param_common import _find_parameter, _param_summary
+from ._param_common import _find_parameter, _normalized_expression, _param_summary
 
 
 def handler(name: str = "", expression: str = "", create: bool = False,
@@ -53,7 +53,7 @@ def handler(name: str = "", expression: str = "", create: bool = False,
 
     after = _param_summary(param)
     if after == before:
-        if (expression or "").strip() == (before.get("expression") or ""):
+        if _normalized_expression(expression) == _normalized_expression(before.get("expression")):
             return ok({"set": True, "created": False, "name": name, "already_current": True,
                        "before": before, "after": after})
         return error(f"Assignment raised no error but '{name}' still reads expression "

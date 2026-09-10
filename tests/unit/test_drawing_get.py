@@ -1,6 +1,6 @@
 """Unit tests for ``drawing_get`` - the drawing family's ONE read tool.
 
-What is pinned: the not-a-drawing refusal, the sheet rows (1-based export_index, is_active,
+What is pinned: the not-a-drawing refusal, the sheet rows (1-based collection_index, is_active,
 width/height in mm), the custom-size disclosure (sheet_size null + custom_size only when the
 build's customSize property answers - an earlier build RAISED on it), the per-view rows carrying
 ONLY index + type, the wire's account of what else a View carries, the view cap, and the
@@ -26,6 +26,12 @@ _LAND = _ORIENTATIONS["LandscapeSheetOrientationType"]
 def _sheet(name, size=_A3, width=420.0, height=297.0, **knobs):
     """One A3 landscape sheet at this file's defaults - the extents a payload row reports in mm."""
     return FakeSheet(name, size=size, orientation=_LAND, width=width, height=height, **knobs)
+
+
+class _UnreadCount:
+    @property
+    def count(self):
+        raise RuntimeError("collection count unavailable")
 
 
 @pytest.fixture
@@ -54,12 +60,60 @@ class TestOrientationRead:
         assert out["sheet_count"] == 2
         assert out["active_sheet"] == "Cover"
 
-    def test_sheet_rows_carry_1_based_export_index_and_is_active(self, install):
+    def test_sheet_rows_carry_collection_position_and_unknown_export_order(self, install):
         install([_sheet("Cover"), _sheet("Detail")], active=1)
         rows = payload(dg.handler())["sheets"]
-        assert [r["export_index"] for r in rows] == [1, 2]
+        assert [r["collection_index"] for r in rows] == [1, 2]
+        assert [r["export_index"] for r in rows] == [None, None]
         assert [r["is_active"] for r in rows] == [False, True]
         assert rows[0]["width"] == 420.0 and rows[0]["width_height_unit"] == "mm"
+
+    def test_unread_modified_state_remains_null(self, install):
+        install([_sheet("Cover")], modified_raises="modified unavailable")
+        assert payload(dg.handler())["is_modified"] is None
+
+    def test_unread_active_sheet_name_keeps_is_active_unknown(self, install):
+        drawing = install([_sheet("Cover")])
+
+        class _UnreadActiveSheet:
+            @property
+            def name(self):
+                raise RuntimeError("active sheet unavailable")
+
+        drawing.activeSheet = _UnreadActiveSheet()
+        row = payload(dg.handler())["sheets"][0]
+        assert row["is_active"] is None
+
+    def test_active_command_id_is_observational_and_null_when_unreadable(self, install):
+        install([_sheet("Cover")])
+        session = dg.adsk.core.Application.get()
+        session.userInterface = type("UI", (), {"activeCommand": "FusionAutoDimensionCmd"})()
+        assert payload(dg.handler())["active_command_id"] == "FusionAutoDimensionCmd"
+
+        class _UnreadCommand:
+            @property
+            def activeCommand(self):
+                raise RuntimeError("active command unavailable")
+
+        session.userInterface = _UnreadCommand()
+        assert payload(dg.handler())["active_command_id"] is None
+
+    def test_unread_sheet_count_does_not_publish_an_empty_listing(self, install):
+        drawing = install([_sheet("Cover")])
+        drawing.sheets = _UnreadCount()
+        out = payload(dg.handler())
+        assert out["sheet_count"] is None
+        assert out["sheets"] is None
+
+    def test_unread_per_sheet_counts_and_view_rows_remain_null(self, install):
+        sheet = _sheet("Cover")
+        sheet.views = sheet.sketches = sheet.customTables = _UnreadCount()
+        install([sheet])
+        row = payload(dg.handler(include=["views"]))["sheets"][0]
+        assert row["views"] is None
+        assert row["sketches"] is None
+        assert row["custom_tables"] is None
+        assert row["view_rows"] is None
 
     def test_the_read_never_touches_the_mutating_tidyup_property(self, install):
         # reading Sheet.tidyUp TIDIES the sheet, so a READ tool that touched it would mutate the

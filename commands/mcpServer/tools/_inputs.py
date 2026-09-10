@@ -745,9 +745,11 @@ def _named_scope(des, key):
     """(scope, error) for the occurrence or component `key` names - the two vocabularies a
     qualified reference's prefix is built from; (None, None) is "names neither". A prefix several
     components answer to identifies no scope, so that refusal is carried, not flattened to a miss."""
-    occ, _err = _resolve_occurrence("scope", key)
+    occ, occ_err = _resolve_occurrence("scope", key, exact_only=True)
     if occ is not None:
         return occ, None
+    if occ_err and OCCURRENCE_MISS not in occ_err:
+        return None, occ_err
     return _find_component(des, key)
 
 
@@ -1008,15 +1010,11 @@ def _resolve_any_body(name, raw, source=None, scope=None, scope_input=None):
         return qbody, None
     if qerr:
         return None, qerr
-    # A COMPONENT (or occurrence 'Name:1') resolves to ITS body when that is unambiguous: agents
-    # pass 'Frame' meaning "that part's body", and find_geometry accepts the same targets. Body
-    # names win over component names (checked above); several bodies refuse with their names.
-    comp, comp_err = _find_component(des, s)
-    if comp is None and not comp_err and isinstance(s, str) and ":" in s:
-        comp, comp_err = _find_component(des, s.rsplit(":", 1)[0])
+    # A COMPONENT or exact OCCURRENCE resolves to its body when that is unambiguous. Body names
+    # win above; resolving through _named_scope preserves the instance suffix instead of treating a
+    # missing 'Frame:999' as the component named 'Frame'.
+    comp, comp_err = _named_scope(des, s)
     if comp_err:
-        # Several components carry the name, so "its body" names no body, and the ':N' strip cannot
-        # pick between them either.
         return None, (f"'{name}': {comp_err} Pass a qualified '<occurrence-or-component>:<body>' "
                       "name, or a find_geometry 'handle'.")
     if comp is not None:
@@ -2157,11 +2155,8 @@ OCCURRENCE_MISS = "no occurrence matching"
 UNRESOLVED_REFERENCE_REFUSAL = "referenced component could not be loaded"
 
 
-def _resolve_occurrence(name, raw, candidates=None):
-    """(occurrence, error) for `raw` as ONE live Occurrence, tried in order: an entityToken HANDLE,
-    exact fullPathName, exact name, then a case-insensitive substring matching exactly one. EVERY
-    by-string form refuses several matches rather than first-matching, and `candidates` optionally
-    collects the AMBIGUOUS hits for a caller that can still act on them."""
+def _resolve_occurrence(name, raw, candidates=None, exact_only=False):
+    """(occurrence, error) for `raw`; exact_only skips the legacy unique-substring fallback."""
     want = (raw or "").strip() if isinstance(raw, str) else raw
     if not want:
         return None, f"'{name}' is required (an occurrence handle or fullPathName from design_get(include=['tree']))."
@@ -2210,9 +2205,28 @@ def _resolve_occurrence(name, raw, candidates=None):
                           "mean (design_get(include=['tree']) emits it beside the path).")
         return None, (f"'{name}': '{want}' names {len(exact)} occurrences ({cands}). Pass the exact "
                       "fullPathName, or a 'handle' (design_get(include=['tree']) emits both).")
+    if exact_only:
+        # A qualified body scope names an occurrence instance, so a nearly matching ':10' or
+        # another path containing the text cannot stand in for the requested instance.
+        case_exact = [o for o, nm in zip(occs, names) if nm.lower() == want.lower()]
+        if len(case_exact) == 1:
+            return case_exact[0], None
+        if len(case_exact) > 1:
+            if candidates is not None:
+                candidates.extend(case_exact)
+            cands, collide = _occurrence_path_candidates(case_exact)
+            if collide:
+                return None, (f"'{name}': '{want}' names {len(case_exact)} occurrences whose fullPathNames "
+                              f"do not tell them all apart - {cands}. Pass the 'handle' of the one you "
+                              "mean (design_get(include=['tree']) emits it beside the path).")
+            return None, (f"'{name}': '{want}' names {len(case_exact)} occurrences ({cands}). Pass the exact "
+                          "fullPathName, or a 'handle' (design_get(include=['tree']) emits both).")
     # 4) substring on name - but ONLY if unique
     low = want.lower()
-    hits = [o for o, nm in zip(occs, names) if low in nm.lower()]
+    if exact_only:
+        hits = []
+    else:
+        hits = [o for o, nm in zip(occs, names) if low in nm.lower()]
     if len(hits) == 1:
         return hits[0], None
     if len(hits) > 1:

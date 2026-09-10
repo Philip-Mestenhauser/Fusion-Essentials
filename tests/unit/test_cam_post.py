@@ -620,6 +620,13 @@ class TestAsIsMode:
         assert prog.parameters.itemByName("nc_program_name").expression == name_param_before
         assert "params_applied" not in data and "post_scope" not in data and "units" not in data
 
+    def test_as_is_refuses_explicit_non_document_units_before_posting(self, monkeypatch, tmp_path):
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])], existing=["JOB1"]))
+        self._configured_existing(cam, "JOB1", tmp_path)
+        result = cp.handler(program_name="JOB1", units="mm")
+        assert result["isError"] is True and "as-is" in result["message"]
+        assert cam.posted == []
+
     def test_as_is_not_triggered_when_scope_given_even_as_document(self, monkeypatch, tmp_path):
         # 'scope' was NOT omitted (an explicit "document" still counts as given) - falls to the
         # configure path, which then requires output_folder/post like a fresh configuration would.
@@ -927,6 +934,21 @@ class TestUnitParam:
         val, note = cp._set_unit_param(FakeCAMParameters(), "mm")
         assert val is cp._MISSING and note is None
 
+    def test_readback_mismatch_is_an_error_note_not_a_postable_unit(self):
+        class _KeepsDocument:
+            def getChoices(self):
+                return (True, ["Document unit", "Inches", "Millimeters"], ["$doc", "$in", "$mm"])
+            @property
+            def value(self):
+                return "$doc"
+            @value.setter
+            def value(self, _):
+                pass
+        params = FakeCAMParameters([types.SimpleNamespace(name="nc_program_unit", value=_KeepsDocument())])
+        val, note = cp._set_unit_param(params, "mm")
+        assert isinstance(val, str) and "read back" in val
+        assert note and "refused" in note
+
     def test_no_choices_exposed_is_error_note_not_wrong_typed_set(self):
         # a value with no getChoices() must NOT be set blind (the platform rejects a bare int with a
         # std::string type error) - surface the error + note instead.
@@ -945,6 +967,28 @@ class TestUnitParam:
             [types.SimpleNamespace(name="nc_program_unit", value=cv)])
         val, note = cp._set_unit_param(params, "mm")
         assert note is None and cv.value == "$mm"
+
+    def test_quoted_native_choice_values_are_written_unquoted_for_mm_and_inch(self):
+        class _Quoted:
+            def __init__(self):
+                self._value = "'DocumentUnit'"
+            def getChoices(self):
+                return (True, ["Millimeters", "Inches", "Document units"],
+                        ["'Millimeters'", "'Inches'", "'DocumentUnit'"])
+            @property
+            def value(self):
+                return self._value
+            @value.setter
+            def value(self, value):
+                if value.startswith("'"):
+                    raise RuntimeError("quoted choice rejected")
+                self._value = value
+
+        for units, expected in (("mm", "Millimeters"), ("inch", "Inches")):
+            cv = _Quoted()
+            params = FakeCAMParameters([types.SimpleNamespace(name="nc_program_unit", value=cv)])
+            val, note = cp._set_unit_param(params, units)
+            assert note is None and val == expected and cv.value == expected
 
     def test_set_failure_returns_error_value_and_surfaced_note(self):
         # the live defect: setting the value raises 'ChoiceParameterValue__set_value'. The failure must
@@ -965,18 +1009,27 @@ class TestUnitParam:
         assert isinstance(val, str) and "error" in val
         assert note and "units" in note.lower()
 
-    def test_handler_surfaces_unit_note_but_still_posts(self, monkeypatch, tmp_path):
-        # a units failure is NON-fatal (the file posts in the program's current units) but must be
-        # surfaced explicitly in units_note + the note, not buried in params_applied.
-        _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])]))
+    def test_handler_refuses_missing_unit_param_before_posting(self, monkeypatch, tmp_path):
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])],
+                                         missing=("nc_program_unit",)))
+        result = cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
+                            program_name="1", units="mm")
+        assert result["isError"] is True
+        assert "nc_program_unit" in result["message"]
+        assert cam.posted == [] and cam.ncPrograms.count == 0
+
+    def test_handler_refuses_unit_setter_failure_before_posting(self, monkeypatch, tmp_path):
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])]))
         monkeypatch.setattr(cp, "_set_unit_param",
                             lambda params, units_key: ("<error: boom>",
                                                        "Output units could not be set to 'mm'."))
-        data = _payload(cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
-                                   program_name="1", units="mm"))
-        assert data["file_count"] == 1                          # non-fatal: the file still posted
-        assert "units_note" in data and "units" in data["units_note"].lower()
-        assert "Output units could not be set" in data["note"]
+        result = cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
+                            program_name="1", units="mm")
+        assert result["isError"] is True
+        assert "Output units could not be set" in result["message"]
+        assert not list(tmp_path.glob("*.nc"))
+        assert not list(tmp_path.glob("*.failed"))
+        assert cam.posted == [] and cam.ncPrograms.count == 0
 
 
 # ── post-log surfacing: a failed post's real error lives in the log, not the output folder ──────────
@@ -1223,10 +1276,9 @@ class TestProgramOperationCount:
         _install(monkeypatch, _CAM([s1]))
         data = _payload(cp.handler(setups=["Setup1"], post=str(_write_cps(tmp_path)),
                                    output_folder=str(tmp_path), program_name="9"))
-        assert "program_operation_count is what the program HOLDS" in data["note"]
-        assert "posted_operations those reading hasToolpath True" in data["note"]
-        # and the usual cause of the difference the two counts just published
-        assert "A suppressed operation is neither held nor posted" in data["note"]
+        assert "program_operation_count: unsuppressed operations in scope" in data["note"]
+        assert "posted_operations: hasToolpath True" in data["note"]
+        assert "Suppressed operations are excluded from both counts and NC output" in data["note"]
 
     def test_the_note_says_a_suppressed_operation_is_neither_held_nor_posted(self, monkeypatch,
                                                                               tmp_path):
@@ -1237,8 +1289,7 @@ class TestProgramOperationCount:
         _install(monkeypatch, _CAM([s1]))
         data = _payload(cp.handler(setups=["Setup1"], post=str(_write_cps(tmp_path)),
                                    output_folder=str(tmp_path), program_name="9"))
-        assert ("A suppressed operation is neither held nor posted: its toolpath reads discarded "
-                "and its moves are absent from the NC file.") in data["note"]
+        assert "Suppressed operations are excluded from both counts and NC output." in data["note"]
 
     def test_a_filtered_read_that_raises_publishes_no_operations_figure(self, monkeypatch,
                                                                         tmp_path):

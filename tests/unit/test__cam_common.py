@@ -3638,6 +3638,62 @@ class TestNcPrograms:
         assert entry["post_parameters"] == [
             {"name": "metric", "title": "Use metric", "expression": "true"}]
 
+    def test_discloses_native_nc_program_unit_and_choices(self, install):
+        unit = FakeCAMParameter("nc_program_unit", "'metric'", value="metric",
+                                title="NC units", choices=["metric", "imperial"])
+        nc = SimpleNamespace(name="Main", machine=None, postConfiguration=None, operations=[],
+                             parameters=_NamedCollection([unit]),
+                             postParameters=_NamedCollection([]))
+        install(SimpleNamespace(ncPrograms=_NamedCollection([nc])))
+        entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
+        assert entry["nc_program_unit"] == {
+            "expression": "'metric'", "value": "metric",
+            "get_choices": {"ok": True, "titles": ["Metric", "Imperial"],
+                             "values": ["metric", "imperial"]}}
+
+    def test_discloses_false_native_choice_status_without_inventing_values(self, install):
+        value = SimpleNamespace(value="metric", getChoices=lambda: (False, None, None))
+        unit = SimpleNamespace(name="nc_program_unit", title="NC units", expression="metric",
+                               value=value)
+        nc = SimpleNamespace(name="Main", machine=None, postConfiguration=None, operations=[],
+                             parameters=_NamedCollection([unit]),
+                             postParameters=_NamedCollection([]))
+        install(SimpleNamespace(ncPrograms=_NamedCollection([nc])))
+        unit_out = _payload(cr.get_nc_programs_handler())["nc_programs"][0]["nc_program_unit"]
+        assert unit_out["get_choices"] == {"ok": False}
+
+    def test_omits_malformed_native_choice_disclosure(self, install):
+        value = SimpleNamespace(value="metric", getChoices=lambda: ("yes", ["Metric"], ["metric"]))
+        unit = SimpleNamespace(name="nc_program_unit", title="NC units", expression="metric",
+                               value=value)
+        nc = SimpleNamespace(name="Main", machine=None, postConfiguration=None, operations=[],
+                             parameters=_NamedCollection([unit]),
+                             postParameters=_NamedCollection([]))
+        install(SimpleNamespace(ncPrograms=_NamedCollection([nc])))
+        unit_out = _payload(cr.get_nc_programs_handler())["nc_programs"][0]["nc_program_unit"]
+        assert "get_choices" not in unit_out
+
+    def test_omits_unreadable_native_choice_disclosure(self, install):
+        def get_choices():
+            raise RuntimeError("choices unavailable")
+        value = SimpleNamespace(value="metric", getChoices=get_choices)
+        unit = SimpleNamespace(name="nc_program_unit", title="NC units", expression="metric",
+                               value=value)
+        nc = SimpleNamespace(name="Main", machine=None, postConfiguration=None, operations=[],
+                             parameters=_NamedCollection([unit]),
+                             postParameters=_NamedCollection([]))
+        install(SimpleNamespace(ncPrograms=_NamedCollection([nc])))
+        unit_out = _payload(cr.get_nc_programs_handler())["nc_programs"][0]["nc_program_unit"]
+        assert "get_choices" not in unit_out
+
+    def test_omits_missing_native_unit_parameter(self, install):
+        other = SimpleNamespace(name="other", title="Other", expression="x",
+                                value=SimpleNamespace(value="x"))
+        nc = SimpleNamespace(name="Main", machine=None, postConfiguration=None, operations=[],
+                             postParameters=_NamedCollection([other]))
+        install(SimpleNamespace(ncPrograms=_NamedCollection([nc])))
+        entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
+        assert "nc_program_unit" not in entry
     def test_an_unassigned_program_reads_nulls_not_fabricated_values(self, install):
         # operation_count especially: an unreadable count must not report 0 operations.
         install(SimpleNamespace(ncPrograms=_NamedCollection([SimpleNamespace(

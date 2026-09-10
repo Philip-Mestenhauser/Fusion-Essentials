@@ -211,7 +211,7 @@ _OPEN_ROW = r"^- \[ \] {id}\b"
 # The defect ledger's filename under plans/. The file is UNTRACKED (the plans tree is gitignored),
 # so it is present on a working machine and absent from a clean checkout - which is why the gap-id
 # check skips rather than passes when it cannot find it.
-_LEDGER_NAME = "fix-backlog.md"
+_LEDGER_NAME = "backlog.md"
 
 # pytest's COLLECTION rules, which are what make a node id spendable: python_files
 # (test_*.py / *_test.py), python_classes (Test*) and python_functions (test*) are its defaults,

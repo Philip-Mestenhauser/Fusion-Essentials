@@ -100,6 +100,45 @@ def _select_cells(trim_input, keep):
     return sorted(keep_set), round(kept_area, 6), total, None
 
 
+def _visible_surface_scope(design, surface):
+    """Refuse a trim when another visible surface can enter its global cell computation."""
+    from ._view_common import same_body
+
+    def complete(collection):
+        count = collection.count
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("invalid collection count")
+        values = list(_common.iter_collection(collection))
+        if len(values) != count:
+            raise ValueError("incomplete collection")
+        return values
+
+    try:
+        if surface.isVisible is not True:
+            return "The target surface must be visible; use view_set action='show' first."
+        found = False
+        for component in complete(design.allComponents):
+            for body in complete(component.bRepBodies):
+                if same_body(body, surface):
+                    found = True
+                    continue
+                visible = body.isVisible
+                if visible is False:
+                    continue
+                solid = body.isSolid
+                if visible is not True or (solid is not True and solid is not False):
+                    raise ValueError("unreadable body visibility or solid state")
+                if solid is False:
+                    name = _inputs.qualified_body_name(body)
+                    return (f"Other visible surface '{name}' can enter this trim. "
+                            "Use view_set action='hide' for other surface bodies, then retry.")
+        if not found:
+            raise ValueError("target missing from body census")
+    except Exception as exc:
+        return f"Cannot establish trim surface scope: {exc}. Refresh the design and retry."
+    return None
+
+
 def handler(surface=None, trim_tool=None, keep=None) -> dict:
     """Trim a surface against a tool that intersects it - remove the unwanted cell(s)."""
     design = _common.design()
@@ -113,6 +152,9 @@ def handler(surface=None, trim_tool=None, keep=None) -> dict:
     tool, terr = _TRIM_TOOL.resolve(trim_tool)
     if terr:
         return error(terr)
+    scope_error = _visible_surface_scope(design, surf)
+    if scope_error:
+        return error(scope_error)
     area_before = safe(lambda: surf.area)
 
     # createInput opens a transaction: commit via add or abort via cancel, explicitly and NOT under
@@ -135,12 +177,9 @@ def handler(surface=None, trim_tool=None, keep=None) -> dict:
         if kept_area is not None and area_before and kept_area > area_before * (1 + 1e-6):
             aborted = _abort(trim_input)
             return error(
-                f"Trim aborted: the kept cell(s) total {round(kept_area * 100.0, 1)} mm2, larger than "
-                f"the target surface's own {round(area_before * 100.0, 1)} mm2 - so 'keep larger' latched "
-                "onto a cell from another surface that overlaps or touches this one (the trim computes "
-                "cells over every VISIBLE surface the tool crosses, not just the target). HIDE the "
-                "overlapping surface body, then trim again; or pass 'keep' with the explicit cell "
-                "index. The surface was left unchanged." + aborted)
+                f"Trim aborted: kept area {round(kept_area * 100.0, 1)} mm2 is larger than "
+                f"target area {round(area_before * 100.0, 1)} mm2. HIDE other surfaces with "
+                "view_set, re-read the target and retry. The transaction was cancelled." + aborted)
         feature = comp.features.trimFeatures.add(trim_input)
     except Exception as e:
         # abort the open partial-compute transaction so Fusion isn't left in a bad state
@@ -174,20 +213,7 @@ def handler(surface=None, trim_tool=None, keep=None) -> dict:
     }
     if cell_info is not None:
         payload.update(cell_info)
-    # Disclose what the phantom-cell gate above actually proved - it is a one-sided test, and a
-    # caller must not read a committed trim as "no foreign cell was involved".
-    if area_before and cell_info is not None and cell_info["kept_area"] is not None:
-        payload["phantom_cell_guard"] = "kept_area_not_above_target_area"
-        payload["note"] += (
-            " Phantom-cell guard: the ONLY check made is that the kept area does not exceed the "
-            "target's own area, so a cell belonging to an overlapping surface that is smaller than "
-            "that is NOT detected. Hide overlapping surfaces, or pass an explicit 'keep' index, "
-            "when another surface touches this one.")
-    else:
-        payload["phantom_cell_guard"] = "not_applied"
-        payload["note"] += (
-            " Phantom-cell guard: NOT applied - the target's own area could not be read, so a cell "
-            "belonging to an overlapping surface would not have been detected at all.")
+    payload["surface_scope"] = "no_other_visible_surfaces"
     if any_solid is None:
         payload["unverified"] = ["is_solid"]
         payload["note"] += " Not read back off the feature: is_solid."
@@ -195,7 +221,7 @@ def handler(surface=None, trim_tool=None, keep=None) -> dict:
 
 
 TOOL_DESCRIPTION = (
-"Trim an open surface body; the cell(s) not kept are removed."
+"Trim one visible open surface body; hide other surface bodies with view_set first."
 )
 tool = (
     Tool.create_simple(name="surface_trim", description=TOOL_DESCRIPTION)

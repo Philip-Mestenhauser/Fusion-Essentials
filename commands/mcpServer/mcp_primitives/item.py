@@ -120,7 +120,8 @@ class Item:
     """
 
     def __init__(self, primitive: Tool, handler: callable, run_on_main_thread: bool = True,
-                 enforce_timeout: bool = True, verification: 'Verification' = None):
+                 enforce_timeout: bool = True, verification: 'Verification' = None,
+                 deferred_capable: bool = False):
         if not isinstance(primitive, Tool):
             raise ValueError("Primitive must be a Tool instance")
         if not callable(handler):
@@ -136,6 +137,7 @@ class Item:
         self.enforce_timeout = enforce_timeout
         # Registry-side metadata only: it never reaches to_dict(), so nothing here crosses the wire.
         self.verification = verification
+        self.deferred_capable = bool(deferred_capable)
 
     def get_name(self) -> str:
         return self.primitive.name
@@ -156,7 +158,8 @@ class Item:
     def create_tool_item(cls, tool: Tool, handler: callable, run_on_main_thread: bool = True,
                          enforce_timeout: bool = True, write: str = None,
                          postconditions: list = None,
-                         verification: 'Verification' = None) -> 'Item':
+                         verification: 'Verification' = None,
+                         deferred_capable: bool = False) -> 'Item':
         """Build a tool Item. ``write`` declares the tool's write-status, applied to the tool's
         annotations (readOnlyHint / destructiveHint) so the server reports it as structured data:
           'read'        -> read-only (does not modify state)
@@ -164,6 +167,13 @@ class Item:
           'destructive' -> a hard-to-reverse write (delete, history-discarding conversion, close doc)
         Every tool must pass one (enforced by test_write_status_annotations.py)."""
         _defaults_from_signature(tool, handler)
+        if deferred_capable:
+            if write not in ("write", "destructive") or not run_on_main_thread:
+                raise ValueError("deferred_capable requires a main-thread write tool")
+            tool.add_input_property("deferred", {"type": "boolean",
+                    "description": "True accepts durable work; poll drawing_get_status."})
+            tool.add_input_property("request_key", {"type": "string",
+                    "description": "Caller-known idempotency key, required with deferred=true."})
         if write == "read":
             tool.reads()
         elif write == "write":
@@ -217,4 +227,5 @@ class Item:
             from ..tools import _write_guard
             handler = _write_guard.wrap_read(handler)
         return cls(primitive=tool, handler=handler, run_on_main_thread=run_on_main_thread,
-                   enforce_timeout=enforce_timeout, verification=verification)
+                   enforce_timeout=enforce_timeout, verification=verification,
+                   deferred_capable=deferred_capable)

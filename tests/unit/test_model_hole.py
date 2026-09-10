@@ -11,7 +11,7 @@ The HoleFeatureInput fake RECORDS the calls so we can assert the exact builder p
 
 import pytest
 
-from conftest import (load_tool, FakeFeatures, FakePoint, FakeSketchPoint, FakeVector3D, BRepEdge,
+from conftest import (load_tool, FakeFeatures, FakePoint, FakeSketchPoint, FakeVector3D, BRepBody, BRepEdge,
                       Circle3D, Cylinder, Line3D, FakeMatrix3D, MakeComp, Sketch,
                       _NamedCollection, _make_object_collection, install, make_design,
                       make_occurrence, payload as _payload)
@@ -35,10 +35,12 @@ class FakeHoleInput:
     # into add() without one.
     # refusals maps a setter NAME to the answer it gives instead of True, so a test can distinguish
     # an outright False (a refusal the handler must report) from a None (no answer read at all).
-    def __init__(self, kind, args, refuse_placement=False, refuse_extent=False, refusals=None):
+    def __init__(self, kind, args, refuse_placement=False, refuse_extent=False, refusals=None,
+                 participant_error=None):
         self.refuse_placement = refuse_placement
         self.refuse_extent = refuse_extent
         self.refusals = dict(refusals or {})
+        self.participant_error = participant_error
         self.kind = kind            # 'simple' | 'counterbore' | 'countersink'
         self.args = args            # the ValueInput strings passed to the builder
         self.placed = None          # ('point', pt) / ('points', [pts]) / ('center', edge) /
@@ -50,6 +52,17 @@ class FakeHoleInput:
         self.isDefaultDirection = True
         self.holeTapType = 0
         self.tipAngle = None
+        self._participant_bodies = None
+        self.participant_set_after_extent = None
+    @property
+    def participantBodies(self):
+        raise AttributeError("participantBodies is write-only")
+    @participantBodies.setter
+    def participantBodies(self, bodies):
+        if self.participant_error is not None:
+            raise self.participant_error
+        self.participant_set_after_extent = self.extent is not None
+        self._participant_bodies = list(bodies)
     def _answer(self, setter):
         """The setter's bool. A False means it DECLINED, so the caller skips its side effect; any
         other answer (True, or a None that read as nothing) means the setting landed. An Exception
@@ -183,6 +196,10 @@ class FakeHoleFeatures:
         self.refuse_placement = False   # the setPosition* setters answer False
         self.refuse_extent = False      # setAllExtent answers False (the through-all extent declined)
         self.refusals = {}              # setter name -> the answer it gives instead of True
+        self.participant_error = None    # participantBodies setter raises this before feature add
+        self.add_calls = 0
+        self.participant_bodies_at_add = None
+        self.extent_at_add = None
         # True echoes the input; a bool models a flag that read back different; None models one
         # that could not be read at all
         self.modeled_readback = True
@@ -194,16 +211,20 @@ class FakeHoleFeatures:
         return len(self.added)
     def createSimpleInput(self, dia):
         return FakeHoleInput("simple", {"dia": dia}, self.refuse_placement, self.refuse_extent,
-                             self.refusals)
+                             self.refusals, self.participant_error)
     def createCounterboreInput(self, dia, cbd, cbdepth):
         return FakeHoleInput("counterbore", {"dia": dia, "cb_dia": cbd, "cb_depth": cbdepth},
-                             refusals=self.refusals)
+                             refusals=self.refusals, participant_error=self.participant_error)
     def createCountersinkInput(self, dia, csd, csa):
         return FakeHoleInput("countersink", {"dia": dia, "cs_dia": csd, "cs_angle": csa},
-                             refusals=self.refusals)
+                             refusals=self.refusals, participant_error=self.participant_error)
     def add(self, inp):
+        self.add_calls += 1
         if inp.placed is None or inp.extent is None:
             raise RuntimeError("InternalValidationError : logicalSelection")
+        self.participant_bodies_at_add = (None if inp._participant_bodies is None
+                                          else list(inp._participant_bodies))
+        self.extent_at_add = inp.extent
         f = FakeHoleFeature(inp, miss_indices=self.miss_indices,
                             modeled_readback=self.modeled_readback, parent=self.parent)
         self.added.append(f); return f
@@ -434,6 +455,14 @@ def _install():
 # ── guards ───────────────────────────────────────────────────────────────────
 
 class TestGuards:
+    def test_target_bodies_refusal_precedes_placement_mutation(self, monkeypatch):
+        _install()
+        monkeypatch.setattr(mh._TARGET_BODIES, "resolve",
+                            lambda value: (None, "target body is ambiguous"))
+        res = mh.handler(hole_type="simple", diameter="5 mm", face="h",
+                         points=[[1, 2, 0]], extent="through", target_bodies=["Body1"])
+        assert res["isError"] is True and "target body is ambiguous" in res["message"]
+
     def test_unknown_type(self):
         _install()
         res = mh.handler(hole_type="oval", diameter="5 mm", face="h", points=[[1, 2, 0]])
@@ -459,6 +488,43 @@ class TestGuards:
         # blind extent but no depth
         res = mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[1, 2, 0]], extent="blind")
         assert res["isError"] is True and "depth" in res["message"].lower()
+
+
+class TestScopedParticipants:
+    def test_scoped_hole_reaches_add_after_extent_and_reports_qualified_configuration(self,
+                                                                                      monkeypatch):
+        d = _install()
+        owner = _Comp("Leaf")
+        web = BRepBody("Web", parent_component=owner)
+        boss = BRepBody("Boss", parent_component=owner)
+        monkeypatch.setattr(mh._TARGET_BODIES, "resolve", lambda _raw: ([web, boss], None))
+
+        out = _payload(mh.handler(hole_type="simple", diameter="5 mm", face="h",
+                                  points=[[1, 2, 0]], extent="through",
+                                  target_bodies=["Leaf:Web", "Leaf:Boss"]))
+
+        hf = d.rootComponent.features.holeFeatures
+        assert hf.participant_bodies_at_add == [web, boss]
+        assert hf.extent_at_add == ("all", mh._extent_dirs.PositiveExtentDirection)
+        assert hf.added[0]._inp.participant_set_after_extent is True
+        assert out["scoped_to_bodies"] == ["Leaf:Web", "Leaf:Boss"]
+        assert "target_bodies" not in out
+
+    def test_participant_setter_failure_adds_no_hole_and_deletes_its_placement_sketch(self,
+                                                                                     monkeypatch):
+        d = _install()
+        body = BRepBody("Web", parent_component=_Comp("Leaf"))
+        monkeypatch.setattr(mh._TARGET_BODIES, "resolve", lambda _raw: ([body], None))
+        hf = d.rootComponent.features.holeFeatures
+        hf.participant_error = RuntimeError("participant assignment rejected")
+
+        res = mh.handler(hole_type="simple", diameter="5 mm", face="h", points=[[1, 2, 0]],
+                         extent="through", target_bodies=["Leaf:Web"])
+
+        assert res["isError"] is True and "participant assignment rejected" in res["message"]
+        assert hf.add_calls == 0 and hf.added == []
+        assert len(d.rootComponent.sketches._items) == 1
+        assert d.rootComponent.sketches._items[0].deleted is True
 
 
 # ── simple holes ─────────────────────────────────────────────────────────────

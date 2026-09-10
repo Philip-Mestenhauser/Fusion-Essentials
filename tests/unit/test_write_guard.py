@@ -217,7 +217,7 @@ class TestNameCollisionRefusal:
         assert len(payload["candidates"]) == 2
         saved = payload["candidates"][0]
         unsaved = payload["candidates"][1]
-        assert saved == {"name": "Bracket", "document_id": "urn:lineage:abc"}
+        assert saved == {"name": "Bracket", "document_id": "urn:lineage:abc", "document_handle": None}
         assert unsaved["document_id"] is None
         assert unsaved["open_index"] == 2                    # the unsaved twin's session address
         assert "URN" in payload["note"]                      # instructs passing the URN
@@ -466,7 +466,8 @@ class TestOpenDocumentsSessionWalk:
         assert called["n"] == 0 and res["isError"] is True
         payload = _decode(res)
         assert payload["blocked_by"] == ["ambiguous_document_name"]
-        assert payload["candidates"][0] == {"name": "Bracket", "document_id": "urn:lineage:abc"}
+        assert payload["candidates"][0] == {"name": "Bracket", "document_id": "urn:lineage:abc",
+                                              "document_handle": wg.document_handle(active)}
         assert payload["candidates"][1]["open_index"] == 1   # the unsaved twin's session address
 
     def test_unreadable_doc_is_not_fatal_to_the_walk(self, live_app):
@@ -1054,3 +1055,95 @@ class TestKeyRename:
         wg.document_key()
         assert evicted == ["urn:lineage:saved"]
         assert wg._UNSAVED_DOC_KEYS and [k for _d, k in wg._UNSAVED_DOC_KEYS] == ["unsaved:2"]
+
+
+class TestSessionDocumentHandles:
+    @pytest.fixture(autouse=True)
+    def isolate(self, monkeypatch):
+        monkeypatch.setattr(wg, "_SESSION_DOCUMENTS", [])
+
+    def test_equal_wrappers_reuse_handle_across_save(self):
+        doc = _OpenDoc()
+        first = wg.document_handle(doc.handle())
+        assert first.startswith("session:") and len(first) == 40
+        assert wg.document_handle(doc.handle()) == first
+        doc.urn = "urn:saved"
+        assert wg.document_handle(doc.handle()) == first
+        other = _OpenDoc(name=doc.name)
+        assert wg.document_handle(other.handle()) != first
+        assert wg.resolve_document_handle(first) == doc.handle()
+
+    @pytest.mark.parametrize("validity", [False, None])
+    def test_uncertain_validity_cannot_mint_or_resolve(self, validity):
+        doc = _OpenDoc()
+        handle = wg.document_handle(doc.handle())
+        doc.is_open = validity
+        assert wg.resolve_document_handle(handle) is None
+        assert wg.document_handle(doc.handle()) is None
+
+    def test_raising_validity_cannot_mint_or_resolve(self):
+        doc = _OpenDoc(handle_class=_MuteValidityHandle)
+        wrapper = doc.handle()
+        handle = "session:" + "a" * 32
+        wg._SESSION_DOCUMENTS.append((wrapper, handle))
+        assert wg.resolve_document_handle(handle) is None
+        assert wg.document_handle(wrapper) is None
+
+    @pytest.mark.parametrize("address", ["session:" + "f" * 32, "session:malformed"])
+    def test_unknown_handle_never_falls_back_to_same_named_document(self, monkeypatch, address):
+        dc = load_tool("_doc_common")
+        twin = FakeFusionDocument(name=address)
+        monkeypatch.setattr(dc, "app", FakeApplication(documents=FakeDocuments([twin])))
+        found, _names, ambiguous = dc._find_open_document(address)
+        assert found is None and ambiguous is False
+        assert wg._document_refusal(address, address, None) is not None
+
+    def test_close_and_registry_reset_invalidate_old_addresses(self):
+        doc = _OpenDoc()
+        first = wg.document_handle(doc.handle())
+        doc.close()
+        assert wg.resolve_document_handle(first) is None
+        another = _OpenDoc()
+        second = wg.document_handle(another.handle())
+        wg._SESSION_DOCUMENTS.clear()
+        assert wg.resolve_document_handle(second) is None
+        assert wg.document_handle(another.handle()) != second
+
+    def test_closed_handle_requires_doc_get_reacquisition(self, monkeypatch):
+        expected = _OpenDoc()
+        handle = wg.document_handle(expected.handle())
+        expected.close()
+        active = _OpenDoc("Active")
+        monkeypatch.setattr(wg, "app", _RewrappingApp(active))
+        monkeypatch.setattr(wg, "_active_identity", lambda: ("Active", None))
+        called = {"n": 0}
+        res = wg.wrap(lambda **kw: called.update(n=1) or _ok({}))(expect_document=handle)
+        payload = _decode(res)
+        assert called["n"] == 0 and payload["blocked_by"] == ["unknown_document_handle"]
+        assert payload["requires"] == {
+            "tool": "doc_get", "result": "open_documents[].document_handle"}
+
+    def test_reload_expired_handle_requires_doc_get_reacquisition(self, monkeypatch):
+        expected = _OpenDoc()
+        handle = wg.document_handle(expected.handle())
+        wg._SESSION_DOCUMENTS.clear()
+        active = _OpenDoc("Active")
+        monkeypatch.setattr(wg, "app", _RewrappingApp(active))
+        monkeypatch.setattr(wg, "_active_identity", lambda: ("Active", None))
+        called = {"n": 0}
+        res = wg.wrap(lambda **kw: called.update(n=1) or _ok({}))(expect_document=handle)
+        payload = _decode(res)
+        assert called["n"] == 0 and payload["blocked_by"] == ["unknown_document_handle"]
+        assert payload["requires"]["tool"] == "doc_get"
+
+    def test_live_wrong_active_handle_keeps_doc_activate_remedy(self, monkeypatch):
+        expected = _OpenDoc("Expected")
+        handle = wg.document_handle(expected.handle())
+        active = _OpenDoc("Active")
+        monkeypatch.setattr(wg, "app", _RewrappingApp(active))
+        monkeypatch.setattr(wg, "_active_identity", lambda: ("Active", None))
+        called = {"n": 0}
+        res = wg.wrap(lambda **kw: called.update(n=1) or _ok({}))(expect_document=handle)
+        payload = _decode(res)
+        assert called["n"] == 0 and payload["blocked_by"] == ["active_document_changed"]
+        assert payload["requires"] == {"tool": "doc_activate", "argument": handle}

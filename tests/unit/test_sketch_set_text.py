@@ -489,7 +489,15 @@ class TestEditHandler:
         _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'")])])])
         res = st.handler(text=None)
         assert res["isError"] is True and "Provide 'text'" in res["message"]
+    def test_explicit_empty_literal_is_accepted(self):
+        _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'")])])])
+        out = _payload(st.handler(text=""))
+        assert out["changed_count"] == 1
 
+    def test_whitespace_literal_is_accepted(self):
+        _install([FakeComp("Root", [FakeSketch("S", [FakeText("'a'")])])])
+        out = _payload(st.handler(text="   "))
+        assert out["changed_count"] == 1
 
 class _StubbornParam:
     """A textParameter that ACCEPTS an expression assignment and keeps the string it already holds
@@ -1795,6 +1803,17 @@ class TestParameterBinding:
                                  ["weight_text"])
         return text
 
+    def test_parameter_binding_is_publicly_usable_without_text(self):
+        assert "text" not in (st.tool.to_dict()["inputSchema"].get("required") or [])
+        text = self._one_text()
+        out = _payload(st.handler(sketch_name="Plate", parameter="weight_text"))
+        assert out["bound_to"] == "weight_text"
+        assert text.textParameter.expression == "weight_text"
+
+    def test_missing_text_and_parameter_are_refused(self):
+        self._one_text()
+        res = st.handler(sketch_name="Plate")
+        assert res["isError"] is True and "text' or 'parameter" in res["message"]
     def test_the_expression_becomes_the_bare_parameter_name(self):
         text = self._one_text()
         out = _payload(st.handler(sketch_name="Plate", parameter="weight_text"))
@@ -1855,7 +1874,17 @@ class TestParameterBinding:
         self._one_text()
         res = st.handler(text="25", sketch_name="Plate", parameter="weight_text")
         assert res["isError"] is True and "two different string sources" in res["message"]
+    def test_whitespace_text_and_parameter_are_refused_without_mutation(self):
+        text = self._one_text()
+        res = st.handler(text="   ", sketch_name="Plate", parameter="weight_text")
+        assert res["isError"] is True and "two different string sources" in res["message"]
+        assert text.textParameter.expression == "'10'"
 
+    def test_empty_text_is_legacy_parameter_only_binding(self):
+        text = self._one_text()
+        out = _payload(st.handler(text="", sketch_name="Plate", parameter="weight_text"))
+        assert out["bound_to"] == "weight_text"
+        assert text.textParameter.expression == "weight_text"
     def test_parameter_on_a_create_names_the_two_call_route(self):
         self._one_text()
         res = st.handler(text="LBL", create=True, sketch_name="Plate", parameter="weight_text")

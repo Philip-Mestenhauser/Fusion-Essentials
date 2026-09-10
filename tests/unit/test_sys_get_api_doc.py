@@ -12,6 +12,8 @@ import json
 import sys
 import types
 
+import pytest
+
 from conftest import load_tool
 
 ad = load_tool("sys_get_api_doc")
@@ -234,3 +236,108 @@ class TestCaps:
         assert len(out["classes"]) == ad._MAX_RESULTS
         assert len(out["members"]) == ad._MAX_RESULTS
         assert out["truncated"] is True
+
+
+
+@pytest.fixture
+def api_modules(monkeypatch):
+    defaults = ad._API_MODULES
+    _install_fake_api(monkeypatch)
+    return {"defaults": defaults, "core": sys.modules["adsk.core"],
+            "fusion": sys.modules["adsk.fusion"]}
+
+
+@pytest.mark.parametrize("namespace", ["adsk.electron", "adsk.volume"])
+def test_additional_namespaces_are_searchable(api_modules, monkeypatch, namespace):
+    module = types.ModuleType(namespace)
+    module.Example = type("Example", (), {"__module__": namespace})
+    monkeypatch.setitem(sys.modules, namespace, module)
+    monkeypatch.setattr(ad, "_API_MODULES", api_modules["defaults"])
+    out = _payload(ad.handler("^Example$", apiCategory="class", filter=namespace))
+    assert [row["namespace"] for row in out["classes"]] == [namespace]
+
+
+def test_description_search_includes_class_docstrings(api_modules):
+    out = _payload(ad.handler("Defines an extrude", apiCategory="description"))
+    assert [row["name"] for row in out["classes"]] == ["ExtrudeFeatureInput"]
+
+
+def test_full_doc_match_and_text_continuation(api_modules, monkeypatch):
+    def long_method(self):
+        pass
+    long_method.__doc__ = "x" * (ad._DOC_CHARS + 20) + " distinctive_suffix"
+    cls = type("LongDoc", (), {"__module__": "adsk.core", "method": long_method})
+    monkeypatch.setattr(api_modules["core"], "LongDoc", cls, raising=False)
+    first = _payload(ad.handler("distinctive_suffix", apiCategory="description",
+                                filter="adsk.core.LongDoc"))
+    row = first["members"][0]
+    assert row["name"] == "method"
+    assert row["doc_truncated"] and row["next_doc_offset"] == ad._DOC_CHARS
+    second = _payload(ad.handler("distinctive_suffix", apiCategory="description",
+                                 filter="adsk.core.LongDoc", doc_offset=row["next_doc_offset"]))
+    assert "distinctive_suffix" in second["members"][0]["doc"]
+    assert second["members"][0]["next_doc_offset"] is None
+
+
+def test_members_beyond_200_are_searchable(api_modules, monkeypatch):
+    members = {f"member{i:03d}": i for i in range(205)}
+    members.update({"__module__": "adsk.core", "z_after200": 307})
+    cls = type("Large", (), members)
+    monkeypatch.setattr(api_modules["core"], "Large", cls, raising=False)
+    out = _payload(ad.handler("^z_after200$", apiCategory="member", filter="adsk.core.Large"))
+    assert [(m["name"], m["type"], m["value"]) for m in out["members"]] == [
+        ("z_after200", "constant", 307)]
+
+
+def test_class_and_member_paging_preserves_both_streams(api_modules, monkeypatch):
+    for i in range(5):
+        cls = type(f"Thing{i}", (), {"__module__": "adsk.core", "probe": lambda self: None})
+        monkeypatch.setattr(api_modules["core"], cls.__name__, cls, raising=False)
+    offset, classes, members = 0, [], []
+    for _ in range(3):
+        out = _payload(ad.handler("^Thing|^probe$", filter="adsk.core", max_results=2, offset=offset))
+        classes.extend(row["name"] for row in out["classes"])
+        members.extend(row["class"] for row in out["members"])
+        offset = out["next_offset"]
+    assert classes == members == [f"Thing{i}" for i in range(5)]
+    assert offset is None and out["truncated"] is False
+
+
+def test_exact_cap_is_not_false_truncation(api_modules):
+    out = _payload(ad.handler("^Extrude", apiCategory="class", max_results=2))
+    assert len(out["classes"]) == 2
+    assert out["next_offset"] is None and out["truncated"] is False
+
+
+def test_import_failure_keeps_scope_incomplete(api_modules, monkeypatch):
+    def importing(name):
+        if name == "adsk.core":
+            return api_modules["core"]
+        raise ImportError("module unavailable")
+    monkeypatch.setattr(ad, "_API_MODULES", ("adsk.core", "adsk.cam"))
+    monkeypatch.setattr(ad.importlib, "import_module", importing)
+    out = _payload(ad.handler("^Vector", apiCategory="class"))
+    assert out["modules"] == ["adsk.core"]
+    assert out["scope_complete"] is False
+    assert out["unavailable_modules"] == [
+        {"namespace": "adsk.cam", "exception": "ImportError", "error": "module unavailable"}]
+
+
+def test_property_writability_and_parent_preview_are_disclosed(api_modules, monkeypatch):
+    cls = type("Preview", (), {"__module__": "adsk.core",
+                              "__doc__": "This class is a preview feature.",
+                              "length": property(lambda self: 1)})
+    monkeypatch.setattr(api_modules["core"], "Preview", cls, raising=False)
+    out = _payload(ad.handler("^length$", apiCategory="member", filter="adsk.core.Preview"))
+    row = out["members"][0]
+    assert row["readable"] is True and row["writable"] is False
+    assert row["documentation_markers"] == ["preview"]
+    assert "self" in row["signature"]
+
+
+@pytest.mark.parametrize("value", [-1, True, 1.5, "2"])
+@pytest.mark.parametrize("field", ["offset", "doc_offset"])
+def test_invalid_continuation_is_refused(api_modules, field, value):
+    result = ad.handler("^Extrude", **{field: value})
+    assert result["isError"] is True
+    assert field in result["message"] and repr(value) in result["message"]

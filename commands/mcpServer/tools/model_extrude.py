@@ -427,16 +427,25 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         return error("No active design. Create or open a document first (see doc_new).")
 
     root = target_component(design)
-    sketch, requested, ambiguous = _sketch_detail.scoped_or_recent_sketch(
-        design, sketch_name, component)
-    if ambiguous:
-        return error(ambiguous)
-    if not sketch:
-        if requested:
-            names = _common.all_sketch_names(design)
-            avail = f" Available: {', '.join(names)}." if names else ""
-            return error(f"No sketch named '{requested}'.{avail} Use sketch_get or sketch_create.")
-        return error("No sketch to extrude. Create one and draw a closed profile first.")
+    selected_profile = None
+    if _looks_like_handle(profile_index):
+        selected_profile, perr = _PROFILE.resolve(profile_index, component)
+        if perr:
+            return error(perr)
+        sketch = safe(lambda: selected_profile.parentSketch)
+        if sketch is None:
+            return error("profile_index resolved a profile whose parent sketch could not be read.")
+    else:
+        sketch, requested, ambiguous = _sketch_detail.scoped_or_recent_sketch(
+            design, sketch_name, component)
+        if ambiguous:
+            return error(ambiguous)
+        if not sketch:
+            if requested:
+                names = _common.all_sketch_names(design)
+                avail = f" Available: {', '.join(names)}." if names else ""
+                return error(f"No sketch named '{requested}'.{avail} Use sketch_get or sketch_create.")
+            return error("No sketch to extrude. Create one and draw a closed profile first.")
 
     profiles = safe(lambda: sketch.profiles)
     pcount = safe(lambda: profiles.count, 0) if profiles else 0
@@ -496,11 +505,8 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
             if perr:
                 return error(perr)
             profile_arg, indices = prof, [None]
-        elif _looks_like_handle(profile_index):
-            prof, perr = _PROFILE.resolve(profile_index, component)
-            if perr:
-                return error(perr)
-            profile_arg, indices = prof, [None]
+        elif selected_profile is not None:
+            profile_arg, indices = selected_profile, [None]
         else:
             # BEFORE the count is trusted: an index reads straight off sketch.profiles here, never
             # through ProfileRef, so a deferred sketch's pcount and item(i) are both pre-deferral.

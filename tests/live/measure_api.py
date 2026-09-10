@@ -6676,30 +6676,17 @@ ROWS = [
     },
     {
         "id": "dxf-sketch-options-units-read-is-fatal",
-        "claim": ("Reading DXFSketchExportOptions.units raises '3 : Distance unit is not supported "
-                  "by DXF. Please select a different unit' UNCATCHABLY: the raise escapes try/except "
-                  "- neither the except body nor any later line runs - and kills the whole "
-                  "Python.Run invocation, so this row can only PASS by aborting and BOTH of its "
-                  "emit() legs are FAILs. Because ANY abort passes it, the rig it shares with "
-                  "dxf-sketch-options-carries-units-unread is gated over there: that row builds the "
-                  "same sketch and options and stops at the listing, so a rig regression reddens it "
-                  "rather than passing this one for the wrong reason. 'units' IS in dir(options), "
-                  "so an attribute check is no guard; only never taking the read is. MEASURED BY "
-                  "HAND on the same script and "
-                  "deliberately NOT re-measured here: the abort DOES roll back the enclosing "
-                  "transaction - a sketch added to a design that existed BEFORE the script is gone "
-                  "afterwards - while a document the SAME script created with documents.add "
-                  "survives, keeping its sketch and its timeline entry"),
+        "claim": ("A DXF options units read can abort Python.Run without a caught "
+                  "verdict. An opaque abort is ERROR, not proof; this row uses the run-owned "
+                  "scratch and creates no additional document."),
         "encoded_in": ("design_export.py's no-dxf_units comment and _write_dxf (which never reads "
                        "units); tests/unit/test_design_export.py's DXF options fake"),
         "expect": "raise_or_abort",
         "facts_on_pass": {"behavior.dxf_sketch_options_units_read_raises": True},
         "body": """
     import os, tempfile
-    # The same scratch-document rig as its sibling row; the abort below skips the close, and the
-    # runner reclaims the stray document afterwards.
-    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
-    d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+    # The document exists before Python.Run, so an uncatchable abort cannot leak a new tab.
+    d = adsk.fusion.Design.cast(app.activeProduct)
     root = d.rootComponent
     sk = root.sketches.add(root.xYConstructionPlane)
     sk.sketchCurves.sketchLines.addByTwoPoints(
@@ -6808,16 +6795,23 @@ def run(context):
 '''
 
 
-def _build_cam_world():
+def _scratch_call(scratch_handle, tool, arguments):
+    """Call a scratch mutation bound to the exact run-created document handle."""
+    args = dict(arguments)
+    args["expect_document"] = scratch_handle
+    return call(tool, args)
+
+
+def _build_cam_world(scratch_handle):
     """Stand up MeasureSetup (box, Face1 top-level, Face2 inside MeasureFolder) in the CURRENT scratch
     doc via the server's own tools. Returns None on success, else the failing step's error."""
-    is_error, payload = call("sys_execute_script", {"script": _CAM_BOX_SCRIPT})
+    is_error, payload = _scratch_call(scratch_handle, "sys_execute_script", {"script": _CAM_BOX_SCRIPT})
     if is_error:
         return "box: " + str(payload)[:120]
-    is_error, payload = call("view_switch_workspace", {"workspace": "manufacture"})
+    is_error, payload = _scratch_call(scratch_handle, "view_switch_workspace", {"workspace": "manufacture"})
     if is_error:
         return "manufacture: " + str(payload)[:120]
-    is_error, payload = call("sys_execute_script", {"script": _CAM_LIBURL_SCRIPT})
+    is_error, payload = _scratch_call(scratch_handle, "sys_execute_script", {"script": _CAM_LIBURL_SCRIPT})
     lib_url = None
     if not is_error and isinstance(payload, str):
         for ln in payload.splitlines():
@@ -6825,22 +6819,22 @@ def _build_cam_world():
                 lib_url = ln[7:].strip()
     if not lib_url:
         return "sample tool library not found: " + str(payload)[:120]
-    is_error, payload = call("cam_create_setup", {"operation_type": "milling", "name": "MeasureSetup"})
+    is_error, payload = _scratch_call(scratch_handle, "cam_create_setup", {"operation_type": "milling", "name": "MeasureSetup"})
     if is_error:
         return "setup: " + str(payload)[:120]
     op_names = []
     for _ in range(2):
-        is_error, payload = call("cam_create_operation", {
+        is_error, payload = _scratch_call(scratch_handle, "cam_create_operation", {
             "setup": "MeasureSetup", "strategy": "face", "tool_library_url": lib_url,
             "tool_index": 0, "generate": False})
         if is_error:
             return "operation: " + str(payload)[:120]
         op_names.append(payload.get("operation") if isinstance(payload, dict) else None)
-    is_error, payload = call("cam_edit_folders",
+    is_error, payload = _scratch_call(scratch_handle, "cam_edit_folders",
                              {"action": "create", "setup": "MeasureSetup", "name": "MeasureFolder"})
     if is_error:
         return "folder: " + str(payload)[:120]
-    is_error, payload = call("cam_edit_folders",
+    is_error, payload = _scratch_call(scratch_handle, "cam_edit_folders",
                              {"action": "move", "setup": "MeasureSetup", "folder": "MeasureFolder",
                               "operations": [op_names[1] or "Face2"]})
     if is_error:
@@ -6903,7 +6897,7 @@ def _judge(row, is_error, payload):
     """One row's verdict: (status, detail). status is PASS / FAIL / ERROR."""
     if is_error:
         if row.get("expect") == "raise_or_abort":
-            return "PASS", "script aborted at the misuse (the raise escaped try/except)"
+            return "ERROR", "expected refusal evidence was unavailable: " + str(payload)
         # NOT truncated: this is a traceback, and the frame that names the defect is the LAST one.
         # The console line slices for width on its own; --json keeps the whole thing, which is the
         # only way to read why a row raised without re-running it by hand.
@@ -6941,63 +6935,55 @@ def _open_doc_rows():
     return rows if isinstance(rows, list) else []
 
 
-def _active_open_index(rows):
-    """The open_index of the ACTIVE document in an open_documents list, or None."""
-    for r in rows:
-        if r.get("is_active"):
-            return r.get("open_index")
+def _scratch_row(rows, scratch_handle):
+    """Return the exact run-created document row, or None when its handle is absent."""
+    for row in rows:
+        if row.get("document_handle") == scratch_handle:
+            return row
     return None
 
 
-def _stray_indices(rows, scratch_index):
-    """Open indices ABOVE the scratch - documents that appeared during the run - HIGHEST FIRST.
-    Closing in that order leaves the scratch's own 'open:N' address intact, since only indices
-    above a closed document shift."""
-    return sorted((r["open_index"] for r in rows
-                   if isinstance(r.get("open_index"), int) and r["open_index"] > scratch_index),
-                  reverse=True)
-
-
-def _scratch_still_unsaved(rows, scratch_index):
-    """True only when the document at scratch_index is present and NEVER SAVED. The scratch is
-    never saved, so a saved document at that index means the index stopped addressing it and the
-    close must be refused rather than aimed at a real file. doc_get prunes is_saved from a healthy
-    SAVED row, so never-saved is the explicit False - a missing key is not it."""
-    for r in rows:
-        if r.get("open_index") == scratch_index:
-            return r.get("is_saved") is False
-    return False
-
-
-def _reclaim_scratch(scratch_index):
-    """Close every document that appeared above the scratch, then bring the scratch back to the
-    foreground so the next row measures it. Returns how many strays were closed."""
+def _reclaim_scratch(scratch_handle):
+    """Activate the exact run-created document by handle; never close an unowned document."""
     rows = _open_doc_rows()
-    strays = _stray_indices(rows, scratch_index)
-    for idx in strays:
-        call("doc_close", {"name": "open:{0}".format(idx), "save_changes": False})
-    if not strays and _active_open_index(rows) == scratch_index:
+    scratch = _scratch_row(rows, scratch_handle)
+    if scratch is None:
+        return -1
+    if scratch.get("is_active"):
         return 0
-    # doc_activate is ASYNC - it reports "pending" until the foreground catches up - so wait for the
-    # switch to READ back before handing the session to the next row.
-    call("doc_activate", {"name": "open:{0}".format(scratch_index)})
+    is_error, _payload = call("doc_activate", {"name": scratch_handle})
+    if is_error:
+        return -1
     for _ in range(_ACTIVATE_TRIES):
-        if _active_open_index(_open_doc_rows()) == scratch_index:
-            break
+        row = _scratch_row(_open_doc_rows(), scratch_handle)
+        if row is not None and row.get("is_active"):
+            return 0
         time.sleep(_ACTIVATE_SLEEP)
-    return len(strays)
+    return -1
 
 
-def _close_scratch(scratch_index):
-    """Close the run's own document, and nothing else."""
-    _reclaim_scratch(scratch_index)
+def _close_scratch(scratch_handle):
+    """Close only the exact run-created document handle, refusing stale or missing identity."""
+    if _reclaim_scratch(scratch_handle) < 0:
+        print("NOT closing scratch: its exact session handle is stale or activation was not confirmed.")
+        return False
     rows = _open_doc_rows()
-    if _scratch_still_unsaved(rows, scratch_index):
-        call("doc_close", {"name": "open:{0}".format(scratch_index), "save_changes": False})
-        return
-    print("NOT closing open:{0}: it no longer reads as an unsaved document, so that index has "
-          "stopped addressing this run's scratch. Close the leftover by hand.".format(scratch_index))
-
+    scratch = _scratch_row(rows, scratch_handle)
+    if scratch is None or scratch.get("is_saved") is not False:
+        print("NOT closing scratch: its exact session handle no longer reads as an unsaved document.")
+        return False
+    is_error, _payload = call("doc_close", {"name": scratch_handle, "save_changes": False,
+                                           "expect_document": scratch_handle})
+    if is_error:
+        return False
+    is_error, payload = call("doc_get", {"max_results": 200})
+    if is_error or not isinstance(payload, dict) or payload.get("truncated") is not False:
+        return False
+    rows = payload.get("open_documents")
+    if not isinstance(rows, list) or any(not isinstance(row, dict)
+            or not isinstance(row.get("document_handle"), str) for row in rows):
+        return False
+    return _scratch_row(rows, scratch_handle) is None
 
 def _fusion_version():
     health_gate()
@@ -7152,6 +7138,13 @@ def cloud_rows():
 
 
 def run_measurements(write_json, only=None):
+    if only:
+        known = {row["id"] for row in ROWS}
+        unknown = sorted(set(only) - known)
+        if unknown:
+            sys.exit("Unknown measurement row ID(s): " + ", ".join(unknown)
+                     + ". Choose IDs from the ROWS registry in tests/live/measure_api.py; "
+                     + "repeat --only for each selected row.")
     # FIRST, before any read of the session: these rows find their project BY NAME, and unconfigured
     # each would fail on an empty name and take the all-PASS gate down with it. Nothing here needs
     # Fusion, so the refusal costs no connection and opens no scratch document.
@@ -7168,28 +7161,29 @@ def run_measurements(write_json, only=None):
     is_error, payload = call("doc_new", {})
     if is_error:
         sys.exit("doc_new refused: {0}".format(payload))
-    scratch = _active_open_index(_open_doc_rows())
-    if scratch is None:
-        sys.exit("doc_new made a document the session would not address (doc_get published no "
-                 "active open_index) - refusing to measure, because the teardown could then only "
-                 "close 'the active document', which is how a run closes someone else's. Close the "
-                 "new Untitled document by hand and re-run.")
+    scratch = payload.get("document_handle") if isinstance(payload, dict) else None
+    if not isinstance(scratch, str) or not scratch.startswith("session:"):
+        sys.exit("doc_new made a document without an exact session handle - refusing to measure, "
+                 "because cleanup cannot safely identify the run's scratch. Close the new document "
+                 "by hand and re-run.")
     results = []
     facts = {}
     shapes = {}
     cam_world = {"built": False, "err": None}
     try:
+        if _reclaim_scratch(scratch) < 0:
+            sys.exit("run scratch handle could not be activated before first row")
         for row in ROWS:
             if only and row["id"] not in only:
                 continue
             if row.get("needs") == "cam" and not cam_world["built"]:
-                cam_world["err"] = _build_cam_world()
+                cam_world["err"] = _build_cam_world(scratch)
                 cam_world["built"] = True
             if row.get("needs") == "cam" and cam_world["err"]:
                 results.append((row, "ERROR", "cam world: " + cam_world["err"]))
                 print("  {0:6} {1:28} {2}".format("ERROR", row["id"], "cam world: " + cam_world["err"][:70]))
                 continue
-            script_args = {"script": _compose(row)}
+            script_args = {"script": _compose(row), "expect_document": scratch}
             if row.get("read_only"):
                 script_args["read_only"] = True
             is_error, payload = call("sys_execute_script", script_args)
@@ -7201,13 +7195,14 @@ def run_measurements(write_json, only=None):
                     shapes.setdefault(tname, set()).update(attrs)
             results.append((row, status, detail))
             print("  {0:6} {1:28} {2}".format(status, row["id"], detail[:90]))
-            strays = _reclaim_scratch(scratch)
-            if strays:
-                print("  {0:6} {1:28} {2}".format("", "", "reclaimed {0} document(s) the row left "
-                                                  "open".format(strays)))
+            if _reclaim_scratch(scratch) < 0:
+                sys.exit("run scratch handle could not be activated after row; stopping subsequent rows")
             time.sleep(0.1)
     finally:
-        _close_scratch(scratch)
+        cleanup_ok = _close_scratch(scratch)
+    if not cleanup_ok:
+        print("Measurement evidence NOT published: scratch cleanup was not confirmed.")
+        return 1
     stamp_date = time.strftime("%Y-%m-%d")
     # The ledger and live_api_facts.py describe ONE run and are written on the same condition:
     # a partial or failing run leaves both at the last complete run, so the stamp never claims

@@ -399,7 +399,7 @@ def load_mcp_server():
         sys.modules[f"{_SERVER_PKG_ROOT}.commands.mcpServer.version"] = sys.modules["mcpServer.version"]
 
         server_dir = os.path.join(COMMANDS_DIR, "mcpServer", "server")
-        for mod_name in ("task_manager", "mcp_server"):
+        for mod_name in ("drawing_jobs", "task_manager", "mcp_server"):
             fq = f"{_SERVER_PKG_ROOT}.commands.mcpServer.server.{mod_name}"
             spec = importlib.util.spec_from_file_location(
                 fq, os.path.join(server_dir, f"{mod_name}.py"))

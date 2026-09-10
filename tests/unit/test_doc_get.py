@@ -155,7 +155,9 @@ class TestOpenList:
         assert out["open_count"] == 2
         rows = {r["name"]: r for r in out["open_documents"]}
         # B is healthy + not active -> collapses to its name + open_index (the addressing key stays)
-        assert rows["B"] == {"name": "B", "open_index": 1}
+        assert rows["B"]["name"] == "B"
+        assert rows["B"]["open_index"] == 1
+        assert rows["B"]["document_handle"].startswith("session:")
         # A is active -> keeps the is_active flag
         assert rows["A"]["is_active"] is True
         assert rows["A"]["open_index"] == 0

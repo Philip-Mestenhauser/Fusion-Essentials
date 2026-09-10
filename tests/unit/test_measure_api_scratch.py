@@ -1,98 +1,64 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""The measurement harness's scratch-document bookkeeping: which document a run closes.
-
-measure_api opens ONE scratch document and must close THAT one. The pure helpers under test map a
-doc_get open_documents listing to the 'open:N' addresses the teardown acts on; a run that instead
-closed "the active document" closed whichever document a row left in front of it.
-"""
+"""Exact scratch document binding tests."""
 
 import os
 import sys
-
 import pytest
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "live"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "live"))
 import measure_api  # noqa: E402
 
 
-def _rows(*specs):
-    """open_documents rows as doc_get publishes them: (open_index, is_active, is_saved), where
-    is_saved None means the key is ABSENT - how a healthy SAVED document reads."""
-    out = []
-    for idx, active, saved in specs:
-        row = {"name": "Untitled", "open_index": idx}
-        if active:
-            row["is_active"] = True
-        if saved is not None:
-            row["is_saved"] = saved
-        out.append(row)
-    return out
+def _row(handle, active=False, saved=False):
+    row = {"document_handle": handle, "is_saved": saved}
+    if active:
+        row["is_active"] = True
+    return row
 
 
-class TestActiveOpenIndex:
-    def test_returns_the_active_rows_index(self):
-        rows = _rows((0, False, False), (1, False, False), (2, True, False))
-        assert measure_api._active_open_index(rows) == 2
+class TestScratchBinding:
+    def test_reclaim_activates_exact_handle(self, monkeypatch):
+        h = "session:" + "a" * 32
+        rows = iter([[_row(h)], [_row(h, active=True)]])
+        calls = []
+        monkeypatch.setattr(measure_api, "_open_doc_rows", lambda: next(rows))
+        monkeypatch.setattr(measure_api, "call", lambda tool, args: (calls.append((tool, args)) or (False, {})))
+        monkeypatch.setattr(measure_api.time, "sleep", lambda seconds: None)
+        assert measure_api._reclaim_scratch(h) == 0
+        assert calls == [("doc_activate", {"name": h})]
 
-    def test_zero_is_a_real_index_not_a_falsy_miss(self):
-        assert measure_api._active_open_index(_rows((0, True, False), (1, False, False))) == 0
+    def test_missing_handle_refuses_without_close_or_activation(self, monkeypatch):
+        h = "session:" + "a" * 32
+        calls = []
+        monkeypatch.setattr(measure_api, "_open_doc_rows", lambda: [_row("session:" + "b" * 32, True)])
+        monkeypatch.setattr(measure_api, "call", lambda tool, args: calls.append((tool, args)))
+        assert measure_api._reclaim_scratch(h) == -1
+        assert calls == []
 
-    def test_none_when_no_row_is_active(self):
-        assert measure_api._active_open_index(_rows((0, False, False))) is None
-        assert measure_api._active_open_index([]) is None
+    def test_close_uses_exact_handle(self, monkeypatch):
+        h = "session:" + "a" * 32
+        calls = []
+        monkeypatch.setattr(measure_api, "_reclaim_scratch", lambda handle: 0)
+        monkeypatch.setattr(measure_api, "_open_doc_rows", lambda: [_row(h, True)])
+        def call(tool, args):
+            calls.append((tool, args))
+            return False, ({"truncated": False, "open_documents": []} if tool == "doc_get" else {})
+        monkeypatch.setattr(measure_api, "call", call)
+        assert measure_api._close_scratch(h) is True
+        assert calls == [("doc_close", {"name": h, "save_changes": False, "expect_document": h}),
+                         ("doc_get", {"max_results": 200})]
 
-    def test_a_hole_row_is_passed_over_for_the_row_that_answered(self):
-        # a hole carries neither is_active nor open_index: it can never be read as the active row,
-        # and it must not stop the walk before the row that is.
-        rows = [{"name": None, "readable": False}] + _rows((1, True, False))
-        assert measure_api._active_open_index(rows) == 1
-
-
-class TestStrayIndices:
-    def test_only_indices_strictly_above_the_scratch(self):
-        # The scratch itself (2) and everything below it are the session as found - never closed.
-        rows = _rows((0, False, False), (1, False, False), (2, False, False), (3, True, False))
-        assert measure_api._stray_indices(rows, 2) == [3]
-
-    def test_highest_index_first(self):
-        rows = _rows((0, False, False), (1, False, False), (2, False, False),
-                     (3, False, False), (4, False, False), (5, True, False))
-        # Closing low-to-high would slide every later stray onto a different address.
-        assert measure_api._stray_indices(rows, 2) == [5, 4, 3]
-
-    def test_empty_when_nothing_leaked(self):
-        rows = _rows((0, False, False), (1, False, False), (2, True, False))
-        assert measure_api._stray_indices(rows, 2) == []
-
-    def test_a_hole_row_is_skipped(self):
-        # the shape doc_get really emits for a slot whose document would not read: readable=false
-        # and NO open_index key at all, since that index addresses nothing doc_close would accept.
-        rows = [{"name": None, "readable": False}, {"name": "Untitled", "open_index": 3}]
-        assert measure_api._stray_indices(rows, 1) == [3]
-
-
-class TestScratchStillUnsaved:
-    def test_true_for_the_never_saved_scratch(self):
-        assert measure_api._scratch_still_unsaved(
-            _rows((0, False, False), (1, True, False)), 1) is True
-
-    def test_false_for_a_saved_document_at_that_index(self):
-        # is_saved is pruned from a healthy SAVED row, so the key is ABSENT - and an absent key must
-        # never read as "never saved", or the teardown closes the user's own file.
-        assert measure_api._scratch_still_unsaved(
-            _rows((0, False, False), (1, True, None)), 1) is False
-
-    def test_a_hole_row_never_answers_for_the_scratch_address(self):
-        # nothing read from that slot, so "never saved" is not something to conclude about it - and
-        # concluding it would aim doc_close at an index that addresses nothing.
-        assert measure_api._scratch_still_unsaved([{"name": None, "readable": False}], 0) is False
-
-    def test_false_when_the_index_is_gone(self):
-        assert measure_api._scratch_still_unsaved(_rows((0, True, False)), 1) is False
-        assert measure_api._scratch_still_unsaved([], 0) is False
+    def test_cam_world_binds_every_write(self, monkeypatch):
+        h = "session:" + "a" * 32
+        answers = iter([(False, ""), (False, {}), (False, "LIBURL u"), (False, {}),
+                        (False, {"operation": "Face1"}), (False, {"operation": "Face2"}),
+                        (False, {}), (False, {})])
+        calls = []
+        monkeypatch.setattr(measure_api, "call", lambda tool, args: (calls.append((tool, args)) or next(answers)))
+        assert measure_api._build_cam_world(h) is None
+        assert all(args["expect_document"] == h for _tool, args in calls)
 
 
 @pytest.fixture
@@ -107,6 +73,24 @@ def no_session(monkeypatch):
     for name in ("_fusion_version", "health_gate", "call", "registered_tools"):
         monkeypatch.setattr(measure_api, name, _no)
     return monkeypatch
+
+
+class TestOnlyPreflight:
+    def test_unknown_row_id_refuses_before_any_session_call(self, no_session):
+        with pytest.raises(SystemExit) as exc:
+            measure_api.run_measurements(write_json=False, only={"no-such-row"})
+        message = str(exc.value)
+        assert "no-such-row" in message
+        assert "ROWS registry" in message
+
+    def test_mixed_known_and_unknown_row_ids_refuse_as_a_whole(self, no_session):
+        with pytest.raises(SystemExit) as exc:
+            measure_api.run_measurements(
+                write_json=False, only={"save-image-options-defaults", "no-such-row"})
+        message = str(exc.value)
+        assert "no-such-row" in message
+        assert "save-image-options-defaults" not in message
+        assert "ROWS registry" in message
 
 
 class TestTheCloudPreflight:
@@ -147,3 +131,88 @@ class TestTheCloudPreflight:
             measure_api.run_measurements(write_json=False, only={"save-image-options-defaults"})
         # it got PAST the cloud gate and stopped at the next one, which is about the server
         assert "sys_execute_script is not registered" in str(exc.value)
+
+
+class TestJudge:
+    def test_transport_error_does_not_prove_abort(self):
+        status, detail = measure_api._judge(
+            {"expect": "raise_or_abort"}, True, "connection refused")
+        assert status == "ERROR"
+        assert detail == "expected refusal evidence was unavailable: connection refused"
+
+    def test_native_error_text_without_execution_proof_does_not_prove_abort(self):
+        status, detail = measure_api._judge(
+            {"expect": "raise_or_abort"}, True, "RuntimeError: 3 : invalid item")
+        assert status == "ERROR"
+        assert detail == ("expected refusal evidence was unavailable: RuntimeError: 3 : invalid item")
+
+    def test_caught_verdict_still_passes(self):
+        status, detail = measure_api._judge(
+            {"expect": "raise_or_abort"}, False, "PASS caught RuntimeError")
+        assert status == "PASS"
+        assert detail == "caught RuntimeError"
+
+
+def test_activation_refusal_never_dispatches_measurement_or_closes_others(monkeypatch):
+    owned = "session:" + "a" * 32
+    other = "session:" + "b" * 32
+    calls = []
+    def call(tool, args):
+        calls.append((tool, args))
+        if tool == "doc_new":
+            return False, {"document_handle": owned, "is_active": False}
+        if tool == "doc_get":
+            return False, {"open_documents": [_row(owned), _row(other, True)]}
+        if tool == "doc_activate":
+            return True, {"error": "activation refused"}
+        raise AssertionError("Unexpected call: " + tool)
+    monkeypatch.setattr(measure_api, "call", call)
+    monkeypatch.setattr(measure_api, "cloud_rows", lambda: [])
+    monkeypatch.setattr(measure_api, "_fusion_version", lambda: "test")
+    monkeypatch.setattr(measure_api, "registered_tools", lambda: {"sys_execute_script"})
+    with pytest.raises(SystemExit, match="before first row"):
+        measure_api.run_measurements(write_json=False, only={"save-image-options-defaults"})
+    assert not any(tool in ("sys_execute_script", "doc_close") for tool, _args in calls)
+    assert all(args["name"] == owned for tool, args in calls if tool == "doc_activate")
+
+
+def test_failed_cleanup_prevents_success_and_evidence_publication(monkeypatch):
+    owned = "session:" + "a" * 32
+    monkeypatch.setattr(measure_api, "ROWS", [{"id": "probe", "body": "pass"}])
+    monkeypatch.setattr(measure_api, "cloud_rows", lambda: [])
+    monkeypatch.setattr(measure_api, "_fusion_version", lambda: "test")
+    monkeypatch.setattr(measure_api, "registered_tools", lambda: {"sys_execute_script"})
+    monkeypatch.setattr(measure_api, "_reclaim_scratch", lambda handle: 0)
+    monkeypatch.setattr(measure_api, "_close_scratch", lambda handle: False)
+    monkeypatch.setattr(measure_api.time, "sleep", lambda seconds: None)
+    def call(tool, args):
+        if tool == "doc_new":
+            return False, {"document_handle": owned}
+        assert tool == "sys_execute_script" and args["expect_document"] == owned
+        return False, "PASS test"
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Failed cleanup published evidence")
+    monkeypatch.setattr(measure_api, "call", call)
+    monkeypatch.setattr(measure_api, "write_ledger", forbidden)
+    monkeypatch.setattr(measure_api, "write_api_facts", forbidden)
+    assert measure_api.run_measurements(write_json=False) == 1
+
+
+@pytest.mark.parametrize("read_error,after", [
+    (False, {"truncated": False, "open_documents": [_row("session:" + "a" * 32)]}),
+    (True, {}),
+    (False, {"truncated": True, "open_documents": []}),
+    (False, {"truncated": False, "open_documents": [{"name": "Unreadable"}]}),
+])
+def test_close_acknowledgement_without_complete_absence_proof_refuses(monkeypatch, read_error, after):
+    owned = "session:" + "a" * 32
+    monkeypatch.setattr(measure_api, "_reclaim_scratch", lambda handle: 0)
+    monkeypatch.setattr(measure_api, "_open_doc_rows", lambda: [_row(owned, True)])
+    def call(tool, args):
+        if tool == "doc_close":
+            assert args["name"] == owned
+            return False, {"close_unconfirmed": ["Untitled"]}
+        assert tool == "doc_get"
+        return read_error, after
+    monkeypatch.setattr(measure_api, "call", call)
+    assert measure_api._close_scratch(owned) is False

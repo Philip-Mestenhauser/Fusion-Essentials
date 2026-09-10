@@ -178,6 +178,38 @@ class TestGeneratedParameters:
         assert out["model_parameter_count"] == 1
         assert out["model_parameters"][0]["name"] == "d1"
 
+    def test_model_rows_classify_a_user_omitted_by_filters_and_the_user_page(self, monkeypatch):
+        monkeypatch.setattr(params, "_MAX_PARAMS", 2)
+        generated = _p("adsk_Generated")
+        filtered = _p("NotFavorite")
+        capped = _p("AfterCap")
+        model = _p("d1")
+        ups = FakeUserParameters([generated, filtered, capped])
+        design = _design(ups, [capped, model])
+        monkeypatch.setattr(params._common, "design", lambda: design)
+        out = _payload(params.handler(include_model_parameters=True, favorites_only=True))
+        assert out["model_parameter_count"] == 1
+        assert [row["name"] for row in out["model_parameters"]] == ["d1"]
+
+    def test_a_capped_model_walk_discloses_the_observed_subset(self, monkeypatch):
+        monkeypatch.setattr(params, "_MAX_PARAMS", 1)
+        first, second = _p("d1"), _p("d2")
+        design = _design(FakeUserParameters([]), [first, second])
+        monkeypatch.setattr(params._common, "design", lambda: design)
+        out = _payload(params.handler(include_model_parameters=True))
+        assert out["model_parameter_count"] == 1 and out["model_walk_truncated"] is True
+        assert "observed subset" in out["note"]
+
+    def test_an_unreadable_user_lookup_does_not_label_the_parameter_model(self, monkeypatch):
+        class Unclassifiable(FakeUserParameters):
+            def itemByName(self, name):
+                raise RuntimeError("user parameter table is locked")
+
+        design = _design(Unclassifiable([]), [_p("d1")])
+        monkeypatch.setattr(params._common, "design", lambda: design)
+        res = params.handler(include_model_parameters=True)
+        assert res["isError"] is True and "Could not classify parameter" in res["message"]
+
     def test_single_named_user_param(self, monkeypatch):
         u1 = _p("PartX", expression="50 mm", value=5.0)
         design = _design(FakeUserParameters([u1]), [u1])

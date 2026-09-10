@@ -516,11 +516,67 @@ class TestBodyRef:
         body, err = inp.BodyRef("body_name").resolve("Frame")
         assert err is None and body is b
 
-    def test_occurrence_suffix_resolves_to_the_component_body(self):
-        b = FakeBody("Body1")
-        _install_bodies(components={"Frame": [b]})
+    def test_exact_occurrence_suffix_resolves_to_its_placed_body(self, monkeypatch):
+        import adsk.fusion
+        monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+        native = FakeBody("Body1")
+        frame = MakeComp(name="Frame", bodies=[native], mesh_bodies=[])
+        occ = make_occurrence(path="Frame:1", component=frame)
+        proxy = body_proxy(native, occ)
+        occ.bRepBodies = _NamedCollection([proxy])
+        root = MakeComp(name="Root", occurrences=[occ])
+        design = MakeDesign(comp=root, all_components=[frame])
+        monkeypatch.setattr(inp._common, "design", lambda: design)
+        monkeypatch.setattr(inp._common, "target_component", lambda d: root)
+        monkeypatch.setattr(inp._common, "occurrence_walk",
+                            lambda _d, cap=None: types.SimpleNamespace(occurrences=[occ]))
         body, err = inp.BodyRef("body_name").resolve("Frame:1")
-        assert err is None and body is b
+        assert err is None and body is proxy and proxy is not native
+
+    def test_nonexistent_occurrence_suffix_does_not_resolve_a_nearby_instance_or_component(self, monkeypatch):
+        import adsk.fusion
+        monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+        native = FakeBody("Body1")
+        frame = MakeComp(name="Frame", bodies=[native], mesh_bodies=[])
+        longer = make_occurrence(path="Frame:10", component=frame)
+        unrelated = make_occurrence(path="OtherFrame:999", component=frame)
+        longer.bRepBodies = _NamedCollection([body_proxy(native, longer)])
+        unrelated.bRepBodies = _NamedCollection([body_proxy(native, unrelated)])
+        root = MakeComp(name="Root", occurrences=[longer, unrelated])
+        design = MakeDesign(comp=root, all_components=[frame])
+        monkeypatch.setattr(inp._common, "design", lambda: design)
+        monkeypatch.setattr(inp._common, "target_component", lambda d: root)
+        monkeypatch.setattr(inp._common, "occurrence_walk",
+                            lambda _d, cap=None: types.SimpleNamespace(
+                                occurrences=[longer, unrelated], broken_occurrences=[], broken=[]))
+        for requested in ("Frame:1", "Frame:999"):
+            body, err = inp.BodyRef("body_name").resolve(requested)
+            assert body is None and requested in err
+
+    def test_duplicate_nested_occurrence_names_refuse_the_short_name(self, monkeypatch):
+        import adsk.fusion
+        monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody, raising=False)
+        a, b = FakeBody("Body1"), FakeBody("Body1")
+        left = make_occurrence(path="SubA:1+Bolt:1",
+                               component=MakeComp(name="Bolt", bodies=[a], mesh_bodies=[]))
+        right = make_occurrence(path="SubB:1+Bolt:1",
+                                component=MakeComp(name="Bolt", bodies=[b], mesh_bodies=[]))
+        left.name = right.name = "Bolt:1"
+        left_proxy, right_proxy = body_proxy(a, left), body_proxy(b, right)
+        left.bRepBodies, right.bRepBodies = _NamedCollection([left_proxy]), _NamedCollection([right_proxy])
+        root = MakeComp(name="Root", occurrences=[left, right])
+        design = MakeDesign(comp=root)
+        monkeypatch.setattr(inp._common, "design", lambda: design)
+        monkeypatch.setattr(inp._common, "target_component", lambda d: root)
+        monkeypatch.setattr(inp._common, "occurrence_walk",
+                            lambda _d, cap=None: types.SimpleNamespace(
+                                occurrences=[left, right], broken_occurrences=[], broken=[]))
+
+        body, err = inp.BodyRef("body_name").resolve("Bolt:1")
+        assert body is None and "names 2 occurrences" in err
+        assert "SubA:1+Bolt:1" in err and "SubB:1+Bolt:1" in err
+        body, err = inp.BodyRef("body_name").resolve("SubB:1+Bolt:1")
+        assert err is None and body is right_proxy
 
     def test_multi_body_component_name_refuses_with_body_names(self):
         _install_bodies(components={"Frame": [FakeBody("Body1"), FakeBody("Body2")]})

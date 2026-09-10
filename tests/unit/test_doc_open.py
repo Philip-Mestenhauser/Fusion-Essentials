@@ -14,6 +14,20 @@ from conftest import (FakeApplication, FakeDataFile, FakeDocuments, FakeFusionDo
                       load_tool)
 
 od = load_tool("doc_open")
+w = load_tool('_write_guard')
+
+class _EqualDocument(FakeFusionDocument):
+    def __init__(self, handle, **kwargs):
+        super().__init__(**kwargs)
+        self._handle = handle
+
+    def __eq__(self, other):
+        return isinstance(other, _EqualDocument) and self._handle == other._handle
+
+
+class _RaisingEqualityDocument(FakeFusionDocument):
+    def __eq__(self, other):
+        raise RuntimeError("active document comparison unavailable")
 
 URN = "urn:adsk.wipprod:dm.lineage:abc123XYZ"
 URN_B64URL = "dXJuOmFkc2sud2lwcHJvZDpkbS5saW5lYWdlOmFiYzEyM1hZWg"
@@ -92,6 +106,14 @@ class TestCamTemplateGuard:
         assert touched["resolve"] is False        # did NOT resolve the DataFile (would crash)
         assert touched["open"] is False           # did NOT attempt the open
 
+    def test_wrapped_cam_refusal_does_not_stamp_active_document(self, monkeypatch):
+        active = FakeFusionDocument(name="Active")
+        fake_app = FakeApplication(active_document=active)
+        monkeypatch.setattr(od, "app", fake_app)
+        monkeypatch.setattr(w, "app", fake_app)
+        out = json.loads(w.wrap(od.handler)(file_id="urn:cam", is_cam_template=True)
+                         ["content"][0]["text"])
+        assert out["opened"] is False and out["acted_on"] is None
     def test_normal_open_requires_force_api_open(self, monkeypatch):
         # A non-CAM doc opens normally — but ONLY when the caller declares force_api_open=true.
         opened = FakeFusionDocument(name="Plain")
@@ -161,11 +183,66 @@ class TestAsyncLoadHandoff:
         monkeypatch.setattr(od, "_resolve_data_file",
                             lambda raw: (FakeDataFile("Plain"), raw, [raw]))
         monkeypatch.setattr(od, "_open_document", lambda d: (opened, "openUsingContext", None))
-        monkeypatch.setattr(od, "app",
-                            FakeApplication(active_document=opened if active else elsewhere))
+        fake_app = FakeApplication(active_document=opened if active else elsewhere)
+        monkeypatch.setattr(od, "app", fake_app)
+        monkeypatch.setattr(w, "app", fake_app)
         res = od.handler(file_id="urn:plain", force_api_open=True)
         assert res["isError"] is False, res
         return json.loads(res["content"][0]["text"])
+
+    def test_wrapped_pending_open_does_not_stamp_previous_active_document(self, monkeypatch):
+        opened = FakeFusionDocument(name="Plain")
+        elsewhere = FakeFusionDocument(name="Other")
+        fake_app = FakeApplication(active_document=elsewhere)
+        monkeypatch.setattr(od, "_resolve_data_file",
+                            lambda raw: (FakeDataFile("Plain", file_id="urn:plain"), raw, [raw]))
+        monkeypatch.setattr(od, "_open_document", lambda d: (opened, "openUsingContext", None))
+        monkeypatch.setattr(od, "app", fake_app)
+        monkeypatch.setattr(w, "app", fake_app)
+        out = json.loads(w.wrap(od.handler)(file_id="urn:plain", force_api_open=True)
+                         ["content"][0]["text"])
+        assert out["is_active"] is False and out["acted_on"] is None
+        assert out["document_handle"].startswith("session:")
+
+    def test_wrapped_active_open_names_the_opened_document(self, monkeypatch):
+        opened = FakeFusionDocument(name="Plain", data_file=FakeDataFile("Plain", file_id="urn:plain"))
+        fake_app = FakeApplication(active_document=opened)
+        monkeypatch.setattr(od, "_resolve_data_file",
+                            lambda raw: (FakeDataFile("Plain", file_id="urn:plain"), raw, [raw]))
+        monkeypatch.setattr(od, "_open_document", lambda d: (opened, "openUsingContext", None))
+        monkeypatch.setattr(od, "app", fake_app)
+        monkeypatch.setattr(w, "app", fake_app)
+        out = json.loads(w.wrap(od.handler)(file_id="urn:plain", force_api_open=True)
+                         ["content"][0]["text"])
+        assert out["is_active"] is True
+        assert out["acted_on"]["name"] == "Plain"
+        assert out["acted_on"]["document_id"] == "urn:plain"
+
+    def test_unreadable_active_comparison_keeps_activation_unknown(self, monkeypatch):
+        opened = FakeFusionDocument(name="Plain", data_file=FakeDataFile("Plain", file_id="urn:plain"))
+        fake_app = FakeApplication(active_document=_RaisingEqualityDocument(name="Other"))
+        monkeypatch.setattr(od, "_resolve_data_file",
+                            lambda raw: (FakeDataFile("Plain", file_id="urn:plain"), raw, [raw]))
+        monkeypatch.setattr(od, "_open_document", lambda d: (opened, "openUsingContext", None))
+        monkeypatch.setattr(od, "app", fake_app)
+        monkeypatch.setattr(w, "app", fake_app)
+        out = json.loads(od.handler(file_id="urn:plain", force_api_open=True)
+                         ["content"][0]["text"])
+        assert out["is_active"] is None and out["acted_on"] is None
+        assert "unreadable" in out["note"] and "doc_get" in out["note"]
+
+    def test_distinct_wrappers_with_native_equality_name_opened_document(self, monkeypatch):
+        opened = _EqualDocument("plain", name="Plain", data_file=FakeDataFile("Plain", file_id="urn:plain"))
+        active_wrapper = _EqualDocument("plain", name="Plain", data_file=FakeDataFile("Plain", file_id="urn:plain"))
+        fake_app = FakeApplication(active_document=active_wrapper)
+        monkeypatch.setattr(od, "_resolve_data_file",
+                            lambda raw: (FakeDataFile("Plain", file_id="urn:plain"), raw, [raw]))
+        monkeypatch.setattr(od, "_open_document", lambda d: (opened, "openUsingContext", None))
+        monkeypatch.setattr(od, "app", fake_app)
+        monkeypatch.setattr(w, "app", fake_app)
+        out = json.loads(w.wrap(od.handler)(file_id="urn:plain", force_api_open=True)
+                         ["content"][0]["text"])
+        assert out["is_active"] is True and out["acted_on"]["document_id"] == "urn:plain"
 
     def test_a_document_not_yet_active_claims_no_load_and_names_the_poller(self, monkeypatch):
         pending = self._open(monkeypatch, active=False)
@@ -241,7 +318,10 @@ class TestConfiguredDesign:
     def test_a_configured_design_publishes_the_configuration_note(self, monkeypatch):
         out = self._open(monkeypatch, is_configured_design=True)
         assert out["is_configured_design"] is True
-        assert "configurationTopTable" in out["configured_design_note"]
+        note = out["configured_design_note"]
+        assert "design_get" in note and "include=['configurations']" in note
+        assert "design_configure" in note and "action='activate'" in note
+        assert "configurationTopTable" not in note and "ConfigurationRow" not in note
         # the twin: the note rides on the flag the file answered, so a plain design gets no claim
         # about configurations it does not have.
         plain = self._open(monkeypatch, is_configured_design=False)

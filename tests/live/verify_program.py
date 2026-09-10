@@ -1078,4 +1078,4 @@ EXCLUDED = {
 # tool moves it out of here into STEPS. test_tool_verify_complete.py enforces that every
 # registered tool is covered, excluded, or listed here, so a NEWLY added tool can't decay coverage
 # silently - it fails the gate until someone scripts it, excuses it, or adds it here deliberately.
-PENDING = frozenset()
+PENDING = frozenset({"drawing_get_status"})

@@ -84,6 +84,43 @@ class TestSetCreateOrUpdate:
         out = _payload(params.handler(name="PartX", expression="10 mm"))
         assert out["set"] is True and out["already_current"] is True
 
+    def test_whitespace_normalized_current_expression_is_already_current(self, monkeypatch):
+        class NormalizedParam(FakeUserParameter):
+            @property
+            def expression(self):
+                return "10mm"
+
+            @expression.setter
+            def expression(self, value):
+                pass
+
+        up = FakeUserParameters([NormalizedParam(name="PartX")])
+        design = _design(up, make_timeline())
+        _stub_design(monkeypatch, design)
+        out = _payload(params.handler(name="PartX", expression="10 mm"))
+        assert out["set"] is True and out["already_current"] is True
+
+    def test_normalization_keeps_identifier_boundaries_and_quoted_text(self):
+        assert params._normalized_expression("10 mm") == params._normalized_expression("10mm")
+        assert params._normalized_expression("A B") != params._normalized_expression("AB")
+        assert params._normalized_expression("1 e-3") != params._normalized_expression("1e-3")
+        assert params._normalized_expression("'a b'") != params._normalized_expression("'ab'")
+
+    def test_silent_equal_value_dependency_change_is_not_already_current(self, monkeypatch):
+        class StuckParam(FakeUserParameter):
+            @property
+            def expression(self):
+                return "DriverA"
+
+            @expression.setter
+            def expression(self, value):
+                pass
+
+        up = FakeUserParameters([StuckParam(name="PartX", value=1.0)])
+        _stub_design(monkeypatch, _design(up, make_timeline()))
+        res = params.handler(name="PartX", expression="DriverB")
+        assert res["isError"] is True and "did not take" in res["message"]
+
     def test_set_missing_without_create_errors(self, monkeypatch):
         design = _design(FakeUserParameters([]), make_timeline())
         _stub_design(monkeypatch, design)

@@ -32,6 +32,7 @@ _EXTENTS = ("blind", "through")
 # the face the holes are drilled into (a find_geometry planar-face handle) - defines orientation.
 _FACE = _inputs.GeometryHandle("face", require="planar_face", required=True,
     description="Drilled into, normal to it.")
+_TARGET_BODIES = _inputs.BodyRefList("target_bodies", required=False)
 
 _PLACEMENTS = ("sketch_points", "center", "on_edge", "plane_offsets")
 
@@ -369,7 +370,8 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
             edge_position: str = "",
             point: list = None, offset_edge_one: str = "", offset_one: str = "",
             offset_edge_two: str = "", offset_two: str = "",
-            modeled: bool = False, tip_angle: str = "", thread_type: str = "") -> dict:
+            modeled: bool = False, tip_angle: str = "", thread_type: str = "",
+            target_bodies=None) -> dict:
     """See TOOL_DESCRIPTION."""
     hole_type = (hole_type or "simple").strip().lower()
     if hole_type not in _TYPES:
@@ -503,6 +505,12 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
             lin_err = _require_linear_edge(offset_edge_two_ent, "offset_edge_two")
             if lin_err:
                 return error(lin_err)
+
+    scoped_bodies = None
+    if target_bodies not in (None, "", []):
+        scoped_bodies, berr = _TARGET_BODIES.resolve(target_bodies)
+        if berr:
+            return error(berr)
 
     # Resolve tap thread + clearance fastener BEFORE building geometry (a later raise aborts the script).
     thread_info = None
@@ -700,6 +708,12 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
             return _abandon(f"Fusion refused the clearance-hole spec for '{fastener}' "
                             "(setToClearanceHole returned false), so nothing was drilled.")
 
+    if scoped_bodies is not None:
+        try:
+            hin.participantBodies = list(scoped_bodies)
+        except Exception as e:
+            return _abandon(f"Could not set target_bodies before hole creation: {e}")
+
     try:
         feature = holes.add(hin)         # MUTATION - raises (and aborts) if anything is inconsistent
     except Exception as e:
@@ -775,6 +789,14 @@ def handler(hole_type: str = "simple", diameter: str = "", face: str = "", point
     if host_name:
         # withheld rather than published as a null - a name that did not read is not a component name
         result["host_component"] = host_name
+    if sketch is not None:
+        result["placement_sketch"] = safe(lambda: sketch.name)
+    if scoped_bodies is not None:
+        result["scoped_to_bodies"] = [_inputs.qualified_body_name(b) for b in scoped_bodies]
+        result["note"] += (" 'scoped_to_bodies' lists the configured participant bodies; Fusion "
+                           "does not expose a readback for this input. The face only locates the hole.")
+    else:
+        result["note"] += " With no target_bodies, Fusion considers every intersected body; the face only locates the hole."
     if not host_from_face:
         result["note"] += _active_host_clause(host_named)
     if unreadable:
@@ -857,6 +879,7 @@ tool = (
     .add_input_property("fastener", {"type": "string",
             "description": "e.g. 'M6 Socket Head Cap Screw'; overrides 'diameter'."})
     .add_input_property("fit", {"type": "string", "enum": list(_FITS)})
+    .add_input_property("target_bodies", _TARGET_BODIES.schema())
     .add_input_property("placement", {"type": "string", "enum": list(_PLACEMENTS)})
     .add_input_property(*_EDGE.as_property())
     .add_input_property("edge_position", {"type": "string", "enum": list(_EDGE_POSITIONS),

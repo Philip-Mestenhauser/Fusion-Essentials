@@ -3,13 +3,12 @@
 
 """Delete a USER parameter, refusing one another expression references. WRITES."""
 
-import re
-
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _common
+from ._param_common import _expression_identifiers
 # the shared timeline-health walk (before/after edit guard) - one home in _common
 from ._common import timeline_health as _timeline_health
 
@@ -42,7 +41,7 @@ def handler(name: str = "") -> dict:
     consumers = []
     for mp in safe(lambda: design.allParameters, []) or []:
         e = safe(lambda mp=mp: mp.expression) or ""
-        if re.search(r'(?<![A-Za-z0-9_])' + re.escape(name) + r'(?![A-Za-z0-9_])', e) and \
+        if name in _expression_identifiers(e) and \
                 (safe(lambda mp=mp: mp.name) != name):
             consumers.append(safe(lambda mp=mp: mp.name))
     if consumers:

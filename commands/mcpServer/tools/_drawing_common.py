@@ -140,12 +140,10 @@ def orientation_label(value):
 
 
 def sheet_listing(dwg):
-    """The drawing's sheets in order as [{export_index, name}]; export_index is 1-BASED, the
-    numbering drawing_export's sheet_range takes."""
-    # A sheet's INDEX is its address, so this stays a positional walk: iter_collection drops an
-    # unreadable sheet, sliding every later export_index down one.
+    """The drawing's sheets in collection order with a 1-based collection index."""
     sheets = safe(lambda: dwg.sheets)
-    return [{"export_index": i + 1, "name": safe(lambda i=i: sheets.item(i).name)}
+    return [{"collection_index": i + 1, "export_index": None,
+             "name": safe(lambda i=i: sheets.item(i).name)}
             for i in range(safe(lambda: sheets.count, 0) or 0)]
 
 
@@ -161,9 +159,9 @@ def sheet_facts(sheet):
         "width": _common.measured(lambda: sheet.width, 1.0, 3),
         "height": _common.measured(lambda: sheet.height, 1.0, 3),
         "width_height_unit": SHEET_EXTENT_UNIT,
-        "views": safe(lambda: sheet.views.count, 0),
-        "sketches": safe(lambda: sheet.sketches.count, 0),
-        "custom_tables": safe(lambda: sheet.customTables.count, 0),
+        "views": _common.counted(lambda: sheet.views.count),
+        "sketches": _common.counted(lambda: sheet.sketches.count),
+        "custom_tables": _common.counted(lambda: sheet.customTables.count),
     }
 
 

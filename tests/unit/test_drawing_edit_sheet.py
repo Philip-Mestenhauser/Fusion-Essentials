@@ -173,8 +173,7 @@ class TestCopy:
         assert out["sheet"] == "Front Copy" and out["facts"]["name"] == "Front Copy"
 
     def test_the_copy_call_pins_the_measured_argument_shape(self, wire):
-        # copy(name, False) appends the copy at the END and makes it active - the tool's payload
-        # says so, so the flag it passes is load-bearing
+        # This pins the call arguments, without inferring a PDF page from collection order.
         state = wire([sheet("Front")])
         payload(es.handler(action="copy", sheet="Front", new_name="Front Copy"))
         assert state.sheets[0]._copy_args == [("Front Copy", False)]
@@ -186,7 +185,8 @@ class TestCopy:
 
     def test_copy_that_did_not_grow_the_drawing_is_an_error(self, wire):
         wire([sheet("Front", copy_result="no_growth")])
-        assert "did not take" in error_message(es.handler(action="copy", sheet="Front"))
+        message = error_message(es.handler(action="copy", sheet="Front"))
+        assert "unverified" in message and "before retrying" in message
 
 
 class TestDelete:
@@ -195,7 +195,8 @@ class TestDelete:
         # the delete must NOT be called a failure, and the count must NOT be sold as a verification
         state = wire([sheet("Front"), sheet("Detail")])
         out = payload(es.handler(action="delete", sheet="Detail"))
-        assert out["deleted"] is True and out["sheet"] == "Detail"
+        assert out["deleted"] is None and out["sheet"] == "Detail"
+        assert out["delete_accepted"] is True and out["verification"] == "pending"
         assert out["sheet_count_before"] == 2 and out["sheet_count_still_reads"] == 2
         assert "neither is a verification" in out["note"] and "later call" in out["note"]
         # the sheets it STILL reports include the deleted one - the payload says so rather than
@@ -317,33 +318,31 @@ class TestFalsyEnumMembers:
 
 
 class TestSheetListing:
-    def test_add_publishes_the_new_order_with_one_based_export_indices(self, wire):
-        # no drawing read tool exists, so the export indices drawing_export's sheet_range takes are
-        # obtainable only here - and an add lands DIRECTLY AFTER the active sheet, shifting them
+    def test_add_publishes_collection_positions_with_unknown_export_indices(self, wire):
+        # The collection positions are observations; the PDF mapping is deliberately unknown.
         state = wire([sheet("Front"), sheet("Tail")])
         out = payload(es.handler(action="add", new_name="Detail"))
-        assert out["sheets"] == [{"export_index": 1, "name": "Front"},
-                                 {"export_index": 2, "name": "Detail"},
-                                 {"export_index": 3, "name": "Tail"}]
-        assert "export index shifts" in out["note"]
+        assert out["sheets"] == [{"export_index": None, "collection_index": 1, "name": "Front"},
+                                 {"export_index": None, "collection_index": 2, "name": "Detail"},
+                                 {"export_index": None, "collection_index": 3, "name": "Tail"}]
+        assert "export/PDF order is unavailable" in out["note"]
         assert len(state.sheets) == 3
 
     def test_copy_publishes_the_listing_with_the_copy_last(self, wire):
         wire([sheet("Front"), sheet("Tail")])
         out = payload(es.handler(action="copy", sheet="Front", new_name="Front Copy"))
         assert [s["name"] for s in out["sheets"]] == ["Front", "Tail", "Front Copy"]
-        assert out["sheets"][-1]["export_index"] == 3
+        assert out["sheets"][-1]["collection_index"] == 3
+        assert all(row["export_index"] is None for row in out["sheets"])
 
-    def test_an_unreadable_sheet_holds_its_export_index_instead_of_shifting_the_rest(self, wire):
-        # export_index is the number drawing_export's sheet_range takes. A sheet that cannot be read
-        # must keep its slot as a null name - dropping it would slide every later sheet down one and
-        # send sheet_range at the WRONG sheets.
+    def test_an_unreadable_sheet_holds_its_collection_position(self, wire):
+        # An unreadable sheet keeps its slot instead of changing the later collection positions.
         wire([sheet("Front"), sheet("Middle"), sheet("Tail")], unreadable=["Middle"])
         out = payload(es.handler(action="add", new_name="Detail"))
-        assert out["sheets"] == [{"export_index": 1, "name": "Front"},
-                                 {"export_index": 2, "name": "Detail"},
-                                 {"export_index": 3, "name": None},
-                                 {"export_index": 4, "name": "Tail"}]
+        assert out["sheets"] == [{"export_index": None, "collection_index": 1, "name": "Front"},
+                                 {"export_index": None, "collection_index": 2, "name": "Detail"},
+                                 {"export_index": None, "collection_index": 3, "name": None},
+                                 {"export_index": None, "collection_index": 4, "name": "Tail"}]
 
 
 class TestExtentUnits:

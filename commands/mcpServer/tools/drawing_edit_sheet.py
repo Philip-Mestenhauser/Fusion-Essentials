@@ -66,11 +66,10 @@ def _do_add(dwg, new_name):
         "sheet_units": _drawing_common.sheet_units(dwg),
         "facts": facts,
         "sheets": _sheet_listing(dwg),
-        "note": ("Sheet added DIRECTLY AFTER the active sheet, not at the end, inheriting its size "
-                 "and orientation and becoming the ACTIVE sheet: every sheet below moves down one "
-                 "and its export index shifts with it, so 'sheets' above is the new order with the "
-                 "1-based indices drawing_export's sheet_range takes. Set its size with "
-                 "action='set_size', its shape with action='set_orientation'."),
+        "note": ("Sheet added, inheriting its size and orientation from the ACTIVE sheet. "
+                 "'sheets' reports collection positions; export/PDF order is unavailable. "
+                 "Export all sheets and inspect the PDF before selecting a page range. "
+                 "Set its size with action='set_size', its shape with action='set_orientation'."),
     }
     if want and facts["name"] != want:
         out["name_warning"] = (f"The sheet reports the name '{facts['name']}', not the requested "
@@ -84,19 +83,19 @@ def _do_copy(dwg, sheet, new_name):
     source = safe(lambda: sheet.name)
     want = (new_name or "").strip()
     try:
-        # copy(name, before=False): the copy is appended at the END of the drawing's sheets and
-        # becomes the active sheet. The placement flag is fixed at False - a drawing has no other
-        # way to order sheets, so the appended position is the one this tool reports.
+        # The native collection position does not establish the copy's PDF page order.
         copied = sheet.copy(want, False)
     except Exception as ex:
         return error(f"Copying sheet '{source}' failed: {ex}")
     if copied is None:
-        return error(f"Sheet.copy returned nothing for '{source}' - the copy failed, or the drawing "
-                     "is still updating asynchronously. Re-read the drawing and retry.")
+        return error(f"Sheet.copy returned nothing for '{source}'; its effect is unverified. "
+                     "The drawing may still be updating asynchronously. Re-read drawing_get "
+                     "before retrying, to avoid a duplicate copy.")
     after = safe(lambda: sheets.count, 0) or 0
     if after <= before:
-        return error(f"Sheet.copy returned a sheet but the drawing still holds {after} sheet(s) - "
-                     "the copy did not take.")
+        return error(f"Sheet.copy returned '{safe(lambda: copied.name)}' but the sheet count "
+                     f"still reads {after} (before {before}); its effect is unverified. Nothing "
+                     "was rolled back. Re-read drawing_get before retrying.")
     facts = _sheet_facts(copied)
     return ok({
         "copied": True,
@@ -108,11 +107,10 @@ def _do_copy(dwg, sheet, new_name):
         "sheet_units": _drawing_common.sheet_units(dwg),
         "facts": facts,
         "sheets": _sheet_listing(dwg),
-        "note": ("Sheet copied - the facts above are read off the COPY, which carries the SOURCE "
-                 "sheet's size, orientation, sketches and tables (not the active sheet's). The copy "
-                 "is the LAST sheet in the drawing and is now the ACTIVE sheet, so it takes the "
-                 "LAST export index in 'sheets' above (1-based, the numbering drawing_export's "
-                 "sheet_range takes). Rename it with action='rename'."),
+        "note": ("Sheet copied; the facts come from the returned copy, which carries the SOURCE "
+                 "sheet's size, orientation, sketches and tables (not the active sheet's). "
+                 "Collection positions are listed; export/PDF order is unavailable. "
+                 "Export all sheets and inspect the PDF before selecting a page range."),
     })
 
 
@@ -131,21 +129,21 @@ def _do_delete(dwg, sheet):
         return error(f"Fusion refused to delete sheet '{name}' (deleteMe returned false). The sheet "
                      "is still there.")
     # A drawing delete is NOT observable inside the call that performs it: the collection still
-    # reports its pre-delete count here. The boolean IS the effect; the count below is published as
-    # a reading, never as a verification.
+    # reports its pre-delete count here. The boolean acknowledges the request; removal remains
+    # unverified until a later read.
     reads = safe(lambda: sheets.count, 0) or 0
     return ok({
-        "deleted": True,
+        "deleted": None,
+        "delete_accepted": True,
+        "verification": "pending",
         "sheet": name,
         "sheet_count_before": before,
         "sheet_count_still_reads": reads,
         "sheets_still_read": _sheet_listing(dwg),
-        "note": ("Fusion accepted the delete (deleteMe returned true), which cannot be undone. The "
-                 f"count of {reads} above and 'sheets_still_read' beside it are what the drawing "
-                 "still reports inside this call - a drawing delete is not visible in the call that "
-                 "makes it, so neither is a verification and the deleted sheet is expected there. "
-                 "Re-read in a later call for the sheets it holds and their 1-based export "
-                 "indices."),
+        "note": ("Fusion accepted deletion (deleteMe=true); deleted=null until a later call confirms "
+                 "removal. This cannot be undone. The count and 'sheets_still_read' are observations "
+                 "inside this call; neither is a verification. Re-read drawing_get in a later call. "
+                 "Collection positions do not establish PDF order."),
     })
 
 

@@ -13,7 +13,7 @@ app = adsk.core.Application.get()
 
 MAP_BLURB = (
     "_resolve_open_document - the open-document resolve doc_activate and doc_close share: one "
-    "document from an 'open:N' index, a lineage URN / web URL matched by LINEAGE EQUALITY, or an "
+    "document from an opaque session handle, positional open:N, a lineage URN / web URL, or an "
     "exact display name, REFUSING more than one distinct match with the address each row reaches by; "
     "VERSION_LAG_WINDOW_S - the measured window a version read can still trail the cloud tip in")
 
@@ -87,8 +87,14 @@ def _find_open_document(name):
         names.append(nm)
         open_docs.append((d, nm))
 
-    # 0) 'open:N' - the open_index doc_get emits: the ONLY way to address an UNSAVED doc sharing a
-    # name ('Untitled') with no URN. N indexes app.documents in doc_get's own order.
+    # 0) Opaque session handle: exact native document equality, never a name/index fallback.
+    if _write_guard.is_document_handle(raw):
+        handle = _write_guard.resolve_document_handle(raw)
+        if handle is not None:
+            return handle, names, False
+        return None, _document_rows(_open_candidates(open_docs)), False
+
+    # open:N is positional and can shift after a document closes; session handles do not.
     if raw.lower().startswith("open:"):
         try:
             idx = int(raw.split(":", 1)[1].strip())
@@ -140,14 +146,17 @@ def _resolve_open_document(name, verb):
     d, listing, ambiguous = _find_open_document(name)
     if d is not None:
         return d, None
+    if _write_guard.is_document_handle((name or "").strip()):
+        return None, error(f"Document handle '{name}' is unknown, closed or expired after reload. "
+                           "Read doc_get and use a current document_handle.")
     rows = "; ".join(r for r in listing if r)
     if ambiguous:
         return None, error(
             f"'{name}' matches more than one OPEN document - refusing to guess which to {verb}. "
             f"Candidates, each with the document id it answered: {rows}. Retry with the address a "
             "candidate carries: a document id standing ALONE reaches that one and no other; a row "
-            "carrying an 'open:N' index as well is reachable only by that index, which doc_get "
-            "publishes too.")
+            "carrying an 'open:N' index also has an exact document_handle in doc_get. "
+            "Prefer that handle; positional indices can shift.")
     return None, error(
         f"No open document matched '{name}'{_tried_lineage(name)}. Open: {rows or '(none)'}. "
-        "(A shared name needs a lineage URN or the 'open:N' index from doc_get.)")
+        "(For a shared name use document_handle from doc_get, or a unique lineage URN.)")

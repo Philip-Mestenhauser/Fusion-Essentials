@@ -243,12 +243,18 @@ def _set_unit_param(params, units_key):
         if len(hits) != 1:
             raise ValueError(
                 f"no unique '{token}' entry in the program's unit choices {names or '(none exposed)'}")
-        cval.value = hits[0]
+        expected = _unquote(hits[0])
+        cval.value = expected
     except Exception as e:
-        note = (f"Output units could not be set to '{units_key}' ({e}) - the NC file posts in the "
-                "program's current units. Set units in the post config / Fusion UI, or omit 'units'.")
+        note = (f"Output units could not be set to '{units_key}' ({e}); posting was refused. "
+                "Set units in the post config / Fusion UI, or omit 'units'.")
         return f"<error: {e}>", note
-    return safe(lambda: cval.value), None
+    applied = safe(lambda: cval.value, _MISSING)
+    if applied is _MISSING or applied != expected:
+        note = (f"Output units did not read back as '{units_key}' after the setter "
+                f"(got {applied!r}); posting was refused.")
+        return f"<error: output units read back as {applied!r}>", note
+    return applied, None
 
 
 def _stored_str_param(params, name):
@@ -265,7 +271,7 @@ def _apply_output_params(params, program_name, out_dir, comment, units_key):
     """Apply the NC-program output parameters onto a CAMParameters collection (an NCProgramInput's or an
     existing NCProgram's). Returns (applied, unresolved, unit_note): applied is {param: read_back_value},
     unresolved is the list of expected params this program did not expose, unit_note is a human string
-    when the output units failed to apply (else None) - so a units failure is surfaced, never swallowed."""
+    when the requested output units did not apply (else None)."""
     applied = {}
     unresolved = []
 
@@ -409,9 +415,9 @@ def _expand_ops(items):
 
 # The count semantics BOTH post arms publish - one sentence, since both arms publish the same keys
 # off _program_counts.
-_COUNTS_NOTE = ("program_operation_count is what the program HOLDS, posted_operations those "
-                "reading hasToolpath True. A suppressed operation is neither held nor posted: its "
-                "toolpath reads discarded and its moves are absent from the NC file.")
+_COUNTS_NOTE = ("program_operation_count: unsuppressed operations in scope; "
+                "posted_operations: hasToolpath True. Suppressed operations are excluded "
+                "from both counts and NC output.")
 
 
 # MEASURED: a program scoped over a list holding a suppressed operation omits it - filteredOperations
@@ -535,6 +541,9 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
     units_key, uerr = _UNITS_CHOICE.resolve(units)
     if uerr:
         return error(uerr)
+    if as_is and units_key != "document":
+        return error("An as-is post uses the program's stored output units; omit 'units' or "
+                     "pass units='document' before posting it unchanged.")
 
     post_scope_key, pserr = _POST_SCOPE_CHOICE.resolve(post_scope)
     if pserr:
@@ -651,6 +660,12 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
         if merr:
             return error(merr + _rollback_program(cam, program, prog_name, reused))
 
+        if units_key != "document" and (_P_UNIT in unresolved or unit_note):
+            reason = (unit_note or f"The NC Program has no '{_P_UNIT}' parameter, so output units could not be set.")
+            retained = (" Existing-program configuration edits remain; inspect the program before retrying."
+                        if reused else "")
+            return error(reason + retained + _rollback_program(cam, program, prog_name, reused))
+
         if unresolved and _P_FOLDER in unresolved:
             # Without the output-folder parameter the file lands at the program default, not out_dir, and
             # the file-landed gate below can't see it - fail loudly and name the missing parameter.
@@ -739,10 +754,6 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
         if unresolved:
             # Non-fatal (the file landed); name what the program did not expose so a caller can confirm.
             result["params_unresolved"] = unresolved
-        if unit_note:
-            # The units knob failed to apply (non-fatal: the file still posted, but in the program's
-            # current units) - surface it explicitly rather than burying it in params_applied.
-            result["units_note"] = unit_note
     if not clean:
         # A file appeared but the post flagged failure or the program faulted - surface both facts AND
         # the post log's error lines so the caller sees the real reason, not just "review the output".
@@ -769,8 +780,6 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
             # The program's own membership read disagreed with the scope, or could not be compared -
             # stated beside the file rather than left in a key the note never mentions.
             result["note"] += " Membership: " + membership["membership_note"]
-    if unit_note:
-        result["note"] += " " + unit_note
     return ok(result)
 
 

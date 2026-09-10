@@ -6,6 +6,7 @@
 and cm-based unit ``scale``/``UNIT_TO_CM``."""
 
 import json
+import math
 
 import adsk.core
 import adsk.fusion
@@ -58,9 +59,12 @@ def measured(getter, scale=1.0, places=6):
     """A measured number, scaled and rounded - or None when it cannot be read, since zero is an
     answer here ("no gap", "no mass", "parallel"). A COUNT goes through ``counted``."""
     v = safe(getter)
-    if not isinstance(v, (int, float)) or isinstance(v, bool):
+    if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
         return None
-    return round(v * scale, places)
+    scaled = v * scale
+    if not math.isfinite(scaled):
+        return None
+    return round(scaled, places)
 
 
 def counted(getter):
@@ -1009,9 +1013,13 @@ def ptxyz(p, f):
     if p is None:
         return None
     x, y, z = safe(lambda: p.x), safe(lambda: p.y), safe(lambda: p.z)
-    if not all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in (x, y, z)):
+    if not all(isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c)
+               for c in (x, y, z)):
         return None
-    return {"x": round(x * f, 6), "y": round(y * f, 6), "z": round(z * f, 6)}
+    scaled = (x * f, y * f, z * f)
+    if not all(math.isfinite(c) for c in scaled):
+        return None
+    return {"x": round(scaled[0], 6), "y": round(scaled[1], 6), "z": round(scaled[2], 6)}
 
 
 # ── measurement (the one measureMinimumDistance core both measure tools share) ────────────────────

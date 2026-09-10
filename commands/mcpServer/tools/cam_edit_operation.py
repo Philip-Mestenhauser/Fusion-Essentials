@@ -415,7 +415,10 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
             if gate_err:
                 return error(gate_err)
 
-    params = op.parameters if wanted else None
+    params = safe(lambda: op.parameters) if wanted else None
+    if wanted and params is None:
+        return error(f"Operation '{operation}' parameters cannot be read before assignment; "
+                     "no write was attempted. Re-read it with cam_get(include=['parameters']).")
     # Validate ALL named parameters exist BEFORE applying any (no half-edited op on a typo).
     resolved = {}
     missing = []
@@ -444,6 +447,50 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
                                             after="", applied="Nothing was applied.")
                      + _LOCKED_REMEDY)
 
+    # Tool and preset assignment precede parameter writes so explicit overrides are final.
+    op_name = safe(lambda: op.name) or (operation or "").strip()
+    pre_landed = []
+    pre_notes = []
+    pre_records = {}
+    if want_tool:
+        rec, terr = _set_tool(cam, op, op_name, scope, url, tool_index)
+        if terr:
+            return error(terr)
+        pre_records.update(rec)
+        pre_notes.append(_tool_note(rec, op_name))
+        pre_landed.append(f"tool already set to '{rec['tool']}'" if rec["tool"] else
+                         "the cutting tool was already assigned")
+    if want_preset:
+        preset_rec, prerr = _set_preset(op, op_name, want_preset)
+        if prerr:
+            return error(prerr + _applied_clause(pre_landed))
+        pre_records.update(preset_rec)
+        pre_notes.append(_preset_note(preset_rec, op_name))
+        pre_landed.append(f"toolPreset already set to '{preset_rec['preset']}'")
+
+    # Assignment can replace the native parameter collection or alter editability. Re-resolve every
+    # requested row so following writes, readbacks, and rollback use the current collection.
+    if wanted:
+        params = safe(lambda: op.parameters)
+        if params is None:
+            return error(f"Operation '{operation}' parameters cannot be read after tool/preset "
+                         "assignment; no explicit parameter write was attempted."
+                         + _applied_clause(pre_landed))
+        resolved = {}
+        missing = []
+        for name in wanted:
+            p = safe(lambda name=name: params.itemByName(name))
+            if p is None:
+                missing.append(name)
+            else:
+                resolved[name] = p
+        if missing:
+            return error(f"Operation '{operation}' lost parameter(s) after tool/preset assignment: "
+                         f"{', '.join(missing)}. No parameter write was attempted."
+                         + _applied_clause(pre_landed))
+        locked = [name for name, p in resolved.items()
+                  if read_flag(lambda p=p: p.isEditable) is False]
+
     changed = []
     eval_failures = []
     no_takes = []
@@ -470,7 +517,8 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
         except Exception as e:
             return error(f"Could not set '{name}' = '{expr}' on '{operation}': {e}. "
                           f"(Already applied: {', '.join(c['name'] for c in changed) or 'none'}.)"
-                          + enumeration_remedy(str(e), written, _PARAM_READ, p))
+                          + enumeration_remedy(str(e), written, _PARAM_READ, p)
+                          + _applied_clause(pre_landed))
         # Read the parameter BACK for its evaluation state: the platform stores an unresolvable
         # expression silently (.expression echoes it, .value.value reads a finite 0.0) - only .error
         # exposes it (see _cam_common.expression_error).
@@ -506,7 +554,8 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
                         if changed else "")
         return error(_LOCKED_REFUSAL.format(
             operation=operation, names=", ".join(still_locked), after=after_clause,
-            applied=_restored_clause(changed, resolved)) + _LOCKED_REMEDY)
+            applied=_restored_clause(changed, resolved)) + _LOCKED_REMEDY
+                    + _applied_clause(pre_landed))
 
     # Three ways a write is not a success: it did not evaluate, it did not move, it will not read
     # back. Restore EVERY parameter set in this call, re-read each one, and name what each one did.
@@ -541,9 +590,8 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
                          if restore_failed else "")
         return error(f"Operation '{operation}': {'; '.join(parts)}. Rolled back all "
                      f"{len(changed)} parameter(s), each restored expression re-read.{failed_clause}"
-                     f" {remedy}")
+                     f" {remedy}" + _applied_clause(pre_landed))
 
-    op_name = safe(lambda: op.name) or (operation or "").strip()
     out = {
         "edited": True,
         "operation": op_name,
@@ -551,34 +599,19 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
     "updated_count": len(changed),
     "changed": changed,
     }
-    notes = [_PARAM_NOTE] if changed else []
+    out.update(pre_records)
+    notes = list(pre_notes)
+    if changed:
+        notes.append(_PARAM_NOTE)
     if any(c.get("unchanged") for c in changed):
         notes.append(_UNCHANGED_NOTE)
     if any(c.get("unlocked_here") for c in changed):
         notes.append(_UNLOCKED_NOTE)
-    # Every arm below runs AFTER the parameters: a set that could not be evaluated has already
-    # returned, so nothing here is applied to an operation this call rolled back. Each failure names
-    # the arms that DID land, in `landed`.
-    landed = []
+    # Rename and suppression run after parameters. Each failure names the arms that DID land, in
+    # `landed`; tool and preset failures return from their earlier arms with the same disclosure.
+    landed = list(pre_landed)
     if changed:
         landed.append("Parameters already applied: " + ", ".join(c["name"] for c in changed))
-    # The TOOL runs before the preset: a preset is resolved on the operation's own tool, so pointing
-    # at a new tool first is what makes that tool's presets reachable in one call.
-    if want_tool:
-        rec, terr = _set_tool(cam, op, op_name, scope, url, tool_index)
-        if terr:
-            return error(terr + _applied_clause(landed))
-        out.update(rec)
-        notes.append(_tool_note(rec, op_name))
-        landed.append(f"tool already set to '{rec['tool']}'" if rec["tool"] else
-                      "the cutting tool was already assigned")
-    if want_preset:
-        preset_rec, prerr = _set_preset(op, op_name, want_preset)
-        if prerr:
-            return error(prerr + _applied_clause(landed))
-        out.update(preset_rec)
-        notes.append(_preset_note(preset_rec, op_name))
-        landed.append(f"toolPreset already set to '{preset_rec['preset']}'")
     if want_rename:
         rec, rerr = _rename(op, op_name, want_rename)
         if rerr:

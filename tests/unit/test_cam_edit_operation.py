@@ -190,6 +190,37 @@ class DroppedPresetOp(FakeOp):
         pass
 
 
+class PresetReplacesParameterCollectionOp(FakeOp):
+    """A preset assignment replaces the native parameter collection and its values."""
+    @FakeOp.toolPreset.setter
+    def toolPreset(self, value):
+        self._preset = value
+        self.parameters = FakeParams({"tool_stepover": "9."})
+
+
+class PresetLosesParametersOp(FakeOp):
+    """A preset assignment leaves the operation parameter collection unreadable."""
+    def __init__(self, *args, **kwargs):
+        self._parameters = None
+        self._parameters_unavailable = False
+        super().__init__(*args, **kwargs)
+
+    @property
+    def parameters(self):
+        if self._parameters_unavailable:
+            raise RuntimeError("parameters unavailable after preset")
+        return self._parameters
+
+    @parameters.setter
+    def parameters(self, value):
+        self._parameters = value
+
+    @FakeOp.toolPreset.setter
+    def toolPreset(self, value):
+        self._preset = value
+        self._parameters_unavailable = True
+
+
 class NullPresetOp(FakeOp):
     """The assignment is accepted and the property then reads NOTHING - the other swallow shape."""
 
@@ -767,16 +798,35 @@ class TestPreset:
         res = ce.handler(operation="Adaptive1",
                          parameters={"tool_stepover": "NoSuchParamXyz * 2"}, preset="Probe Alu")
         assert res["isError"] is True and "Rolled back" in res["message"]
-        assert op.toolPreset.name == "Default preset"
+        assert op.toolPreset.name == "Probe Alu"
+        assert "toolPreset already set to 'Probe Alu'" in res["message"]
 
-    def test_a_failed_preset_names_the_parameters_already_applied(self, monkeypatch):
-        # Partial success is stated, never swallowed: the params landed, the preset did not.
+    def test_preset_failure_precedes_parameter_writes(self, monkeypatch):
+        # The preset arm runs first, so a failed preset leaves parameters untouched.
         op = _install_op(monkeypatch, _preset_op(cls=DroppedPresetOp))
         res = ce.handler(operation="Adaptive1", parameters={"tool_stepover": "1.5"},
                          preset="Probe Alu")
         assert res["isError"] is True and "did not take" in res["message"]
-        assert "Parameters already applied: tool_stepover" in res["message"]
+        assert "Parameters already applied" not in res["message"]
+        assert op.parameters.itemByName("tool_stepover").expression == "2."
+
+    def test_unreadable_parameters_after_preset_are_an_error(self, monkeypatch):
+        op = _install_op(monkeypatch, _preset_op(cls=PresetLosesParametersOp))
+        res = ce.handler(operation="Adaptive1", parameters={"tool_stepover": "1.5"},
+                         preset="Probe Alu")
+        assert res["isError"] is True
+        assert "cannot be read after tool/preset assignment" in res["message"]
+        assert "no explicit parameter write was attempted" in res["message"]
+        assert "toolPreset already set to 'Probe Alu'" in res["message"]
+
+    def test_parameters_are_applied_after_preset_overwrite(self, monkeypatch):
+        # The final parameter write must win when a preset setter overwrites that row.
+        op = _install_op(monkeypatch, _preset_op(cls=PresetReplacesParameterCollectionOp))
+        out = _payload(ce.handler(operation="Adaptive1", parameters={"tool_stepover": "1.5"},
+                                  preset="Probe Alu"))
         assert op.parameters.itemByName("tool_stepover").expression == "1.5"
+        assert out["changed"][0]["after"] == "1.5"
+        assert out["changed"][0]["before"] == "9."
 
     def test_a_failed_suppression_names_the_preset_that_did_land(self, monkeypatch):
         # The other half of the same disclosure: an arm that failed LAST must name every earlier

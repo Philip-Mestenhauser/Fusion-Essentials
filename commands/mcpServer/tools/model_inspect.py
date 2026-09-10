@@ -332,27 +332,27 @@ def _full_props(pp, k):
         out["inertia_world"] = {
             "about": "world coordinate origin",
             "units": "kg*unit^2",
-            "Ixx": round(xyz[1] * i_f, 6), "Iyy": round(xyz[2] * i_f, 6), "Izz": round(xyz[3] * i_f, 6),
-            "Ixy": round(xyz[4] * i_f, 6), "Iyz": round(xyz[5] * i_f, 6), "Ixz": round(xyz[6] * i_f, 6),
+            "Ixx": _common.measured(lambda: xyz[1] * i_f), "Iyy": _common.measured(lambda: xyz[2] * i_f), "Izz": _common.measured(lambda: xyz[3] * i_f),
+            "Ixy": _common.measured(lambda: xyz[4] * i_f), "Iyz": _common.measured(lambda: xyz[5] * i_f), "Ixz": _common.measured(lambda: xyz[6] * i_f),
         }
     pm = safe(lambda: pp.getPrincipalMomentsOfInertia())    # about the CoM / principal frame
     if pm and len(pm) >= 4 and pm[0]:
         out["principal_moments"] = {
             "about": "center of mass (principal axes)",
             "units": "kg*unit^2",
-            "i1": round(pm[1] * i_f, 6), "i2": round(pm[2] * i_f, 6), "i3": round(pm[3] * i_f, 6),
+            "i1": _common.measured(lambda: pm[1] * i_f), "i2": _common.measured(lambda: pm[2] * i_f), "i3": _common.measured(lambda: pm[3] * i_f),
         }
     pax = safe(lambda: pp.getPrincipalAxes())
     if pax and len(pax) >= 4 and pax[0]:
         out["principal_axes"] = {"x": _vec(pax[1]), "y": _vec(pax[2]), "z": _vec(pax[3])}
     gyr = safe(lambda: pp.getRadiusOfGyration())
     if gyr and len(gyr) >= 4 and gyr[0]:
-        out["radius_of_gyration"] = {"kx": round(gyr[1] * inv, 6), "ky": round(gyr[2] * inv, 6),
-                                     "kz": round(gyr[3] * inv, 6)}
+        out["radius_of_gyration"] = {"kx": _common.measured(lambda: gyr[1] * inv), "ky": _common.measured(lambda: gyr[2] * inv),
+                                     "kz": _common.measured(lambda: gyr[3] * inv)}
     rot = safe(lambda: pp.getRotationToPrincipal())
     if rot and len(rot) >= 4 and rot[0]:
-        out["rotation_to_principal_rad"] = {"rx": round(rot[1], 6), "ry": round(rot[2], 6),
-                                            "rz": round(rot[3], 6)}
+        out["rotation_to_principal_rad"] = {"rx": _common.measured(lambda: rot[1]), "ry": _common.measured(lambda: rot[2]),
+                                            "rz": _common.measured(lambda: rot[3])}
     return out
 
 

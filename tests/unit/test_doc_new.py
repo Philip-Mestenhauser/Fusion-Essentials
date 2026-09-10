@@ -66,8 +66,19 @@ class TestNewDocument:
                     active=_EqualByHandle("h-other", name="Untitled"))
         out = _payload(dm.handler())
         assert out["created"] is True and out["is_active"] is False
+        assert dm._write_guard.resolve_document_handle(out["document_handle"]) == made
 
     def test_add_returning_nothing_is_an_error(self, install_app):
         install_app(_AddsNothing())
         res = dm.handler()
         assert res["isError"] is True and "returned nothing" in res["message"]
+
+
+def test_wrapped_creation_receipt_names_created_document_even_when_another_stays_active(install_app):
+    made = _EqualByHandle("created", name="New document")
+    other = _EqualByHandle("other", name="Other document")
+    install_app(FakeDocuments(new_document=made), active=other)
+    out = _payload(dm._write_guard.wrap(dm.handler)())
+    assert out["is_active"] is False
+    assert out["acted_on"]["name"] == "New document"
+    assert dm._write_guard.resolve_document_handle(out["acted_on"]["document_handle"]) == made

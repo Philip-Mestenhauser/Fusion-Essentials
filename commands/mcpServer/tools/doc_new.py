@@ -9,6 +9,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
+from . import _write_guard
 
 app = adsk.core.Application.get()
 
@@ -27,13 +28,17 @@ def handler() -> dict:
     # compare would false-positive on two 'Untitled' docs.
     new_name = safe(lambda: doc.name)
     is_active = bool(safe(lambda: app.activeDocument == doc, False))
+    handle = _write_guard.document_handle(doc)
     info = {
     "created": True,
+    "document_handle": handle,
+    "acted_on": {"name": new_name, "document_id": safe(lambda: doc.dataFile.id),
+                 "document_handle": handle},
     "document_name": new_name,
     "is_active": is_active,
     "is_saved": safe(lambda: doc.isSaved),
-    "note": ("New blank design is now the active document (unsaved - it has no cloud id "
-        "yet). Save it with doc_save_as, or start modelling with sketch_create."),
+    "note": ("New blank design created. Use document_handle with doc_activate/expect_document; "
+             "it expires on close/add-in reload. Check is_active before modelling; save with doc_save_as."),
     }
     return ok(info)
 

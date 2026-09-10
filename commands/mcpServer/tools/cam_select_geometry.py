@@ -461,7 +461,7 @@ def _rail_groups(name, entities, knobs):
     return [[e] for e in entities], rail_knobs
 
 
-def _apply_curve(op, selection, entities, knobs, factor, units, extra):
+def _apply_curve(op, selection, entities, knobs, factor, units, extra, explicit_groups=None):
     """(record, None) or (None, error) - build the CurveSelection(s) of this kind from `entities`,
     apply them, read them back, and engage the drive parameter's mode in the same call."""
     name, p = _curve_param(op)
@@ -490,7 +490,8 @@ def _apply_curve(op, selection, entities, knobs, factor, units, extra):
     cs = safe(lambda: pv.getCurveSelections())
     if cs is None:
         return None, "Could not read the operation's curve selections."
-    groups, knobs = _rail_groups(name, entities, knobs)
+    groups, knobs = (_rail_groups(name, entities, knobs) if explicit_groups is None
+                     else (explicit_groups, knobs))
     # Ahead of every line below: getCurveSelections() hands back a DETACHED collection, so nothing
     # reaches the operation until applyCurveSelections and a refusal here performs no work.
     if name in _RAIL_PAIR_PARAMS and len(groups) < _RAILS_REQUIRED:
@@ -519,6 +520,12 @@ def _apply_curve(op, selection, entities, knobs, factor, units, extra):
     record, ferr = _read_back(applied, selection)
     if ferr:
         return record, ferr
+    if explicit_groups is not None and record.get("selections") != len(explicit_groups):
+        return record, (f"Requested {len(explicit_groups)} chain groups but read back "
+                        f"{record.get('selections')} selections. Selection changes remain; inspect "
+                        "the operation before retrying.")
+    if explicit_groups is not None:
+        extra["chain_groups_read"] = record["selections"]
     if name in _RAIL_PAIR_PARAMS:
         # The order the selections were built in is the order the references arrived in, and it is
         # published because getting it wrong fails SILENTLY - an upper-first pair generates valid and
@@ -793,11 +800,27 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
             surface_target: str = None,
             top_mode: str = None, top_offset: str = None,
             bottom_mode: str = None, bottom_offset: str = None,
-            units: str = "mm", generate: bool = True) -> dict:
+            units: str = "mm", generate: bool = True,
+            allow_pocket_recognition: bool = False, chain_groups=None) -> dict:
     """See TOOL_DESCRIPTION."""
     selection = (selection or "").strip().lower()
     if selection not in _SELECTIONS:
         return error(f"selection must be one of {', '.join(_SELECTIONS)}; got '{selection}'.")
+    if selection == _POCKET_RECOGNITION and not allow_pocket_recognition:
+        return error("selection='pocket_recognition' is disabled by default because native pocket "
+                     "recognition can terminate Fusion. Pass allow_pocket_recognition=true for "
+                     "an explicit diagnostic attempt; use selection='pocket' with a floor-face "
+                     "handle or selection='chain' with edge handles instead.")
+
+    if chain_groups is not None:
+        if selection != _CHAIN or handles:
+            return error("chain_groups requires selection='chain' and replaces handles.")
+        if (not isinstance(chain_groups, list) or not chain_groups
+                or any(not isinstance(group, list) or not group
+                       or any(not isinstance(h, str) or not h.strip() for h in group)
+                       for group in chain_groups)):
+            return error("chain_groups must contain nonempty lists of edge handles.")
+        handles = [h for group in chain_groups for h in group]
 
     scope = (component or "").strip()
     knobs = {"is_open": is_open, "reverted": reverted, "pocket_filter": pocket_filter or None,
@@ -833,6 +856,22 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
     if herr:
         return error(herr)
 
+    explicit_groups = None
+    if selection == _CHAIN:
+        curve_name, _parameter = _curve_param(op)
+        if chain_groups is not None:
+            if curve_name in _PER_REFERENCE_PARAMS:
+                return error(f"'{curve_name}' already separates each reference; use handles here.")
+            if len(entities) != sum(len(group) for group in chain_groups):
+                return error("chain_groups did not resolve one edge per handle; refresh the handles.")
+            explicit_groups, offset = [], 0
+            for group in chain_groups:
+                explicit_groups.append(entities[offset:offset + len(group)])
+                offset += len(group)
+        elif len(entities) > 1 and curve_name not in _PER_REFERENCE_PARAMS:
+            return error("Multiple chain handles need chain_groups: one list per contour. "
+                         "Wrap connected edges in one group; separate disconnected contours. "
+                         "No heights or selections were changed.")
     result = {"operation": safe(lambda: op.name), "selection": selection}
 
     # ── every refusal that can be decided WITHOUT touching the operation runs here ──
@@ -875,7 +914,8 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
         count, aerr = _apply_surfaces(op, entities, knobs.get("surface_target"), extra)
         record = None if aerr else {"selections": count}
     else:
-        record, aerr = _apply_curve(op, selection, entities, knobs, factor, units_key, extra)
+        record, aerr = _apply_curve(op, selection, entities, knobs, factor, units_key, extra,
+                                    explicit_groups=explicit_groups)
     if aerr:
         return error(_retained(applied, aerr))
     if not record.get("selections"):
@@ -927,7 +967,7 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
 
 TOOL_DESCRIPTION = (
     "Select the machining geometry on a CAM operation; 'selection' picks the family and fixes "
-    "which input carries it."
+    "which input carries it. Native pocket recognition requires allow_pocket_recognition=true."
 )
 
 tool = (
@@ -939,6 +979,9 @@ tool = (
     .add_input_property(*BODIES.as_property())
     .add_input_property(*SKETCHES.as_property())
     .add_input_property(*_sketch_detail.component_scope("component", narrows="sketches / bodies"))
+    .add_input_property("chain_groups", {"type": "array", "minItems": 1,
+            "items": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+            "description": "Chain only: one edge-handle list per contour; replaces handles."})
     .add_input_property("is_open", {"type": "boolean", "description": "Chain: open profile (default closed)."})
     .add_input_property("reverted", {"type": "boolean"})
     .add_input_property(*LOOP_TYPE.as_property())
@@ -957,6 +1000,8 @@ tool = (
     .add_input_property("bottom_offset", {"type": "string"})
     .add_input_property("generate", {"type": "boolean",
             "description": "Async - read cam_get_status."})
+    .add_input_property("allow_pocket_recognition", {"type": "boolean",
+            "description": "Required for native pocket recognition; defaults false."})
     .strict_schema()
 )
 item = Item.create_tool_item(

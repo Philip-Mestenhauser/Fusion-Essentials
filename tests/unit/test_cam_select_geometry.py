@@ -360,6 +360,19 @@ class TestGuards:
         res = cg.handler(operation="X", selection="chain", handles=["h"])
         assert res["isError"] is True and "cam" in res["message"].lower()
 
+    def test_pocket_recognition_refuses_before_cam_or_native_resolution(self, monkeypatch):
+        touched = []
+        monkeypatch.setattr(cg, "get_cam",
+                            lambda: touched.append("get_cam") or (None, "unexpected CAM read"))
+        monkeypatch.setattr(cg, "_resolve_geometry",
+                            lambda *args: touched.append("resolve_geometry") or ([], None))
+        res = cg.handler(operation="Adaptive1", selection="pocket_recognition",
+                         bodies=["Carrier"], generate=False)
+        assert res["isError"] is True
+        assert "allow_pocket_recognition=true" in res["message"]
+        assert "floor-face" in res["message"] and "edge handles" in res["message"]
+        assert touched == []
+
     def test_op_not_found(self, monkeypatch):
         cam = _CAM([_Setup([_curve_op("A")])])
         _install(monkeypatch, cam, [_Edge()])
@@ -417,7 +430,7 @@ class TestCurveSelection:
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Edge(), _Edge(), _Edge(), _Edge()])
         out = _payload(cg.handler(operation="2D Contour1", selection="chain",
-                                  handles=["a", "b", "c", "d"], is_open=True, reverted=True,
+                                  chain_groups=[["a", "b", "c", "d"]], is_open=True, reverted=True,
                                   generate=False))
         pv = op.parameters.itemByName("contours").value
         sel = pv.getCurveSelections().item(0)
@@ -549,7 +562,7 @@ class TestBodySelections:
         cam = _CAM([_Setup([op])])
         _install_bodies(monkeypatch, cam, [_Body("Carrier")])
         cg.handler(operation="Adaptive1", selection="pocket_recognition", bodies=["Carrier"],
-                   generate=False)
+                   allow_pocket_recognition=True, generate=False)
         assert _selection_of(op).kind == "pocket_recognition"
 
 
@@ -615,7 +628,7 @@ class TestBodySelectionComponentScope:
         cam = _CAM([_Setup([op])])
         monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
         res = cg.handler(operation="Adaptive1", selection="pocket_recognition", bodies=["Body1"],
-                         component="Bracket", generate=False)
+                         component="Bracket", allow_pocket_recognition=True, generate=False)
         assert res["isError"] is False
         assert _selection_of(op).inputGeometry == [proxy]
 
@@ -663,7 +676,8 @@ class TestPocketFilter:
         cam = _CAM([_Setup([op])])
         _install_bodies(monkeypatch, cam, [_Body("Carrier")])
         res = cg.handler(operation="Adaptive1", selection="pocket_recognition", bodies=["Carrier"],
-                         pocket_filter=flt, units=units, generate=False)
+                         pocket_filter=flt, units=units, allow_pocket_recognition=True,
+                         generate=False)
         return op, res
 
     def test_min_hole_diameter_without_holes_is_refused(self, monkeypatch):
@@ -723,7 +737,8 @@ class TestPocketFilter:
             return sel
         pv._cs._make = _deaf
         res = cg.handler(operation="Adaptive1", selection="pocket_recognition", bodies=["Carrier"],
-                         pocket_filter={"holes": True, "min_hole_diameter": 2.5}, generate=False)
+                         pocket_filter={"holes": True, "min_hole_diameter": 2.5},
+                         allow_pocket_recognition=True, generate=False)
         assert res["isError"] is True and "min_hole_diameter" in res["message"]
         assert pv.applied == 0
 
@@ -740,7 +755,8 @@ class TestPocketFilter:
             return sel
         pv._cs._make = _clamping
         res = cg.handler(operation="Adaptive1", selection="pocket_recognition", bodies=["Carrier"],
-                         pocket_filter={"min_depth": 1.0}, units="in", generate=False)
+                         pocket_filter={"min_depth": 1.0}, units="in",
+                         allow_pocket_recognition=True, generate=False)
         assert res["isError"] is True and "min_depth" in res["message"]
         assert "reads back 2.0 in" in res["message"]      # 5.08 cm stated in the caller's inches
         assert "5.08" not in res["message"]
@@ -976,7 +992,7 @@ class TestSelectedIdentityIsPublished:
         op = _curve_op()
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Edge(), _Edge()])
-        out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["a", "b"],
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain", chain_groups=[["a", "b"]],
                                   generate=False))
         assert out["selections"] == 1 and "selected" not in out
 
@@ -1968,7 +1984,7 @@ class TestBoundaryEngage:
         op = _boundary_op()
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Edge(), _Edge()])
-        out = _payload(cg.handler(operation="Parallel1", selection="chain", handles=["a", "b"],
+        out = _payload(cg.handler(operation="Parallel1", selection="chain", chain_groups=[["a", "b"]],
                                   generate=False))
         # boundaryMode is flipped off its inert default in the same call
         assert cg.unquote_expression(op.parameters.itemByName("boundaryMode").expression) == "selection"
@@ -2237,7 +2253,7 @@ class TestDriveParamRouting:
         op = _deburr_op()
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Edge(), _Edge()])
-        out = _payload(cg.handler(operation="Deburr1", selection="chain", handles=["a", "b"],
+        out = _payload(cg.handler(operation="Deburr1", selection="chain", chain_groups=[["a", "b"]],
                                   generate=False))
         assert _selection_on(op, "edgeSel").count == 1
         assert _selection_on(op, "machiningBoundarySel").count == 0
@@ -2451,7 +2467,7 @@ class TestSwarfRailPair:
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Edge(), _Edge(), _Edge(), _Edge()])
         out = _payload(cg.handler(operation="2D Contour1", selection="chain",
-                                  handles=["a", "b", "c", "d"], generate=False))
+                                  chain_groups=[["a", "b", "c", "d"]], generate=False))
         cs = op.parameters.itemByName("contours").value.getCurveSelections()
         assert cs.count == 1 and len(cs.item(0).inputGeometry) == 4
         assert out["selections"] == 1 and "rails_open" not in out
@@ -2943,3 +2959,50 @@ class TestSurfaceSelection:
         assert cg.unquote_expression(
             op.parameters.itemByName("boundaryMode").expression) == "automatic"
         assert "boundary_engaged" not in out
+
+
+class TestExplicitChainGroups:
+    def test_separate_contours_reach_apply_as_distinct_selections(self, monkeypatch):
+        op = _curve_op()
+        edges = [_Edge(), _Edge(), _Edge()]
+        _install(monkeypatch, _CAM([_Setup([op])]), edges)
+        pv = op.parameters.itemByName("contours").value
+        applied = []
+        original = pv.applyCurveSelections
+        def apply(cs):
+            applied.extend([list(cs.item(i).inputGeometry) for i in range(cs.count)])
+            original(cs)
+        monkeypatch.setattr(pv, "applyCurveSelections", apply)
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain",
+                                  chain_groups=[["a", "b"], ["c"]], generate=False))
+        assert applied == [edges[:2], edges[2:]]
+        assert out["chain_groups_read"] == 2
+
+    def test_flat_multiple_edges_refuse_before_height_or_selection_changes(self, monkeypatch):
+        op = _curve_op()
+        _install(monkeypatch, _CAM([_Setup([op])]), [_Edge(), _Edge()])
+        def forbidden(*_args):
+            raise AssertionError("height mutation")
+        monkeypatch.setattr(cg, "_set_height", forbidden)
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["a", "b"],
+                         bottom_offset="99 mm", generate=False)
+        assert res["isError"] is True and "chain_groups" in res["message"]
+        assert op.parameters.itemByName("contours").value.applied == 0
+
+    def test_lost_group_cannot_report_success(self, monkeypatch):
+        op = _curve_op()
+        _install(monkeypatch, _CAM([_Setup([op])]), [_Edge(), _Edge()])
+        pv = op.parameters.itemByName("contours").value
+        def lose_group(cs):
+            cs._items.pop()
+            pv._cs = cs
+        monkeypatch.setattr(pv, "applyCurveSelections", lose_group)
+        res = cg.handler(operation="2D Contour1", selection="chain",
+                         chain_groups=[["a"], ["b"]], generate=False)
+        assert res["isError"] is True and "read back 1" in res["message"]
+        assert "changes remain" in res["message"]
+
+    @pytest.mark.parametrize("groups", [[], [[]], ["a"], [[None]]])
+    def test_invalid_groups_refuse(self, groups):
+        res = cg.handler(operation="X", selection="chain", chain_groups=groups)
+        assert res["isError"] is True and "chain_groups" in res["message"]

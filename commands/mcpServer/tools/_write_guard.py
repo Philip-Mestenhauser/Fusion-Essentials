@@ -9,6 +9,7 @@ Main-thread tools only - the identity read touches adsk. document_key answers th
 question for a STORE that outlives one MCP call."""
 
 import json
+import uuid
 
 import adsk.core
 
@@ -17,11 +18,9 @@ from . import _common
 app = adsk.core.Application.get()
 
 MAP_BLURB = (
-    "_active_identity - the ONE active-document identity read (name, urn); one_open_document - "
-    "whether several open-document matches are really ONE document; document_key - the key a "
-    "store outliving one MCP call remembers a document by (data-file id, else a per-INSTANCE "
-    "token matched by handle equality, never by name); prune_closed_documents + on_key_evicted/"
-    "on_key_renamed - eviction and its two hooks")
+    "_active_identity + one_open_document - document identity reads; document_key - store key; "
+    "document_handle + resolve_document_handle - exact session addresses until close/reload; "
+    "prune_closed_documents + on_key_evicted/on_key_renamed - store lifecycle hooks")
 
 
 def _active_identity():
@@ -55,6 +54,9 @@ def _active_identity():
 # distinct never-saved documents - it cannot key a document, and it collides silently.
 _UNSAVED_DOC_KEYS = []
 _UNSAVED_DOC_SEQ = 0
+
+# Session handles are opaque and remain tied to the native Document across save and tab movement.
+_SESSION_DOCUMENTS = []
 
 # A LIST of listeners, not a per-call callback: the registry is SHARED, so whichever consumer's
 # read triggers a prune must drop what EVERY consumer parked under that key.
@@ -90,6 +92,52 @@ def prune_closed_documents():
             del _UNSAVED_DOC_KEYS[i]
             for listener in _KEY_EVICTION_LISTENERS:
                 listener(key)
+
+
+def _prune_session_documents():
+    """Drop handles whose native document wrapper is not certainly live."""
+    for i in range(len(_SESSION_DOCUMENTS) - 1, -1, -1):
+        if _common.read_flag(lambda i=i: _SESSION_DOCUMENTS[i][0].isValid) is not True:
+            del _SESSION_DOCUMENTS[i]
+
+
+def document_handle(doc=None):
+    """Return an opaque session handle for a live Document wrapper, minting by native equality."""
+    if doc is None:
+        doc = _common.safe(lambda: app.activeDocument)
+    if doc is None or _common.read_flag(lambda doc=doc: doc.isValid) is not True:
+        return None
+    _prune_session_documents()
+    for known, handle in list(_SESSION_DOCUMENTS):
+        if bool(_common.safe(lambda known=known: known == doc, False)):
+            return handle
+    handle = "session:" + uuid.uuid4().hex
+    _SESSION_DOCUMENTS.append((doc, handle))
+    return handle
+
+
+def resolve_document_handle(handle):
+    """Resolve an opaque session handle, refusing unknown or closed Documents."""
+    if not isinstance(handle, str) or not handle.startswith("session:"):
+        return None
+    for i, (doc, known) in enumerate(list(_SESSION_DOCUMENTS)):
+        if known != handle:
+            continue
+        if _common.read_flag(lambda doc=doc: doc.isValid) is not True:
+            del _SESSION_DOCUMENTS[i]
+            return None
+        return doc
+    return None
+
+
+def is_document_handle(value):
+    """Whether a value uses the opaque session-document handle address form."""
+    return isinstance(value, str) and value.startswith("session:")
+
+
+def active_document_handle():
+    """Return the active document's session handle, or None when its identity is unreadable."""
+    return document_handle()
 
 
 def document_key():
@@ -145,6 +193,23 @@ def _refusal(expect, name, urn):
             % (expect, name)}
 
 
+def _unknown_handle_refusal(expect, name, urn):
+    """Refuse a session handle that no longer resolves, with a usable reacquisition route."""
+    payload = {
+        "blocked_by": ["unknown_document_handle"],
+        "expected": expect,
+        "actual": {"name": name, "document_id": urn},
+        "requires": {"tool": "doc_get",
+                     "result": "open_documents[].document_handle"},
+        "note": ("The expected session document handle is unknown, closed, or expired after "
+                 "reload. Refused WITHOUT writing. Call doc_get and retry with the target row's "
+                 "current document_handle."),
+    }
+    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
+            "isError": True,
+            "message": "unknown_document_handle: %r cannot be resolved; call doc_get" % expect}
+
+
 def _open_documents():
     """Every document open in the session as {name, document_id(URN or None), open_index, is_active},
     a slot that will not read as {name: None, readable: False} (doc_get's convention). Any read
@@ -187,7 +252,7 @@ def _open_documents():
             is_active = bool(d == active)
         except Exception:
             pass
-        out.append({"name": name, "document_id": urn, "open_index": i, "is_active": is_active})
+        out.append({"name": name, "document_id": urn, "document_handle": document_handle(d), "open_index": i, "is_active": is_active})
     return out
 
 
@@ -202,9 +267,10 @@ def _collision_refusal(expect, candidates):
             continue        # one document loaded twice (tab + dependency instance) is ONE candidate
         if cid:
             seen_urns.add(cid)
-        row = {"name": c.get("name"), "document_id": cid}
+        row = {"name": c.get("name"), "document_id": cid,
+               "document_handle": c.get("document_handle")}
         if not cid:
-            row["open_index"] = c.get("open_index")    # unsaved: reachable only by open:N
+            row["open_index"] = c.get("open_index")    # positional fallback
         rows.append(row)
     payload = {
         "blocked_by": ["ambiguous_document_name"],
@@ -212,9 +278,8 @@ def _collision_refusal(expect, candidates):
         "candidates": rows,
         "note": (f"{len(candidates)} open documents share the name '{expect}', so a bare name does not "
                  "identify which one to write - refused WITHOUT writing. Pass expect_document as the "
-                 "lineage URN (the document_id above) to target one exactly. An unsaved candidate has "
-                 "no URN yet - activate it by its open_index (doc_activate open:N) then save it, or "
-                 "omit expect_document to write the active doc regardless."),
+                 "document_handle from doc_get or the lineage URN. Activate that same address first. "
+                 "Session handles expire on close/add-in reload; open_index is positional."),
     }
     return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
             "isError": True, "message": "ambiguous_document_name: %d open docs named '%s' - pass the URN"
@@ -238,6 +303,12 @@ def _document_refusal(expect, name, urn):
     e = (expect or "").strip()
     if not e:
         return None
+    if is_document_handle(e):
+        if resolve_document_handle(e) is None:
+            return _unknown_handle_refusal(expect, name, urn)
+        if active_document_handle() == e:
+            return None
+        return _refusal(expect, name, urn)
     if e == (urn or ""):
         return None                              # exact URN - unambiguous, always wins
     if e != (name or ""):

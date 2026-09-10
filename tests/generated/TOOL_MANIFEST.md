@@ -2,7 +2,7 @@
 
 _Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails the suite if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
-**Tools:** 187  |  **Input-kinds:** 21  |  write-status: `·` read · `✎` write · `⚠` destructive
+**Tools:** 188  |  **Input-kinds:** 21  |  write-status: `·` read · `✎` write · `⚠` destructive
 
 ## Input kinds — reference EXISTING geometry/structure with these (don't hand-roll a name/index)
 
@@ -103,7 +103,7 @@ Produces: feature -> design_delete_feature. |
 Produces: feature, reversed_confirmed. |
 | ✎ | `surface_revolve` | Revolve an open profile into a sheet body; model_revolve makes a solid. |
 | ✎ | `surface_thicken` | Thicken faces into a solid wall. |
-| ✎ | `surface_trim` | Trim an open surface body; the cell(s) not kept are removed. |
+| ✎ | `surface_trim` | Trim one visible open surface body; hide other surface bodies with view_set first. |
 | ✎ | `surface_untrim` | Restore trimmed faces to their natural extent, or remove an internal hole loop.
 Produces: feature, area_after. |
 
@@ -175,7 +175,7 @@ Produces: passed. |
 | ✎ | `cam_post` | Create (or reuse) an NC Program and post it to a G-code / NC file on disk - the final CAM step |
 | ✎ | `cam_reorder` | Reorder a CAM item in the machining sequence: move 'entity' before or after 'reference' (both are names from cam_get / cam_edit_folders) |
 | ✎ | `cam_save_template` | Bundle some of a setup's operations into a NEW toolpath template. |
-| ✎ | `cam_select_geometry` | Select the machining geometry on a CAM operation; 'selection' picks the family and fixes which input carries it. |
+| ✎ | `cam_select_geometry` | Select the machining geometry on a CAM operation; 'selection' picks the family and fixes which input carries it |
 | ✎ | `cam_set_nc_comment` | Set the COMMENT field of the active document's NC programs - what most posts emit near the top of the G-code. |
 | ✎ | `cam_show_toolpath` | Show or hide CAM toolpaths to inspect one operation's path at a time |
 
@@ -270,15 +270,16 @@ Produces: file_path, size_bytes. |
 | ✎ | `drawing_add_sketch` | Draw 2D geometry on a NEW sketch on a sheet of the active 2D drawing document.
 Produces: sketch_name, curves_landed. |
 | ✎ | `drawing_create` | Create a 2D drawing from the active design via Fusion's automatic generator |
-| ✎ | `drawing_dimension` | Auto-dimension one view on the active drawing's active sheet - the API's only route to dimensions.
+| ✎ | `drawing_dimension` | Auto-dimension one view on a named sheet of the active drawing - the API's route to dimensions.
 Produces: document_modified. |
 | ⚠ | `drawing_edit_sheet` | Manage the active 2D drawing's sheets - add, copy, delete, rename, set_size, set_orientation, or tidy_up (lay a sheet's views out again). |
 | ✎ | `drawing_export` | Export the active 2D drawing to a PDF, DXF or DWG file on local disk - open the drawing first (doc_open by file_id).
 Produces: file_path, size_bytes. |
-| · | `drawing_get` | Read the ACTIVE 2D drawing: standard, units, and a sheet listing with per-sheet facts and a 1-based export_index. |
+| · | `drawing_get` | Read the ACTIVE 2D drawing: standard, units, and a sheet listing with per-sheet facts and a 1-based collection_index (export order unavailable). |
+| · | `drawing_get_status` | Poll deferred drawing_create, drawing_update, or drawing_export by caller-known request_key |
 | ✎ | `drawing_insert_image` | Place an image file from local disk onto the active drawing's active sheet.
 Produces: document_modified. |
-| ✎ | `drawing_update` | Refresh the active 2D drawing's out-of-date references to the latest saved source design, regenerating its views |
+| ✎ | `drawing_update` | Refresh stale references in the active 2D drawing from its saved source |
 
 ### param
 
@@ -343,7 +344,7 @@ Produces: handle -> jo... |
 | · | `sys_capability_map` | Start here for help: an overview of every tool FAMILY, its entry tool and tool count, plus each capability name beside the tool whose read answers it |
 | ⚠ | `sys_execute_script` | Run Fusion API Python in the live session; prefer a typed tool (sys_find_tool). |
 | · | `sys_find_tool` | Search this server's tools by keyword when you don't know the name; sys_capability_map lists the families. |
-| · | `sys_get_api_doc` | Regex-search the LIVE Fusion API for classes, methods, properties and enums; use it before a sys_execute_script. |
+| · | `sys_get_api_doc` | Search installed Fusion API declarations and full docs |
 | · | `sys_get_guidance` | Read this server's packaged CAD DESIGN GUIDANCE: no argument gives the index, 'section' its rules, 'recipe' one recipe whole |
 | · | `sys_get_preferences` | Read the APPLICATION's preferences: app.preferences, which belong to no document.
 Produces: preferences -> sys_set_preferences. |

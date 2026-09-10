@@ -33,6 +33,7 @@ from ....lib import fusion360utils as futil
 from ..mcp_primitives.item import Item
 from ..version import __version__
 from .task_manager import TaskManager
+from . import drawing_jobs
 
 # The MCP path served by Fusion's built-in server; we mirror it so clients
 # configured for the well-known endpoint reach us unchanged.
@@ -94,6 +95,14 @@ MAIN_THREAD_TASK_TIMEOUT_S = 30
 START_OK = 'ok'
 START_PORT_IN_USE = 'port_in_use'
 START_ERROR = 'error'
+
+
+class _AfterSendResponse(dict):
+    """A JSON response carrying one transport-local callback after its bytes flush."""
+
+    def __init__(self, payload, after_send):
+        super().__init__(payload)
+        self.after_send = after_send
 
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
@@ -166,7 +175,7 @@ class SimpleMCPServer:
     """Routes MCP JSON-RPC requests to registered tool handlers, and serves a static resource
     catalog the caller built."""
 
-    def __init__(self, name: str = SERVER_NAME, resources=None):
+    def __init__(self, name: str = SERVER_NAME, resources=None, job_store=None):
         self.name = name
         # Session id assigned at initialize and echoed back to the client on every
         # response. Generated lazily so each server instance has a stable id.
@@ -175,6 +184,8 @@ class SimpleMCPServer:
         # tool name -> {prop: enum spec}, precomputed at registration so enum validation is O(1) per arg.
         self._enum_specs: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self.server_info = {"name": name, "version": __version__}
+        self._job_store = job_store
+        self._job_store_lock = threading.Lock()
         # Application-controlled content published over resources/*, built by the caller (entry.py)
         # and handed in whole: this transport serves what it was given and opens no product file of
         # its own. An entry with no address or no body cannot be served, so it is dropped here
@@ -298,14 +309,29 @@ class SimpleMCPServer:
         if validation_error is not None:
             return {"jsonrpc": "2.0", "id": request_id, "result": validation_error}
 
+        execution_arguments = dict(arguments)
+        if item.deferred_capable:
+            deferred = execution_arguments.pop("deferred", False)
+            request_key = execution_arguments.pop("request_key", None)
+            if not isinstance(deferred, bool):
+                result = self._tool_error_result("'deferred' must be true or false.")
+                return {"jsonrpc": "2.0", "id": request_id, "result": result}
+            if request_key is not None and not deferred:
+                result = self._tool_error_result(
+                    "'request_key' is used only with deferred=true.")
+                return {"jsonrpc": "2.0", "id": request_id, "result": result}
+            if deferred:
+                return self._accept_deferred(request_id, tool_name, item, request_key,
+                                             execution_arguments)
+
         futil.log(f"MCP calling tool: {tool_name}")
         try:
             if item.run_on_main_thread:
                 result = await self._execute_on_main_thread(
-                    item.handler, arguments,
+                    item.handler, execution_arguments,
                     enforce_timeout=item.enforce_timeout)
             else:
-                result = item.handler(**arguments)
+                result = item.handler(**execution_arguments)
             return {"jsonrpc": "2.0", "id": request_id, "result": result}
         except Exception as e:
             # A tool EXECUTION failure (including the curated timeout messages from
@@ -318,6 +344,71 @@ class SimpleMCPServer:
                 "id": request_id,
                 "result": self._tool_error_result(f"Tool '{tool_name}' failed: {e}"),
             }
+
+    def _jobs(self):
+        with self._job_store_lock:
+            if self._job_store is None:
+                self._job_store = drawing_jobs.get_store()
+            return self._job_store
+
+    @staticmethod
+    def _tool_ok_result(payload):
+        return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
+                "isError": False}
+
+    def _accept_deferred(self, request_id, tool_name, item, request_key, arguments):
+        expected = arguments.get("expect_document")
+        if not isinstance(expected, str) or not expected.startswith("session:"):
+            result = self._tool_error_result(
+                "deferred drawing work requires expect_document as a session: handle from doc_get.")
+            return {"jsonrpc": "2.0", "id": request_id, "result": result}
+        record, created, refusal = self._jobs().accept(request_key, tool_name, arguments)
+        if refusal:
+            result = self._tool_error_result(refusal)
+            return {"jsonrpc": "2.0", "id": request_id, "result": result}
+        payload = {
+            "accepted": record["status"] in ("accepted", "queued", "running"),
+            "request_key": record["request_key"],
+            "job_id": record["job_id"], "status": record["status"],
+            "poll": {"tool": "drawing_get_status",
+                     "request_key": record["request_key"]},
+            "note": ("Poll drawing_get_status with the same request_key; retries with identical "
+                     "arguments reuse this job."),
+        }
+        response = {"jsonrpc": "2.0", "id": request_id,
+                    "result": self._tool_ok_result(payload)}
+        if record["status"] != "accepted":
+            return response
+        return _AfterSendResponse(
+            response, lambda: self._dispatch_deferred(record["request_key"], tool_name,
+                                                       item, arguments))
+
+    def _dispatch_deferred(self, request_key, tool_name, item, arguments):
+        store = self._jobs()
+        if not store.claim_dispatch(request_key):
+            return
+
+        def callback(_data):
+            if not store.mark_running(request_key):
+                store.fail_unclaimed(request_key, "running_state_could_not_be_persisted")
+                return
+            try:
+                result = item.handler(**arguments)
+            except Exception as ex:
+                result = self._tool_error_result(f"Tool '{tool_name}' failed: {ex}")
+            store.finish(request_key, result)
+
+        try:
+            if not TaskManager.is_running() and not TaskManager.start():
+                store.fail_unclaimed(request_key, "task_manager_start_failed")
+                return
+            task_id = TaskManager.post(
+                command="deferred_" + tool_name, callback=callback, data={},
+                on_drop=lambda reason: store.fail_unclaimed(request_key, reason))
+            if not task_id:
+                store.fail_unclaimed(request_key, "task_post_failed")
+        except Exception:
+            store.fail_unclaimed(request_key, "task_dispatch_failed")
 
     @staticmethod
     def _tool_error_result(message: str) -> Dict[str, Any]:
@@ -608,6 +699,9 @@ class MCPHandler(BaseHTTPRequestHandler):
 
         # Requests -> single JSON object (we use application/json, not SSE; spec rule 5).
         self._send_json(response)
+        after_send = getattr(response, 'after_send', None)
+        if after_send is not None:
+            after_send()
 
     def do_GET(self):
         if not self._origin_ok():
@@ -653,12 +747,13 @@ class MCPHandler(BaseHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', origin)
         self.end_headers()
         self.wfile.write(body)
+        self.wfile.flush()
 
     def log_message(self, *args):
         pass  # silence default stderr logging
 
 
-def start_server(host: str, port: int, items=None, resources=None):
+def start_server(host: str, port: int, items=None, resources=None, job_store=None):
     """Start the MCP HTTP server on host:port in a background thread.
 
     Returns a dict:
@@ -675,7 +770,7 @@ def start_server(host: str, port: int, items=None, resources=None):
     the user (likely Autodesk's built-in MCP server holding 27182).
     """
     try:
-        mcp = SimpleMCPServer(resources=resources)
+        mcp = SimpleMCPServer(resources=resources, job_store=job_store)
         for item in (items or []):
             mcp.register(item)
 
@@ -688,6 +783,13 @@ def start_server(host: str, port: int, items=None, resources=None):
             if e.errno in (errno.EADDRINUSE, errno.EACCES) or getattr(e, 'winerror', None) == 10048:
                 futil.log(f"MCP server: port {port} already in use (likely Fusion's built-in MCP server)")
                 return {"status": START_PORT_IN_USE, "port": port}
+            raise
+
+        try:
+            current_store = drawing_jobs.start_server_store(store=job_store)
+            mcp._job_store = current_store
+        except Exception:
+            http_server.server_close()
             raise
 
         thread = threading.Thread(

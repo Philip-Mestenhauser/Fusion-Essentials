@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 187  |  **description breadcrumbs:** 265  |  **note/error breadcrumbs:** 470
+**Tools:** 188  |  **description breadcrumbs:** 269  |  **note/error breadcrumbs:** 470
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -15,10 +15,10 @@ close orphans, factor duplicated guards into shared helpers.
 
 ### Orphans (no breadcrumb leads here - reachable only via workspace_orient / search)
 **Read/Acquire (6)** - higher concern, a check-your-work tool nothing points to:
-  `cam_compare_operations`, `cam_inspect_toolpaths`, `drawing_get`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`
+  `cam_compare_operations`, `cam_inspect_toolpaths`, `drawing_get_status`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`
 
-**Edit (56)** - usually leaf actions, scan for genuine gaps:
-  `assembly_edit_contacts`, `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_configure`, `design_remove_feature`, `doc_insert_derive`, `doc_insert_import`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_insert_image`, `drawing_update`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_generate_face_groups`, `mesh_plane_cut`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_sweep`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
+**Edit (55)** - usually leaf actions, scan for genuine gaps:
+  `assembly_edit_contacts`, `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_configure`, `design_remove_feature`, `doc_insert_derive`, `doc_insert_import`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_insert_image`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_generate_face_groups`, `mesh_plane_cut`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_sweep`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
 - **50x** across 50 module(s): "No active design. Create or open a document first (see doc_new)."
@@ -38,13 +38,13 @@ close orphans, factor duplicated guards into shared helpers.
 - `doc_new`  <- 82  (desc 0, note 82)
 - `find_geometry`  <- 39  (desc 14, note 25)
 - `design_delete_feature`  <- 37  (desc 16, note 21)
+- `design_get`  <- 35  (desc 9, note 26)
 - `view_screenshot`  <- 34  (desc 5, note 29)
-- `design_get`  <- 33  (desc 8, note 25)
 - `cam_get`  <- 24  (desc 11, note 13)
 - `data_get`  <- 24  (desc 10, note 14)
 - `doc_open`  <- 22  (desc 5, note 17)
-- `sketch_create`  <- 22  (desc 7, note 15)
 - `sketch_get`  <- 22  (desc 5, note 17)
+- `sketch_create`  <- 21  (desc 7, note 14)
 - `model_inspect`  <- 18  (desc 3, note 15)
 - `assembly_get`  <- 16  (desc 3, note 13)
 
@@ -459,9 +459,13 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `cam_edit_operation`
 - Provide 'operation' - the CAM operation name to edit (see cam_get(include=['operations'])).
 - Provide 'parameters' - at least one name=value to set (e.g. {'tool_feedCutting': '3000'}) - or 'preset', a preset on this operation's tool, 'tool_index' (with 'tool_scope=document' or 'tool_library...
+- ' parameters cannot be read before assignment; no write was attempted. Re-read it with cam_get(include=['parameters']).
 - ' has no parameter(s):
 - . cam_get(include=['parameters'], operation=...) lists the rows Fusion SHOWS and counts the rest as hidden_count: a row behind a switch reads isEnabled false and is absent from that list, yet still...
 - parameter(s), each restored expression re-read.
+- ' parameters cannot be read after tool/preset assignment; no explicit parameter write was attempted.
+- ' lost parameter(s) after tool/preset assignment:
+- . No parameter write was attempted.
 
 ### `cam_edit_setup`
 - Setup edited. Existing toolpaths are now OUT OF DATE - regenerate with cam_generate. A WCS bound via 'wcs' is a LIVE reference to the selected geometry or Joint Origin (bound_entities), so the WCS ...
@@ -605,6 +609,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - file(s), nothing reconfigured. 'readiness' carries its health.
 - file(s). 'readiness' carries its health.
 - Provide 'program_name' - the NC Program name or number (some posts require a number).
+- An as-is post uses the program's stored output units; omit 'units' or pass units='document' before posting it unchanged.
 - Provide 'output_folder' - the directory where the NC file(s) will be written.
 - Pass 'scope' or 'setups', not both - 'scope' names ONE setup/folder/operation and 'setups' names the several setups one program holds.
 - No valid toolpaths to post - every operation is out-of-date, errored, or ungenerated. Run cam_generate (in the Manufacture workspace) first. (
@@ -669,9 +674,15 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Selection applied but generation failed to launch:
 - . The selection is saved - fix the cause, then run cam_generate(target='
 - selection must be one of
+- selection='pocket_recognition' is disabled by default because native pocket recognition can terminate Fusion. Pass allow_pocket_recognition=true for an explicit diagnostic attempt; use selection='p...
 - '. Use mm, cm, or in.
 - Selection applied but the operation reports 0 selections - the geometry was rejected. Check the geometry matches the strategy (edges for chain, the pocket floor face for pocket, bodies for silhouet...
+- chain_groups requires selection='chain' and replaces handles.
+- chain_groups must contain nonempty lists of edge handles.
 - No cylinder faces left after the diameter filter.
+- ' already separates each reference; use handles here.
+- chain_groups did not resolve one edge per handle; refresh the handles.
+- Multiple chain handles need chain_groups: one list per contour. Wrap connected edges in one group; separate disconnected contours. No heights or selections were changed.
 
 ### `cam_set_nc_comment`
 - Provide a non-empty 'comment' (and/or 'set_name') - the value(s) to write. Refusing: an empty comment with no name would blank the comment on every matched NC program.
@@ -1240,7 +1251,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `doc_get`
 - No active document. Open or create one first (doc_open / doc_new).
-- active = the focused document (document_id is its lineage URN, for doc_copy/doc_open). open_documents is a SUPERSET of visible tabs - referenced/dependency docs load as real Documents (is_visible=t...
+- active is the focused document; document_id is its cloud lineage URN. document_handle addresses the exact open document, saved or unsaved: use it with doc_activate, doc_close and expect_document. I...
 - numbers_may_lag true: the tip is under
 - s old and these numbers may trail the cloud - re-read; null: its date did not read. A row the collection lists whose flag reads false is is_milestone=true + flag_lagging=true. is_milestone null, mi...
 - The active document has no cloud DataFile (never saved to the cloud); no version history exists. Save it first (doc_save_as).
@@ -1324,7 +1335,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - . (An external reference requires the source and host in the SAME PROJECT - save the host into the source's project, then retry.)
 
 ### `doc_new`
-- New blank design is now the active document (unsaved - it has no cloud id yet). Save it with doc_save_as, or start modelling with sketch_create.
+- New blank design created. Use document_handle with doc_activate/expect_document; it expires on close/add-in reload. Check is_active before modelling; save with doc_save_as.
 - New-document creation returned nothing.
 - Failed to create a new design document:
 
@@ -1455,7 +1466,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Auto-dimensioned one view.
 - The document's modified flag could not be read, so nothing here confirms the dimensioning took.
 - No drawing to dimension: the active document is not a drawing. Open the drawing (doc_open by file_id) and make it active, then retry.
-- The active drawing has no active sheet to dimension.
 - ' has no views to dimension. Drawing views are created by the automatic generator (drawing_create) or in the Fusion UI - the API cannot add one.
 - Provide 'view' - the index of the view to dimension, 0 to
 - is out of range: sheet '
@@ -1478,23 +1488,23 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - The active document is not a drawing, so it has no sheets. Open the drawing (doc_open by file_id) and make it active, then retry.
 - Provide 'sheet_size' - the preset size to give the sheet.
 - Provide 'orientation' - landscape or portrait.
-- Sheet added DIRECTLY AFTER the active sheet, not at the end, inheriting its size and orientation and becoming the ACTIVE sheet: every sheet below moves down one and its export index shifts with it,...
+- Sheet added, inheriting its size and orientation from the ACTIVE sheet. 'sheets' reports collection positions; export/PDF order is unavailable. Export all sheets and inspect the PDF before selectin...
 - The drawing's sheets could not be read - cannot add a sheet.
 - Sheets.add returned nothing - no sheet was added.
 - Sheets.add returned a sheet but the drawing still holds
 - sheet(s) - the add did not take.
 - Fusion refused the sheet add:
 - Sheet.copy returned nothing for '
-- ' - the copy failed, or the drawing is still updating asynchronously. Re-read the drawing and retry.
-- Sheet.copy returned a sheet but the drawing still holds
-- sheet(s) - the copy did not take.
-- Sheet copied - the facts above are read off the COPY, which carries the SOURCE sheet's size, orientation, sketches and tables (not the active sheet's). The copy is the LAST sheet in the drawing and...
+- '; its effect is unverified. The drawing may still be updating asynchronously. Re-read drawing_get before retrying, to avoid a duplicate copy.
+- Sheet.copy returned '
+- ' but the sheet count still reads
+- ); its effect is unverified. Nothing was rolled back. Re-read drawing_get before retrying.
+- Sheet copied; the facts come from the returned copy, which carries the SOURCE sheet's size, orientation, sketches and tables (not the active sheet's). Collection positions are listed; export/PDF or...
 - ' is the only sheet this drawing holds (
 - ) - refusing to delete it. Add a sheet first (action='add'), then delete this one.
 - Fusion refused to delete sheet '
 - ' (deleteMe returned false). The sheet is still there.
-- Fusion accepted the delete (deleteMe returned true), which cannot be undone. The count of
-- above and 'sheets_still_read' beside it are what the drawing still reports inside this call - a drawing delete is not visible in the call that makes it, so neither is a verification and the deleted...
+- Fusion accepted deletion (deleteMe=true); deleted=null until a later call confirms removal. This cannot be undone. The count and 'sheets_still_read' are observations inside this call; neither is a ...
 - Provide 'new_name' - the name to give the sheet.
 - ' but the sheet name could not be read back, so the rename is unverified.
 - The rename did not take - the sheet still reads '
@@ -1537,9 +1547,16 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not create output directory '
 
 ### `drawing_get`
-- export_index is 1-based - the address drawing_export's sheet_range and drawing_edit_sheet take. Sheet width/height are ALWAYS mm; a custom-size sheet reads sheet_size null. include=['views'] adds p...
+- collection_index is 1-based in the native collection; export_index is unknown. Export all sheets and inspect the PDF before choosing a page range. Width/height are mm; custom-size sheets read sheet...
 - Unknown include value(s):
 - The active document is not a 2D drawing. Activate the drawing document first (doc_activate), then read it.
+- The drawing's sheet count could not be read, so sheet name '
+- ' cannot be resolved. Retry drawing_get after the drawing finishes updating.
+
+### `drawing_get_status`
+- This is the stored operation state and raw terminal tool result. It does not add an effect verdict or replay unresolved work.
+- Provide the request_key used for deferred drawing work.
+- No durable drawing job has this request_key.
 
 ### `drawing_insert_image`
 - Image placed on the sheet.
@@ -1565,13 +1582,16 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - 'rotate_deg' must be a number of degrees (got
 
 ### `drawing_update`
-- Refreshed the drawing's out-of-date references to the latest source design (views regenerated; each reference's 'version' now reflects what the views show). The drawing is modified in-session but N...
+- Refresh request completed. 'references' and 'is_up_to_date' are the immediate readback; the write postcondition waits for stale references to settle. document_modified is the post-refresh native fl...
 - reference(s) could not be read back (null rows) - their post-refresh staleness is unknown, so up-to-date is unverified.
 - No drawing to update: the active document is not a drawing. Open the drawing (doc_open by file_id) and make it active, then retry.
 - The drawing's document references could not be read, so its staleness cannot be determined - refusing to refresh blind.
 - Drawing references are already up to date - nothing to refresh. Edit and SAVE the source design first, then this refreshes the drawing's views to match.
 - reference(s) could not be read (null rows) - their staleness is unknown, so up-to-date is unverified. Every readable reference is current; nothing to refresh.
+- The immediate readback still shows
+- stale reference(s); the final verification waits for the refresh to settle.
 - updateAllReferences failed:
+- The immediate reference collection could not be counted, so up-to-date is unverified.
 
 ### `find_geometry`
 - A match on a body that is not visible carries hidden:true.
@@ -2062,7 +2082,6 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Provide a non-zero 'distance' to extrude, or 'to_object' to extrude up to a face.
 - '. Use: new, join, cut, intersect.
 - No active design. Create or open a document first (see doc_new).
-- No sketch to extrude. Create one and draw a closed profile first.
 - profile_index mixes the sketch text '
 - ' with other regions. A sketch text extrudes on its own - pass just '
 - ', and a separate call for the closed regions.
@@ -2075,10 +2094,12 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Profile extruded into a solid. Pair with view_screenshot (iso) to view it.
 - extent='two_side' needs non-zero 'distance' and 'distance2' (one per side).
 - extent='two_side' does not use 'symmetric' - pass equal 'distance' and 'distance2' for a symmetric two-sided extrude, or use extent='distance' with symmetric=true.
-- Use sketch_get or sketch_create.
+- profile_index resolved a profile whose parent sketch could not be read.
+- No sketch to extrude. Create one and draw a closed profile first.
 - Could not start extrude:
 - Could not set extrude extent:
 - 'target_bodies' only applies to cut/join/intersect (a 'new' body has no participants). Remove it, or change the operation.
+- Use sketch_get or sketch_create.
 - taper_deg is not supported with extent=to_object/to_face - a to-entity extrude takes no taper. Use a distance extent, or drop the taper.
 - Fusion refused the to_object extent (setOneSideExtent returned false), so nothing was extruded. Check the target face is reachable from the profile in the extrude direction.
 - Could not scope to target_bodies:
@@ -2343,6 +2364,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Use sketch_get or sketch_create.
 - ' has no closed profile to revolve.
 - out of range - sketch has
+- 'target_bodies' only applies to cut/intersect operations.
 - Could not start revolve:
 - . (The axis must not pass through the profile in a way that self-intersects.)
 - Could not set revolve angle:
@@ -2353,6 +2375,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Fusion refused a two-sided revolve extent (
 - deg), so nothing was revolved.
 - deg, so nothing was revolved.
+- Could not set target_bodies before revolve:
 
 ### `model_scale`
 - Bodies resized about the anchor point, which stays put. Factors are unitless: 2 doubles every dimension and multiplies volume by 8.
@@ -2374,15 +2397,17 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - failed - see 'failed' ('<component>/<body>' names each).
 - No active design with geometry.
 - has no bodies to assign a material to.
-- Could not assign material '
+- Selected material source identity is unavailable (name or id could not be read); refusing mutation. Read design_get(include=['materials']) and retry with a source carrying both fields.
+- No body assignment was verified for material '
 - Empty target: the design's component list did not read, so only the ROOT component's bodies were reached - a child component's bodies keep the material they had.
 
 ### `model_shell`
 - Body hollowed into a shell. Pair with view_section to inspect the wall thickness.
 - No active design. Create or open a document first (see doc_new).
 - (The body could not be hollowed at this thickness.)
-- Shell reported success on body '
-- . Read the body back with model_inspect, or cut a cross-section with view_section, to see what the feature did.
+- Shell returned feature '
+- ', but its effect is unverified:
+- . Nothing was rolled back. Inspect the retained feature with model_inspect and view_section before retrying.
 
 ### `model_split`
 - No active design. Create or open a document first (see doc_new).
@@ -2505,6 +2530,9 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - No active design (open a document with design geometry).
 - Parameter not found: '
 - Could not read user parameters:
+- Could not read model parameters:
+- Could not read a parameter name while classifying model parameters.
+- Could not classify parameter '
 
 ### `param_set`
 - Provide 'name' - the parameter to set.
@@ -2790,7 +2818,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 
 ### `sketch_set_text`
 - and design recomputed so any engraving/emboss that consumes it rebuilt
-- Provide 'text' - the string to display.
+- Provide 'text' or 'parameter' - the string to display or the Text parameter to bind.
 - No active design (open a document with sketch text).
 - '. Use mm, cm, or in.
 - No sketch text matched index
@@ -2965,9 +2993,9 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - The open transaction was cancelled.
 - Trim committed but the surface area did not decrease (
 - cm2 before and after) - no cell was actually removed.
-- Trim aborted: the kept cell(s) total
-- mm2, larger than the target surface's own
-- mm2 - so 'keep larger' latched onto a cell from another surface that overlaps or touches this one (the trim computes cells over every VISIBLE surface the tool crosses, not just the target). HIDE th...
+- Trim aborted: kept area
+- mm2 is larger than target area
+- mm2. HIDE other surfaces with view_set, re-read the target and retry. The transaction was cancelled.
 - . (The trim tool must INTERSECT the surface and divide it.)
 
 ### `surface_untrim`
@@ -2994,12 +3022,14 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Before adding a tool input that REFERENCES existing geometry/profile/body/etc., use one of these _inputs.py kinds (extend the kind if it's close); don't hand-roll a name/index. See CLAUDE.md 'Input...
 
 ### `sys_get_api_doc`
-- Live introspection of the installed Fusion API (adsk.* docstrings/signatures) - always matches this Fusion version. Narrow with 'filter' (e.g. 'adsk.cam' or 'adsk.fusion.Extrude') and pick 'apiCate...
 - Provide 'searchPattern' (a regex matched against API names/docs).
-- apiCategory must be one of: class, member, description, all.
-- No API modules in scope for filter '
-- '. Try 'adsk.core', 'adsk.fusion', 'adsk.cam', 'adsk.drawing', or 'adsk.sim'.
-- Invalid regex 'searchPattern':
+- apiCategory must be one of: class, member, description, all; got
+- No API modules in scope for filter
+- . Use an importable namespace from
+- Declaration search only; runtime behavior and entitlement are not tested. Keep the query and cap unchanged when using next_offset; use next_doc_offset as doc_offset for more text. Documentation mar...
+- Invalid regex 'searchPattern'
+- ' must be a non-negative integer; got
+- 'max_results' must be an integer; got
 
 ### `sys_get_guidance`
 - Ask for one or the other: section='

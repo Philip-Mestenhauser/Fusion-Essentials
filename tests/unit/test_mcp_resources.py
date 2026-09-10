@@ -17,7 +17,6 @@ import json
 import os
 import re
 import sys
-import types
 
 import pytest
 
@@ -383,13 +382,15 @@ def no_transport(mcp, monkeypatch):
     """start_server with its bind and its serving thread replaced - everything else is the real
     function, including the SimpleMCPServer it constructs."""
     monkeypatch.setattr(mcp, "ThreadedHTTPServer", _NoSocketHTTPServer)
-    monkeypatch.setattr(mcp, "threading", types.SimpleNamespace(Thread=_NoThread))
+    monkeypatch.setattr(mcp.threading, "Thread", _NoThread)
+    monkeypatch.setattr(mcp.drawing_jobs, "_DEFAULT_STORE", mcp.drawing_jobs._DEFAULT_STORE)
     return mcp
 
 
 class TestStartServerPublishesTheCatalogItWasHanded:
     def _start(self, mcp, resources_arg):
-        result = mcp.start_server("127.0.0.1", 27182, items=[], resources=resources_arg)
+        result = mcp.start_server(
+            "127.0.0.1", 27182, items=[], resources=resources_arg, job_store=object())
         assert result["status"] == mcp.START_OK, result
         assert result["thread"].started, "the serving thread must still be started"
         return result["mcp"]

@@ -13,6 +13,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _assert
+from . import _common
 from . import _drawing_common
 from . import _outputs
 
@@ -28,23 +29,27 @@ def _reference_state(dd):
     True even while a reference is stale, so it is deliberately not consulted)."""
     refs = safe(lambda: dd.documentReferences)
     if refs is None:
-        return None, [], 0
+        return None, None, None
     out, stale, unread = [], 0, 0
     # Each reference's INDEX is published on the wire beside its staleness, so this stays a
     # positional walk: an unreadable reference HOLDS its slot with a null verdict (dropping it would
     # slide every later index onto the wrong one, and its staleness is unknown, not fresh).
-    count = safe(lambda: refs.count, 0) or 0
+    count = _common.counted(lambda: refs.count)
+    if count is None:
+        return None, None, None
     for i in range(count):
         r = safe(lambda k=i: refs.item(k))
         if r is None:
             unread += 1
             out.append({"index": i, "is_out_of_date": None, "version": None})
             continue
-        ood = safe(lambda rr=r: rr.isOutOfDate)
+        ood = _common.read_flag(lambda rr=r: rr.isOutOfDate)
         ver = safe(lambda rr=r: rr.version)
-        if ood:
+        if ood is None:
+            unread += 1
+        elif ood:
             stale += 1
-        out.append({"index": i, "is_out_of_date": bool(ood), "version": ver})
+        out.append({"index": i, "is_out_of_date": ood, "version": ver})
     return stale, out, unread
 
 
@@ -67,6 +72,7 @@ def handler() -> dict:
             "stale_references_before": 0,
             "is_up_to_date": True if unread_before == 0 else None,
             "references": refs_before,
+            "document_modified": _common.read_flag(lambda: dd.isModified),
             "note": "Drawing references are already up to date - nothing to refresh. Edit and SAVE the "
                     "source design first, then this refreshes the drawing's views to match.",
         }
@@ -85,17 +91,20 @@ def handler() -> dict:
     # updateAllReferences returning true is not proof the stale state cleared; the ReferencesFresh
     # postcondition re-walks the references under its own settle wait. This re-read is one immediate
     # sample taken BEFORE that wait, so a row can still read stale on a refresh that then settles.
-    _stale_after, refs_after, unread_after = _reference_state(dd)
+    stale_after, refs_after, unread_after = _reference_state(dd)
+    modified_after = _common.read_flag(lambda: dd.isModified)
+    immediate_fresh = stale_after == 0 and unread_after == 0
 
     payload = {
         "updated": True,
         "stale_references_before": stale_before,
-        "is_up_to_date": True if not unread_after else None,
+        "is_up_to_date": True if immediate_fresh else None,
         "references": refs_after,
+        "document_modified": modified_after,
         "update_call_result": bool(call_result),
-        "note": ("Refreshed the drawing's out-of-date references to the latest source design (views "
-                 "regenerated; each reference's 'version' now reflects what the views show). The drawing "
-                 "is modified in-session but NOT saved - call doc_save to persist a new version, then "
+        "note": ("Refresh request completed. 'references' and 'is_up_to_date' are the immediate "
+                 "readback; the write postcondition waits for stale references to settle. "
+                 "document_modified is the post-refresh native flag. Call doc_save to persist, then "
                  "drawing_export for the PDF."),
     }
     if unread_after:
@@ -103,12 +112,19 @@ def handler() -> dict:
         payload["note"] = (f"Refreshed, but {unread_after} reference(s) could not be read back "
                            "(null rows) - their post-refresh staleness is unknown, so up-to-date "
                            "is unverified. " + payload["note"])
+    elif stale_after:
+        payload["note"] = (f"The immediate readback still shows {stale_after} stale reference(s); "
+                           "the final verification waits for the refresh to settle. "
+                           + payload["note"])
+    elif stale_after is None:
+        payload["note"] = ("The immediate reference collection could not be counted, so "
+                           "up-to-date is unverified. " + payload["note"])
     return ok(payload)
 
 
 TOOL_DESCRIPTION = (
-    "Refresh the active 2D drawing's out-of-date references to the latest saved source design, "
-    "regenerating its views. Does NOT save - doc_save afterward."
+    "Refresh stale references in the active 2D drawing from its saved source. "
+    "Does not save; call doc_save."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)
@@ -122,7 +138,7 @@ tool = (
 # can run past the server's call timeout for a large drawing, and the reference read-back is the
 # real proof of success.
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
-                             enforce_timeout=False,
+                             enforce_timeout=False, deferred_capable=True,
                              postconditions=[_assert.ReferencesFresh()])
 
 

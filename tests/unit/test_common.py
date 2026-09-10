@@ -202,6 +202,20 @@ class TestPtxyz:
         # bool is an int subclass: True would otherwise scale to a 10.0 mm coordinate.
         assert common.ptxyz(self._Pt(1.0, 2.0, True), 10.0) is None
 
+    def test_scaled_overflow_is_null_for_measure_and_point(self):
+        assert common.measured(lambda: 1e308, scale=10.0) is None
+        assert common.ptxyz(self._Pt(1e308, 0.0, 0.0), 10.0) is None
+
+    def test_nonfinite_component_is_not_json_measurement(self):
+        assert common.ptxyz(self._Pt(float("nan"), 0.0, float("inf")), 10.0) is None
+
+
+class TestMeasured:
+    def test_nonfinite_values_are_unknown_but_zero_is_measured(self):
+        assert common.measured(lambda: float("nan")) is None
+        assert common.measured(lambda: float("inf")) is None
+        assert common.measured(lambda: 0.0) == 0.0
+
 
 class TestResultBodies:
     def _feature(self, bodies):

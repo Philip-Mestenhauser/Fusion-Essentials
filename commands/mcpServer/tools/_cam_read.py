@@ -874,7 +874,7 @@ def _hms(seconds) -> str:
     return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
 
 _NC_PROGRAM_NOTE = (
-    "operation_count is NCProgram.filteredOperations - every operation the program HOLDS; "
+    "operation_count is NCProgram.filteredOperations - unsuppressed operations in scope; "
     "posted_operations counts those reading hasToolpath True. item_count is NCProgram.operations, "
     "the SETUPS/folders it stores. empty_toolpath_count counts held operations that generated and "
     "cut nothing, empty_toolpaths names them, capped; a name several share carries its position in "
@@ -889,9 +889,8 @@ def _held_row_label(name, position):
     return f"{name} (operation {position})" if name else ""
 
 
-# Held vs posted rests on ledger row FILTERED-1 (a SUPPRESSED op is excluded from
-# filteredOperations) and the sweep's cam_post act (1 <= posted_operations <=
-# program_operation_count); no script row can, since a setup-scoped NC program arms a modal dialog.
+# filteredOperations excludes suppressed operations. Posting an unsuppressed operation without
+# a toolpath can still require a modal response; hasToolpath alone does not prove posting completed.
 def _program_held_ops(nc, cam=None) -> dict:
     """{operation_count, posted_operations, toolpath_unread?, empty_toolpath_count, empty_toolpaths?}
     for ONE NC program off filteredOperations; {} where that property does not read. A held list can
@@ -921,6 +920,34 @@ def _program_held_ops(nc, cam=None) -> dict:
     return out
 
 
+def _nc_program_unit_record(params):
+    """Read the optional native NC unit parameter and its own choices, if available."""
+    parameter = safe(lambda: params.itemByName("nc_program_unit"))
+    if parameter is None:
+        return None
+    record = {
+        "expression": safe(lambda: parameter.expression),
+        "value": safe(lambda: parameter.value.value),
+    }
+    value = safe(lambda: parameter.value)
+    choices = None
+    try:
+        getter = getattr(value, "getChoices", None) if value is not None else None
+        if callable(getter):
+            choices = getter()
+    except Exception:
+        choices = None
+    if isinstance(choices, (tuple, list)) and len(choices) == 3 and isinstance(choices[0], bool):
+        if choices[0] is False:
+            record["get_choices"] = {"ok": False}
+        elif (isinstance(choices[1], (tuple, list))
+              and isinstance(choices[2], (tuple, list))
+              and len(choices[1]) == len(choices[2])):
+            record["get_choices"] = {"ok": True, "titles": list(choices[1]),
+                                      "values": list(choices[2])}
+    return record
+
+
 def get_nc_programs_handler() -> dict:
     """The document's NC programs: name, machine, post configuration, operation counts, and the
     post parameters the post exposes."""
@@ -947,6 +974,9 @@ def get_nc_programs_handler() -> dict:
             if items is not None:
                 entry["item_count"] = len(items)
             entry.update(_program_held_ops(nc, cam))
+            unit_record = _nc_program_unit_record(safe(lambda: nc.parameters))
+            if unit_record is not None:
+                entry["nc_program_unit"] = unit_record
             params = safe(lambda: nc.postParameters)
             if params is not None:
                 try:

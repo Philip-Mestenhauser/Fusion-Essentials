@@ -456,6 +456,8 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
     # world with its ctx, nothing is stamped and the state is not advanced.
     develop = bool(run_id and resume and acts_spec is not None)
     state = load_run_state(run_id) if (run_id and resume) else None
+    # This run is bound to one working-tree snapshot; this does not identify loaded Fusion code.
+    pinned_source_hash = source_hash()
     # A run id that already holds state is CONTINUED, never restarted over: starting it again
     # would run the acts with an empty ctx (every saved value gone) and rewrite its progress.
     if run_id and not resume and load_run_state(run_id) is not None:
@@ -467,14 +469,14 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
     print(f"server ok: {health.get('server')} v{health.get('version', '?')}")
     if run_id and resume:
         refusal = (develop_refusal(state, run_id, _document_now()) if develop
-                   else resume_refusal(state, run_id, source_hash(), _document_now()))
+                   else resume_refusal(state, run_id, pinned_source_hash, _document_now()))
         if refusal:
             print("resume refused: " + refusal)
             return 1
         if develop:
             print("development walk of run {0}: the named acts run again against its world with "
                   "its saved ctx - no receipt, state not advanced{1}".format(
-                      run_id, "" if state.get("source_hash") == source_hash()
+                      run_id, "" if state.get("source_hash") == pinned_source_hash
                       else " (the source moved since the run's first chunk)"))
         else:
             print("resuming run {0}: {1} act(s) already done".format(
@@ -543,6 +545,9 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
             if name not in acts_done:
                 acts_done.append(name)
             walked += 1
+            if run_id and not develop and source_hash() != pinned_source_hash:
+                print("run refused: source changed during this run; no state or receipt written")
+                return 1
             continue
         mode, steps = "narrative", narrative
         if pre is not None and fallback is not None and not _precondition_holds(pre):
@@ -586,6 +591,9 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
         walked += 1
         # THE CHUNK BOUNDARY: an act is the unit a resume restarts from, so the state is saved here
         # - after the act's own boundary poll, with everything a later act reads.
+        if not develop and source_hash() != pinned_source_hash:
+            print("run refused: source changed during this run; no state or receipt written")
+            return 1
         if run_id and not develop:
             # The document goes into EVERY boundary save, read once per chunk at the first of them:
             # a chunk killed later still leaves the identity its resume is refused against, and the
@@ -593,7 +601,7 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
             # creates the document.
             document = document or _document_now()
             save_run_state(run_id, {
-                "run": run_id, "source_hash": source_hash(), "acts_done": acts_done,
+                "run": run_id, "source_hash": pinned_source_hash, "acts_done": acts_done,
                 "rows": [list(r) for r in rows], "notes": notes,
                 "act_modes": [list(m) for m in act_modes], "valued": sorted(valued),
                 "parked": parked, "gated": gated, "entitlements": entitlements,
@@ -611,8 +619,14 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
     # THE RELOAD BEAT, after every act: it restarts the server, so no step can be dispatched
     # afterwards and no act can hold it. It appends its own row rather than running through the
     # step engine, because what it has to judge is a reconnect, not one wire call (reload_smoke).
+    if complete and not develop and source_hash() != pinned_source_hash:
+        print("run refused: source changed during this run; no receipt written")
+        return 1
     if complete:
         reload_smoke(rows, notes, valued=valued)
+        if not develop and source_hash() != pinned_source_hash:
+            print("run refused: source changed during reload; no receipt written")
+            return 1
     if keep_open:
         print("\n--keep-open: the story document is left open for inspection.")
 
@@ -689,7 +703,7 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
         if fails:
             print("\nVERIFIED_TOOLS.md NOT rewritten - resolve the FAIL/blocked/pass* steps first.")
         else:
-            src_hash = source_hash()
+            src_hash = pinned_source_hash
             stamp_date = time.strftime("%Y-%m-%d")
             fusion_version = ctx.get("fusion_version", "?")
             # WHAT THIS INVOCATION CONTRIBUTED, beside the stamp: a chunk can complete a run without

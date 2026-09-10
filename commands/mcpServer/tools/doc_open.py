@@ -14,8 +14,9 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import counted, ok, error, safe
+from ._common import counted, ok, error, safe, read_flag
 from ._data_common import _b64url_decode, _urn_candidates, _resolve_data_file
+from . import _write_guard
 
 app = adsk.core.Application.get()
 
@@ -61,6 +62,7 @@ def handler(file_id: str = "", is_cam_template: bool = False,
         return ok({
         "opened": False,
         "refused_api_open": True,
+        "acted_on": None,
         "file_id": raw,
         "note": "This is declared a multi-reference CAM template. Opening it (or even resolving "
         "its references) via the API crashes Fusion, so the API open is refused. Open "
@@ -105,7 +107,7 @@ def handler(file_id: str = "", is_cam_template: bool = False,
     "document_name": safe(lambda: doc.name),
     # EQUALITY, never identity: Document wrappers are not identity-stable (measured live -
     # `is` reads False for the active document itself); `==` compares the underlying handle.
-    "is_active": bool(safe(lambda: app.activeDocument == doc, False)),
+    "is_active": read_flag(lambda: app.activeDocument == doc),
     "is_configured_design": is_configured,
     "open_method": method,
     "resolved_id": resolved,
@@ -119,16 +121,22 @@ def handler(file_id: str = "", is_cam_template: bool = False,
     "documents_loaded": loaded,
     "note": None,
     }
+    # Publish the opened handle, and name it as acted_on only after active-document equality confirms it.
+    info["document_handle"] = _write_guard.document_handle(doc)
+    info["acted_on"] = ({
+        "name": info["document_name"],
+        "document_id": safe(lambda: doc.dataFile.id),
+        "document_handle": info["document_handle"],
+    } if info["is_active"] is True else None)
     if resolved and resolved != raw:
         # Be transparent that we normalized a URL/alternate form to a URN.
         info["input"] = raw
 
     if is_configured:
         info["configured_design_note"] = (
-    "This is a Configured Design. It is now open at its active configuration; read its "
-    "configurations from the open design's configurationTopTable, and switch the active "
-    "one with ConfigurationRow.activate(). OBSERVED ONCE: opening a doc_copy of a "
-    "configured design ended with the Fusion process gone."
+    "This is a Configured Design. It is open at its active configuration. Call "
+    "design_get(include=['configurations']), then design_configure(action='activate', "
+    "name=...) to switch."
         )
 
     # Opening a cloud document is asynchronous, and this handler runs on the same main thread that
@@ -143,6 +151,11 @@ def handler(file_id: str = "", is_cam_template: bool = False,
         parts.append(
         "Document is still loading (open is asynchronous). Call workspace_orient after a "
         "moment to confirm it has become the active document before operating on it."
+        )
+    elif info["is_active"] is None:
+        parts.append(
+        "The active-document check was unreadable, so activation is unconfirmed. Call doc_get or "
+        "workspace_orient before operating on the opened document."
         )
     if parts:
         info["note"] = " ".join(parts)

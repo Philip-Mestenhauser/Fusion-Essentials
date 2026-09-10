@@ -557,27 +557,27 @@ def _iter_sketch_texts(design, only_component=None):
             yield from _texts_in_sketch(sk, comp_name)
 
 
-def handler(text: str = "", sketch_name: str = "", index: int = -1,
+def handler(text: str = None, sketch_name: str = "", index: int = -1,
             create: bool = False, height: float = None, x: float = None, y: float = None,
             units: str = "mm", mode: str = "", path: str = "", above_path: bool = None,
             align: str = "", character_spacing: float = None, angle_deg: float = None,
             flip_h: bool = None, flip_v: bool = None, font_name: str = "",
             component: str = "", parameter: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
-    if text is None:
-        return error("Provide 'text' - the string to display.")
+    bind_to = (parameter or "").strip()
+    if text is None and not bind_to:
+        return error("Provide 'text' or 'parameter' - the string to display or the Text parameter to bind.")
 
     design = _common.design()
     if not design:
         return error("No active design (open a document with sketch text).")
 
-    bind_to = (parameter or "").strip()
     if bind_to:
         if create:
             return error("'parameter' binds an EXISTING sketch text, so it cannot ride a create. "
                          "Create the text with its starting string first, then call again with "
                          f"parameter='{bind_to}' to bind it.")
-        if (text or "").strip():
+        if text:
             return error(f"'text' ('{text}') and parameter='{bind_to}' are two different string "
                          "sources for one text. Pass 'parameter' alone to bind it, or 'text' alone "
                          "to store a literal.")
@@ -794,12 +794,11 @@ TOOL_DESCRIPTION = (
 )
 
 tool = (
-    Tool.create_with_string_input(
+    Tool.create_simple(
         name="sketch_set_text",
         description=TOOL_DESCRIPTION,
-        input_param_name="text",
-        input_param_description="The new string to display.",
-    )
+    ).add_input_property("text", {"type": "string",
+            "description": "The new string to display; omit when binding 'parameter'."})
     .add_input_property("sketch_name", {"type": "string",
             "description": "Omit this AND 'index' to update EVERY sketch text."})
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)

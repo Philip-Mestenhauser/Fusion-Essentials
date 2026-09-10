@@ -950,7 +950,7 @@ tool = (
     .add_input_property("timeline_params", {"type": "boolean",
             "description": "Adds each row's own model parameters."})
     .add_input_property("library", {"type": "string",
-            "description": "One catalog library, by exact name from the census."})
+            "description": "One catalog library, by exact name or id from the census."})
     .add_input_property("name_filter", {"type": "string",
             "description": "Catalog entries or tree TOP-LEVEL nodes containing this."})
     .add_input_property("max_results", {"type": "integer",

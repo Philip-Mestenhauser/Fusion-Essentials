@@ -12,7 +12,7 @@ import json
 import adsk.core
 import adsk.fusion
 
-from ._common import measured, safe
+from ._common import counted, measured, read_flag, safe
 
 app = adsk.core.Application.get()
 
@@ -87,35 +87,49 @@ class ReferencesFresh(Postcondition):
     # DrawingDocument.isUpToDate reads True while a reference is stale, so the per-reference
     # isOutOfDate walk below is the gate instead.
 
-    def _stale_count(self):
+    def _stale_state(self):
+        """Return (known stale count, complete walk)."""
         refs = safe(lambda: app.activeDocument.documentReferences)
         if refs is None:
-            return None
-        count = safe(lambda: refs.count, 0) or 0
-        stale = 0
+            return 0, False
+        count = counted(lambda: refs.count)
+        if count is None:
+            return 0, False
+        stale, complete = 0, True
         for i in range(count):
-            if safe(lambda k=i: refs.item(k).isOutOfDate):
+            ref = safe(lambda k=i: refs.item(k))
+            if ref is None:
+                complete = False
+                continue
+            is_stale = read_flag(lambda ref=ref: ref.isOutOfDate)
+            if is_stale is None:
+                complete = False
+            elif is_stale:
                 stale += 1
-        return stale
+        return stale, complete
 
     def capture(self, kwargs):
-        return self._stale_count()
+        return self._stale_state()
 
     def verify(self, kwargs, payload, before):
         from . import _export
 
         def probe():
-            stale = self._stale_count()
-            # None is an unreadable walk, not a staleness verdict, so it ends the wait too.
-            return stale is None or stale == 0, stale
+            state = self._stale_state()
+            return state[0] == 0, state
 
-        _settled, stale = _export.pump_until(probe, _REFERENCE_SETTLE_S,
+        _settled, state = _export.pump_until(probe, _REFERENCE_SETTLE_S,
                                              _REFERENCE_SETTLE_POLL_SLEEP)
-        if stale is None:
-            return "", {"references_confirmed": False}
+        stale, complete = state
         if stale:
-            return (f"refresh ran but {stale} reference(s) are STILL out of date - the references did "
-                    f"not fully update. The refresh was given {_REFERENCE_SETTLE_S:g}s to settle."), {}
+            if complete:
+                reason = f"{stale} reference(s) are STILL out of date"
+            else:
+                reason = f"at least {stale} known reference(s) are STILL out of date"
+            return (f"refresh ran but {reason} - the references did not fully update. The refresh "
+                    f"was given {_REFERENCE_SETTLE_S:g}s to settle."), {}
+        if not complete:
+            return "", {"references_confirmed": False}
         return "", {"stale_references_after": 0}
 
 
