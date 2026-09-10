@@ -22,12 +22,10 @@ from verify_layout import _DRIFT_CHUNKS, drift_row
 
 
 # --- the SECOND document: what puts doc_activate in the always-on receipt -----------------------
-# doc_new mints an UNSAVED document, which carries no lineage URN and answers to 'Untitled' beside
-# any other - so the 'open:N' index doc_get publishes is the only address that reaches either one.
+# doc_new mints an UNSAVED document with a session handle that addresses it exactly.
 
 def _story_address(p):
-    """The story document's 'open:N' address, with it and the session's document COUNT parked for
-    the rows below, which measure the scratch against both."""
+    """Return the story document's exact handle while recording the open count."""
     _RECALL["open_before"] = p.get("open_count")
     return _home_address(p)
 
@@ -37,7 +35,7 @@ def _scratch_opened_beside_it(p):
     ACTIVE one is the scratch - a new document that replaced the story one would read the same
     count and the same address."""
     rows = [r for r in (p.get("open_documents") or []) if r.get("is_active")]
-    here = _home_address(p) if len(rows) == 1 and _num(rows[0].get("open_index")) else None
+    here = _home_address(p) if len(rows) == 1 else None
     return _measured("the scratch document opened BESIDE the story document",
                      {"open_count": p.get("open_count"), "open_before": _RECALL["open_before"],
                       "scratch": here, "story": _RECALL["story_doc"]},
@@ -50,7 +48,7 @@ def _scratch_gone_story_active(p):
     """doc_get after the scratch is closed: the session is back to the count it opened with, and
     the story document is active at the address it answered to all along."""
     rows = [r for r in (p.get("open_documents") or []) if r.get("is_active")]
-    here = _home_address(p) if len(rows) == 1 and _num(rows[0].get("open_index")) else None
+    here = _home_address(p) if len(rows) == 1 else None
     return _measured("the scratch is closed and the session is back on the story document",
                      {"open_count": p.get("open_count"), "open_before": _RECALL["open_before"],
                       "active": here, "story": _RECALL["story_doc"]},
@@ -59,8 +57,8 @@ def _scratch_gone_story_active(p):
 
 
 # The scratch beat, in the order that leaves nothing behind: read the address, open the second
-# document, switch BOTH ways by index, come home, and close the scratch BY ITS OWN ADDRESS - never
-# whatever is in front, which is what a bare doc_close would take.
+# document, switch both ways by exact handle, come home, and close the scratch by its own handle -
+# never whatever is in front, which is what a bare doc_close would take.
 _SCRATCH_DOCUMENT = [
     ("doc_get", {}, _home_document, ("story_doc", _recall("story_doc", _story_address))),
     ("doc_new", {}, _new_document, None),

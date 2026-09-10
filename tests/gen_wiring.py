@@ -13,10 +13,10 @@ It is the pointer-map counterpart to TOOL_MANIFEST (what tools exist):
     py -3 tests/gen_wiring.py          # writes tests/generated/TOOL_POINTER_MAP.md
     py -3 tests/gen_wiring.py --check  # exit 1 if TOOL_POINTER_MAP.md is stale
 
-The reference edges are read from the CODE (AST), attributed per tool via its handler function, split
-by SURFACE (description = the manual, note/error = the situational tip). sys_capability_map is excluded
-from the "workflow" view - it names every family's entry tool by design, so it is a catalog, not a
-breadcrumb.
+The reference edges are read from CODE (AST), attributed by registered handler, and split by
+SURFACE (description = manual, note/error = situational tip). Static literals from handlers and one
+level of local helper calls. Imported or deeper helpers and assembled messages are not exhaustively
+covered. sys_capability_map is excluded from the "workflow" view - it is a catalog, not a breadcrumb.
 """
 
 import argparse
@@ -336,13 +336,13 @@ def render(data):
         "",
         "## Blindspots to engineer",
         "",
-        "### Dead references (a tip names something that is not a tool - FIX THESE)",
+        "### Dead references (a detected literal tip names something that is not a tool - FIX THESE)",
     ]
     if ghosts:
         for tok in sorted(ghosts):
             L.append(f"- `{tok}(` named by: {', '.join(sorted(ghosts[tok]))}")
     else:
-        L.append("- none - every named breadcrumb resolves to a real tool.")
+        L.append("- none detected in the scanned literals.")
 
     # orphans: no breadcrumb (desc OR note) leads here
     any_in = {n for n in records if combined_in[n] > 0}
@@ -350,7 +350,7 @@ def render(data):
     read_orph = [n for n in orphans if records[n]["readonly"]]
     edit_orph = [n for n in orphans if not records[n]["readonly"]]
     L += ["",
-          "### Orphans (no breadcrumb leads here - reachable only via workspace_orient / search)",
+          "### Orphans (no incoming breadcrumb detected in this map)",
           f"**Read/Acquire ({len(read_orph)})** - higher concern, a check-your-work tool nothing points to:",
           "  " + (", ".join(f"`{n}`" for n in read_orph) or "(none)"),
           f"\n**Edit ({len(edit_orph)})** - usually leaf actions, scan for genuine gaps:",
@@ -374,10 +374,11 @@ def render(data):
 
     # ── the full guidance surface, legible in one place ────────────────────────────────────────────
     smell_total = 0
-    audit = ["", "## The guidance surface (every note the agent can be told)", "",
-             "Every runtime **note/warning** string a tool can return, per tool - the guidance we give,",
-             "in one place, to judge: is it there, consistent, teaching a REAL best-practice, or a stale",
-             "war story? Smells are auto-tagged: `war-story` (narrates history), `cause-guess` (asserts an",
+    audit = ["", "## The detected guidance surface", "",
+             "Static runtime **note/warning** literals per tool, attributed from each registered handler and one",
+             "level of local helper calls. Imported or deeper helpers and assembled messages are not",
+             "exhaustively covered. Use this surface to judge consistency and best-practice guidance.",
+             "Smells are auto-tagged: `war-story` (narrates history), `cause-guess` (asserts an",
              "unverified cause), `hedge` (waffles). (Pure error-validation strings - 'must be a number' -",
              "are omitted; this is the GUIDANCE layer, not input validation.)", ""]
     for n in sorted(records):

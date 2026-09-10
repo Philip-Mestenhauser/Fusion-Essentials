@@ -44,6 +44,10 @@ def _decode(result):
 
 
 class TestActedOnStamp:
+    @pytest.fixture(autouse=True)
+    def healthy_scan(self, monkeypatch):
+        monkeypatch.setattr(wg, "_open_documents", lambda: [{"name": "Bracket", "document_id": "urn:abc"}])
+
     def test_successful_write_is_stamped(self):
         _set_active("Bracket", "urn:lineage:abc")
         h = wg.wrap(lambda **kw: _ok({"created": True}))
@@ -135,6 +139,10 @@ class TestReadStamp:
 
 
 class TestExpectDocumentGuard:
+    @pytest.fixture(autouse=True)
+    def healthy_scan(self, monkeypatch):
+        monkeypatch.setattr(wg, "_open_documents", lambda: [{"name": "Bracket", "document_id": "urn:abc"}])
+
     def test_match_by_name_proceeds(self):
         _set_active("Bracket", "urn:abc")
         called = {"n": 0}
@@ -298,13 +306,18 @@ class TestNameCollisionRefusal:
         assert res["isError"] is True
         assert _decode(res)["blocked_by"] == ["active_document_changed"]
 
-    def test_unreadable_session_degrades_to_the_single_doc_pass(self, monkeypatch):
-        # _open_documents returns [] on any read failure; the guard must not invent a false
-        # ambiguity out of an unreadable session - the name match stands as before.
+    def test_empty_census_refuses_without_calling_handler(self, monkeypatch):
         _set_active("Bracket", "urn:lineage:abc")
         self._docs(monkeypatch, [])
-        out = _decode(wg.wrap(lambda **kw: _ok({"created": True}))(expect_document="Bracket"))
-        assert out["created"] is True
+        called = []
+        result = wg.wrap(lambda **kw: called.append(kw) or _ok({"created": True}))(
+            expect_document="Bracket")
+        assert called == [] and result["isError"] is True
+        payload = _decode(result)
+        assert payload["blocked_by"] == ["document_collection_unreadable"]
+        assert payload["expected"] == "Bracket"
+        assert payload["requires"] == {
+            "tool": "doc_get", "result": "open_documents[].document_handle"}
 
 
 def _FakeDoc(name=None, urn=None, name_raises=False, datafile_raises=False):
@@ -449,14 +462,29 @@ class TestActiveIdentityLiveReads:
         assert out["acted_on"] == {"name": None, "document_id": "urn:lineage:abc"}
 
     def test_unreadable_datafile_keeps_the_name(self, live_app):
-        live_app(active=_FakeDoc("Bracket", "urn:abc", datafile_raises=True), docs=None)
+        active = _FakeDoc("Bracket", "urn:abc", datafile_raises=True)
+        live_app(active=active, docs=_HoledDocuments([active]))
         out = _decode(wg.wrap(lambda **kw: _ok({"created": True}))(expect_document="Bracket"))
-        assert out["created"] is True                        # name still matches; urn degraded to None
+        assert out["created"] is True
         assert out["acted_on"] == {"name": "Bracket", "document_id": None}
 
 
 class TestOpenDocumentsSessionWalk:
     """The REAL session walk behind the name-collision check (the earlier class stubs it)."""
+
+    def test_census_omitting_active_name_refuses_without_calling_handler(self, live_app):
+        live_app(active=_FakeDoc("Bracket", "urn:a"),
+                 docs=_HoledDocuments([_FakeDoc("Other", "urn:o")]))
+        called = []
+        result = wg.wrap(lambda **kw: called.append(kw) or _ok({"created": True}))(
+            expect_document="Bracket")
+        assert called == [] and result["isError"] is True
+        payload = _decode(result)
+        assert payload["blocked_by"] == ["document_collection_unreadable"]
+        assert payload["expected"] == "Bracket"
+        assert payload["actual"] == {"name": "Bracket", "document_id": "urn:a"}
+        assert payload["requires"] == {
+            "tool": "doc_get", "result": "open_documents[].document_handle"}
 
     def test_collision_refusal_lists_live_candidates(self, live_app):
         active = _FakeDoc("Bracket", "urn:lineage:abc")
@@ -471,9 +499,7 @@ class TestOpenDocumentsSessionWalk:
         assert payload["candidates"][1]["open_index"] == 1   # the unsaved twin's session address
 
     def test_unreadable_doc_is_not_fatal_to_the_walk(self, live_app):
-        # A doc that raises on item() (mid-close) names nothing, so it is no collision candidate;
-        # the docs AROUND it are still walked, so the twin at index 2 is still found and the
-        # collision still refuses.
+        # An unreadable item leaves the name census incomplete, so the bare-name write refuses.
         active = _FakeDoc("Bracket", "urn:lineage:abc")
         twin = _FakeDoc("Bracket", None)
         live_app(active=active, docs=_HoledDocuments([active, _FakeDoc("X", "urn:x"), twin],
@@ -481,15 +507,11 @@ class TestOpenDocumentsSessionWalk:
         res = wg.wrap(lambda **kw: _ok({}))(expect_document="Bracket")
         assert res["isError"] is True
         payload = _decode(res)
-        assert payload["blocked_by"] == ["ambiguous_document_name"]
-        assert len(payload["candidates"]) == 2
-        assert payload["candidates"][1]["open_index"] == 2   # true session index, not a renumbering
+        assert payload["blocked_by"] == ["document_collection_unreadable"]
+        assert payload["expected"] == "Bracket"
 
     def test_an_unreadable_slot_is_published_as_the_hole_it_is(self, live_app):
-        # doc_get publishes the same hole row, so the two listings count the session the same way -
-        # a dropped row shows one document fewer than doc_get does. It carries NO open_index: that
-        # index addresses nothing doc_activate/doc_close would accept, so offering it would be a
-        # false address, and no name, so it can never become a collision candidate.
+        # A failed item remains an explicit unreadable row and marks the name census incomplete.
         active = _FakeDoc("Bracket", "urn:a")
         live_app(active=active, docs=_HoledDocuments([active, _FakeDoc("Other", "urn:o")],
                                                broken_indices=(1,)))
@@ -499,25 +521,30 @@ class TestOpenDocumentsSessionWalk:
         assert rows[0]["open_index"] == 0 and rows[0]["is_active"] is True
 
     def test_a_slot_answering_no_document_is_published_the_same_way(self, live_app):
-        # item(i) can ANSWER None rather than raise (a stale proxy); both are the same hole.
+        # item(i) can answer None rather than raise; both forms mark the census incomplete.
         active = _FakeDoc("Bracket", "urn:a")
         live_app(active=active, docs=_HoledDocuments([active, None]))
         assert wg._open_documents()[1] == {"name": None, "readable": False}
 
     def test_a_published_hole_never_becomes_a_name_collision_candidate(self, live_app):
-        # publishing the hole must not invent an ambiguity: the row names nothing, so the one
-        # readable 'Bracket' is still session-unique and the write proceeds.
+        # An unreadable slot leaves document-name uniqueness unproven, so the write refuses.
         active = _FakeDoc("Bracket", "urn:a")
         live_app(active=active, docs=_HoledDocuments([active, _FakeDoc("Bracket", None)],
                                                broken_indices=(1,)))
         out = _decode(wg.wrap(lambda **kw: _ok({"created": True}))(expect_document="Bracket"))
-        assert out["created"] is True
+        assert out["blocked_by"] == ["document_collection_unreadable"]
 
-    def test_doc_with_unreadable_name_does_not_count_toward_collision(self, live_app):
+    def test_doc_with_unreadable_name_refuses_bare_name(self, live_app):
         active = _FakeDoc("Bracket", "urn:lineage:abc")
         live_app(active=active, docs=_HoledDocuments([active, _FakeDoc("Bracket", "urn:z", name_raises=True)]))
         out = _decode(wg.wrap(lambda **kw: _ok({"created": True}))(expect_document="Bracket"))
-        assert out["created"] is True                        # unreadable name != "Bracket" - unique
+        assert out["blocked_by"] == ["document_collection_unreadable"]
+
+    def test_doc_with_name_none_refuses_bare_name(self, live_app):
+        active = _FakeDoc("Bracket", "urn:lineage:abc")
+        live_app(active=active, docs=_HoledDocuments([active, _FakeDoc(None, "urn:z")]))
+        out = _decode(wg.wrap(lambda **kw: _ok({"created": True}))(expect_document="Bracket"))
+        assert out["blocked_by"] == ["document_collection_unreadable"]
 
     def test_candidate_with_unreadable_datafile_is_listed_by_open_index(self, live_app):
         active = _FakeDoc("Bracket", "urn:lineage:abc")
@@ -526,7 +553,7 @@ class TestOpenDocumentsSessionWalk:
         payload = _decode(res)
         assert payload["blocked_by"] == ["ambiguous_document_name"]
         assert payload["candidates"][1]["document_id"] is None
-        assert payload["candidates"][1]["open_index"] == 1   # URN unreadable -> session address instead
+        assert payload["candidates"][1]["open_index"] == 1
 
     def test_walk_marks_exactly_the_active_row(self, live_app):
         active = _FakeDoc("Bracket", "urn:a")
@@ -535,21 +562,26 @@ class TestOpenDocumentsSessionWalk:
         assert [r["is_active"] for r in rows] == [False, True]
         assert [r["open_index"] for r in rows] == [0, 1]
 
-    def test_unreadable_documents_collection_degrades_to_the_name_pass(self, live_app):
+    def test_unreadable_documents_collection_refuses_bare_name(self, live_app):
         live_app(active=_FakeDoc("Bracket", "urn:a"), docs_raises=True)
         out = _decode(wg.wrap(lambda **kw: _ok({"created": True}))(expect_document="Bracket"))
-        assert out["created"] is True                        # no false ambiguity from a dead session read
+        assert out["blocked_by"] == ["document_collection_unreadable"]
 
-    def test_missing_documents_collection_degrades_to_the_name_pass(self, live_app):
+    def test_missing_documents_collection_refuses_bare_name(self, live_app):
         live_app(active=_FakeDoc("Bracket", "urn:a"), docs=None)
         out = _decode(wg.wrap(lambda **kw: _ok({"created": True}))(expect_document="Bracket"))
-        assert out["created"] is True
+        assert out["blocked_by"] == ["document_collection_unreadable"]
 
-    def test_unreadable_count_degrades_to_the_name_pass(self, live_app):
+    def test_unreadable_count_refuses_bare_name(self, live_app):
         live_app(active=_FakeDoc("Bracket", "urn:a"),
                  docs=_HoledDocuments([_FakeDoc("Bracket", "urn:a")], count_raises=True))
         out = _decode(wg.wrap(lambda **kw: _ok({"created": True}))(expect_document="Bracket"))
-        assert out["created"] is True
+        assert out["blocked_by"] == ["document_collection_unreadable"]
+
+    def test_zero_count_refuses_when_active_name_is_known(self, live_app):
+        live_app(active=_FakeDoc("Bracket", "urn:a"), docs=_HoledDocuments([]))
+        out = _decode(wg.wrap(lambda **kw: _ok({"created": True}))(expect_document="Bracket"))
+        assert out["blocked_by"] == ["document_collection_unreadable"]
 
 
 class TestWrapEdges:

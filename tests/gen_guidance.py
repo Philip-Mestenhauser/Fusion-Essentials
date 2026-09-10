@@ -207,10 +207,13 @@ def _scenario_problems(declared, label, known_scenarios):
     if not (isinstance(declared, list) and declared):
         return [f"{label} needs a non-empty 'scenarios' list"]
     problems = []
-    unknown = sorted(s for s in declared if s not in known_scenarios)
+    valid = [s for s in declared if isinstance(s, str) and s.strip()]
+    if len(valid) != len(declared):
+        problems.append(f"{label} 'scenarios' entries must be non-empty id strings")
+    unknown = sorted(s for s in valid if s not in known_scenarios)
     if unknown:
         problems.append(f"{label} declares unknown scenario(s) {unknown}")
-    if declared != sorted(set(declared)):
+    if valid != sorted(set(valid)):
         problems.append(f"{label} 'scenarios' must be sorted and carry no duplicate")
     return problems
 
@@ -224,7 +227,8 @@ def _rule_problems(rule, section_id, known_scenarios, tool_names):
         if field not in rule:
             problems.append(f"{label} is missing '{field}'")
 
-    if isinstance(rule_id, str) and (not rule_id or set(rule_id) - _ID_CHARS):
+    if "id" in rule and (not isinstance(rule_id, str) or not rule_id or
+                         set(rule_id) - _ID_CHARS):
         problems.append(f"{label} id must be lowercase letters, digits and '-'")
 
     for field in ("when", "do", "except"):
@@ -310,7 +314,8 @@ def _recipe_problems(recipe, section_id, known_scenarios, tool_names):
         if field not in recipe:
             problems.append(f"{label} is missing '{field}'")
 
-    if isinstance(recipe_id, str) and (not recipe_id or set(recipe_id) - _ID_CHARS):
+    if "id" in recipe and (not isinstance(recipe_id, str) or not recipe_id or
+                           set(recipe_id) - _ID_CHARS):
         problems.append(f"{label} id must be lowercase letters, digits and '-'")
 
     for field in ("title", "use_when"):
@@ -351,7 +356,10 @@ def validate(doc, tool_names):
         if not (isinstance(doc.get(key), str) and doc[key].strip()):
             problems.append(f"top-level '{key}' must be a non-empty string")
 
-    declared = scenario_ids(doc)
+    raw_scenarios = doc.get("scenarios")
+    declared = scenario_ids(doc) if isinstance(raw_scenarios, list) else []
+    if raw_scenarios is not None and not isinstance(raw_scenarios, list):
+        problems.append("'scenarios' must be a list of id strings")
     if not declared:
         problems.append("'scenarios' must declare at least one scenario")
     if any(not (isinstance(s, str) and s.strip()) for s in declared):
@@ -361,8 +369,11 @@ def validate(doc, tool_names):
                         "deterministic")
     known = {s for s in declared if isinstance(s, str)}
 
-    sections = doc.get("sections") or []
-    present = [s.get("id") for s in sections]
+    raw_sections = doc.get("sections")
+    sections = raw_sections if isinstance(raw_sections, list) else []
+    if raw_sections is not None and not isinstance(raw_sections, list):
+        problems.append("'sections' must be a list of section objects")
+    present = [s.get("id") if isinstance(s, dict) else None for s in sections]
     if present != list(SECTION_IDS):
         problems.append(f"sections must be exactly {list(SECTION_IDS)} in that order, got {present}")
 
@@ -370,13 +381,19 @@ def validate(doc, tool_names):
     recipe_owner = {}
     routed = set()
     for sec in sections:
+        if not isinstance(sec, dict):
+            problems.append("each section must be an object")
+            continue
         section_id = sec.get("id")
         if not (isinstance(sec.get("title"), str) and sec["title"].strip()):
             problems.append(f"section '{section_id}' needs a title")
         if not (isinstance(sec.get("use_when"), str) and sec["use_when"].strip()):
             problems.append(f"section '{section_id}' needs a 'use_when' line saying when an agent "
                             "should read it")
-        section_rules = sec.get("rules") or []
+        raw_rules = sec.get("rules")
+        section_rules = raw_rules if isinstance(raw_rules, list) else []
+        if raw_rules is not None and not isinstance(raw_rules, list):
+            problems.append(f"section '{section_id}' 'rules' must be a list of rule objects")
         if not section_rules:
             problems.append(f"section '{section_id}' has no rules")
         if len(section_rules) > MAX_SECTION_RULES:
@@ -385,6 +402,9 @@ def validate(doc, tool_names):
             problems.append(f"section '{section_id}' holds {len(section_rules)} rules - at most "
                             f"{MAX_SECTION_RULES}, which is all one sys_get_guidance call serves")
         for rule in section_rules:
+            if not isinstance(rule, dict):
+                problems.append(f"section '{section_id}' rules must contain objects")
+                continue
             problems += _rule_problems(rule, section_id, known, tool_names)
             rule_id = rule.get("id")
             if isinstance(rule_id, str):
@@ -396,9 +416,18 @@ def validate(doc, tool_names):
                                     f"'{recipe_owner[rule_id]}' - one id names one record")
                 else:
                     owner[rule_id] = section_id
-            routed.update(s for s in (rule.get("scenarios") or []) if isinstance(s, str))
+            rule_scenarios = rule.get("scenarios")
+            if isinstance(rule_scenarios, list):
+                routed.update(s for s in rule_scenarios if isinstance(s, str))
 
-        section_recipes = sec.get("recipes") or []
+        raw_recipes = sec.get("recipes")
+        if raw_recipes is None:
+            section_recipes = []
+        elif not isinstance(raw_recipes, list):
+            problems.append(f"section '{section_id}' 'recipes' must be a list of recipe objects")
+            section_recipes = []
+        else:
+            section_recipes = raw_recipes
         if section_id == KERNEL and section_recipes:
             problems.append("the kernel carries no recipes - it is what holds in every case, and "
                             "a recipe is a sequence for one situation")
@@ -406,6 +435,9 @@ def validate(doc, tool_names):
             problems.append(f"section '{section_id}' holds {len(section_recipes)} recipes - at "
                             f"most {MAX_RECIPES_PER_SECTION}")
         for recipe in section_recipes:
+            if not isinstance(recipe, dict):
+                problems.append(f"section '{section_id}' recipes must contain objects")
+                continue
             problems += _recipe_problems(recipe, section_id, known, tool_names)
             recipe_id = recipe.get("id")
             if isinstance(recipe_id, str):
@@ -417,17 +449,25 @@ def validate(doc, tool_names):
                                     f"'{owner[recipe_id]}' - one id names one record")
                 else:
                     recipe_owner[recipe_id] = section_id
-            routed.update(s for s in (recipe.get("scenarios") or []) if isinstance(s, str))
+            recipe_scenarios = recipe.get("scenarios")
+            if isinstance(recipe_scenarios, list):
+                routed.update(s for s in recipe_scenarios if isinstance(s, str))
 
     for sec in sections:
-        if sec.get("id") != KERNEL:
+        if not isinstance(sec, dict) or sec.get("id") != KERNEL:
             continue
-        kernel_rules = sec.get("rules") or []
+        kernel_rules = sec.get("rules")
+        if not isinstance(kernel_rules, list):
+            continue
         if len(kernel_rules) > KERNEL_MAX_RULES:
             problems.append(f"the kernel holds {len(kernel_rules)} rules - at most "
                             f"{KERNEL_MAX_RULES}")
         for rule in kernel_rules:
-            if set(rule.get("scenarios") or []) != known:
+            if not isinstance(rule, dict):
+                continue
+            rule_scenarios = rule.get("scenarios")
+            if (isinstance(rule_scenarios, list)
+                    and {s for s in rule_scenarios if isinstance(s, str)} != known):
                 problems.append(f"kernel rule '{rule.get('id')}' must declare every scenario - "
                                 "a rule that does not hold everywhere is a playbook rule")
             if rule.get("example"):
@@ -494,6 +534,7 @@ def main():
     if undeclared:
         print("Undeclared playbook file(s) left in place - delete them:\n  "
               + "\n  ".join(os.path.relpath(p, REPO_ROOT) for p in undeclared), file=sys.stderr)
+        return 1
     return 0
 
 

@@ -554,6 +554,34 @@ class TestRecipeValidationBites:
         _section(doc, "sketch")["use_when"] = "  "
         assert_diagnostic(_problems(doc), "section 'sketch' needs a 'use_when' line")
 
+    @pytest.mark.parametrize("value", [7, {}, {"id": "orphan"}])
+    def test_a_malformed_recipe_container_is_reported(self, value):
+        doc = _doc()
+        _section(doc, "plan")["recipes"] = value
+        assert_diagnostic(_problems(doc), "section 'plan' 'recipes' must be a list")
+
+    def test_a_nonobject_recipe_entry_is_reported(self):
+        doc = _doc()
+        _section(doc, "plan")["recipes"] = [["bad"]]
+        assert_diagnostic(_problems(doc), "section 'plan' recipes must contain objects")
+
+    @pytest.mark.parametrize("missing", [False, True])
+    def test_missing_or_none_recipe_container_remains_optional(self, missing):
+        doc = _doc()
+        if missing:
+            del _section(doc, "plan")["recipes"]
+        else:
+            _section(doc, "plan")["recipes"] = None
+        assert _problems(doc) == []
+
+    @pytest.mark.parametrize("recipe_id", [None, 7, []])
+    def test_a_nonstring_recipe_id_is_reported(self, recipe_id):
+        doc = _doc()
+        recipe = _recipe("temporary", "plan")
+        recipe["id"] = recipe_id
+        _section(doc, "plan")["recipes"] = [recipe]
+        assert_diagnostic(_problems(doc), "id must be lowercase letters, digits and '-'")
+
 
 class TestDocumentLevelBites:
     """The checks above the rule loop: the header fields, the scenario enum itself, and each
@@ -583,6 +611,42 @@ class TestDocumentLevelBites:
         doc = _doc()
         _section(doc, "model")["rules"] = []
         assert_diagnostic(_problems(doc), "section 'model' has no rules")
+
+
+    @pytest.mark.parametrize("value", ["bad", 7])
+    def test_malformed_sections_container_is_reported(self, value):
+        doc = _doc(sections=value)
+        assert_diagnostic(_problems(doc), "'sections' must be a list of section objects")
+
+    def test_malformed_section_and_rule_entries_are_reported(self):
+        doc = _doc(sections=["bad"])
+        assert_diagnostic(_problems(doc), "each section must be an object")
+        doc = _doc()
+        _section(doc, "plan")["rules"] = ["bad"]
+        assert_diagnostic(_problems(doc), "section 'plan' rules must contain objects")
+
+    @pytest.mark.parametrize("section_id, value", [("plan", "bad"), ("kernel", 7)])
+    def test_malformed_rules_container_is_reported(self, section_id, value):
+        doc = _doc()
+        _section(doc, section_id)["rules"] = value
+        assert_diagnostic(_problems(doc), f"section '{section_id}' 'rules' must be a list")
+
+    def test_malformed_scenario_and_rule_ids_are_reported(self):
+        doc = _doc(scenarios=["alpha", ["bad"]])
+        _section(doc, "plan")["rules"][0]["id"] = ["bad"]
+        problems = _problems(doc)
+        assert_diagnostic(problems, "every entry in 'scenarios' must be a non-empty id string")
+        assert_diagnostic(problems, "id must be lowercase letters, digits and '-'")
+
+    @pytest.mark.parametrize("section_id", ["plan", "kernel"])
+    @pytest.mark.parametrize("value, message", [
+        (7, "needs a non-empty 'scenarios' list"),
+        (["alpha", {}], "'scenarios' entries must be non-empty id strings"),
+    ])
+    def test_malformed_rule_scenarios_are_reported(self, section_id, value, message):
+        doc = _doc()
+        _section(doc, section_id)["rules"][0]["scenarios"] = value
+        assert_diagnostic(_problems(doc), f"rule '{section_id}-rule' {message}")
 
 
 class TestSizeCapsBiteAtTheirBoundary:
@@ -821,6 +885,18 @@ class TestCheckDetectsAStalePackage:
             fh.write("## Retired\n")
         assert self._run(monkeypatch, ["--check"]) == 1
         assert "retired.md" in capsys.readouterr().err
+
+    def test_write_reports_a_playbook_the_document_does_not_declare(self, monkeypatch, tmp_path,
+                                                                     capsys):
+        self._elsewhere(monkeypatch, tmp_path)
+        assert self._run(monkeypatch, []) == 0
+        stray = os.path.join(gen_guidance.PLAYBOOK_DIR, "retired.md")
+        with open(stray, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("## Retired\n")
+        assert self._run(monkeypatch, []) == 1
+        assert "retired.md" in capsys.readouterr().err
+        with open(stray, encoding="utf-8") as fh:
+            assert fh.read() == "## Retired\n"
 
     def test_check_reports_a_missing_skill(self, monkeypatch, tmp_path):
         monkeypatch.setattr(gen_guidance, "SKILL_PATH", str(tmp_path / "absent.md"))

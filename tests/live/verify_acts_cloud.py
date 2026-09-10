@@ -703,6 +703,8 @@ _CLOUD_DERIVE = [
               "doc_insert_derive"), None),
     ("doc_close", lambda c: {"name": _ctx_get(c, "derive_urn", "the derive host"),
                              "save_changes": False}, _document_closed, None),
+    ("doc_activate", lambda c: {"name": _ctx_get(c, "source_urn", "the source")},
+     _activated(SOURCE_DOC), None),
     _dwell(6.0),
     ("data_delete_file", lambda c: {"document_id": _ctx_get(c, "derive_urn", "the derive host"),
                                     "confirm_name": DERIVE_DOC}, _file_deleted, None),
@@ -768,6 +770,8 @@ _CLOUD_LINK = [
               "did NOT read as wholly native"), None),
     ("doc_close", lambda c: {"name": _ctx_get(c, "link_urn", "the link assembly"),
                              "save_changes": False}, _document_closed, None),
+    ("doc_activate", lambda c: {"name": _ctx_get(c, "source_urn", "the source")},
+     _activated(SOURCE_DOC), None),
     _dwell(6.0),
     ("data_delete_file", lambda c: {"document_id": _ctx_get(c, "link_urn", "the link assembly"),
                                     "confirm_name": LINK_DOC}, _file_deleted, None),
@@ -863,7 +867,7 @@ _CLOUD_DOC = [
                                     "confirm_name": HOST_DOC}, _file_deleted, None),
     ("data_delete_file", lambda c: {"document_id": _ctx_get(c, "copy_urn", "the copy"),
                                     "confirm_name": COPY_DOC}, _file_deleted, None),
-    ("doc_activate", lambda c: {"name": _ctx_get(c, "home_doc", "the home document's open:N")},
+    ("doc_activate", lambda c: {"name": _ctx_get(c, "home_doc", "the home document")},
      _activated(), None),
 ]
 
@@ -924,6 +928,8 @@ _CLOUD_DRAWING = [
                              "save_changes": False}, _document_closed, None),
     ("doc_close", lambda c: {"name": _ctx_get(c, "source_urn", "the source"),
                              "save_changes": False}, _document_closed, None),
+    ("doc_activate", lambda c: {"name": _ctx_get(c, "home_doc", "the home document")},
+     _activated(), None),
     _dwell(6.0),
     ("data_delete_file", lambda c: {"document_id": _ctx_get(c, "drawing", "the drawing")[0],
                                     "confirm_name": _ctx_get(c, "drawing", "the drawing")[1]},
@@ -941,6 +947,4 @@ _CLOUD_DRAWING = [
     # subfolders, past the 20 s budget, which would red this row for the folder's size).
     ("data_get", {"project": PROJECT, "folder": FOLDER, "recursive": False},
      _files_gone(SOURCE_DOC, COPY_DOC, HOST_DOC, DERIVE_DOC, LINK_DOC), None),
-    ("doc_activate", lambda c: {"name": _ctx_get(c, "home_doc", "the home document's open:N")},
-     _activated(), None),
 ]

@@ -10,10 +10,10 @@ close orphans, factor duplicated guards into shared helpers.
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
-### Dead references (a tip names something that is not a tool - FIX THESE)
-- none - every named breadcrumb resolves to a real tool.
+### Dead references (a detected literal tip names something that is not a tool - FIX THESE)
+- none detected in the scanned literals.
 
-### Orphans (no breadcrumb leads here - reachable only via workspace_orient / search)
+### Orphans (no incoming breadcrumb detected in this map)
 **Read/Acquire (6)** - higher concern, a check-your-work tool nothing points to:
   `cam_compare_operations`, `cam_inspect_toolpaths`, `drawing_get_status`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`
 
@@ -48,11 +48,12 @@ close orphans, factor duplicated guards into shared helpers.
 - `model_inspect`  <- 18  (desc 3, note 15)
 - `assembly_get`  <- 16  (desc 3, note 13)
 
-## The guidance surface (every note the agent can be told)
+## The detected guidance surface
 
-Every runtime **note/warning** string a tool can return, per tool - the guidance we give,
-in one place, to judge: is it there, consistent, teaching a REAL best-practice, or a stale
-war story? Smells are auto-tagged: `war-story` (narrates history), `cause-guess` (asserts an
+Static runtime **note/warning** literals per tool, attributed from each registered handler and one
+level of local helper calls. Imported or deeper helpers and assembled messages are not
+exhaustively covered. Use this surface to judge consistency and best-practice guidance.
+Smells are auto-tagged: `war-story` (narrates history), `cause-guess` (asserts an
 unverified cause), `hedge` (waffles). (Pure error-validation strings - 'must be a number' -
 are omitted; this is the GUIDANCE layer, not input validation.)
 

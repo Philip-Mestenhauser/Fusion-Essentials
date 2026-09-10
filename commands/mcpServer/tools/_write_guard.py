@@ -211,15 +211,13 @@ def _unknown_handle_refusal(expect, name, urn):
 
 
 def _open_documents():
-    """Every document open in the session as {name, document_id(URN or None), open_index, is_active},
-    a slot that will not read as {name: None, readable: False} (doc_get's convention). Any read
-    failure yields an empty list, never a raise."""
+    """Return open-document rows, preserving failed item reads as unreadable rows."""
     out = []
     try:
         docs = app.documents
-        active = app.activeDocument
     except Exception:
         return out
+    active = _common.safe(lambda: app.activeDocument)
     if not docs:
         return out
     try:
@@ -254,6 +252,21 @@ def _open_documents():
             pass
         out.append({"name": name, "document_id": urn, "document_handle": document_handle(d), "open_index": i, "is_active": is_active})
     return out
+
+
+def _scan_refusal(expect, name, urn):
+    """Refuse a bare-name write when the open-document uniqueness scan is incomplete."""
+    payload = {
+        "blocked_by": ["document_collection_unreadable"],
+        "expected": expect,
+        "actual": {"name": name, "document_id": urn},
+        "requires": {"tool": "doc_get", "result": "open_documents[].document_handle"},
+        "note": ("Open-document names did not establish a unique target for expect_document %r. "
+                 "Refused WITHOUT writing. Call doc_get and retry with the exact document_handle." % expect),
+    }
+    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
+            "isError": True,
+            "message": "document_collection_unreadable: pass expect_document as an exact handle"}
 
 
 def _collision_refusal(expect, candidates):
@@ -314,7 +327,12 @@ def _document_refusal(expect, name, urn):
     if e != (name or ""):
         return _refusal(expect, name, urn)       # the active doc is simply not the target
     # e matches the ACTIVE doc's NAME - a match only if that name is unique across the open session.
-    same = [d for d in _open_documents() if d.get("name") == e]
+    scan = _open_documents()
+    if any(not isinstance(d.get("name"), str) or not d["name"] for d in scan):
+        return _scan_refusal(expect, name, urn)
+    same = [d for d in scan if d.get("name") == e]
+    if not same:
+        return _scan_refusal(expect, name, urn)
     if len(same) > 1:
         # One document listed twice (tab + dependency instance) is not an ambiguity: when every
         # candidate is that one document AND it is the active one, the write lands where meant.

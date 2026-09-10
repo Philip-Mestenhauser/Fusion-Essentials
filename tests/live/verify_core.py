@@ -168,7 +168,7 @@ def _schema_fingerprint(rows):
     return hashlib.sha256(body.encode("ascii")).hexdigest()
 
 
-def registered_tools(health=None):
+def registered_tools(health=None, include_rows=False):
     out, response_session = _post(
         {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
         with_session=True)
@@ -183,7 +183,8 @@ def registered_tools(health=None):
             sys.exit("Refusing to run: the server session changed between health and tools/list.")
         if _schema_fingerprint(rows) != identity["schema_fingerprint"]:
             sys.exit("Refusing to run: tools/list does not match the attested schema fingerprint.")
-    return sorted(row["name"] for row in rows)
+    names = sorted(row["name"] for row in rows)
+    return (names, tuple(rows)) if include_rows else names
 
 
 # --- the DAG ----------------------------------------------------------------------------------
@@ -1488,28 +1489,32 @@ def _document_closed(p):
 
 
 def _home_document(p):
-    """doc_get on the way in: whatever document the session is ON, and the 'open:N' address that
-    reaches it - what an act that switches away activates back to when it is done.
-
-    Exactly one open row may claim to be active, and it must carry an open_index: an UNSAVED
-    document has no lineage URN and its display name may be one another open document also answers
-    to, so the index is the only address that reaches it. Whether it is SAVED is reported, never
-    asserted - a partial run finds whatever is open."""
+    """Verify doc_get has one active document with an exact session handle."""
     active = p.get("active") or {}
     rows = [r for r in (p.get("open_documents") or []) if r.get("is_active")]
-    return _measured("one active document, reachable by its open:N address",
+    return _measured("one active document with an exact session handle",
                      {"name": active.get("name"), "has_data_file": active.get("has_data_file"),
                       "open_count": p.get("open_count"),
-                      "active_rows": [(r.get("name"), r.get("open_index")) for r in rows]},
+                      "active_rows": [(r.get("name"), r.get("document_handle")) for r in rows]},
                      bool(active.get("name"))
                      and _num(p.get("open_count")) and p["open_count"] >= 1
-                     and len(rows) == 1 and _num(rows[0].get("open_index")))
+                     and len(rows) == 1
+                     and isinstance(rows[0].get("document_handle"), str)
+                     and rows[0]["document_handle"].startswith("session:")
+                     and len(rows[0]["document_handle"]) > len("session:")
+                     and not any(c.isspace() for c in rows[0]["document_handle"])
+                     and rows[0]["document_handle"] == active.get("document_handle"))
 
 
 def _home_address(p):
-    """That document's 'open:N' address off the same read - the one an act comes home to."""
+    """That document's exact session handle off the same active-document read."""
     row = next(r for r in p["open_documents"] if r.get("is_active"))
-    return "open:%d" % row["open_index"]
+    handle = row.get("document_handle")
+    if (not isinstance(handle, str) or not handle.startswith("session:")
+            or len(handle) <= len("session:") or any(c.isspace() for c in handle)
+            or handle != (p.get("active") or {}).get("document_handle")):
+        raise ValueError("active document has no exact session handle")
+    return handle
 
 
 def _activated(name=None):

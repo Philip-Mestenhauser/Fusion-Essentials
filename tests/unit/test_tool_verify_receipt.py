@@ -30,6 +30,26 @@ _ATTESTATION = {"implementation_fingerprint": "a" * 64, "schema_fingerprint": "b
                 "load_id": "fixture-load", "session_id": "fixture-session"}
 
 
+def _registered(names, writes=()):
+    writes = set(writes)
+    rows = [{"name": name, "annotations": {"readOnlyHint": name not in writes},
+             "inputSchema": {"properties": (
+                 {"expect_document": {}} if name in writes else {})}}
+            for name in names]
+    def registered(_health=None, include_rows=False):
+        return (list(names), tuple(rows)) if include_rows else list(names)
+    return registered
+
+
+def _known_wire(tool, args):
+    if tool == "doc_get":
+        return False, {"active": {"name": "Untitled", "document_id": None,
+                                   "document_handle": "session:test"}}
+    if tool == "design_get":
+        return False, {"feature_count": 1}
+    return False, {"n": 1}
+
+
 def _attested_health(identity=None):
     identity = identity or _ATTESTATION
     return {"server": tool_verify.SERVER_NAME, "version": "t",
@@ -284,7 +304,7 @@ class _Harness:
         monkeypatch.setattr(verify_runner, "time", _Clock(elapsed))
         monkeypatch.setattr(verify_runner, "RESULTS_DIR", str(tmp_path))
         monkeypatch.setattr(tool_verify, "health_gate", _attested_health)
-        monkeypatch.setattr(tool_verify, "registered_tools", lambda _health=None: ["a_get", "b_get"])
+        monkeypatch.setattr(tool_verify, "registered_tools", _registered(["a_get", "b_get"]))
         monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: src_hash)
         monkeypatch.setattr(tool_verify, "write_verified", self._write)
         reloaded = dict(_ATTESTATION, load_id="fixture-load-2",
@@ -424,8 +444,11 @@ class TestResumableRun:
                                   "boolean", "integer", "mapping"])
     def test_malformed_equal_handles_are_refused_before_remaining_acts(
             self, monkeypatch, tmp_path, capsys, bad_handle):
-        first = _Harness(monkeypatch, tmp_path, document_handle=bad_handle)
+        first = _Harness(monkeypatch, tmp_path)
         first.run(run_id="r1", acts_spec="ACT A")
+        state = tool_verify.load_run_state("r1")
+        state["document"]["document_handle"] = bad_handle
+        tool_verify.save_run_state("r1", state)
         second = _Harness(monkeypatch, tmp_path, document_handle=bad_handle)
         assert second.run(run_id="r1", resume=True) == 1
         assert "b_get" not in second.tools_called() and not second.wrote
@@ -782,7 +805,7 @@ class TestPredicateKind:
         # The receipt's covered/called split pairs each result row back with the EXPECTATION that
         # judged it by position, so a step that produced no row (or two) would attribute a value
         # predicate to the wrong tool. A blocked step still gets its row.
-        monkeypatch.setattr(tool_verify, "call", lambda tool, args: (False, {"n": 1}))
+        monkeypatch.setattr(tool_verify, "call", _known_wire)
         monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
         steps = [
             ("a_get", {}, "ok", None),
@@ -810,7 +833,7 @@ class TestPredicateKind:
         # The by-position pairing needs these two lists to be the same length, and each decides
         # what yields a row through _leaves_no_row. A second row-less step kind taught to one site
         # alone would shift the pairing again with every other test here still green.
-        monkeypatch.setattr(tool_verify, "call", lambda tool, args: (False, {"n": 1}))
+        monkeypatch.setattr(tool_verify, "call", _known_wire)
         monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
         steps = [
             ("bare_ok", {}, "ok", None),
@@ -829,7 +852,7 @@ class TestPredicateKind:
         # by-position pairing: run over the act's raw list and every expectation after a dwell is
         # credited to a LATER step's tool - a bare "ok" reads as covered and a value predicate is
         # lost. judged_steps is what the pairing runs over.
-        monkeypatch.setattr(tool_verify, "call", lambda tool, args: (False, {"n": 1}))
+        monkeypatch.setattr(tool_verify, "call", _known_wire)
         monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
         steps = [
             ("a_get", {}, "ok", None),
@@ -852,10 +875,10 @@ class TestPredicateKind:
             ledger.update(rows)
             return "VERIFIED_TOOLS.md"
 
-        monkeypatch.setattr(tool_verify, "call", lambda tool, args: (False, {"n": 1}))
+        monkeypatch.setattr(tool_verify, "call", _known_wire)
         monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
         monkeypatch.setattr(tool_verify, "health_gate", _attested_health)
-        monkeypatch.setattr(tool_verify, "registered_tools", lambda _health=None: ["a_get", "b_get", "c_get"])
+        monkeypatch.setattr(tool_verify, "registered_tools", _registered(["a_get", "b_get", "c_get"]))
         monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
         monkeypatch.setattr(tool_verify, "write_verified", fake_write)
         monkeypatch.setattr(tool_verify, "reload_smoke",
@@ -932,7 +955,7 @@ class TestParkedSteps:
         assert tool_verify.predicate_kind(tool_verify.Parked("held", "refused")) == "refusal"
 
     def test_a_parked_step_is_judged_by_the_expectation_inside_it(self, monkeypatch):
-        monkeypatch.setattr(tool_verify, "call", lambda tool, args: (False, {"n": 1}))
+        monkeypatch.setattr(tool_verify, "call", _known_wire)
         monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
         rows = tool_verify.run_steps([
             ("a_get", {}, tool_verify.Parked("held at a bare ok"), None),
@@ -1101,12 +1124,21 @@ class TestCapabilityTier:
                 flags = {n: entitled for n in ("steep_and_shallow", "multiaxis_finishing",
                                                "swarf", "probe_geometry")}
                 return False, {"machining_capabilities": {"observed_generation": flags}}
+            if tool == "doc_get":
+                return False, {"active": {"name": "Untitled", "document_id": None,
+                                           "document_handle": "session:test"}}
+            if tool == "design_get":
+                return False, {"feature_count": 1}
+            if tool == "doc_new":
+                return False, {"created": True, "document_handle": "session:test"}
             return False, {"n": 1}
 
         monkeypatch.setattr(tool_verify, "call", call)
         monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
         monkeypatch.setattr(tool_verify, "health_gate", _attested_health)
-        monkeypatch.setattr(tool_verify, "registered_tools", lambda _health=None: sorted(tools))
+        monkeypatch.setattr(
+            tool_verify, "registered_tools",
+            _registered(sorted(tools), {"doc_new"} if "doc_new" in tools else ()))
         monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
         monkeypatch.setattr(tool_verify, "write_verified", fake_write)
         # the post-run reload beat is another act's business; stubbed so 'seen' is this tier's
@@ -1168,7 +1200,8 @@ class TestCapabilityTier:
         ledger, seen, _modes = self._run(
             monkeypatch, acts, {"ACT E": "machining_extension"}, entitled=True,
             tools=["a_get", "doc_new"])
-        assert seen == ["doc_new", "workspace_orient", "a_get"]
+        assert seen == ["doc_get", "design_get", "doc_new", "doc_get", "design_get",
+                        "workspace_orient", "a_get"]
         assert ledger["a_get"] == "covered"
 
     def test_a_gated_act_polls_nothing(self, monkeypatch):
@@ -1200,7 +1233,7 @@ class TestCapabilityTier:
         monkeypatch.setattr(tool_verify, "call", call)
         monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
         monkeypatch.setattr(tool_verify, "health_gate", _attested_health)
-        monkeypatch.setattr(tool_verify, "registered_tools", lambda _health=None: ["a_get", "workspace_orient"])
+        monkeypatch.setattr(tool_verify, "registered_tools", _registered(["a_get", "workspace_orient"]))
         monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
         ledger = {}
         monkeypatch.setattr(tool_verify, "write_verified",
@@ -1296,6 +1329,163 @@ class TestFacadeLateBinding:
         assert seen == [("sketch_get", {"sketch_name": "X"})]
         monkeypatch.setattr(tool_verify, "call", lambda tool, args: (True, "down"))
         assert tool_verify._precondition_holds(("sketch_get", {})) is False
+
+    def test_run_steps_pins_guarded_writes_and_rejects_authored_divergence(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(tool_verify, "call",
+                            lambda tool, args: (seen.append((tool, dict(args))), (False, {}))[1])
+        pin = {"state": "known", "handle": "session:pinned", "snapshot": {}}
+        rows = tool_verify.run_steps(
+            [("a_get", {}, "ok", None),
+             ("b_get", {"expect_document": "session:authored"}, "ok", None),
+             ("c_get", {"expect_document": None}, "ok", None),
+             ("d_get", {"expect_document": " "}, "ok", None)],
+            {}, sleep_s=0, document_pin=pin,
+            guarded_tools={"a_get", "b_get", "c_get", "d_get"})
+        assert [r[1] for r in rows] == ["pass", "blocked", "pass", "pass"]
+        assert seen == [
+            ("a_get", {"expect_document": "session:pinned"}),
+            ("c_get", {"expect_document": "session:pinned"}),
+            ("d_get", {"expect_document": "session:pinned"}),
+        ]
+
+    def test_deliberate_guard_refusal_preserves_the_retained_pin(self, monkeypatch):
+        seen = []
+
+        def call(tool, args):
+            seen.append((tool, dict(args)))
+            return (True, "document mismatch") if tool == "doc_activate" else (False, {})
+        monkeypatch.setattr(tool_verify, "call", call)
+        pin = {"state": "known", "handle": "session:pinned",
+               "snapshot": {"state": "known", "document_handle": "session:pinned"},
+               "known_documents": {}}
+        rows = tool_verify.run_steps(
+            [("doc_activate", {"name": "missing",
+                               "expect_document": "session:wrong"}, "refused", None),
+             ("a_get", {}, "ok", None)], {}, sleep_s=0, document_pin=pin,
+            guarded_tools={"doc_activate", "a_get"})
+        assert [row[1] for row in rows] == ["expected-refusal", "pass"]
+        assert seen[-1] == ("a_get", {"expect_document": "session:pinned"})
+
+    def test_unreadable_active_document_blocks_doc_new_before_dispatch(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            tool_verify, "call",
+            lambda tool, args: (seen.append((tool, dict(args))), (True, "no active document"))[1])
+        pin = {"state": "unknown", "handle": None, "snapshot": None,
+               "known_documents": {}}
+        rows = tool_verify.run_steps(
+            [("doc_new", {}, "ok", None)], {}, sleep_s=0, document_pin=pin,
+            guarded_tools={"doc_new"})
+        assert rows[0][1] == "blocked"
+        assert seen == [("doc_get", {})]
+
+    def test_failed_initial_pin_blocks_later_doc_get_capture_and_write(self, monkeypatch):
+        judged, captured, seen = [], [], []
+        doc_reads = iter([
+            (True, "active document unreadable"),
+            (False, {"active": {"name": "A", "document_handle": "session:a"}}),
+        ])
+
+        def call(tool, args):
+            seen.append((tool, dict(args)))
+            if tool == "doc_get":
+                return next(doc_reads)
+            return False, {"changed": True}
+
+        monkeypatch.setattr(tool_verify, "call", call)
+        pin = {"state": "unknown", "handle": None, "snapshot": None,
+               "known_documents": {}}
+        rows = tool_verify.run_steps(
+            [("doc_get", {}, lambda p: judged.append(p) or True,
+              ("captured", lambda p: captured.append(p) or "session:a")),
+             ("model_write", {}, "ok", None)],
+            {}, sleep_s=0, document_pin=pin, guarded_tools={"model_write"})
+        assert [row[1] for row in rows] == ["blocked", "blocked"]
+        assert judged == [] and captured == []
+        assert not any(tool == "model_write" for tool, _args in seen)
+
+    def test_mismatch_block_survives_a_later_matching_doc_get(self, monkeypatch):
+        judged, captured, seen = [], [], []
+        doc_reads = iter([
+            (False, {"active": {"name": "B", "document_handle": "session:b"}}),
+            (False, {"active": {"name": "A", "document_handle": "session:a"}}),
+        ])
+
+        def call(tool, args):
+            seen.append((tool, dict(args)))
+            if tool == "doc_get":
+                return next(doc_reads)
+            return False, {"changed": True}
+
+        monkeypatch.setattr(tool_verify, "call", call)
+        pin = {"state": "known", "handle": "session:a",
+               "snapshot": {"state": "known", "document_handle": "session:a"},
+               "known_documents": {"session:a": "session:a"}}
+        rows = tool_verify.run_steps(
+            [("doc_get", {}, lambda p: judged.append(p) or True,
+              ("first", lambda p: captured.append(p) or "session:b")),
+             ("doc_get", {}, lambda p: judged.append(p) or True,
+              ("second", lambda p: captured.append(p) or "session:a")),
+             ("model_write", {}, "ok", None)],
+            {}, sleep_s=0, document_pin=pin, guarded_tools={"model_write"})
+        assert [row[1] for row in rows] == ["blocked", "blocked", "blocked"]
+        assert judged == [] and captured == []
+        assert not any(tool == "model_write" for tool, _args in seen)
+
+    def test_pending_activation_is_settled_before_the_following_write(self, monkeypatch):
+        seen = []
+        active = ["session:pinned"]
+
+        def call(tool, args):
+            seen.append((tool, dict(args)))
+            if tool == "doc_activate":
+                active[0] = "session:target"
+                return False, {"activated": "pending"}
+            if tool == "doc_get":
+                return False, {"active": {"name": "Target", "document_id": "urn:target",
+                                           "document_handle": active[0]}}
+            if tool == "design_get":
+                return False, {"feature_count": 2}
+            return False, {}
+        monkeypatch.setattr(tool_verify, "call", call)
+        pin = {"state": "known", "handle": "session:pinned",
+               "snapshot": {"state": "known", "document_handle": "session:pinned"},
+               "known_documents": {}}
+        rows = tool_verify.run_steps(
+            [("doc_activate", {"name": "session:target"}, "ok", None),
+             ("a_get", {}, "ok", None)], {}, sleep_s=0, document_pin=pin,
+            guarded_tools={"doc_activate", "a_get"})
+        assert [r[1] for r in rows] == ["pass", "pass"]
+        assert seen[0] == ("doc_activate", {
+            "name": "session:target", "expect_document": "session:pinned"})
+        assert seen[-1] == ("a_get", {"expect_document": "session:target"})
+
+    def test_unsettled_activation_blocks_the_following_write(self, monkeypatch):
+        seen = []
+
+        def call(tool, args):
+            seen.append((tool, dict(args)))
+            if tool == "doc_activate":
+                return False, {"activated": "pending"}
+            if tool == "doc_get":
+                return False, {"active": {"name": "Pinned", "document_id": "urn:pinned",
+                                           "document_handle": "session:pinned"}}
+            if tool == "design_get":
+                return False, {"feature_count": 2}
+            return False, {}
+        monkeypatch.setattr(tool_verify, "call", call)
+        monkeypatch.setattr(verify_runner.time, "sleep", lambda _seconds: None)
+        pin = {"state": "known", "handle": "session:pinned",
+               "snapshot": {"state": "known", "document_handle": "session:pinned"},
+               "known_documents": {}}
+        rows = tool_verify.run_steps(
+            [("doc_activate", {"name": "session:target"}, "ok", None),
+             ("a_get", {}, "ok", None)], {}, sleep_s=0, document_pin=pin,
+            guarded_tools={"doc_activate", "a_get"})
+        assert [r[1] for r in rows] == ["blocked", "blocked"]
+        assert [tool for tool, _args in seen].count("doc_activate") == 1
+        assert not any(tool == "a_get" for tool, _args in seen)
 
     def test_shoot_reads_the_stubbed_wire_and_names_the_file(self, monkeypatch, tmp_path):
         seen = []
@@ -1485,7 +1675,14 @@ class TestReloadBeat:
 
         def call(tool, args):
             seen.append(tool)
-            return (False, {"n": 1}) if tool == "a_get" else wire(tool, args)
+            if tool == "a_get":
+                return False, {"n": 1}
+            if tool == "doc_get":
+                return False, {"active": {"name": "Untitled", "document_id": None,
+                                           "document_handle": "session:test"}}
+            if tool == "design_get":
+                return False, {"feature_count": 1}
+            return wire(tool, args)
 
         monkeypatch.setattr(tool_verify, "call", call)
         monkeypatch.setattr(tool_verify, "_server_answers", _health(True, False, True))
@@ -1495,9 +1692,13 @@ class TestReloadBeat:
         monkeypatch.setattr(tool_verify, "health_gate", lambda: next(health_rows))
         registry_health = []
 
-        def registered(health=None):
+        def registered(health=None, include_rows=False):
             registry_health.append(health)
-            return ["a_get", "sys_reload_addin"]
+            names = ["a_get", "sys_reload_addin"]
+            rows = [{"name": name, "annotations": {"readOnlyHint": True},
+                     "inputSchema": {"properties": {"expect_document": {}}}}
+                    for name in names]
+            return (names, tuple(rows)) if include_rows else names
 
         monkeypatch.setattr(tool_verify, "registered_tools", registered)
         monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
@@ -1530,7 +1731,7 @@ class TestReloadBeat:
         monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
         monkeypatch.setattr(tool_verify, "health_gate", _attested_health)
         monkeypatch.setattr(tool_verify, "registered_tools",
-                            lambda _health=None: ["a_get", "sys_reload_addin"])
+                            _registered(["a_get", "sys_reload_addin"]))
         monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
         monkeypatch.setattr(tool_verify, "write_verified", fake_write)
         monkeypatch.setattr(tool_verify, "POLL_AFTER", {})
@@ -1586,10 +1787,10 @@ class TestActSelection:
         exit code)."""
         seen, wrote = [], []
         monkeypatch.setattr(tool_verify, "call",
-                            lambda tool, args: (seen.append(tool), (False, {"n": 1}))[1])
+                            lambda tool, args: (seen.append(tool), _known_wire(tool, args))[1])
         monkeypatch.setattr(tool_verify.time, "sleep", lambda s: None)
         monkeypatch.setattr(tool_verify, "health_gate", _attested_health)
-        monkeypatch.setattr(tool_verify, "registered_tools", lambda _health=None: sorted(tools))
+        monkeypatch.setattr(tool_verify, "registered_tools", _registered(sorted(tools)))
         monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
         monkeypatch.setattr(tool_verify, "write_verified",
                             lambda *a, **k: wrote.append(True) or "VERIFIED_TOOLS.md")
@@ -1636,6 +1837,253 @@ class TestActSelection:
         lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
         assert seen == [] and lines[-1].endswith("; the story document is left open")
 
+
+
+class _DocumentWire:
+    """A session whose exact handles and active tab change like the document tools report."""
+
+    def __init__(self, drift_after_write=False, drift_after_doc_get=None,
+                 invalid_handle_tool=None):
+        self.documents = {
+            "session:home": {"name": "Home", "document_id": "urn:home"},
+            "session:intruder": {"name": "Intruder", "document_id": "urn:intruder"},
+        }
+        self.active = "session:home"
+        self.drift_after_write = drift_after_write
+        self.drift_after_doc_get = drift_after_doc_get
+        self.invalid_handle_tool = invalid_handle_tool
+        self.seen = []
+        self.created = 0
+        self.doc_reads = 0
+
+    def __call__(self, tool, args):
+        self.seen.append((tool, dict(args)))
+        if tool == "doc_get":
+            self.doc_reads += 1
+            active = dict(self.documents[self.active], document_handle=self.active)
+            rows = [{"name": value["name"], "document_handle": handle,
+                     "open_index": index, "is_active": handle == self.active}
+                    for index, (handle, value) in enumerate(self.documents.items())]
+            payload = {"active": active, "open_documents": rows,
+                       "open_count": len(rows), "truncated": False}
+            if self.drift_after_doc_get == self.doc_reads:
+                self.active = "session:intruder"
+            return False, payload
+        if tool == "design_get":
+            return False, {"feature_count": 3}
+        if tool == "doc_new":
+            self.created += 1
+            handle = "session:new%d" % self.created
+            self.documents[handle] = {"name": "Untitled", "document_id": None}
+            self.active = handle
+            payload = {"created": True, "document_handle": handle}
+            if self.invalid_handle_tool == tool:
+                payload.pop("document_handle")
+            return False, payload
+        if tool == "doc_open":
+            self.created += 1
+            handle = "session:open%d" % self.created
+            self.documents[handle] = {"name": "Drawing", "document_id": args["file_id"]}
+            self.active = handle
+            payload = {"opened": True, "document_handle": handle}
+            if self.invalid_handle_tool == tool:
+                payload["document_handle"] = "open:2"
+            return False, payload
+        if tool == "doc_activate":
+            target = args["name"]
+            if target not in self.documents:
+                return True, "not open"
+            self.active = target
+            return False, {"activated": True,
+                           "document_name": self.documents[target]["name"]}
+        if tool == "doc_close":
+            target = args.get("name") or self.active
+            if target not in self.documents:
+                return True, "not open"
+            name = self.documents.pop(target)["name"]
+            if self.active == target:
+                self.active = list(self.documents)[-1]
+            return False, {"closed": [name], "closed_count": 1, "errors": []}
+        if tool in {"doc_new", "doc_open", "doc_activate", "doc_close",
+                    "model_write", "view_set", "view_screenshot"}:
+            expected = args.get("expect_document")
+            if expected and expected != self.active:
+                return True, "document mismatch"
+        if tool == "model_write":
+            if self.drift_after_write:
+                self.active = "session:intruder"
+                self.drift_after_write = False
+            return False, {"changed": True}
+        return False, {"ok": True}
+
+
+def _run_document_program(monkeypatch, tmp_path, wire, acts, writes, run_id=None,
+                          shots_dir=None):
+    wrote = {}
+    names = sorted({step[0] for _name, _pre, narrative, fallback in acts
+                    for step in list(narrative) + list(fallback or [])
+                    if step[0] != tool_verify._DWELL})
+    monkeypatch.setattr(tool_verify, "call", wire)
+    monkeypatch.setattr(verify_runner, "time", _Clock(1.0))
+    monkeypatch.setattr(verify_runner, "RESULTS_DIR", str(tmp_path))
+    monkeypatch.setattr(tool_verify, "health_gate", _attested_health)
+    monkeypatch.setattr(tool_verify, "registered_tools", _registered(names, writes))
+    monkeypatch.setattr(tool_verify, "source_hash", lambda *a, **k: "0" * 64)
+    monkeypatch.setattr(
+        tool_verify, "write_verified",
+        lambda rows, *a, **k: wrote.update(ledger=dict(rows)) or "VERIFIED_TOOLS.md")
+    monkeypatch.setattr(tool_verify, "reload_smoke",
+                        lambda rows, notes, valued=None, **kw: _reloaded_attestation())
+    monkeypatch.setattr(tool_verify, "POLL_AFTER", {})
+    monkeypatch.setattr(tool_verify, "EXCLUDED", {})
+    monkeypatch.setattr(tool_verify, "STORY", {})
+    monkeypatch.setattr(tool_verify, "ACT_NEEDS", {})
+    monkeypatch.setattr(tool_verify, "ACTS", acts)
+    tool_verify._RECALL.clear()
+    code = tool_verify.run(write_json=False, run_id=run_id, shots_dir=shots_dir)
+    return code, wrote
+
+
+class TestWithinActDocumentPin:
+    def test_home_address_requires_the_active_row_exact_handle(self):
+        payload = {
+            "active": {"name": "Home", "document_handle": "session:home"},
+            "open_count": 1,
+            "open_documents": [
+                {"name": "Home", "open_index": 0, "is_active": True,
+                 "document_handle": "session:home"},
+            ],
+        }
+        assert verify_core._home_document(payload) is True
+        assert verify_core._home_address(payload) == "session:home"
+        payload["active"]["document_handle"] = "session:other"
+        with pytest.raises(AssertionError, match="exact session handle"):
+            verify_core._home_document(payload)
+        with pytest.raises(ValueError, match="exact session handle"):
+            verify_core._home_address(payload)
+
+    def test_run_pins_before_the_first_context_read(self, monkeypatch, tmp_path):
+        judged, captured = [], []
+
+        def predicate(payload):
+            judged.append(payload)
+            return True
+
+        def extract(payload):
+            captured.append(payload)
+            return payload["active"]["document_handle"]
+
+        wire = _DocumentWire(drift_after_doc_get=1)
+        acts = [("ACT INITIAL PIN", None, [
+            ("doc_get", {}, predicate, ("captured", extract)),
+            ("model_write", {}, lambda p: p["changed"] is True, None),
+        ], [])]
+        code, wrote = _run_document_program(
+            monkeypatch, tmp_path, wire, acts, {"model_write"}, run_id="initial-drift")
+        assert code == 1 and not wrote
+        assert judged == [] and captured == []
+        assert not any(tool == "model_write" for tool, _args in wire.seen)
+        assert not Path(tool_verify.run_state_path("initial-drift")).exists()
+
+    @pytest.mark.parametrize("transition", ["doc_new", "doc_open"])
+    def test_invalid_transition_handle_blocks_later_write_and_checkpoint(
+            self, monkeypatch, tmp_path, transition):
+        wire = _DocumentWire(invalid_handle_tool=transition)
+        args = {} if transition == "doc_new" else {
+            "file_id": "urn:drawing", "force_api_open": True}
+        key = "created" if transition == "doc_new" else "opened"
+        acts = [("ACT INVALID TRANSITION", None, [
+            (transition, args, lambda p: p[key] is True, None),
+            ("model_write", {}, lambda p: p["changed"] is True, None),
+        ], [])]
+        run_id = "invalid-" + transition
+        code, wrote = _run_document_program(
+            monkeypatch, tmp_path, wire, acts, {transition, "model_write"}, run_id=run_id)
+        assert code == 1 and not wrote
+        assert [tool for tool, _args in wire.seen].count(transition) == 1
+        assert not any(tool == "model_write" for tool, _args in wire.seen)
+        assert not Path(tool_verify.run_state_path(run_id)).exists()
+
+    def test_authored_positive_guard_cannot_bypass_the_run_pin(
+            self, monkeypatch, tmp_path):
+        wire = _DocumentWire()
+        acts = [("ACT AUTHORED GUARD", None, [
+            ("model_write", {"expect_document": "session:intruder"},
+             lambda p: p["changed"] is True, None),
+        ], [])]
+        code, wrote = _run_document_program(
+            monkeypatch, tmp_path, wire, acts, {"model_write"}, run_id="authored")
+        assert code == 1 and not wrote
+        assert not any(tool == "model_write" for tool, _args in wire.seen)
+
+    def test_intruder_doc_get_blocks_save_write_and_checkpoint(self, monkeypatch, tmp_path):
+        judged, captured = [], []
+        wire = _DocumentWire(drift_after_write=True)
+        acts = [("ACT PIN", None, [
+            ("model_write", {}, lambda p: p["changed"] is True, None),
+            ("doc_get", {}, lambda p: judged.append(p) or True,
+             ("captured", lambda p: captured.append(p) or p["active"]["document_handle"])),
+            ("doc_activate", {"name": "session:home"}, "ok", None),
+            ("model_write", {}, lambda p: p["changed"] is True, None),
+        ], [])]
+        code, wrote = _run_document_program(
+            monkeypatch, tmp_path, wire, acts, {"model_write", "doc_activate"},
+            run_id="intruder")
+        calls = [(tool, args) for tool, args in wire.seen if tool == "model_write"]
+        assert code == 1 and not wrote and len(calls) == 1
+        assert calls[0][1]["expect_document"] == "session:home"
+        assert judged == [] and captured == []
+        assert not any(tool == "doc_activate" for tool, _args in wire.seen)
+        assert not Path(tool_verify.run_state_path("intruder")).exists()
+
+    def test_active_closes_recover_only_through_exact_activation(self, monkeypatch, tmp_path):
+        wire = _DocumentWire()
+        wire.documents.pop("session:intruder")
+        acts = [("ACT DOCUMENTS", None, [
+            ("doc_get", {}, lambda p: p["active"]["name"] == "Home",
+             ("home", lambda p: p["active"]["document_handle"])),
+            ("doc_new", {}, lambda p: p["created"] is True, None),
+            ("model_write", {}, lambda p: p["changed"] is True, None),
+            ("doc_get", {}, lambda p: p["active"]["name"] == "Untitled",
+             ("source", lambda p: p["active"]["document_handle"])),
+            ("doc_open", {"file_id": "urn:drawing", "force_api_open": True},
+             lambda p: p["opened"] is True, None),
+            ("view_set", {"focus": ["drawing"]}, "ok", None),
+            ("doc_get", {}, lambda p: p["active"]["name"] == "Drawing",
+             ("drawing", lambda p: p["active"]["document_handle"])),
+            ("doc_activate", lambda c: {"name": c["source"]}, "ok", None),
+            ("doc_activate", {"name": "urn:drawing"}, "ok", None),
+            ("doc_close", lambda c: {"name": c["drawing"]}, "ok", None),
+            ("doc_close", lambda c: {"name": c["source"]}, "ok", None),
+            ("doc_activate", lambda c: {"name": c["home"]}, "ok", None),
+            ("model_write", {}, lambda p: p["changed"] is True, None),
+        ], [])]
+        writes = {"doc_new", "doc_open", "view_set", "doc_close", "doc_activate",
+                  "model_write"}
+        code, wrote = _run_document_program(
+            monkeypatch, tmp_path, wire, acts, writes, run_id="recovery",
+            shots_dir=str(tmp_path / "shots"))
+        assert code == 0 and wrote
+        guarded = [(tool, args["expect_document"]) for tool, args in wire.seen
+                   if tool in writes]
+        assert guarded == [
+            ("doc_new", "session:home"),
+            ("model_write", "session:new1"),
+            ("doc_open", "session:new1"),
+            ("view_set", "session:open2"),
+            ("doc_activate", "session:open2"),
+            ("doc_activate", "session:new1"),
+            ("doc_close", "session:open2"),
+            ("doc_close", "session:new1"),
+            ("doc_activate", "session:home"),
+            ("model_write", "session:home"),
+        ]
+        shots = [args for tool, args in wire.seen if tool == "view_screenshot"]
+        assert shots and shots[0]["expect_document"] == "session:open2"
+        saved = tool_verify.load_run_state("recovery")
+        assert saved["complete"] is True
+        assert saved["document"]["document_handle"] == "session:home"
+        assert saved["document"]["feature_count"] == 3
 
 class TestActualSchemaBinding:
     def test_identity_requires_a_load_id_and_session_id(self):

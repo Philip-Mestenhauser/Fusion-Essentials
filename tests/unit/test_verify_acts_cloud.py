@@ -337,37 +337,42 @@ class TestTheHomeDocument:
 
     @staticmethod
     def _payload(**over):
-        base = {"active": {"name": "Untitled", "has_data_file": False},
+        base = {"active": {"name": "Untitled", "has_data_file": False,
+                           "document_handle": "session:home"},
                 "open_count": 1,
-                "open_documents": [{"name": "Untitled", "is_active": True, "open_index": 0}]}
+                "open_documents": [{"name": "Untitled", "is_active": True,
+                                    "document_handle": "session:home"}]}
         base.update(over)
         return base
 
-    def test_an_active_document_with_an_open_index_is_the_home_address(self):
+    def test_an_active_document_with_an_exact_handle_is_the_home_address(self):
         assert acts._home_document(self._payload()) is True
-        assert acts._home_address(self._payload()) == "open:0"
+        assert acts._home_address(self._payload()) == "session:home"
 
     def test_a_SAVED_active_document_is_reported_not_refused(self):
         # The tier follows the story act in a full program but runs against whatever a partial
         # --acts run finds open, and it only READS this document and returns to it. Asserting it
         # unsaved would red the tier's first row for something that is not the tier's business.
         saved = self._payload(active={"name": "SomeDesign", "has_data_file": True,
-                                      "document_id": "urn:adsk.x"},
+                                      "document_id": "urn:adsk.x",
+                                      "document_handle": "session:saved"},
                               open_documents=[{"name": "SomeDesign", "is_active": True,
-                                               "open_index": 2}])
+                                               "document_handle": "session:saved"}])
         assert acts._home_document(saved) is True
-        assert acts._home_address(saved) == "open:2"
+        assert acts._home_address(saved) == "session:saved"
 
-    def test_two_rows_claiming_active_or_a_row_with_no_index_fails(self):
-        # open_index is the ONLY address an unsaved document has, and a row that answered no
-        # document carries none - doc_activate refuses the 'open:N' naming such a slot.
+    def test_duplicate_active_or_missing_or_mismatched_handle_fails(self):
         with pytest.raises(AssertionError):
             acts._home_document(self._payload(open_documents=[
-                {"name": "A", "is_active": True, "open_index": 0},
-                {"name": "B", "is_active": True, "open_index": 1}]))
+                {"name": "A", "is_active": True, "document_handle": "session:a"},
+                {"name": "B", "is_active": True, "document_handle": "session:b"}]))
         with pytest.raises(AssertionError):
             acts._home_document(self._payload(open_documents=[
-                {"name": None, "is_active": True, "readable": False}]))
+                {"name": "Untitled", "is_active": True}]))
+        with pytest.raises(AssertionError):
+            acts._home_document(self._payload(open_documents=[
+                {"name": "Untitled", "is_active": True,
+                 "document_handle": "session:other"}]))
 
     def test_a_saved_document_whose_urn_would_not_read_fails(self):
         # doc_get reads document_id through a guarded getter, so a read that raised publishes null.
@@ -404,13 +409,35 @@ class TestTheHomeDocument:
                                   document_id="urn:adsk.wipprod:dm.lineage:abc")}
         assert acts._document_is("SweepCloudHost 20260907-090457")(settled) is True
 
-    def test_every_act_ends_by_coming_home(self):
-        for narrative in (acts._CLOUD_DATA, acts._CLOUD_DOC, acts._CLOUD_DRAWING):
-            last = [s for s in narrative if s[0] != tool_verify._DWELL][-1]
-            if narrative is acts._CLOUD_DATA:
-                continue        # the data act never leaves the document it read on the way in
-            assert last[0] == "doc_activate", last[0]
-            assert last[1]({"home_doc": "open:0"})["name"] == "open:0"
+    def test_document_transitions_finish_at_the_captured_exact_home(self):
+        transitions = {"doc_new", "doc_open", "doc_activate", "doc_close"}
+        for narrative in (acts._CLOUD_DOC, acts._CLOUD_DRAWING):
+            indexed = [(index, step) for index, step in enumerate(narrative)
+                       if step[0] in transitions]
+            home_index, home = indexed[-1]
+            assert home[0] == "doc_activate"
+            assert home[1]({"home_doc": "session:home"})["name"] == "session:home"
+            assert not any(step[0] in transitions for step in narrative[home_index + 1:])
+
+    def test_drawing_teardown_closes_dependencies_then_comes_home_before_deletes(self):
+        steps = acts._CLOUD_DRAWING
+        source_urn = "urn:adsk.wipprod:dm.lineage:source"
+        drawing_urn = "urn:adsk.wipprod:dm.lineage:drawing"
+        ctx = {"home_doc": "session:home", "source_urn": source_urn,
+               "drawing": [drawing_urn, "Drawing"]}
+        drawing_close = next(index for index, step in enumerate(steps)
+                             if step[0] == "doc_close"
+                             and step[1](ctx)["name"] == drawing_urn)
+        source_close = next(index for index, step in enumerate(steps)
+                            if step[0] == "doc_close"
+                            and step[1](ctx)["name"] == source_urn)
+        home = next(index for index, step in enumerate(steps)
+                    if step[0] == "doc_activate"
+                    and step[1](ctx)["name"] == "session:home")
+        deletes = [index for index, step in enumerate(steps)
+                   if step[0] == "data_delete_file"]
+        assert drawing_close < source_close < home < min(deletes)
+        assert steps[-1][0] == "data_get"
 
 
 class TestReadBackKeys:

@@ -257,12 +257,18 @@ def _document_now():
     call = facade("call")
     is_error, doc = call("doc_get", {})
     if is_error or not isinstance(doc, dict):
-        return {"name": None, "document_id": None, "document_handle": None, "feature_count": None}
-    active = doc.get("active") or {}
+        return {"name": None, "document_id": None, "document_handle": None,
+                "feature_count": None, "state": "unknown"}
+    active = doc.get("active")
+    if active is not None and not isinstance(active, dict):
+        active = {}
+    active = active or {}
     is_error, design = call("design_get", {})
     features = None if is_error or not isinstance(design, dict) else design.get("feature_count")
+    handle = active.get("document_handle")
+    state = "known" if _valid_session_handle(handle) else "unknown"
     return {"name": active.get("name"), "document_id": active.get("document_id"),
-            "document_handle": active.get("document_handle"), "feature_count": features}
+            "document_handle": handle, "feature_count": features, "state": state}
 
 
 def _identity_refusal(previous, current, allow_new_session=False):
@@ -329,50 +335,295 @@ def _document_refusal(state, run_id, document):
     return None
 
 
-def _shoot(label, out_dir, seq):
+def _valid_session_handle(value):
+    return (isinstance(value, str) and value.startswith("session:")
+            and len(value) > len("session:")
+            and all(not character.isspace() for character in value))
+
+
+def _invalidate_pin(document_pin, reason):
+    document_pin.update(state="unknown", handle=None, snapshot=None,
+                        blocked_transition=reason)
+
+
+def _remember_document(document_pin, snapshot, *aliases):
+    handle = snapshot.get("document_handle") if isinstance(snapshot, dict) else None
+    if not _valid_session_handle(handle):
+        return
+    known = document_pin.setdefault("known_documents", {})
+    known[handle] = handle
+    for alias in (snapshot.get("document_id"),) + aliases:
+        if not isinstance(alias, str) or not alias.strip():
+            continue
+        if alias not in known:
+            known[alias] = handle
+        elif known[alias] != handle:
+            known[alias] = None
+
+
+def _adopt_snapshot(document_pin, snapshot, *aliases):
+    handle = snapshot.get("document_handle") if isinstance(snapshot, dict) else None
+    if snapshot.get("state") != "known" or not _valid_session_handle(handle):
+        _invalidate_pin(document_pin, "the intended document identity did not read back")
+        return False
+    document_pin.update(state="known", handle=handle, snapshot=snapshot,
+                        blocked_transition=False)
+    _remember_document(document_pin, snapshot, *aliases)
+    return True
+
+
+def _pin_snapshot(document_pin):
+    if document_pin.get("blocked_transition"):
+        return document_pin.get("snapshot") or {"state": "unknown"}
+    retained = document_pin.get("handle")
+    snapshot = facade("_document_now")()
+    if snapshot.get("state") == "known":
+        if (_valid_session_handle(retained)
+                and snapshot.get("document_handle") != retained):
+            document_pin["blocked_transition"] = "the active document no longer matches the pin"
+        else:
+            _adopt_snapshot(document_pin, snapshot)
+    elif snapshot.get("state") == "none" and not _valid_session_handle(retained):
+        document_pin.update(snapshot=snapshot, state="none", handle=None,
+                            blocked_transition=False)
+    elif _valid_session_handle(retained):
+        document_pin["blocked_transition"] = "the active document identity is unreadable"
+    else:
+        _invalidate_pin(document_pin, "the active document identity is unreadable")
+    return snapshot
+
+
+def _refresh_pin(document_pin):
+    """Refresh observations only while the exact retained document is still active."""
+    expected = document_pin.get("handle")
+    if document_pin.get("blocked_transition") or not _valid_session_handle(expected):
+        return "the document pin is unresolved"
+    snapshot = facade("_document_now")()
+    if snapshot.get("state") != "known" or snapshot.get("document_handle") != expected:
+        document_pin["blocked_transition"] = "the active document no longer matches the pin"
+        return document_pin["blocked_transition"]
+    document_pin["snapshot"] = snapshot
+    _remember_document(document_pin, snapshot)
+    return None
+
+
+def _complete_open_documents():
+    """Return a complete doc_get census and active handle, or a refusal."""
+    is_error, payload = facade("call")("doc_get", {})
+    if is_error or not isinstance(payload, dict):
+        return None, None, "doc_get did not return a document census"
+    rows = payload.get("open_documents")
+    count = payload.get("open_count")
+    if (payload.get("truncated") is not False or not isinstance(rows, list)
+            or not isinstance(count, int) or isinstance(count, bool) or count != len(rows)
+            or any(not isinstance(row, dict)
+                   or not _valid_session_handle(row.get("document_handle"))
+                   or not isinstance(row.get("open_index"), int)
+                   or isinstance(row.get("open_index"), bool) for row in rows)):
+        return None, None, "doc_get did not return a complete exact-handle census"
+    active = payload.get("active")
+    active_handle = active.get("document_handle") if isinstance(active, dict) else None
+    active_rows = [row for row in rows if row.get("is_active") is True]
+    if (not _valid_session_handle(active_handle)
+            or len(active_rows) != 1
+            or active_rows[0]["document_handle"] != active_handle):
+        return None, None, "doc_get did not identify the active document exactly"
+    return rows, active_handle, None
+
+
+def _resolve_document_target(document_pin, target):
+    """Resolve a transition target to one exact session handle without adopting it."""
+    if _valid_session_handle(target):
+        return target, None
+    if not isinstance(target, str) or not target.strip():
+        return None, "the document target is empty"
+    known = document_pin.get("known_documents") or {}
+    if _valid_session_handle(known.get(target)):
+        return known[target], None
+    rows, _active, problem = _complete_open_documents()
+    if problem:
+        return None, problem
+    if re.fullmatch(r"open:[0-9]+", target):
+        index = int(target.split(":", 1)[1])
+        matches = [row for row in rows if row.get("open_index") == index]
+    else:
+        matches = [row for row in rows if row.get("name") == target]
+    handles = {row["document_handle"] for row in matches}
+    if len(handles) != 1:
+        return None, "document target %r did not resolve to one exact open handle" % target
+    return handles.pop(), None
+
+
+def _confirm_transition(document_pin, expected, *aliases, polls=12):
+    """Settle an accepted transition through bounded reads of its intended handle."""
+    for attempt in range(polls):
+        snapshot = facade("_document_now")()
+        if (snapshot.get("state") == "known"
+                and snapshot.get("document_handle") == expected):
+            _adopt_snapshot(document_pin, snapshot, *aliases)
+            return None
+        if attempt + 1 < polls:
+            time.sleep(0.25)
+    _invalidate_pin(document_pin, "the intended document did not become active")
+    return document_pin["blocked_transition"]
+
+
+def _observe_doc_get(document_pin, payload):
+    """Refresh a same-pin doc_get row, or block on unreadable or changed identity."""
+    if document_pin.get("blocked_transition"):
+        return document_pin["blocked_transition"]
+    if document_pin.get("state") != "known" or not _valid_session_handle(document_pin.get("handle")):
+        return None
+    active = payload.get("active") if isinstance(payload, dict) else None
+    observed = active.get("document_handle") if isinstance(active, dict) else None
+    if observed != document_pin["handle"]:
+        document_pin["blocked_transition"] = (
+            "doc_get observed a different or unreadable active document")
+        return document_pin["blocked_transition"]
+    snapshot = dict(document_pin.get("snapshot") or {})
+    snapshot.update(name=active.get("name"), document_id=active.get("document_id"),
+                    document_handle=observed, state="known")
+    document_pin["snapshot"] = snapshot
+    _remember_document(document_pin, snapshot)
+    return None
+
+
+_NO_EXPECT = object()
+
+
+def _shoot(label, out_dir, seq, expected_document=_NO_EXPECT):
     """Capture the CURRENT view to out_dir. Used by --shots after each framing row: the frame ratio
     being arithmetically right is not evidence the view shows the thing - only looking is. Returns
     the path written, or None (a shot that fails is never worth failing the sweep over)."""
     call = facade("call")
     safe_label = re.sub(r"[^A-Za-z0-9_.-]", "_", label)[:60]
     path = os.path.join(out_dir, f"{seq:04d}_{safe_label}.png")
-    is_error, _ = call("view_screenshot", {"width": 640, "height": 460, "file_path": path})
+    if expected_document is _NO_EXPECT:
+        is_error, _ = call("view_screenshot", {"width": 640, "height": 460,
+                                                "file_path": path})
+    elif not expected_document:
+        return None
+    else:
+        is_error, _ = call("view_screenshot", {"width": 640, "height": 460,
+                                                "file_path": path,
+                                                "expect_document": expected_document})
     return None if is_error else path
 
 
 def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, timings=None,
-              shots_dir=None, act=""):
-    """The ONE (tool, args, expect, save) step engine - every live harness judges its steps here,
-    so the status vocabulary cannot fork: pass / pass* / expected-refusal / FAIL / blocked.
-    'pass*' means a passing step whose saved-value extraction failed - a payload-shape mismatch
-    that BLOCKS a green receipt/run in every consumer, never a quiet pass. A failing step keeps
-    NOTE_MAX characters of its payload (the keys that diagnose it sit late), a passing refusal
-    REFUSAL_NOTE_MAX. Yields nothing early:
-    returns the full row list; 'on_result' (tool, status, note) fires per step for a consumer
-    that prints as it goes. 'timings', when given, accumulates {tool: (seconds, calls)} over the
-    wire calls - the sweep runs against a 600 s shell ceiling, so where its time goes has to be
-    measurable rather than guessed at."""
+              shots_dir=None, act="", document_pin=None, guarded_tools=None):
+    """Run and judge one sequence while guarding writes to one exact document."""
     call = facade("call")
     rows = []
+    transitions = {"doc_new", "doc_open", "doc_activate", "doc_close"}
+    guarded_tools = guarded_tools or set()
+    document_pin = document_pin if document_pin is not None else {
+        "state": "unknown", "handle": None, "known_documents": {}}
+    if (guarded_tools and document_pin.get("snapshot") is None
+            and not document_pin.get("blocked_transition")):
+        _pin_snapshot(document_pin)
+
+    def block(tool, note):
+        row = (tool, "blocked", note)
+        rows.append(row)
+        if on_result:
+            on_result(*row)
+
     for step in steps:
         if _leaves_no_row(step):
-            # a showcase beat: hold the view, judge nothing, and leave no row - it is not a tool.
             time.sleep(step[1]["seconds"])
             continue
         tool, args, expect, save = step
-        # A Parked or Needs wrapper carries ledger routing, never a judgement: the step is judged
-        # by the expectation inside it exactly as if that expectation had been passed bare.
         expect = _unparked(expect)
+        deliberate_refusal = isinstance(expect, _Refusal) or expect == "refused"
         try:
             arguments = args(ctx) if callable(args) else dict(args)
         except KeyError as e:
-            rows.append((tool, "blocked", str(e)))
-            if on_result:
-                on_result(*rows[-1])
+            block(tool, str(e))
             continue
-        # Flushed BEFORE the call, on every run: a redirected log buffers per act, so a step that
-        # kills the process leaves its own line rather than only the act it was in. 'act' names
-        # that act, since the act header shares the buffer this line escapes.
+
+        authored_value = arguments.get("expect_document")
+        authored_expect = (isinstance(authored_value, str) and bool(authored_value.strip()))
+        authored_refusal = authored_expect and deliberate_refusal
+        if not authored_expect:
+            arguments.pop("expect_document", None)
+
+        intended_handle = None
+        recovery = False
+        pre_call_handle = document_pin.get("handle")
+        transition_aliases = ()
+        if tool in guarded_tools:
+            blocked_reason = document_pin.get("blocked_transition")
+            if blocked_reason and not authored_refusal:
+                explicit_recovery = (
+                    blocked_reason == "the active document was closed"
+                    and tool in ("doc_activate", "doc_close")
+                    and isinstance(arguments.get("name"), str)
+                    and bool(arguments["name"].strip())
+                    and not arguments.get("close_all"))
+                if not explicit_recovery:
+                    block(tool, "document pin unresolved ({0}); refusing the write before dispatch"
+                          .format(blocked_reason))
+                    continue
+                intended_handle, problem = _resolve_document_target(
+                    document_pin, arguments["name"])
+                census, active_handle, census_problem = _complete_open_documents()
+                if (problem or census_problem or intended_handle not in
+                        {row["document_handle"] for row in (census or [])}):
+                    block(tool, "document recovery target is unconfirmed: {0}".format(
+                        problem or census_problem or "the exact target is not open"))
+                    continue
+                arguments["name"] = intended_handle
+                if authored_expect and not deliberate_refusal and authored_value != active_handle:
+                    block(tool, "authored expect_document does not match the recovery guard")
+                    continue
+                if not authored_refusal:
+                    arguments["expect_document"] = active_handle
+                recovery = True
+            else:
+                if document_pin.get("snapshot") is None:
+                    _pin_snapshot(document_pin)
+                if document_pin.get("blocked_transition") and not authored_refusal:
+                    block(tool, "document pin unresolved ({0}); refusing the write before dispatch"
+                          .format(document_pin["blocked_transition"]))
+                    continue
+                if tool in ("doc_activate", "doc_close") and arguments.get("name") and not deliberate_refusal:
+                    intended_handle, problem = _resolve_document_target(
+                        document_pin, arguments["name"])
+                    if problem:
+                        _invalidate_pin(document_pin, problem)
+                        block(tool, "document transition target is unconfirmed: " + problem)
+                        continue
+                    arguments["name"] = intended_handle
+                if not authored_refusal:
+                    retained = document_pin.get("handle")
+                    if authored_expect and authored_value != retained:
+                        block(tool, "authored expect_document does not match the retained document pin")
+                        continue
+                    if (_valid_session_handle(retained)
+                            and not document_pin.get("blocked_transition")):
+                        arguments["expect_document"] = retained
+                    elif (document_pin.get("state") == "none"
+                          and tool in ("doc_new", "doc_open") and not authored_expect):
+                        pass
+                    else:
+                        state = document_pin.get("state", "unknown")
+                        block(tool, "document pin unavailable ({0}); refusing the write before dispatch"
+                              .format(state))
+                        continue
+
+        if (tool in guarded_tools and tool == "doc_activate"
+                and intended_handle is None and not deliberate_refusal):
+            intended_handle, problem = _resolve_document_target(
+                document_pin, arguments.get("name"))
+            if problem:
+                _invalidate_pin(document_pin, problem)
+                block(tool, "document transition target is unconfirmed: " + problem)
+                continue
+            arguments["name"] = intended_handle
+        elif tool in guarded_tools and tool == "doc_open":
+            transition_aliases = (arguments.get("file_id"),)
+
         print(f"    -> {tool} {act}".rstrip()
               + (f" {json.dumps(arguments)[:120]}" if trace else ""), flush=True)
         t0 = time.time()
@@ -380,9 +631,18 @@ def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, tim
         if timings is not None:
             spent, count = timings.get(tool, (0.0, 0))
             timings[tool] = (spent + time.time() - t0, count + 1)
-        if isinstance(expect, _Refusal):
-            # a refusal whose WORDS are the assertion: the error must carry every fragment, so a
-            # guard refusing for another reason fails the row instead of passing as "refused".
+
+        identity_problem = None
+        if tool == "doc_get" and not deliberate_refusal:
+            if is_error:
+                _invalidate_pin(document_pin, "doc_get could not read the active document identity")
+                identity_problem = document_pin["blocked_transition"]
+            else:
+                identity_problem = _observe_doc_get(document_pin, payload)
+
+        if identity_problem:
+            status, note = "blocked", identity_problem
+        elif isinstance(expect, _Refusal):
             if not is_error:
                 status, note = "FAIL", f"expected a refusal, got ok: {str(payload)[:NOTE_MAX]}"
             else:
@@ -392,8 +652,6 @@ def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, tim
                 else:
                     status, note = "expected-refusal", str(payload)[:REFUSAL_NOTE_MAX]
         elif callable(expect):
-            # a VALUE PREDICATE on an ok result: call success is not enough - the payload
-            # must satisfy the check (grip contact, machine assignment, rest-pose honesty).
             if is_error:
                 status, note = "FAIL", str(payload)[:NOTE_MAX]
             else:
@@ -408,18 +666,58 @@ def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, tim
             status, note = "expected-refusal", str(payload)[:REFUSAL_NOTE_MAX]
         else:
             status, note = "FAIL", str(payload)[:NOTE_MAX]
+
+        if tool in guarded_tools and tool in transitions:
+            if status == "expected-refusal":
+                pass
+            elif status != "pass":
+                _invalidate_pin(document_pin, "document transition did not pass")
+            elif tool in ("doc_new", "doc_open"):
+                expected = payload.get("document_handle") if isinstance(payload, dict) else None
+                if not _valid_session_handle(expected):
+                    problem = "the transition returned no exact document handle"
+                else:
+                    problem = _confirm_transition(
+                        document_pin, expected, *transition_aliases)
+                if problem:
+                    if not document_pin.get("blocked_transition"):
+                        _invalidate_pin(document_pin, problem)
+                    status, note = "blocked", problem
+            elif tool == "doc_activate":
+                problem = (_confirm_transition(document_pin, intended_handle)
+                           if _valid_session_handle(intended_handle)
+                           else "the activation target was not exact")
+                if problem:
+                    if not document_pin.get("blocked_transition"):
+                        _invalidate_pin(document_pin, problem)
+                    status, note = "blocked", problem
+            elif tool == "doc_close":
+                target = intended_handle
+                closes_active = bool(arguments.get("close_all")) or not arguments.get("name")
+                closes_active = closes_active or target == pre_call_handle
+                if target:
+                    known = document_pin.get("known_documents") or {}
+                    document_pin["known_documents"] = {
+                        alias: handle for alias, handle in known.items() if handle != target}
+                if closes_active or recovery:
+                    _invalidate_pin(document_pin, "the active document was closed")
+
         if status == "pass" and save is not None and not is_error:
             key, extract = save
             try:
                 ctx[key] = extract(payload)
             except Exception as e:
                 status, note = "pass*", f"saved-value extraction failed: {e}"
+
         rows.append((tool, status, note))
         if on_result:
             on_result(*rows[-1])
         if shots_dir and tool == "view_set" and status == "pass" and arguments.get("focus"):
-            f = arguments["focus"]
-            _shoot("-".join(f) if isinstance(f, list) else str(f), shots_dir, len(rows))
+            focus = arguments["focus"]
+            expected = (document_pin.get("handle")
+                        if not document_pin.get("blocked_transition") else None)
+            _shoot("-".join(focus) if isinstance(focus, list) else str(focus),
+                   shots_dir, len(rows), expected_document=expected)
         if sleep_s:
             time.sleep(sleep_s)
     return rows
@@ -530,9 +828,10 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
     def current_attestation():
         return attestation_identity(health_gate())
 
+    current_document = _document_now() if run_id and resume else None
     if run_id and resume:
-        refusal = (develop_refusal(state, run_id, _document_now()) if develop
-                   else resume_refusal(state, run_id, pinned_source_hash, _document_now(),
+        refusal = (develop_refusal(state, run_id, current_document) if develop
+                   else resume_refusal(state, run_id, pinned_source_hash, current_document,
                                        pinned_attestation))
         if refusal:
             print("resume refused: " + refusal)
@@ -545,7 +844,12 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
         else:
             print("resuming run {0}: {1} act(s) already done".format(
                 run_id, len(state.get("acts_done") or [])))
-    all_tools = registered_tools(health)
+    all_tools, registry_rows = registered_tools(health, include_rows=True)
+    guarded_tools = frozenset(
+        row["name"] for row in registry_rows
+        if isinstance(row.get("annotations"), dict)
+        and row["annotations"].get("readOnlyHint") is not True
+        and "expect_document" in ((row.get("inputSchema") or {}).get("properties") or {}))
 
     # THE CAPABILITY TIER: every capability an act or a step declares, answered True/False/None by
     # its own probe. An unmet capability routes its acts and steps to the receipt's
@@ -587,13 +891,38 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
     entitlements.update(prior.get("entitlements") or {})
     # the document this chunk works in, and how many acts it drove itself - a chunk that drove none
     # produced no evidence of its own, whatever the saved ledger says.
-    document = prior.get("document")
+    document = prior.get("document") or current_document or {
+        "name": None, "document_id": None, "document_handle": None,
+        "feature_count": None, "state": "unknown"}
+    document_pin = {
+        "state": document.get("state", "known" if document.get("document_handle") else "unknown"),
+        "handle": document.get("document_handle"),
+        "snapshot": document if prior.get("document") or current_document else None,
+        "blocked_transition": False,
+        "known_documents": dict(prior.get("document_handles") or {})}
+    _remember_document(document_pin, document)
+    if (guarded_tools and document_pin.get("snapshot") is None
+            and not document_pin.get("blocked_transition")):
+        _pin_snapshot(document_pin)
     walked = 0
+    program = [act[0] for act in ACTS]
 
-    def checkpoint():
+    def checkpoint(allow_terminal_close=False):
         nonlocal document
-        # The document goes into every boundary save, read once per chunk at the first of them.
-        document = document or _document_now()
+        if document_pin.get("snapshot") is None and not document_pin.get("blocked_transition"):
+            _pin_snapshot(document_pin)
+        if document_pin.get("blocked_transition"):
+            if (allow_terminal_close
+                    and document_pin["blocked_transition"] == "the active document was closed"):
+                return True
+            print("run refused: document pin unresolved ({0}); no state written".format(
+                document_pin["blocked_transition"]))
+            return False
+        problem = _refresh_pin(document_pin)
+        if problem:
+            print("run refused: " + problem + "; no state written")
+            return False
+        document = document_pin["snapshot"]
         save_run_state(run_id, {
             "run": run_id, "source_hash": pinned_source_hash,
             "attestation": pinned_attestation, "acts_done": acts_done,
@@ -604,7 +933,9 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
             "timings": {t: list(v) for t, v in timings.items()},
             "act_seconds": [list(a) for a in act_seconds],
             "elapsed_s": chunk_started + (time.time() - run_started),
-            "document": document})
+            "document": document,
+            "document_handles": dict(document_pin.get("known_documents") or {})})
+        return True
 
     for name, pre, narrative, fallback in ACTS:
         if name in acts_done and not develop:
@@ -634,8 +965,9 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
                 if identity_problem:
                     print("run refused: " + identity_problem + "; no state or receipt written")
                     return 1
-                if run_id:
-                    checkpoint()
+                if run_id and not checkpoint(
+                        allow_terminal_close=set(program) <= set(acts_done)):
+                    return 1
             continue
         mode, steps = "narrative", narrative
         if pre is not None and fallback is not None and not _precondition_holds(pre):
@@ -656,7 +988,9 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
         # docstring for what a dwell does to the pairing.
         for step, (tool, status, note) in zip(judged_steps(steps),
                                               run_steps(steps, ctx, trace=trace, timings=timings,
-                                                        shots_dir=shots_dir, act=name)):
+                                                        shots_dir=shots_dir, act=name,
+                                                        document_pin=document_pin,
+                                                        guarded_tools=guarded_tools)):
             rows.append((tool, status, note))
             if status in ("pass", "pass*") and predicate_kind(step[2]) == "value":
                 valued.add(tool)
@@ -673,6 +1007,10 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
             budget = {k: v for k, v in POLL_AFTER[name].items() if k == "max_polls"}
             for setup in ([targets] if isinstance(targets, str) else targets):
                 poll_generation(rows, notes, setup, valued=valued, **budget)
+        if document_pin.get("snapshot") is not None:
+            document = document_pin["snapshot"]
+        elif document_pin.get("state") != "known":
+            document = dict(document, document_handle=None, state=document_pin.get("state"))
         act_seconds.append((name, time.time() - act_started))
         if name not in acts_done:
             acts_done.append(name)
@@ -686,12 +1024,12 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
         if not develop and identity_problem:
             print("run refused: " + identity_problem + "; no state or receipt written")
             return 1
-        if run_id and not develop:
-            checkpoint()
+        if run_id and not develop and not checkpoint(
+                allow_terminal_close=set(program) <= set(acts_done)):
+            return 1
 
     # A run is COMPLETE when every act of the program has run under this id - in this chunk or an
     # earlier one. Only a complete run stamps, and only a complete run fires the reload beat.
-    program = [act[0] for act in ACTS]
     complete = not develop and set(program) <= set(acts_done)
 
     # THE RELOAD BEAT, after every act: it restarts the server, so no step can be dispatched
@@ -700,8 +1038,10 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
     if complete and not develop and source_hash() != pinned_source_hash:
         print("run refused: source changed during this run; no receipt written")
         return 1
+    pre_reload_failures = [row for row in rows
+                           if row[1] in ("FAIL", "blocked", "pass*")]
     final_attestation = pinned_attestation
-    if complete:
+    if complete and not pre_reload_failures:
         reloaded = reload_smoke(rows, notes, valued=valued,
                                 expected_attestation=pinned_attestation)
         if reloaded is None:
@@ -808,7 +1148,7 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
         with open(path, "w", encoding="utf-8") as fh:
             json.dump({"steps": rows, "ledger": ledger, "acts": act_modes, "server": health}, fh, indent=2)
         print(f"\nwrote {path}")
-    if complete and run_id:
+    if complete and run_id and not fails:
         # the id is spent: its acts have all run, so a later --resume of it would stamp from the
         # saved ledger without driving a step.
         save_run_state(run_id, dict(load_run_state(run_id) or {}, complete=True))
@@ -819,8 +1159,7 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
         elif run_id:
             # the document stays open for the chunk that carries on, and its identity is saved with
             # the state: a resume against a different one is refused rather than run.
-            state_file = save_run_state(run_id, dict(load_run_state(run_id) or {},
-                                                     document=_document_now()))
+            state_file = run_state_path(run_id)
             print("\nrun {0}: {1} of {2} acts done, receipt not written - carry on with "
                   "'--run {0} --resume' against the document left open ({3})".format(
                       run_id, len(acts_done), len(program), state_file))
