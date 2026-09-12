@@ -14,7 +14,9 @@ two setups one NC program spans. Their non-empty oracle is each operation's own 
 hasToolpath reads TRUE on an empty swarf toolpath, so it cannot answer that question.
 """
 
+import json
 import re
+import sys
 import time
 
 from verify_core import (
@@ -58,9 +60,19 @@ _FLIP_BACK_OP = "FlipCbores"   # and the contour round the counterbore backsides
 _ENGRAVE_OP = "SketchEngrave"  # the engraving, driven by the scratch sketch
 _PROBE_OP = "ProbeStepTop"     # the Probe WCS cycle that touches off the stepped top
 
+_FOLDER_INNER = "FolderInner"
+_FOLDER_DEEP = "FolderDeep"
+_FOLDER_EMPTY = "FolderEmpty"
+_FOLDER_TARGET = "FolderFace"
+_FOLDER_RENAMED_OP = "NestedFace"
+_FOLDER_CONTROL = "FolderFaceExtra"
+_FOLDER_FEED = "900"
+
 # The shipped hole-drilling template one act applies by its folder-position url: a spot drill, a
 # drill and a counterbore in one bundle, which is the counterbored mounting pattern's whole cycle.
 _FUSION_HOLE_TEMPLATE = "Spotdrill, Drill, & Counterbore Hole"
+_TEMPLATE_SKIP_SETUP = "TemplateSkip"
+_TEMPLATE_GENERATE_SETUP = "TemplateGenerate"
 # The ctx label for that bundle's operations - the platform names them, so every row that addresses
 # one reads the name the apply published rather than a literal.
 _TOOL_LESS = "the shipped bundle's operations by cycle"
@@ -239,15 +251,20 @@ def _probe_applied(count):
     return check
 
 
+def _operation_row(payload, setup, name):
+    """One named operation row from one setup in a cam_get operations payload, or None."""
+    recs = ((payload.get("operations") or {}).get("setups") or [])
+    rec = next((r for r in recs if r.get("setup") == setup), None)
+    return next((r for r in ((rec or {}).get("operations") or [])
+                 if r.get("name") == name), None)
+
+
 def _op_valid(setup, name):
     """cam_get(include=['operations']) read after the act boundary certified the generation: ONE
     operation's row, valid, carrying no blocker, and NOT flagged empty_toolpath - the flag the
     slice puts on a row that cuts nothing, which a state of 'valid' does not exclude."""
     def check(p):
-        recs = ((p.get("operations") or {}).get("setups") or [])
-        rec = next((r for r in recs if r.get("setup") == setup), None)
-        row = next((r for r in ((rec or {}).get("operations") or [])
-                    if r.get("name") == name), None)
+        row = _operation_row(p, setup, name)
         return _measured(f"'{name}' reads valid in '{setup}', with a toolpath that is not empty",
                          {"row": row},
                          bool(row) and row.get("state") == "valid"
@@ -297,6 +314,121 @@ def _paths_address_every_operation(setup):
     return check
 
 
+def _setup_operation_rows(payload, setup):
+    """One setup's operation container and rows, or (None, [])."""
+    recs = ((payload.get("operations") or {}).get("setups") or [])
+    rec = next((r for r in recs if r.get("setup") == setup), None)
+    return rec, list((rec or {}).get("operations") or [])
+
+
+def _remember_folder_paths(setup, key):
+    """Remember the complete operation-path census before the temporary folder workflow."""
+    def check(p):
+        rec, rows = _setup_operation_rows(p, setup)
+        paths = {r.get("name"): r.get("path") for r in rows}
+        target, control = _RECALL.get("face_op"), _RECALL.get("adaptive_op")
+        expected = {target: f"{setup} / Milling / {target}",
+                    control: f"{setup} / Milling / {control}"}
+        passed = (bool(rec) and rec.get("operations_truncated") is False and bool(rows)
+                  and len(paths) == len(rows)
+                  and all(paths.get(name) == path for name, path in expected.items()))
+        _measured("the complete operation-path census before the nested-folder workflow",
+                  {"operation_count": len(rows), "operations_truncated": (
+                      rec or {}).get("operations_truncated"), "paths": paths}, passed)
+        _RECALL[key] = paths
+        return True
+    return check
+
+
+def _folder_path_census(setup, key, stage):
+    """Compare every operation path with the saved census at one folder-workflow stage."""
+    def check(p):
+        rec, rows = _setup_operation_rows(p, setup)
+        actual = {r.get("name"): r.get("path") for r in rows}
+        expected = dict(_RECALL.get(key) or {})
+        original_target = _RECALL.get("face_op")
+        original_control = _RECALL.get("adaptive_op")
+        ready = bool(expected) and original_target in expected and original_control in expected
+        if ready and stage != "restored":
+            del expected[original_target]
+            del expected[original_control]
+            target_name = _FOLDER_TARGET if stage == "nested" else _FOLDER_RENAMED_OP
+            folder = {
+                "nested": _FOLDER_INNER,
+                "edited": _FOLDER_INNER,
+                "folder_renamed": _FOLDER_DEEP,
+            }.get(stage)
+            target_path = " / ".join(
+                [setup, "Milling"] + ([folder] if folder else []) + [target_name])
+            expected[target_name] = target_path
+            expected[_FOLDER_CONTROL] = f"{setup} / Milling / {_FOLDER_CONTROL}"
+        passed = (ready and bool(rec) and rec.get("operations_truncated") is False
+                  and len(actual) == len(rows) and actual == expected)
+        return _measured(f"the complete operation-path census at folder stage '{stage}'",
+                         {"operations_truncated": (rec or {}).get("operations_truncated"),
+                          "actual": actual, "expected": expected}, passed)
+    return check
+
+
+def _remember_operation_feed(operation_key, feed_key, expected=None):
+    """Remember one operation's independently read cutting-feed expression."""
+    def check(p):
+        operation = _RECALL.get(operation_key)
+        actual = (p.get("parameters") or {}).get("operation")
+        expression = _parameter_expression(p, "tool_feedCutting")
+        _measured(f"{operation!r} cutting-feed expression before the folder workflow",
+                  {"operation": actual, "expression": expression},
+                  bool(operation) and actual == operation and expression is not None
+                  and (expected is None or expression == expected))
+        _RECALL[feed_key] = expression
+        return True
+    return check
+
+
+def _operation_feed(operation, expected):
+    """One operation's independently read cutting-feed expression."""
+    def check(p):
+        want_operation = _RECALL.get(operation) if operation in _RECALL else operation
+        want_expression = _RECALL.get(expected) if expected in _RECALL else expected
+        actual_operation = (p.get("parameters") or {}).get("operation")
+        actual_expression = _parameter_expression(p, "tool_feedCutting")
+        return _measured(f"{want_operation!r} cutting-feed expression",
+                         {"operation": actual_operation, "expression": actual_expression,
+                          "expected": want_expression},
+                         bool(want_operation) and want_expression is not None
+                         and actual_operation == want_operation
+                         and actual_expression == want_expression)
+    return check
+
+
+def _operation_renamed(old, new):
+    """A CAM operation rename read back under its new name."""
+    def check(p):
+        want_old = _RECALL.get(old) if old in _RECALL else old
+        return _measured(f"operation {want_old!r} renamed to {new!r}",
+                         {"renamed": p.get("renamed"), "was_operation": p.get("was_operation"),
+                          "operation": p.get("operation")},
+                         bool(want_old) and p.get("renamed") is True
+                         and p.get("was_operation") == want_old
+                         and p.get("operation") == new)
+    return check
+
+
+def _folder_compound_edit(p):
+    """The lowercase target resolved, then its feed and name both read back changed."""
+    changed = p.get("changed") or []
+    row = changed[0] if len(changed) == 1 else {}
+    return _measured("the lowercase nested operation compound rename/feed edit",
+                     {"renamed": p.get("renamed"), "was_operation": p.get("was_operation"),
+                      "operation": p.get("operation"), "changed": changed},
+                     p.get("edited") is True and p.get("renamed") is True
+                     and p.get("was_operation") == _FOLDER_TARGET
+                     and p.get("operation") == _FOLDER_RENAMED_OP
+                     and p.get("updated_count") == 1
+                     and row.get("name") == "tool_feedCutting"
+                     and row.get("after") == _FOLDER_FEED)
+
+
 def _machining_capabilities(p):
     """workspace_orient's entitlement block: one observed_generation entry per sentinel strategy and
     nothing else, each a flag that ANSWERED - null there is 'the probe could not read it', which is
@@ -321,6 +453,23 @@ def _types_offered(*names):
         return _measured(f"the from_type vocabulary offers each of {len(names)} named types",
                          {"type_count": p.get("type_count"), "missing": missing},
                          not missing and (p.get("type_count") or 0) >= 10)
+    return check
+
+
+def _setup_scope(setup, require_operations=False):
+    """cam_get setup scope keeps one exact setup row and its counts and pointers."""
+    def check(p):
+        rows = p.get("setups") or []
+        names = [row.get("name") for row in rows]
+        missing = object()
+        operation_payload = p.get("operations", missing)
+        operations = (operation_payload or {}).get("setups") if isinstance(operation_payload, dict) else None
+        scoped_ops = (not require_operations and operation_payload is missing) or (
+            isinstance(operations, list) and len(operations) == 1 and operations[0].get("setup") == setup)
+        return _measured(f"cam_get setup scope returns only '{setup}'",
+                         {"setup_count": p.get("setup_count"), "names": names,
+                          "operation_setups": [r.get("setup") for r in (operations or [])]},
+                         p.get("setup_count") == 1 and names == [setup] and scoped_ops)
     return check
 
 
@@ -398,6 +547,45 @@ def _setup_bodies(**counts):
         return _measured(f"the setup holds {counts}",
                          {f"{arg}_set": p.get(f"{arg}_set") for arg in counts},
                          all(p.get(f"{arg}_set") == n for arg, n in counts.items()))
+    return check
+
+
+def _complete_setup_row(payload, setup):
+    """Return one exact, readable and untruncated setup row, or None."""
+    rows = payload.get("setups") or []
+    if (payload.get("setup_count") != 1 or payload.get("truncated") is not False
+            or len(rows) != 1 or rows[0].get("name") != setup
+            or rows[0].get("model_lists_truncated") is not False
+            or "model_lists_unreadable" in rows[0]
+            or not all(isinstance(rows[0].get(key), list)
+                       for key in ("selected_models", "fixtures", "stock_solids"))):
+        return None
+    return rows[0]
+
+
+def _populated_setup_snapshot(setup):
+    """Require one complete setup row with every selection collection populated."""
+    def check(p):
+        row = _complete_setup_row(p, setup)
+        selections = {key: (row or {}).get(key)
+                      for key in ("selected_models", "fixtures", "stock_solids")}
+        return _measured(f"'{setup}' has a complete populated setup snapshot",
+                         {"name": (row or {}).get("name"), "selections": selections},
+                         row is not None and all(selections.values()))
+    return check
+
+
+def _setup_snapshot_unchanged(setup, before_key):
+    """Require one complete setup row exactly equal to the saved row before a refusal."""
+    def check(p):
+        before = _RECALL.get(before_key)
+        after = _complete_setup_row(p, setup)
+        keys = ("name", "selected_models", "fixtures", "stock_solids",
+                "operation_count", "folder_count")
+        got = {"before": {key: (before or {}).get(key) for key in keys},
+               "after": {key: (after or {}).get(key) for key in keys}}
+        return _measured(f"'{setup}' is unchanged after the empty-list refusal", got,
+                         isinstance(before, dict) and after == before)
     return check
 
 
@@ -544,6 +732,35 @@ _CAM_STORY = [
     ("cam_edit_setup", {"setup": CAM_SETUP, "stock": [STOCK_COMP],
                         "fixtures": [VISE_BASE, JAW_FIXED, JAW_MOVING]},
      _setup_bodies(stock=1, fixtures=3), None),
+    # Empty selection lists are refused. Each after row must exactly equal the saved complete
+    # before row, including its name and three populated collections; that after row becomes the
+    # next before, so every refusal has an adjacent independent readback.
+    ("cam_get", {"setup": CAM_SETUP}, _populated_setup_snapshot(CAM_SETUP),
+     ("cam_empty_before_models",
+      _recall("cam_empty_before_models", lambda p: dict(p["setups"][0])))),
+    ("cam_edit_setup", {"setup": CAM_SETUP, "models": []},
+     _refused("'models' cannot be an empty list", "clearing", "unsupported by this tool"), None),
+    ("cam_get", {"setup": CAM_SETUP},
+     _setup_snapshot_unchanged(CAM_SETUP, "cam_empty_before_models"),
+     ("cam_empty_before_models_rename",
+      _recall("cam_empty_before_models_rename", lambda p: dict(p["setups"][0])))),
+    ("cam_edit_setup", {"setup": CAM_SETUP, "models": [],
+                        "rename": CAM_SETUP + "Empty"},
+     _refused("'models' cannot be an empty list", "clearing", "unsupported by this tool"), None),
+    ("cam_get", {"setup": CAM_SETUP},
+     _setup_snapshot_unchanged(CAM_SETUP, "cam_empty_before_models_rename"),
+     ("cam_empty_before_fixtures",
+      _recall("cam_empty_before_fixtures", lambda p: dict(p["setups"][0])))),
+    ("cam_edit_setup", {"setup": CAM_SETUP, "fixtures": []},
+     _refused("'fixtures' cannot be an empty list", "clearing", "unsupported by this tool"), None),
+    ("cam_get", {"setup": CAM_SETUP},
+     _setup_snapshot_unchanged(CAM_SETUP, "cam_empty_before_fixtures"),
+     ("cam_empty_before_stock",
+      _recall("cam_empty_before_stock", lambda p: dict(p["setups"][0])))),
+    ("cam_edit_setup", {"setup": CAM_SETUP, "stock": []},
+     _refused("'stock' cannot be an empty list", "clearing", "unsupported by this tool"), None),
+    ("cam_get", {"setup": CAM_SETUP},
+     _setup_snapshot_unchanged(CAM_SETUP, "cam_empty_before_stock"), None),
     # THE ASSOCIATIVE SEAM ON CAMERA: a Joint Origin at the real stock's center becomes the
     # setup WCS; the bound_entities read-back lands in ctx as the receipt's evidence.
     ("joint_create_origin", {"anchor": "bbox_center", "bbox_target": STOCK_COMP + ":1",
@@ -833,6 +1050,7 @@ _CAM_STORY = [
                                                    _ctx_get(c, "drill_op", "the drill op"),
                                                    _BORE_OP]},
      lambda p: p["moved"] == 3 and p["into"] == "Drilling", None),
+    # The nested-folder control runs in this act's bounded post-act poll, after its generation.
     # WALK-ORDER ADDRESSING, now that the job is split across the setup and two folders. Operation
     # .name DEDUPES rather than refusing, which would mint a second 'Face1' nothing asked for and
     # leave the two tellable apart only by walk position. Both arms that could reach that refuse
@@ -955,7 +1173,7 @@ def _applied_rows_account(p, rows, tool_less):
                               if r.get("tool") is None and not r.get("tool_description_unread")])
 
 
-def _template_applied(name, setup, minimum):
+def _template_applied(name, setup, minimum, generation_mode):
     """cam_apply_template of a template bundled from an operation that CARRIES a tool: the row count
     accounts for operations_added, nothing is named in 'tool_unselected', and 'ready' reads true -
     the opposite reading from the shipped bundle below, which is why neither is asserted
@@ -963,36 +1181,63 @@ def _template_applied(name, setup, minimum):
     def check(p):
         rows = p.get("operations") or []
         tool_less = p.get("tool_unselected")
+        created = p.get("created_operations") or []
+        row_names = [r.get("name") for r in rows]
         return _measured(f"{name!r} applied to '{setup}', every added operation carrying a tool",
                          {"applied": p.get("applied"), "template": p.get("template"),
                           "setup": p.get("setup"), "operations_added": p.get("operations_added"),
-                          "operations": rows, "tool_unselected": tool_less, "ready": p.get("ready")},
+                          "operations": rows, "created_operations": created,
+                          "generation_mode": p.get("generation_mode"),
+                          "tool_unselected": tool_less, "ready": p.get("ready")},
                          p.get("applied") is True and p.get("template") == name
                          and p.get("setup") == setup and (p.get("operations_added") or 0) >= minimum
+                         and p.get("generation_mode") == generation_mode
+                         and p.get("created_count") == len(created) == len(rows)
+                         and sorted(created) == sorted(row_names)
                          and _applied_rows_account(p, rows, tool_less)
                          and tool_less == [] and p.get("ready") is True)
     return check
 
 
-def _template_applied_tool_less(name, setup, minimum):
+def _template_applied_tool_less(name, setup, minimum, generation_mode):
     """The same census on the SHIPPED hole bundle, whose operations arrive carrying no tool: every
     row reads a null tool, 'tool_unselected' names all of them, and 'ready' is false."""
     def check(p):
         rows = p.get("operations") or []
         tool_less = p.get("tool_unselected")
+        created = p.get("created_operations") or []
         cycles = _bundle_ops(p)
         return _measured(f"{name!r} applied to '{setup}' with every operation tool-less",
                          {"applied": p.get("applied"), "operations_added": p.get("operations_added"),
                           "operations": rows, "tool_unselected": tool_less, "ready": p.get("ready"),
+                          "generation_mode": p.get("generation_mode"),
                           "cycles": sorted(cycles)},
                          p.get("applied") is True and p.get("template") == name
                          and p.get("setup") == setup and (p.get("operations_added") or 0) >= minimum
+                         and p.get("generation_mode") == generation_mode
                          and _applied_rows_account(p, rows, tool_less)
                          and p.get("ready") is False and bool(rows)
                          and len(tool_less) == len(rows)
                          and set(cycles) == set(_CYCLES)
                          and all(r.get("tool") is None and not r.get("tool_description_unread")
                                  for r in rows))
+    return check
+
+
+def _template_path_state(setup, recall_key, state):
+    """cam_get(include=['operations']): the exact operations returned by an apply in one state."""
+    def check(p):
+        names = _RECALL.get(recall_key) or []
+        setups = (p.get("operations") or {}).get("setups") or []
+        record = next((r for r in setups if r.get("setup") == setup), None)
+        rows = (record or {}).get("operations") or []
+        seen = [r.get("name") for r in rows]
+        wrong = [{"name": r.get("name"), "path": r.get("path"), "state": r.get("state")}
+                 for r in rows if r.get("state") != state]
+        return _measured(f"the operations applied to '{setup}' read {state}",
+                         {"expected": names, "seen": seen, "wrong_state": wrong},
+                         bool(names) and len(rows) == len(names)
+                         and sorted(seen) == sorted(names) and not wrong)
     return check
 
 
@@ -1172,7 +1417,7 @@ _CAM_DELIVER = [
     # objects, which is what says the by-name search reached the template this run saved.
     ("cam_apply_template", {"setup": "Setup2", "template_name": TEMPLATE_NAME,
                             "location": "local", "generate": "skip"},
-     _template_applied(TEMPLATE_NAME, "Setup2", 1), None),
+     _template_applied(TEMPLATE_NAME, "Setup2", 1, "skip"), None),
     # THE SHIPPED LIBRARY, the other half of the same tool: Fusion's own hole-drilling bundle,
     # reached by the url the templates slice publishes for it rather than by a name search. The
     # read is what says the url exists and how it addresses the asset; the apply hands BOTH the url
@@ -1186,7 +1431,7 @@ _CAM_DELIVER = [
                 "template_url": _ctx_get(c, "hole_template_url", "the shipped hole template url"),
                 "template_name": _FUSION_HOLE_TEMPLATE, "location": "fusion",
                 "generate": "skip"},
-     _template_applied_tool_less(_FUSION_HOLE_TEMPLATE, "Setup2", 2),
+     _template_applied_tool_less(_FUSION_HOLE_TEMPLATE, "Setup2", 2, "skip"),
      ("tmpl_ops", _recall("tmpl_ops", _bundle_ops))),
     # THE REMEDY the apply's note names, run on EVERY one of those operations: a document tool by
     # index, with Operation.tool read back and 'was_tool' null - which is what says the operation
@@ -1271,13 +1516,6 @@ _CAM_DELIVER = [
      and p["resolves_after_delete"] is False, None),
     ("cam_get", {"include": ["machines"], "vendor": "SweepCo"},
      lambda p: not any(m["name"] == MACHINE_NAME for m in p["machines"]["machines"]), None),
-    ("cam_delete_template", {"name": TEMPLATE_NAME, "confirm_name": "NotThisTemplate"},
-     "refused", None),
-    ("cam_delete_template", {"name": TEMPLATE_NAME, "confirm_name": TEMPLATE_NAME},
-     lambda p: p["deleted"] is True and p["template"] == TEMPLATE_NAME
-     and p["loads_after_delete"] is False and p["location"] == "local", None),
-    ("cam_get", {"include": ["templates"], "template_location": "local"},
-     lambda p: TEMPLATE_NAME not in _tmpl_names(p["templates"]["tree"]), None),
     ("design_export", {"format": "step", "file_path": EXPORT_DIR + "/bracket_export",
                        "target": PART_COMP}, "ok", None),
     # the SPLIT path writes one file per top-level occurrence, each through its OWN options object -
@@ -1297,7 +1535,598 @@ _CAM_DELIVER = [
 ]
 
 
-def poll_generation(rows, notes, setup, max_polls=40, valued=None):
+# The saved template's two generation modes on clean, one-operation targets. ACT 10b's own
+# Setup2 generation is complete before this act starts, and the direct generation is its last write.
+_CAM_TEMPLATE_MODES = [
+    ("cam_create_setup", {"models": [PART_COMP + ":1"], "name": _TEMPLATE_SKIP_SETUP},
+     lambda p: p["created"] is True and p["setup_name"] == _TEMPLATE_SKIP_SETUP
+     and p["operation_count"] == 0, None),
+    ("cam_apply_template", {"setup": _TEMPLATE_SKIP_SETUP, "template_name": TEMPLATE_NAME,
+                            "location": "local", "generate": "skip"},
+     _template_applied(TEMPLATE_NAME, _TEMPLATE_SKIP_SETUP, 1, "skip"),
+     ("template_skip_ops", _recall("template_skip_ops", lambda p: p["created_operations"]))),
+    ("cam_get", {"include": ["operations"], "setup": _TEMPLATE_SKIP_SETUP},
+     _template_path_state(_TEMPLATE_SKIP_SETUP, "template_skip_ops", "no_toolpath"), None),
+    ("cam_create_setup", {"models": [PART_COMP + ":1"], "name": _TEMPLATE_GENERATE_SETUP},
+     lambda p: p["created"] is True and p["setup_name"] == _TEMPLATE_GENERATE_SETUP
+     and p["operation_count"] == 0, None),
+    ("cam_apply_template", {"setup": _TEMPLATE_GENERATE_SETUP, "template_name": TEMPLATE_NAME,
+                            "location": "local", "generate": "generate"},
+     _template_applied(TEMPLATE_NAME, _TEMPLATE_GENERATE_SETUP, 1, "generate"),
+     ("template_generate_ops", _recall("template_generate_ops",
+                                       lambda p: p["created_operations"]))),
+]
+
+
+_CAM_TEMPLATE_CLEANUP = [
+    ("cam_get", {"include": ["operations"], "setup": _TEMPLATE_GENERATE_SETUP},
+     _template_path_state(_TEMPLATE_GENERATE_SETUP, "template_generate_ops", "valid"), None),
+    ("cam_delete_template", {"name": TEMPLATE_NAME, "confirm_name": "NotThisTemplate"},
+     "refused", None),
+    ("cam_delete_template", {"name": TEMPLATE_NAME, "confirm_name": TEMPLATE_NAME},
+     lambda p: p["deleted"] is True and p["template"] == TEMPLATE_NAME
+     and p["loads_after_delete"] is False and p["location"] == "local", None),
+    ("cam_get", {"include": ["templates"], "template_location": "local"},
+     lambda p: TEMPLATE_NAME not in _tmpl_names(p["templates"]["tree"]), None),
+]
+
+
+_IDENTITY_FEED = "1250"
+_IDENTITY_STEPOVER = "2 mm"
+
+
+def _identity_stepover_reads_back(value):
+    """Whether a read-back is the proven 2 mm expression, with whitespace normalized."""
+    return (isinstance(value, str)
+            and " ".join(value.strip().lower().split()) == _IDENTITY_STEPOVER)
+
+
+def _parameter_expression(payload, name):
+    """One named expression from a cam_get parameters payload, or None."""
+    params = payload.get("parameters") or {}
+    rows = [row for section in (params.get("sections") or {}).values() for row in section]
+    row = next((row for row in rows if row.get("name") == name), None)
+    return (row or {}).get("expression")
+
+
+def _status_unsettled(payload):
+    """The truly unsettled count in one cam_get_status payload."""
+    live = payload.get("live_states") or {}
+    return max(0, (live.get("generating", 0) or 0)
+               - (live.get("generating_settled", 0) or 0))
+
+
+def _folder_probe_call(rows, tool, arguments, predicate, label):
+    """Run and record one typed call inside the post-act folder probe."""
+    is_error, payload = _folder_wire_call(tool, arguments)
+    if is_error:
+        rows.append((tool, "FAIL", str(payload)[:NOTE_MAX]))
+        return None
+    try:
+        passed = predicate(payload)
+    except Exception as exc:
+        rows.append((tool, "FAIL", f"predicate raised: {exc}"[:NOTE_MAX]))
+        return None
+    rows.append((tool, "pass" if passed else "FAIL", str(label)[:NOTE_MAX]))
+    return payload if passed else None
+
+
+def _trace_folder_call(tool, arguments):
+    """Flush one exact pending folder call to the ACT 10a trace."""
+    print(f"    -> {tool} ACT 10a - CAM: JOB + GENERATE"
+          + (f" {json.dumps(arguments, sort_keys=True)}" if "--trace" in sys.argv else ""),
+          flush=True)
+
+
+def _folder_wire_call(tool, arguments):
+    """Trace and dispatch one folder-probe wire call."""
+    _trace_folder_call(tool, arguments)
+    return facade("call")(tool, arguments)
+
+
+def _poll_folder_generation(rows, setup, max_polls=40):
+    """Poll one setup until completed with no unsettled operation."""
+    last = None
+    for index in range(max_polls):
+        if index:
+            time.sleep(5)
+        is_error, payload = _folder_wire_call("cam_get_status", {"target": setup})
+        if is_error:
+            rows.append(("cam_get_status", "FAIL", str(payload)[:NOTE_MAX]))
+            return False
+        last = payload
+        live = payload.get("live_states") or {}
+        generating = live.get("generating", 0) or 0
+        generating_settled = live.get("generating_settled", 0) or 0
+        unsettled = _status_unsettled(payload)
+        if live.get("errored"):
+            rows.append(("cam_get_status", "FAIL",
+                         f"{live['errored']} operation(s) errored while settling folders"))
+            return False
+        if payload.get("completed") is True and unsettled == 0:
+            rows.append(("cam_get_status", "pass",
+                         f"{setup!r} settled after {index + 1} read(s); raw generating="
+                         f"{generating}, stale generating flags={generating_settled}, "
+                         f"unsettled={unsettled}"))
+            return True
+    rows.append(("cam_get_status", "FAIL",
+                 f"{setup!r} folder edit did not settle after {max_polls} reads: {last}"))
+    return False
+
+
+def _folder_poll_before_call(rows, setup, tool, arguments, predicate, label,
+                             max_polls=40):
+    """Settle one setup, then run the next CAM mutation."""
+    if not _poll_folder_generation(rows, setup, max_polls=max_polls):
+        return None
+    return _folder_probe_call(rows, tool, arguments, predicate, label)
+
+
+def _empty_folder_status(p):
+    """An exact folder target that exists and contains zero operations."""
+    live = p.get("live_states") or {}
+    return _measured(f"empty folder {_FOLDER_EMPTY!r} resolves exactly",
+                     {"target": p.get("target"), "completed": p.get("completed"),
+                      "operations_total": p.get("operations_total"), "live_states": live},
+                     p.get("target") == f"folder '{_FOLDER_EMPTY}'"
+                     and p.get("completed") is True and p.get("operations_total") == 0
+                     and live.get("total") == 0 and live.get("generating") == 0)
+
+
+def _delete_empty_folder_probe(rows, setup, document_pin):
+    """Read the empty folder, delete it, require its exact miss, then re-read all paths."""
+    present = _folder_probe_call(
+        rows, "cam_get_status", {"target": _FOLDER_EMPTY}, _empty_folder_status,
+        f"folder {_FOLDER_EMPTY!r} exists with zero operations before delete")
+    if present is None:
+        return False
+    deleted = _folder_probe_call(
+        rows, "cam_delete", {"entity": _FOLDER_EMPTY, "expect_document": document_pin},
+        lambda p: p.get("deleted") is True and p.get("entity") == _FOLDER_EMPTY
+        and p.get("entity_type") == "folder",
+        f"folder {_FOLDER_EMPTY!r} deleted and re-resolved absent")
+    if deleted is None:
+        return False
+    arguments = {"target": _FOLDER_EMPTY}
+    is_error, payload = _folder_wire_call("cam_get_status", arguments)
+    text = str(payload)
+    passed = (is_error and f"No setup/folder/operation named '{_FOLDER_EMPTY}'" in text
+              and "Available" in text)
+    rows.append(("cam_get_status", "expected-refusal" if passed else "FAIL",
+                 (f"exact absent-folder refusal for {_FOLDER_EMPTY!r}"
+                  if passed else text[:NOTE_MAX])))
+    if not passed:
+        return False
+    census = _folder_probe_call(
+        rows, "cam_get", {"include": ["operations"], "setup": setup},
+        _folder_path_census(setup, "folder_paths_before", "deleted"),
+        "complete operation census unchanged after empty-folder deletion")
+    return census is not None
+
+
+def _folder_workflow_probe(rows, setup, max_polls=40, document_pin=None):
+    """Exercise nested folder edits inside ACT 10a's bounded post-act hook."""
+    if (not isinstance(document_pin, str) or not document_pin.startswith("session:")
+            or len(document_pin) == len("session:") or any(c.isspace() for c in document_pin)):
+        rows.append(("cam_edit_folders", "FAIL",
+                     "folder workflow refused: document pin is absent or unknown"))
+        return False
+    target, control = _RECALL.get("face_op"), _RECALL.get("adaptive_op")
+    if not target or not control:
+        rows.append(("cam_get", "FAIL", "folder workflow operation identities are absent"))
+        return False
+    if not _poll_folder_generation(rows, setup, max_polls=max_polls):
+        return False
+
+    def ask(tool, arguments, predicate, label):
+        if tool in {"cam_edit_operation", "cam_edit_folders", "cam_delete"}:
+            arguments = dict(arguments, expect_document=document_pin)
+        return _folder_probe_call(rows, tool, arguments, predicate, label)
+
+    if ask("cam_get", {"include": ["parameters"], "operation": target},
+           _remember_operation_feed("face_op", "folder_target_feed", "1200"),
+           "target cutting feed captured before folder edits") is None:
+        return False
+    if ask("cam_get", {"include": ["parameters"], "operation": control},
+           _remember_operation_feed("adaptive_op", "folder_control_feed"),
+           "similar-name control cutting feed captured before folder edits") is None:
+        return False
+    if ask("cam_get", {"include": ["operations"], "setup": setup},
+           _remember_folder_paths(setup, "folder_paths_before"),
+           "complete operation-path census captured before folder edits") is None:
+        return False
+    if ask("cam_edit_operation", {"operation": target, "rename": _FOLDER_TARGET},
+           _operation_renamed("face_op", _FOLDER_TARGET),
+           "target renamed for the exact lowercase control") is None:
+        return False
+
+    control_rename = {"operation": control, "rename": _FOLDER_CONTROL,
+                      "expect_document": document_pin}
+    if _folder_poll_before_call(
+            rows, setup, "cam_edit_operation", control_rename,
+            _operation_renamed("adaptive_op", _FOLDER_CONTROL),
+            "similar-name control renamed after target settlement", max_polls) is None:
+        return False
+    create_inner = {"action": "create", "setup": setup, "name": _FOLDER_INNER,
+                    "expect_document": document_pin}
+    if _folder_poll_before_call(
+            rows, setup, "cam_edit_folders", create_inner,
+            lambda p: p.get("created") is True and p.get("folder") == _FOLDER_INNER,
+            "temporary inner folder created after control settlement", max_polls) is None:
+        return False
+    if ask("cam_edit_folders", {"action": "move", "setup": setup, "folder": "Milling",
+                                "operations": [_FOLDER_INNER]},
+           lambda p: p.get("moved") == 1 and p.get("operations") == [_FOLDER_INNER],
+           "inner folder moved beneath Milling") is None:
+        return False
+    if ask("cam_edit_folders", {"action": "move", "setup": setup,
+                                "folder": _FOLDER_INNER, "operations": [_FOLDER_TARGET]},
+           lambda p: p.get("moved") == 1 and p.get("operations") == [_FOLDER_TARGET],
+           "target moved into the second folder level") is None:
+        return False
+    if ask("cam_get", {"include": ["operations"], "setup": setup},
+           _folder_path_census(setup, "folder_paths_before", "nested"),
+           "complete two-level operation paths independently read") is None:
+        return False
+    if ask("cam_edit_operation", {"operation": _FOLDER_TARGET.lower(),
+                                  "parameters": {"tool_feedCutting": _FOLDER_FEED},
+                                  "rename": _FOLDER_RENAMED_OP},
+           _folder_compound_edit, "lowercase target compound feed and rename edit") is None:
+        return False
+    if not _poll_folder_generation(rows, setup, max_polls=max_polls):
+        return False
+    if ask("cam_get", {"include": ["parameters"], "operation": _FOLDER_RENAMED_OP},
+           _operation_feed(_FOLDER_RENAMED_OP, _FOLDER_FEED),
+           "target cutting feed independently read after compound edit") is None:
+        return False
+    if ask("cam_get", {"include": ["parameters"], "operation": _FOLDER_CONTROL},
+           _operation_feed(_FOLDER_CONTROL, "folder_control_feed"),
+           "control cutting feed independently unchanged") is None:
+        return False
+    if ask("cam_get", {"include": ["operations"], "setup": setup},
+           _folder_path_census(setup, "folder_paths_before", "edited"),
+           "complete operation rename paths independently read") is None:
+        return False
+    if ask("cam_edit_folders", {"action": "rename", "setup": setup,
+                                "folder": _FOLDER_INNER.lower(), "new_name": _FOLDER_DEEP},
+           lambda p: p.get("renamed") is True and p.get("from") == _FOLDER_INNER.lower()
+           and p.get("to") == _FOLDER_DEEP,
+           "lowercase nested folder lookup renamed the folder") is None:
+        return False
+    if ask("cam_get", {"include": ["operations"], "setup": setup},
+           _folder_path_census(setup, "folder_paths_before", "folder_renamed"),
+           "complete folder rename paths independently read") is None:
+        return False
+    if ask("cam_edit_folders", {"action": "move", "setup": setup, "folder": "Milling",
+                                "operations": [_FOLDER_RENAMED_OP]},
+           lambda p: p.get("moved") == 1 and p.get("operations") == [_FOLDER_RENAMED_OP],
+           "target moved up exactly one folder level") is None:
+        return False
+    if ask("cam_get", {"include": ["operations"], "setup": setup},
+           _folder_path_census(setup, "folder_paths_before", "moved"),
+           "complete moved operation paths independently read") is None:
+        return False
+    if ask("cam_edit_folders", {"action": "rename", "setup": setup,
+                                "folder": _FOLDER_DEEP, "new_name": _FOLDER_EMPTY},
+           lambda p: p.get("renamed") is True and p.get("from") == _FOLDER_DEEP
+           and p.get("to") == _FOLDER_EMPTY,
+           "empty nested folder renamed for deletion") is None:
+        return False
+    if ask("cam_get", {"include": ["operations"], "setup": setup},
+           _folder_path_census(setup, "folder_paths_before", "empty_renamed"),
+           "complete census proves no operation remains in the empty folder") is None:
+        return False
+    if not _delete_empty_folder_probe(rows, setup, document_pin):
+        return False
+
+    restore_target = {"operation": _FOLDER_RENAMED_OP,
+                      "parameters": {"tool_feedCutting": _RECALL["folder_target_feed"]},
+                      "rename": target, "expect_document": document_pin}
+    target_restored = ask(
+        "cam_edit_operation", restore_target,
+        lambda p: _operation_renamed(_FOLDER_RENAMED_OP, target)(p)
+        and p.get("changed", [{}])[0].get("after") == _RECALL.get("folder_target_feed"),
+        "target name and original cutting feed restored")
+    if target_restored is None:
+        return False
+    control_restore = {"operation": _FOLDER_CONTROL, "rename": control,
+                       "expect_document": document_pin}
+    if _folder_poll_before_call(
+            rows, setup, "cam_edit_operation", control_restore,
+            _operation_renamed(_FOLDER_CONTROL, control),
+            "control name restored after target settlement", max_polls) is None:
+        return False
+    if not _poll_folder_generation(rows, setup, max_polls=max_polls):
+        return False
+    if ask("cam_get", {"include": ["parameters"], "operation": target},
+           _operation_feed("face_op", "folder_target_feed"),
+           "target original cutting feed independently restored") is None:
+        return False
+    if ask("cam_get", {"include": ["parameters"], "operation": control},
+           _operation_feed("adaptive_op", "folder_control_feed"),
+           "control original cutting feed independently restored") is None:
+        return False
+    restored = ask("cam_get", {"include": ["operations"], "setup": setup},
+                   _folder_path_census(setup, "folder_paths_before", "restored"),
+                   "complete authored Milling and Drilling census restored")
+    return restored is not None
+
+
+def _generation_identity_probe(rows, setup, operation, max_polls=40, document_pin=None):
+    """Bracket proven invalidation with exact-operation generation and effect reads."""
+    if (not isinstance(document_pin, str) or not document_pin.startswith("session:")
+            or len(document_pin) == len("session:")
+            or any(char.isspace() for char in document_pin)):
+        rows.append(("cam_edit_operation", "FAIL",
+                     "generation identity probe refused: document pin is absent or unknown"))
+        return False
+    call = facade("call")
+
+    def ask(tool, arguments):
+        is_error, payload = call(tool, arguments)
+        if is_error:
+            rows.append((tool, "FAIL", str(payload)[:NOTE_MAX]))
+            return None
+        return payload
+
+    def judged(tool, passed, note):
+        rows.append((tool, "pass" if passed else "FAIL", str(note)[:NOTE_MAX]))
+        return passed
+
+    def valid_nonempty(payload):
+        row = _operation_row(payload, setup, operation)
+        return (row, bool(row) and row.get("state") == "valid"
+                and row.get("blocked_by") == [] and "empty_toolpath" not in row)
+
+    before = ask("cam_get", {"include": ["operations"], "setup": setup})
+    if before is None:
+        return False
+    row, passed = valid_nonempty(before)
+    if not judged("cam_get", passed,
+                  f"{operation!r} valid and nonempty before input controls: {row}"):
+        return False
+
+    baseline = ask("cam_get", {"include": ["parameters"], "operation": operation})
+    if baseline is None:
+        return False
+    baseline_stepover = _parameter_expression(baseline, "stepover")
+    if not judged("cam_get",
+                  baseline_stepover is not None
+                  and not _identity_stepover_reads_back(baseline_stepover),
+                  f"{operation!r} baseline stepover is a real change: {baseline_stepover!r}"):
+        return False
+
+    edited = ask("cam_edit_operation",
+                 {"operation": operation, "parameters": {"tool_feedCutting": _IDENTITY_FEED},
+                  "expect_document": document_pin})
+    if edited is None:
+        return False
+    changed = next((r for r in (edited.get("changed") or [])
+                    if r.get("name") == "tool_feedCutting"), None)
+    note = edited.get("note") or ""
+    if not judged("cam_edit_operation",
+                  edited.get("edited") is True
+                  and _reads_back((changed or {}).get("after"), _IDENTITY_FEED)
+                  and "operationState reads valid in Manufacture after the edit" in note
+                  and "OUT OF DATE" not in note,
+                  f"{operation!r} valid-preserving feed edit and guidance: {changed}; {note}"):
+        return False
+
+    parameter = ask("cam_get", {"include": ["parameters"], "operation": operation})
+    if parameter is None:
+        return False
+    expression = _parameter_expression(parameter, "tool_feedCutting")
+    if not judged("cam_get", _reads_back(expression, _IDENTITY_FEED),
+                  f"{operation!r} independently reads tool_feedCutting={expression!r}"):
+        return False
+
+    control = ask("cam_get", {"include": ["operations"], "setup": setup})
+    if control is None:
+        return False
+    row, passed = valid_nonempty(control)
+    if not judged("cam_get", passed,
+                  f"{operation!r} remains valid and nonempty after the feed control: {row}"):
+        return False
+
+    edited = ask("cam_edit_operation",
+                 {"operation": operation, "parameters": {"stepover": _IDENTITY_STEPOVER},
+                  "expect_document": document_pin})
+    if edited is None:
+        return False
+    changed = next((r for r in (edited.get("changed") or [])
+                    if r.get("name") == "stepover"), None)
+    note = edited.get("note") or ""
+    if not judged("cam_edit_operation",
+                  edited.get("edited") is True
+                  and _identity_stepover_reads_back((changed or {}).get("after"))
+                  and "operationState now reads out_of_date" in note,
+                  f"{operation!r} stepover invalidation edit and guidance: {changed}; {note}"):
+        return False
+
+    parameter = ask("cam_get", {"include": ["parameters"], "operation": operation})
+    if parameter is None:
+        return False
+    expression = _parameter_expression(parameter, "stepover")
+    if not judged("cam_get", _identity_stepover_reads_back(expression),
+                  f"{operation!r} independently reads stepover={expression!r}"):
+        return False
+
+    stale = ask("cam_get", {"include": ["operations"], "setup": setup})
+    if stale is None:
+        return False
+    stale_row = _operation_row(stale, setup, operation)
+    if not judged("cam_get",
+                  bool(stale_row) and stale_row.get("state") == "out_of_date"
+                  and "toolpath_out_of_date" in (stale_row.get("blocked_by") or []),
+                  f"{operation!r} after the stepover edit: {stale_row}"):
+        return False
+
+    launched = ask("cam_generate", {"target": operation, "skip_valid": False,
+                                    "expect_document": document_pin})
+    if launched is None:
+        return False
+    handle = launched.get("handle")
+    if not judged("cam_generate",
+                  launched.get("launched") is True and bool(handle)
+                  and launched.get("target") == f"operation '{operation}'",
+                  f"{operation!r} regeneration handle: {handle!r}"):
+        return False
+
+    handle_done = target_done = False
+    active_routes = set()
+    for index in range(max_polls):
+        if index:
+            time.sleep(5)
+        snapshots = []
+        if not handle_done:
+            payload = ask("cam_get_status", {"handle": handle})
+            if payload is None:
+                return False
+            handle_done = payload.get("completed") is True
+            snapshots.append(("handle", payload))
+        if not target_done:
+            payload = ask("cam_get_status", {"target": operation})
+            if payload is None:
+                return False
+            target_done = payload.get("completed") is True
+            snapshots.append(("target", payload))
+        for route, payload in snapshots:
+            if payload.get("completed") is False and _status_unsettled(payload) > 0:
+                lines = [payload.get("readiness") or "",
+                         (payload.get("live_states") or {}).get("readiness") or ""]
+                if not judged("cam_get_status",
+                              all("poll cam_get_status" in line
+                                  and "run cam_generate" not in line for line in lines),
+                              f"{route} active guidance: {lines}"):
+                    return False
+                active_routes.add(route)
+        if handle_done and target_done:
+            break
+    if not judged("cam_get_status",
+                  handle_done and target_done and active_routes == {"handle", "target"},
+                  f"handle={handle!r} and target={operation!r} settled; "
+                  f"active routes observed={sorted(active_routes)}"):
+        return False
+
+    current = ask("cam_get", {"include": ["operations"], "setup": setup})
+    if current is None:
+        return False
+    current_row, passed = valid_nonempty(current)
+    if not judged("cam_get", passed, f"{operation!r} current valid path: {current_row}"):
+        return False
+
+    timing = ask("cam_get", {"include": ["time"], "setup": setup})
+    if timing is None:
+        return False
+    time_row = _time_row(timing, setup, operation)
+    if not judged("cam_get",
+                  bool(time_row) and (time_row.get("feed_distance") or 0) > 0,
+                  f"{operation!r} current feed distance: {time_row}"):
+        return False
+
+    parameter = ask("cam_get", {"include": ["parameters"], "operation": operation})
+    if parameter is None:
+        return False
+    expression = _parameter_expression(parameter, "stepover")
+    if not judged("cam_get", _identity_stepover_reads_back(expression),
+                  f"{operation!r} current stepover={expression!r}"):
+        return False
+
+    recs = ((current.get("operations") or {}).get("setups") or [])
+    rec = next((r for r in recs if r.get("setup") == setup), None)
+    operation_rows = (rec or {}).get("operations") or []
+    summary = (rec or {}).get("summary") or {}
+    stale_rows = [r for r in operation_rows if r.get("state") == "out_of_date"]
+    stale_names = [r.get("name") for r in stale_rows]
+    summary_exceptions = summary.get("exceptions") or []
+    known_rows = all(
+        ((r.get("state") == "valid" and r.get("blocked_by") == [])
+         or (r.get("state") == "out_of_date"
+             and r.get("blocked_by") == ["toolpath_out_of_date"]))
+        and "empty_toolpath" not in r for r in operation_rows)
+    exceptions_match = (
+        len(summary_exceptions) == len(stale_rows)
+        and all(any(exception.get("name") == row.get("name")
+                    and exception.get("blocked_by") == row.get("blocked_by")
+                    for exception in summary_exceptions)
+                for row in stale_rows))
+    census_passed = (
+        bool(rec) and bool(operation_rows) and rec.get("operations_truncated") is False
+        and summary.get("active_count") == len(operation_rows)
+        and known_rows and exceptions_match)
+    if not judged("cam_get", census_passed,
+                  f"{setup!r} complete post-control census; stale={stale_names}: {summary}"):
+        return False
+
+    if stale_rows:
+        launched = ask("cam_generate", {"target": setup, "skip_valid": False,
+                                        "expect_document": document_pin})
+        if launched is None:
+            return False
+        handle = launched.get("handle")
+        if not judged("cam_generate",
+                      launched.get("launched") is True and bool(handle)
+                      and launched.get("target") == f"setup '{setup}'"
+                      and launched.get("skip_valid") is False,
+                      f"{setup!r} one bounded dependency reconciliation: {launched}"):
+            return False
+
+        handle_done = setup_done = False
+        for index in range(max_polls):
+            if index:
+                time.sleep(5)
+            snapshots = []
+            if not handle_done:
+                payload = ask("cam_get_status", {"handle": handle})
+                if payload is None:
+                    return False
+                handle_done = payload.get("completed") is True
+                snapshots.append(payload)
+            if not setup_done:
+                payload = ask("cam_get_status", {"target": setup})
+                if payload is None:
+                    return False
+                setup_done = payload.get("completed") is True
+                snapshots.append(payload)
+            for payload in snapshots:
+                live = payload.get("live_states") or {}
+                if live.get("errored") or (payload.get("empty_toolpaths") or []):
+                    judged("cam_get_status", False,
+                           f"{setup!r} dependency reconciliation failed: {payload}")
+                    return False
+            if handle_done and setup_done:
+                break
+        if not judged("cam_get_status", handle_done and setup_done,
+                      f"handle={handle!r} and setup={setup!r} dependency reconciliation settled"):
+            return False
+
+    inspected = ask("cam_inspect_toolpaths", {"scope": setup})
+    if inspected is None:
+        return False
+    measured = inspected.get("measured") or {}
+    states = measured.get("states") or {}
+    inspected_clean = (
+        inspected.get("passed") is True
+        and measured.get("scope") == f"setup '{setup}'"
+        and measured.get("not_valid") == []
+        and measured.get("not_valid_truncated") is False
+        and measured.get("empty_toolpath_count") == 0
+        and measured.get("empty_toolpaths") == []
+        and states.get("valid") == len(operation_rows)
+        and states.get("total") == len(operation_rows))
+    if not judged("cam_inspect_toolpaths", inspected_clean,
+                  f"{setup!r} independently valid and nonempty after controls: {measured}"):
+        return False
+
+    parameter = ask("cam_get", {"include": ["parameters"], "operation": operation})
+    if parameter is None:
+        return False
+    expression = _parameter_expression(parameter, "stepover")
+    return judged("cam_get", _identity_stepover_reads_back(expression),
+                  f"{operation!r} retained stepover={expression!r} after setup reconciliation")
+
+
+def poll_generation(rows, notes, setup, max_polls=40, valued=None, document_pin=None):
     """Read cam_get_status until completed (bounded). Generation free-runs in the background and a
     status read returns immediately, so real wall-clock sits between reads. An errored op, an EMPTY
     toolpath (a 'valid' op that cuts nothing - the silent version of wrong), or an exhausted budget
@@ -1331,6 +2160,16 @@ def poll_generation(rows, notes, setup, max_polls=40, valued=None):
                 notes["cam_get_status"] = STORY.get("cam_get_status", "")
                 if valued is not None:
                     valued.add("cam_get_status")
+                if setup == CAM_SETUP and not _folder_workflow_probe(
+                        rows, setup, max_polls=max_polls, document_pin=document_pin):
+                    return
+                if setup in (CAM_SETUP, "Setup1"):
+                    operation = _RECALL.get("face_op")
+                    if not operation:
+                        rows.append(("cam_get", "FAIL", "face operation identity was not retained"))
+                        return
+                    _generation_identity_probe(
+                        rows, setup, operation, max_polls=max_polls, document_pin=document_pin)
             return
     rows.append(("cam_get_status", "FAIL", f"not complete after {max_polls} polls"))
 
@@ -1444,7 +2283,7 @@ _CAM_FB_DELIVER = [
      lambda p: p["created"] is True and p["setup_name"] == "Setup2"
      and p["operation_count"] == 0, None),
     ("cam_apply_template", {"setup": "Setup2", "template_name": TEMPLATE_NAME, "location": "local", "generate": "skip"},
-     _template_applied(TEMPLATE_NAME, "Setup2", 1), None),
+     _template_applied(TEMPLATE_NAME, "Setup2", 1, "skip"), None),
     ("cam_delete", lambda c: {"entity": _ctx_get(c, "adaptive_op", "the created adaptive op")},
      lambda p: p["deleted"] is True and p["entity"] == _RECALL.get("adaptive_op")
      and p["entity_type"] == "operation", None),
@@ -1731,6 +2570,133 @@ def _params_counted(operation):
                          and params.get("hidden_count", 0) >= 1
                          and "hidden_count" in (params.get("note") or ""))
     return check
+
+
+def _requested_parameter_rows(payload):
+    "(parameters payload, raw rows, rows by requested internal name) from an exact query."
+    params = payload.get("parameters") or {}
+    raw = params.get("requested_parameters") or []
+    return params, raw, {row.get("requested_name"): row for row in raw}
+
+
+def _valid_unavailable_page(page, expected_offset):
+    "Whether one unavailable page has consistent readable collection and continuation facts."
+    rows = page.get("parameters") or []
+    total = page.get("collection_count")
+    readable = page.get("readable_count")
+    unread = page.get("unread_item_count")
+    matching = page.get("readable_matching_count")
+    returned = page.get("returned_count")
+    next_offset = page.get("next_offset")
+    truncated = page.get("truncated")
+    basic = (isinstance(expected_offset, int) and not isinstance(expected_offset, bool)
+             and page.get("offset") == expected_offset
+             and isinstance(total, int) and total > 0
+             and isinstance(readable, int) and isinstance(unread, int)
+             and readable + unread == total and unread == 0
+             and page.get("collection_complete") is True
+             and isinstance(matching, int) and matching >= returned
+             and returned == len(rows) and 0 < returned <= 50)
+    continuation = (
+        truncated is True and next_offset == expected_offset + returned
+        and next_offset < matching
+        or truncated is False and next_offset is None
+        and expected_offset + returned == matching)
+    return basic and continuation
+
+
+def _dependency_state(operation, stage):
+    "Verify the Deburr pair and unrelated lock before, after, or after restoration."
+    def check(payload):
+        params, raw, rows = _requested_parameter_rows(payload)
+        switch = rows.get("doMultiplePasses") or {}
+        gated = rows.get("numberOfStepovers") or {}
+        control = rows.get("checkSurfaceSelection") or {}
+        baseline = _RECALL.get("deburr_dependency_baseline") or {}
+        before = baseline.get("expressions") or {}
+        observed = {
+            name: {key: row.get(key) for key in
+                   ("name", "expression", "visible", "enabled", "editable", "deprecated")}
+            for name, row in rows.items()}
+        common = (params.get("operation") == operation and len(raw) == 3
+                  and params.get("requested_parameter_count") == 3
+                  and set(rows) == {"doMultiplePasses", "numberOfStepovers",
+                                    "checkSurfaceSelection"}
+                  and all(row.get("name") == name for name, row in rows.items())
+                  and control.get("editable") is False)
+        if stage == "before":
+            valid = (common and _reads_back(switch.get("expression"), "false")
+                     and gated.get("enabled") is False and gated.get("editable") is False
+                     and gated.get("expression") is not None
+                     and _valid_unavailable_page(params.get("unavailable") or {}, 0))
+        elif stage == "enabled":
+            valid = (common and _reads_back(switch.get("expression"), "true")
+                     and _reads_back(gated.get("expression"), "3")
+                     and gated.get("enabled") is True and gated.get("editable") is True)
+        else:
+            valid = (common and set(before) == {"doMultiplePasses", "numberOfStepovers"}
+                     and all(rows[name].get("expression") == before[name] for name in before)
+                     and gated.get("enabled") is False and gated.get("editable") is False)
+        return _measured(f"'{operation}' dependency parameters read at {stage}",
+                         {"raw_requested_count": len(raw),
+                          "requested_parameter_count": params.get("requested_parameter_count"),
+                          "parameters": observed,
+                          "unavailable": params.get("unavailable") if stage == "before" else None},
+                         valid)
+    return check
+
+
+def _dependency_baseline(payload):
+    "The exact expressions and first unavailable-page facts needed by later rows."
+    params, _raw, rows = _requested_parameter_rows(payload)
+    page = params.get("unavailable") or {}
+    return {
+        "expressions": {
+            name: rows[name].get("expression")
+            for name in ("doMultiplePasses", "numberOfStepovers") if name in rows},
+        "unavailable": {
+            **{key: page.get(key) for key in
+               ("next_offset", "collection_count", "readable_matching_count")},
+            "names": [row.get("name") for row in (page.get("parameters") or [])]}}
+
+
+def _dependency_continuation(operation):
+    "Verify the next unavailable page starts at the first page's returned continuation."
+    def check(payload):
+        params = payload.get("parameters") or {}
+        page = params.get("unavailable") or {}
+        baseline = (_RECALL.get("deburr_dependency_baseline") or {}).get("unavailable") or {}
+        offset = baseline.get("next_offset")
+        before_names = baseline.get("names") or []
+        names = [row.get("name") for row in (page.get("parameters") or [])]
+        readable_names = (bool(before_names) and bool(names)
+                          and all(isinstance(name, str) and name for name in before_names + names)
+                          and len(before_names) == len(set(before_names))
+                          and len(names) == len(set(names))
+                          and set(before_names).isdisjoint(names))
+        valid = (params.get("operation") == operation
+                 and isinstance(offset, int) and offset > 0
+                 and _valid_unavailable_page(page, offset) and readable_names
+                 and page.get("collection_count") == baseline.get("collection_count")
+                 and page.get("readable_matching_count")
+                 == baseline.get("readable_matching_count"))
+        return _measured(
+            f"'{operation}' unavailable parameters continued from offset {offset}",
+            {"unavailable": page}, valid)
+    return check
+
+
+def _dependency_restore_edit(payload):
+    "Verify both restored expressions in the edit readback."
+    before = ((_RECALL.get("deburr_dependency_baseline") or {}).get("expressions") or {})
+    rows = {row.get("name"): row for row in (payload.get("changed") or [])}
+    return _measured(
+        "Deburr dependency expressions restored with the switch last",
+        {"edited": payload.get("edited"), "changed": payload.get("changed")},
+        payload.get("edited") is True and set(before) == {
+            "doMultiplePasses", "numberOfStepovers"}
+        and all((rows.get(name) or {}).get("after") == expression
+                for name, expression in before.items()))
 
 
 def _preset_applied(name):
@@ -2097,13 +3063,48 @@ _CAM_EXTENSION = [
                                        "handles": [_ctx_get(c, "sw_top_edge", "the top edge")],
                                        "generate": False},
      _edges_applied(1), None),
-    # the deburr's MULTI-PASS in ONE call: the stepover row reads isEditable False until the flag
-    # above it is true, so it is written LAST and its flag re-read once the switch has landed. The
-    # gated row is named FIRST here, which is the order a request-order apply would refuse on.
+    ("cam_get", lambda c: {"include": ["parameters"],
+                           "operation": _ctx_get(c, "deburr_op", "the deburr op"),
+                           "parameter_names": ["doMultiplePasses", "numberOfStepovers",
+                                               "checkSurfaceSelection"],
+                           "include_unavailable": True},
+     lambda p: _dependency_state(_RECALL.get("deburr_op"), "before")(p),
+     ("deburr_dependency_baseline", _recall("deburr_dependency_baseline",
+                                             _dependency_baseline))),
+    ("cam_get", lambda c: {
+         "include": ["parameters"],
+         "operation": _ctx_get(c, "deburr_op", "the deburr op"),
+         "include_unavailable": True,
+         "unavailable_offset": _ctx_get(
+             c, "deburr_dependency_baseline", "the Deburr dependency baseline")[
+                 "unavailable"]["next_offset"]},
+     lambda p: _dependency_continuation(_RECALL.get("deburr_op"))(p), None),
     ("cam_edit_operation", lambda c: {"operation": _ctx_get(c, "deburr_op", "the deburr op"),
                                       "parameters": {"numberOfStepovers": "3",
                                                      "doMultiplePasses": "true"}},
      _unlocked_in_one_call("doMultiplePasses", "numberOfStepovers", 3), None),
+    ("cam_get", lambda c: {"include": ["parameters"],
+                           "operation": _ctx_get(c, "deburr_op", "the deburr op"),
+                           "parameter_names": ["doMultiplePasses", "numberOfStepovers",
+                                               "checkSurfaceSelection"]},
+     lambda p: _dependency_state(_RECALL.get("deburr_op"), "enabled")(p), None),
+    # numberOfStepovers is restored while doMultiplePasses still reads true; the switch is restored
+    # last so this sequence does not depend on writing a row after its control is disabled.
+    ("cam_edit_operation", lambda c: {
+         "operation": _ctx_get(c, "deburr_op", "the deburr op"),
+         "parameters": {
+             "numberOfStepovers": _ctx_get(
+                 c, "deburr_dependency_baseline", "the Deburr dependency baseline")[
+                     "expressions"]["numberOfStepovers"],
+             "doMultiplePasses": _ctx_get(
+                 c, "deburr_dependency_baseline", "the Deburr dependency baseline")[
+                     "expressions"]["doMultiplePasses"]}},
+     _dependency_restore_edit, None),
+    ("cam_get", lambda c: {"include": ["parameters"],
+                           "operation": _ctx_get(c, "deburr_op", "the deburr op"),
+                           "parameter_names": ["doMultiplePasses", "numberOfStepovers",
+                                               "checkSurfaceSelection"]},
+     lambda p: _dependency_state(_RECALL.get("deburr_op"), "restored")(p), None),
     # the faces the geodesic is driven by, sorted from a point above the frustum: the top face and
     # the four drafted walls, with the base face the farthest of the six and so the one left out.
     ("find_geometry", {"target": _SW_COMP, "kind": "planar_face",
@@ -2299,6 +3300,13 @@ _CAM_SECOND_SETUP = [
     ("cam_edit_setup", {"setup": FLIP_SETUP, "machine": "Haas VF-2",
                         "machine_strip_simulation": True},
      lambda p: p.get("machine_set") == "Haas VF-2", None),
+    # A multi-setup read proves the unscoped default remains broad, while setup narrows the
+    # orientation row before any row cap is applied.
+    ("cam_get", {}, lambda p: (p.get("setup_count") or 0) >= 2, None),
+    ("cam_get", {"setup": FLIP_SETUP}, _setup_scope(FLIP_SETUP), None),
+    ("cam_get", {"setup": "MissingScope"}, _refused("MissingScope"), None),
+    ("cam_get", {"include": ["default", "operations"], "setup": FLIP_SETUP},
+     _setup_scope(FLIP_SETUP, require_operations=True), None),
     ("cam_get", {"include": ["strategies"], "setup": FLIP_SETUP},
      _offers(FLIP_SETUP, "face", "contour2d"), None),
     # THE UNDERSIDE: the face the flip exists to reach, measured before it is faced. 'nearest_to'
@@ -2367,6 +3375,11 @@ _CAM_MULTI_POST = [
                   "output_folder": EXPORT_DIR + "/nc", "program_name": "2001"},
      _refused("already exists", "Omit 'scope', 'setups', 'post', and 'output_folder'"), None),
     ("cam_post", {"program_name": "2001"}, _posted_as_is("2001"), None),
+    # The clean mode targets survive every intervening CAM act. Remove only the ungenerated setup
+    # before the final document poll; the generated target remains as the lasting witness.
+    ("cam_delete", {"entity": _TEMPLATE_SKIP_SETUP},
+     lambda p: p.get("deleted") is True and p.get("entity") == _TEMPLATE_SKIP_SETUP
+     and p.get("entity_type") == "setup", None),
     # THE TREE THE RUN LEAVES BEHIND. Both programs are written, so the rail toolpath comes back off
     # its park and every setup the job's later edits left stale is relaunched. Only setups whose
     # every operation read a selection back are named: a blocked one parks the process on a modal.

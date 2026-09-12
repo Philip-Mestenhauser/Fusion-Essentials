@@ -298,6 +298,12 @@ def _machining_extension_probe():
 
 
 CLOUD_TIER = "cloud_tier"
+CLOUD_LINK_CRASH_REVIEW = "cloud_link_crash_review_authorization"
+
+
+def _cloud_link_crash_review_probe():
+    """False until a separate owner-approved crash review changes this quarantine."""
+    return False
 
 
 def _cloud_tier_probe():
@@ -347,18 +353,23 @@ def _cloud_tier_probe():
 # the start of a run; a name with no probe answers None and routes as unmet, so a typo cannot read
 # as entitled.
 CAPABILITY_PROBES = {"machining_extension": _machining_extension_probe,
-                     CLOUD_TIER: _cloud_tier_probe}
+                     CLOUD_TIER: _cloud_tier_probe,
+                     CLOUD_LINK_CRASH_REVIEW: _cloud_link_crash_review_probe}
 
 # Capabilities that are an OPT-IN TIER rather than a licence. A licence capability may never hold
 # back a tool's only step - the same tool has to be driven by an ungated one, or an unentitled
 # installation loses that tool's coverage. A tier is the opposite: it exists so that tools which
 # touch an operator's own cloud data are held back BY DEFAULT, and being skipped is their resting
 # state (test_tool_verify_receipt reads this to keep the two invariants apart).
-OPT_IN_TIERS = frozenset({CLOUD_TIER})
+OPT_IN_TIERS = frozenset({CLOUD_TIER, CLOUD_LINK_CRASH_REVIEW})
 
 # One sentence beside a capability's skip verdict - what an operator does to turn the tier on. A
 # capability with no entry says only that it is not entitled.
-CAPABILITY_DETAIL = {CLOUD_TIER: "opt-in: " + cloud_config.CONFIG_NAME + " names hub, project, folder"}
+CAPABILITY_DETAIL = {
+    CLOUD_TIER: "opt-in: " + cloud_config.CONFIG_NAME + " names hub, project, folder",
+    CLOUD_LINK_CRASH_REVIEW: (
+        "deferred and unverified; separate owner-approved crash review and code change required"),
+}
 
 
 def probe_capabilities(names, probes=None):

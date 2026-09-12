@@ -2441,6 +2441,67 @@ class TestLiveReadinessEdges:
         assert sig is None and "CAM tree read failed" in err
 
 
+    def test_active_generation_points_to_status_not_another_launch(
+            self, monkeypatch, operation_cast_passthrough):
+        op = _tally_op("Face1", state=1, generating=True)
+        op.strategy = "face"
+        monkeypatch.setattr(cc, "_create_strategy", strategy_factory({"face": True}))
+        monkeypatch.setattr(cc, "get_cam", lambda: (self._cam([op]), None))
+        sig, err = cc.live_readiness()
+        assert err is None and cc.unsettled_count(sig) == 1
+        assert "poll cam_get_status" in sig["readiness"]
+        assert "run cam_generate" not in sig["readiness"]
+
+    def test_active_unread_state_points_to_status_without_inventing_a_state(
+            self, monkeypatch, operation_cast_passthrough):
+        op = _unread_state_op()
+        op.isGenerating = True
+        monkeypatch.setattr(cc, "get_cam", lambda: (self._cam([op]), None))
+        sig, err = cc.live_readiness()
+        assert err is None and sig["unread"] == 1 and cc.unsettled_count(sig) == 1
+        assert "unread operationState" in sig["readiness"]
+        assert "poll cam_get_status" in sig["readiness"]
+        assert "run cam_generate" not in sig["readiness"]
+
+    def test_idle_unread_state_requires_a_fresh_manufacture_read(
+            self, monkeypatch, operation_cast_passthrough):
+        monkeypatch.setattr(cc, "get_cam", lambda: (self._cam([_unread_state_op()]), None))
+        sig, err = cc.live_readiness()
+        assert err is None and sig["unread"] == 1 and cc.unsettled_count(sig) == 0
+        assert "re-read with cam_get in the Manufacture workspace" in sig["readiness"]
+        assert "cam_generate" not in sig["readiness"]
+        assert sig["readiness"] != "no active operations to assess."
+
+    @pytest.mark.parametrize("generating", [True, False])
+    def test_an_unrecognized_state_value_uses_the_same_unread_guidance(
+            self, monkeypatch, operation_cast_passthrough, generating):
+        op = _tally_op("OddState", state=99, generating=generating)
+        monkeypatch.setattr(cc, "get_cam", lambda: (self._cam([op]), None))
+        sig, err = cc.live_readiness()
+        assert err is None and sig["unread"] == 1
+        assert "unread operationState" in sig["readiness"]
+        if generating:
+            assert cc.unsettled_count(sig) == 1
+            assert "poll cam_get_status" in sig["readiness"]
+        else:
+            assert cc.unsettled_count(sig) == 0
+            assert "re-read with cam_get in the Manufacture workspace" in sig["readiness"]
+        assert "cam_generate" not in sig["readiness"]
+        assert sig["readiness"] != "no active operations to assess."
+
+    def test_mixed_idle_stale_and_unread_states_keep_both_next_steps(
+            self, monkeypatch, operation_cast_passthrough):
+        ops = [_tally_op("Stale", state=1), _unread_state_op()]
+        monkeypatch.setattr(cc, "get_cam", lambda: (self._cam(ops), None))
+        sig, err = cc.live_readiness()
+        assert err is None and sig["out_of_date"] == 1 and sig["unread"] == 1
+        assert "1 operation(s) read out_of_date" in sig["readiness"]
+        assert "run cam_generate for those" in sig["readiness"]
+        assert "unread operationState" in sig["readiness"]
+        assert "re-read with cam_get in the Manufacture workspace" in sig["readiness"]
+        assert "ready to post" not in sig["readiness"]
+
+
 class TestReadinessWarningVerdict:
     """The verdict may not overstate. A warning does NOT block a post, so the job stays postable -
     but 'ready to post' on its own hides an op that reads valid and cut nothing, so a warned job
@@ -5471,6 +5532,15 @@ class TestUnfinishedVerdictNamesTheBlockedOps:
                             strategy_factory({"chamfer": True, "face": True}))
         assert cc.unfinished_verdict("1 of 2 active ops valid", self._ops()) == \
             "1 of 2 active ops valid - run cam_generate to finish the rest."
+
+    def test_active_work_uses_the_unsettled_count_and_keeps_blocked_ops_visible(self, monkeypatch):
+        monkeypatch.setattr(cc, "_create_strategy",
+                            strategy_factory({"chamfer": False, "face": True}))
+        verdict = cc.unfinished_verdict(
+            "1 of 2 active ops valid", self._ops(), unsettled=1)
+        assert "1 operation(s) still generating" in verdict
+        assert "poll cam_get_status" in verdict and "run cam_generate" not in verdict
+        assert "Cham" in verdict and "EXCLUDES" in verdict
 
     def test_a_blocked_op_is_named_and_the_circular_pointer_is_dropped(self, monkeypatch):
         monkeypatch.setattr(cc, "_create_strategy",

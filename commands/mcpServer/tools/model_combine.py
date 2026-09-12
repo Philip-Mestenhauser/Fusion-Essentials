@@ -27,10 +27,59 @@ app = adsk.core.Application.get()
 _OPERATION_KEYS = ("join", "cut", "intersect")   # combine needs an existing target; no "new"
 
 
+def _complete_result_bodies(feature):
+    """Return (bodies, declared count, complete) from a feature's count/item collection."""
+    bodies = safe(lambda: feature.bodies)
+    count = _common.counted(lambda: bodies.count) if bodies is not None else None
+    if count is None:
+        return [], None, False
+    result = []
+    for i in range(count):
+        body = safe(lambda i=i: bodies.item(i))
+        if body is None:
+            return result, count, False
+        result.append(body)
+    return result, count, True
+
+
+def _supported_join_verdict(result_names, result_count, result_complete, result_lumps,
+                            input_lumps):
+    """Return the verdict for a feature-backed JOIN without kept tools or a new component."""
+    total_in = (sum(input_lumps) if all(isinstance(n, int) for n in input_lumps) else None)
+    total_out = (sum(result_lumps) if result_complete and result_lumps
+                 and all(isinstance(n, int) for n in result_lumps) else None)
+    fields = {
+        "fusion_outcome": "unknown",
+        "result_bodies_complete": result_complete,
+        "input_lump_total": total_in,
+    }
+    if result_count is not None:
+        fields["result_body_count"] = result_count
+    if total_out is not None:
+        fields["result_lump_total"] = total_out
+
+    names = ", ".join(n or "<unnamed>" for n in result_names)
+    if total_in is None or total_out is None or total_out < 1 or total_out > total_in:
+        return fields, ("WARNING: this join's fusion outcome is UNKNOWN - a complete result-body "
+                        "and input/result lump census could not be read.")
+    if total_out == 1:
+        fields.update({"fusion_outcome": "complete", "fused": True})
+        return fields, ""
+    fields["disjoint_join"] = True
+    if total_out < total_in:
+        fields.update({"fusion_outcome": "partial", "fused": True})
+        return (fields,
+                f"WARNING: this join partially fused the inputs - it reduced {total_in} input "
+                f"lumps to {total_out} result lumps across {result_count} bodies ({names}).")
+    fields.update({"fusion_outcome": "none", "fused": False})
+    return (fields,
+            f"WARNING: this join fused NOTHING - it left all {total_out} input lumps separate "
+            f"across {result_count} result bodies ({names}).")
+
+
 def _join_verdict(result_bodies, result_lumps, input_lumps, direct_no_feature,
                   before_bodies, after_bodies, tool_count, keep_tools, new_component):
-    """(payload fields, warning sentence) for a JOIN that did not fuse - ({}, "") when nothing read
-    says it failed."""
+    """Return the pre-existing fallback verdict for unsupported JOIN reporting routes."""
     # A kept tool body rides in the feature's own result set, so more than one result body there is
     # not a failed fuse.
     if len(result_bodies) > 1 and not keep_tools:
@@ -151,7 +200,13 @@ def handler(target: str = "", tools=None, operation: str = "join",
     # body-split: CombineFeature.bodies holds what this feature modified/created and the tools were
     # consumed, so for a cut/intersect more than one result body means the target came apart. Direct
     # mode has no feature to read it off, so the check is skipped and the note says so.
-    result_objs = [] if direct_no_feature else _common.result_bodies(feature)
+    if direct_no_feature:
+        result_objs, result_count, result_complete = [], None, False
+    elif op_key == "join" and not keep_tools and not new_component:
+        result_objs, result_count, result_complete = _complete_result_bodies(feature)
+    else:
+        result_objs = _common.result_bodies(feature)
+        result_count, result_complete = len(result_objs), True
     result_bodies = [f["name"] for f in _common.body_facts(result_objs)]
     # With keep_tools the feature's result bodies include the kept tool copies - a kept disjoint tool
     # counts as a split piece - so kept tool NAMES are excluded before the >1 verdict.
@@ -178,8 +233,11 @@ def handler(target: str = "", tools=None, operation: str = "join",
 
     # The body a JOIN landed in: the feature's single result body, or the target in direct mode. Its
     # lumps read FRESH off that body - an input reference can go invalid once the feature rebuilds.
-    joined = result_objs[0] if len(result_objs) == 1 else (tgt if direct_no_feature else None)
+    joined = (result_objs[0] if result_complete and len(result_objs) == 1
+              else (tgt if direct_no_feature else None))
     result_lumps = _geom.lump_count(joined) if joined is not None else None
+    result_lump_counts = ([_geom.lump_count(body) for body in result_objs]
+                          if result_complete else [])
 
     payload = {
         "combined": True,
@@ -202,13 +260,24 @@ def handler(target: str = "", tools=None, operation: str = "join",
     if result_lumps is not None:
         payload["lump_count"] = result_lumps
     if op_key == "join":
-        fields, warning = _join_verdict(
-            result_bodies, result_lumps, input_lumps, direct_no_feature,
-            before_bodies, after_bodies, len(tool_bodies), keep_tools, new_component)
+        if not direct_no_feature and not keep_tools and not new_component:
+            fields, warning = _supported_join_verdict(
+                result_bodies, result_count, result_complete, result_lump_counts, input_lumps)
+        else:
+            fields, warning = _join_verdict(
+                result_bodies, result_lumps, input_lumps, direct_no_feature,
+                before_bodies, after_bodies, len(tool_bodies), keep_tools, new_component)
         payload.update(fields)
         if warning:
-            payload["note"] += (" " + warning + " " + _common.failed_effect_remedy(design, feature)
-                                + " Move the pieces into contact (model_move) and join again.")
+            remedy = _common.failed_effect_remedy(design, feature)
+            if fields.get("fusion_outcome") == "unknown":
+                remedy += (" Read the independent body/lump census with "
+                           "model_inspect(include=['mass'], per_body=true); require "
+                           "mass.per_body_truncated=false and a readable lump_count for every "
+                           "returned body before deciding whether geometry needs to move.")
+            else:
+                remedy += " Move the pieces into contact (model_move) and join again."
+            payload["note"] += " " + warning + " " + remedy
     if op_key in ("cut", "intersect") and len(split_pieces) > 1:
         payload["body_split"] = split_pieces
         payload["note"] += (f" WARNING: this {op_key} DISCONNECTED the target into {len(split_pieces)} "

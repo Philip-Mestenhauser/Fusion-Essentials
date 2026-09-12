@@ -8,10 +8,21 @@ reaches the run as an ERROR row hours later - and a duplicate id silently overwr
 ledger cell. Both are decidable offline, against the same _compose the runner calls.
 """
 
+import ast
+import json
 import os
+import re
+import shutil
 import sys
+import tempfile
 import textwrap
 from types import SimpleNamespace
+
+import adsk.core
+import adsk.core as adsk_core
+import adsk.cam as adsk_cam
+import adsk.fusion
+import pytest
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "live"))
@@ -44,6 +55,260 @@ class TestRowRegistry:
                 if not str(row.get("claim", "")).strip()
                 or not str(row.get("encoded_in", "")).strip()]
         assert not thin, "rows with an empty claim or encoded_in: " + ", ".join(thin)
+
+
+class _Items:
+    def __init__(self, values):
+        self.values = list(values)
+        self.count = len(self.values)
+
+    def item(self, index):
+        return self.values[index]
+
+
+class _EllipseGeometry:
+    curveType = adsk.core.Curve3DTypes.Ellipse3DCurveType
+
+    def __init__(self, center, major=2.0, minor=1.0):
+        self.center = SimpleNamespace(x=center[0], y=center[1], z=center[2])
+        self.majorRadius = major
+        self.minorRadius = minor
+
+
+def _run_ellipse_row(caps):
+    ellipse_geometries = [_EllipseGeometry(*cap) for cap in caps]
+    solid = SimpleNamespace(edges=_Items(
+        [SimpleNamespace(geometry=geometry) for geometry in ellipse_geometries]))
+    extrudes = SimpleNamespace(addSimple=lambda *_args: SimpleNamespace(bodies=_Items([solid])))
+    sketch = SimpleNamespace(
+        sketchCurves=SimpleNamespace(sketchEllipses=SimpleNamespace(add=lambda *_args: None)),
+        profiles=_Items([object()]))
+    root = SimpleNamespace(
+        xYConstructionPlane=object(), sketches=SimpleNamespace(add=lambda _plane: sketch),
+        features=SimpleNamespace(extrudeFeatures=extrudes))
+    design = SimpleNamespace(rootComponent=root)
+    closed = []
+    document = SimpleNamespace(
+        products=SimpleNamespace(itemByProductType=lambda _kind: design),
+        close=lambda save: closed.append(save))
+    emitted = []
+    row = next(row for row in measure_api.ROWS if row["id"] == "shape-dump-ellipse3d")
+    exec(textwrap.dedent(row["body"]), {
+        "adsk": adsk,
+        "app": SimpleNamespace(documents=SimpleNamespace(add=lambda _kind: document)),
+        "dump_shape": lambda _label, obj: len(dir(obj)),
+        "emit": lambda passed, detail: emitted.append((passed, detail)),
+    })
+    assert closed == [False]
+    assert len(emitted) == 1
+    return emitted[0]
+
+
+@pytest.mark.parametrize(("caps", "expected"), [
+    ((((0.0, 0.0, 1.0), 2.0, 1.0), ((0.0, 0.0, 0.0), 2.0, 1.0)), True),
+    ((((0.0, 0.0, 0.0), 2.0, 1.0), ((0.0, 0.0, 1.0), 2.0, 1.0)), True),
+    ((((0.0, 0.0, 0.0), 2.0, 1.0), ((-1e-12, 0.0, 1.0), 2.0, 1.0)), True),
+    ((((0.0, 0.0, 0.0), 2.0, 1.0),), False),
+    ((((0.0, 0.0, 0.0), 2.0, 1.0), ((0.0, 0.0, 1.0), 2.0, 0.5)), False),
+])
+def test_ellipse_row_checks_both_cap_curves_without_edge_order(caps, expected):
+    passed, detail = _run_ellipse_row(caps)
+    assert passed is expected
+    assert "ellipse edges=" in detail
+
+
+class _OutOfRangeCollection:
+    def __init__(self, outcome, count):
+        self.outcome = outcome
+        self.count = count
+        self.calls = []
+
+    def item(self, index):
+        self.calls.append(index)
+        assert index == 9999
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+
+@pytest.mark.parametrize("row_id", ["item-oor-brepbodies", "item-oor-sketches"])
+@pytest.mark.parametrize(("outcome", "count", "expected", "called"), [
+    (RuntimeError("native range error"), 0, True, True),
+    (ValueError("wrong error"), 0, False, True),
+    (None, 0, False, True),
+    (RuntimeError("boundary range error"), 9999, True, True),
+    (RuntimeError("must not be called"), 10000, False, False),
+])
+def test_collection_out_of_range_rows_require_a_caught_runtime_error(
+        row_id, outcome, count, expected, called):
+    collection = _OutOfRangeCollection(outcome, count)
+    root = SimpleNamespace(bRepBodies=collection, sketches=collection)
+    design = SimpleNamespace(rootComponent=root)
+    products = SimpleNamespace(itemByProductType=lambda kind: (
+        design if kind == "DesignProductType" else None))
+    app = SimpleNamespace(activeDocument=SimpleNamespace(products=products))
+    adsk = SimpleNamespace(fusion=SimpleNamespace(
+        Design=SimpleNamespace(cast=lambda product: product)))
+    emitted = []
+    row = next(row for row in measure_api.ROWS if row["id"] == row_id)
+    exec(textwrap.dedent(row["body"]), {
+        "adsk": adsk,
+        "app": app,
+        "emit": lambda passed, detail: emitted.append((passed, detail)),
+    })
+    assert row["read_only"] is True
+    assert "need_box" not in row and "expect" not in row
+    assert len(emitted) == 1
+    assert emitted[0][0] is expected
+    assert collection.calls == ([9999] if called else [])
+
+
+def _execute_row_body(body, scope):
+    exec("def _row():\n" + textwrap.indent(textwrap.dedent(body), "    "), scope)
+    scope["_row"]()
+
+
+class _ClosedDocument:
+    def __init__(self, close_mode="ok", name_mode="runtime"):
+        self.close_mode = close_mode
+        self.name_mode = name_mode
+        self.closed = False
+        self.close_calls = 0
+
+    @property
+    def isValid(self):
+        return not self.closed
+
+    @property
+    def name(self):
+        if self.name_mode == "runtime":
+            raise RuntimeError("An API Object refers to a deleted Object")
+        if self.name_mode == "wrong":
+            raise ValueError("wrong read")
+        if self.name_mode == "wrong_runtime":
+            raise RuntimeError("different runtime failure")
+        return "closed"
+
+    def close(self, _save):
+        self.close_calls += 1
+        if self.close_mode == "raise":
+            raise RuntimeError("close failed")
+        if self.close_mode == "raise_once" and self.close_calls == 1:
+            raise RuntimeError("close failed once")
+        self.closed = True
+
+
+@pytest.mark.parametrize(("close_mode", "name_mode", "expected"), [
+    ("ok", "runtime", True),
+    ("ok", "wrong", False),
+    ("ok", "value", False),
+    ("ok", "wrong_runtime", False),
+    ("raise_once", "runtime", False),
+    ("raise", "runtime", False),
+])
+def test_closed_document_row_requires_cleanup_and_runtime_error(close_mode, name_mode, expected):
+    document = _ClosedDocument(close_mode, name_mode)
+    adsk = SimpleNamespace(core=SimpleNamespace(
+        DocumentTypes=adsk_core.DocumentTypes))
+    app = SimpleNamespace(documents=SimpleNamespace(add=lambda _kind: document))
+    emitted = []
+    row = next(row for row in measure_api.ROWS if row["id"] == "closed-document-name-raises")
+    _execute_row_body(row["body"], {
+        "adsk": adsk, "app": app,
+        "emit": lambda passed, detail: emitted.append((passed, detail)),
+    })
+    assert emitted[0][0] is expected
+    assert row["read_only"] is True and "expect" not in row
+    assert document.close_calls == (1 if close_mode == "ok" else 2)
+    if close_mode == "raise_once":
+        assert document.isValid is False
+    if not expected:
+        assert emitted[0][1]
+
+
+class _TemplateURL:
+    leafName = "owned-template.f3d"
+    def toString(self):
+        return "local://owned-template.f3d"
+
+
+class _TemplateLibrary:
+    def __init__(self, template_mode="runtime", delete_mode="ok"):
+        self.template_mode = template_mode
+        self.delete_mode = delete_mode
+        self.url = _TemplateURL()
+        self.asset_present = False
+        self.delete_calls = 0
+
+    def urlByLocation(self, _location):
+        return "local"
+
+    def importTemplate(self, _template, _local):
+        self.asset_present = True
+        return self.url
+
+    def deleteAsset(self, _url):
+        self.delete_calls += 1
+        if self.delete_mode == "raise":
+            raise RuntimeError("delete failed")
+        if self.delete_mode == "false":
+            return False
+        self.asset_present = False
+        return True
+
+    def childAssetURLs(self, _local):
+        return [self.url] if self.asset_present else []
+
+    def templateAtURL(self, _url):
+        if self.template_mode == "runtime":
+            raise RuntimeError("3 : Given URL does not point to a template")
+        if self.template_mode == "wrong":
+            raise ValueError("wrong exception")
+        if self.template_mode == "wrong_runtime":
+            raise RuntimeError("different runtime failure")
+        return None
+
+
+@pytest.mark.parametrize(("template_mode", "delete_mode", "expected"), [
+    ("runtime", "ok", True),
+    ("wrong", "ok", False),
+    ("wrong_runtime", "ok", False),
+    ("return", "ok", False),
+    ("runtime", "false", False),
+    ("runtime", "raise", False),
+])
+def test_deleted_template_row_requires_exact_exception_and_cleanup(
+        template_mode, delete_mode, expected):
+    library = _TemplateLibrary(template_mode, delete_mode)
+    template = SimpleNamespace(name=None)
+    operation = object()
+    setup = SimpleNamespace(name="MeasureSetup", allOperations=[operation])
+    cam = SimpleNamespace(setups=SimpleNamespace(count=1, item=lambda _index: setup))
+    products = SimpleNamespace(itemByProductType=lambda kind: cam)
+    app = SimpleNamespace(activeDocument=SimpleNamespace(products=products))
+    adsk = SimpleNamespace(
+        cam=SimpleNamespace(
+            CAM=SimpleNamespace(cast=lambda product: product),
+            Operation=SimpleNamespace(cast=lambda operation: operation),
+            CAMTemplate=SimpleNamespace(
+                createFromOperations=lambda _ops: template,
+                cast=lambda result: result),
+            CAMManager=SimpleNamespace(get=lambda: SimpleNamespace(
+                libraryManager=SimpleNamespace(templateLibrary=library))),
+            LibraryLocations=adsk_cam.LibraryLocations))
+    emitted = []
+    row = next(row for row in measure_api.ROWS
+               if row["id"] == "cam-templateaturl-raises-on-deleted-url")
+    _execute_row_body(row["body"], {
+        "adsk": adsk, "app": app,
+        "emit": lambda passed, detail: emitted.append((passed, detail)),
+    })
+    assert emitted[0][0] is expected
+    assert row["read_only"] is True and "expect" not in row
+    assert library.asset_present is (delete_mode != "ok")
+    assert library.delete_calls == (1 if delete_mode == "ok" else 2)
+    if not expected:
+        assert "local://owned-template.f3d" in emitted[0][1]
 
 
 _METRIC_DESIGNATIONS = ("M5x0.8", "M10x1.5", "M6x1")
@@ -137,3 +402,132 @@ class TestThreadDesignationMultiTypeIdentity:
         assert passed is False
         assert calls == []
         assert all(designation in detail for designation in _METRIC_DESIGNATIONS)
+
+
+class TestDxfFatalProbe:
+    @pytest.fixture
+    def dxf_probe(self):
+        row = next(row for row in measure_api.ROWS
+                   if row["id"] == "dxf-sketch-options-units-read-is-fatal")
+        marker = {
+            "row_id": row["id"], "nonce": "n", "scratch": "session:s",
+            "source_sha256": "h", "phase": "getter_ready",
+            "options_object_type": "adsk::fusion::DXFSketchExportOptions",
+            "curve_count": 1,
+        }
+        return row, marker
+
+    def test_exact_fatal_boundary_passes(self, dxf_probe):
+        row, marker = dxf_probe
+        status, detail = measure_api._judge_dxf_fatal(
+            marker, True,
+            "Traceback\nRuntimeError: 3 : Distance unit is not supported by DXF. "
+            "Please select a different unit\n",
+            row["id"], "n", "session:s", "h")
+        assert status == "PASS"
+        assert "exact_fatal_getter" in detail
+
+    def test_wrong_boundary_and_error_have_specific_refusals(self, dxf_probe):
+        row, marker = dxf_probe
+        cases = [
+            (None, True, "RuntimeError: 3 : Distance unit is not supported by DXF. "
+             "Please select a different unit", "missing_or_malformed_marker", "ERROR"),
+            ({**marker, "phase": "getter_returned"}, True,
+             "RuntimeError: 3 : Distance unit is not supported by DXF. Please select a different unit",
+             "getter_did_not_abort", "FAIL"),
+            ({**marker, "phase": "getter_caught"}, True,
+             "RuntimeError: 3 : Distance unit is not supported by DXF. Please select a different unit",
+             "getter_did_not_abort", "FAIL"),
+            ({**marker, "nonce": "other"}, True,
+             "RuntimeError: 3 : Distance unit is not supported by DXF. Please select a different unit",
+             "marker_identity_mismatch", "ERROR"),
+            (marker, True,
+             "wrapper: RuntimeError: 3 : Distance unit is not supported by DXF. "
+             "Please select a different unit",
+             "different_native_error", "ERROR"),
+            (marker, False, "printed no error", "no_channel_error", "FAIL"),
+        ]
+        for candidate, is_error, payload, cause, expected_status in cases:
+            status, detail = measure_api._judge_dxf_fatal(
+                candidate, is_error, payload, row["id"], "n", "session:s", "h")
+            assert status == expected_status
+            assert cause in detail
+
+    def test_marker_requires_measured_options_and_curve(self, dxf_probe):
+        row, marker = dxf_probe
+        for field, value in (("options_object_type", "other"), ("curve_count", 2)):
+            candidate = dict(marker)
+            candidate[field] = value
+            status, detail = measure_api._judge_dxf_fatal(
+                candidate, True,
+                "RuntimeError: 3 : Distance unit is not supported by DXF. "
+                "Please select a different unit",
+                row["id"], "n", "session:s", "h")
+            assert status == "ERROR"
+            assert ("options_type_unproven" in detail
+                    or "one_curve_unproven" in detail)
+
+    def test_measure_helper_binds_marker_and_removes_temp_probe(
+            self, monkeypatch, dxf_probe):
+        row, _marker = dxf_probe
+        probe_dir = tempfile.mkdtemp(prefix="fe_measure_dxf_fatal_quote_'")
+        seen = {}
+        error_line = ('RuntimeError: 3 : Distance unit is not supported by DXF. '
+                      'Please select a different unit')
+
+        def fake_call(_tool, args):
+            assert args.get('read_only') in (None, False)
+            script = args['script']
+            marker_path = ast.literal_eval(
+                re.search(r'_probe_path = (.+)', script).group(1))
+            nonce = ast.literal_eval(
+                re.search(r'_probe_nonce = (.+)', script).group(1))
+            scratch = ast.literal_eval(
+                re.search(r'_probe_scratch = (.+)', script).group(1))
+            source_sha = ast.literal_eval(
+                re.search(r'_probe_source_sha = (.+)', script).group(1))
+            assert marker_path == os.path.join(probe_dir, 'marker.json')
+            compile(script, 'instrumented-dxf', 'exec')
+            seen['probe_dir'] = os.path.dirname(marker_path)
+            with open(marker_path, 'w', encoding='utf-8') as fh:
+                json.dump({'row_id': row['id'], 'nonce': nonce, 'scratch': scratch,
+                           'source_sha256': source_sha, 'phase': 'getter_ready',
+                           'options_object_type': 'adsk::fusion::DXFSketchExportOptions',
+                           'curve_count': 1}, fh)
+            return True, error_line
+
+        monkeypatch.setattr(measure_api.tempfile, 'mkdtemp', lambda prefix: probe_dir)
+        monkeypatch.setattr(measure_api, 'call', fake_call)
+        status, detail = measure_api._measure_dxf_units(row, 'session:s')
+        assert status == 'PASS'
+        assert 'exact_fatal_getter' in detail
+        assert not os.path.exists(seen['probe_dir'])
+
+    def test_transport_failure_still_cleans_probe(self, monkeypatch, dxf_probe):
+        row, _marker = dxf_probe
+        probe_dir = tempfile.mkdtemp(prefix='fe_measure_dxf_fatal_transport_')
+        monkeypatch.setattr(measure_api.tempfile, 'mkdtemp', lambda prefix: probe_dir)
+        monkeypatch.setattr(measure_api, 'call',
+                            lambda *_args: (_ for _ in ()).throw(RuntimeError('transport')))
+        status, detail = measure_api._measure_dxf_units(row, 'session:s')
+        assert status == 'ERROR'
+        assert 'transport_exception' in detail
+        assert not os.path.exists(probe_dir)
+
+    def test_probe_cleanup_failure_is_error(self, monkeypatch, dxf_probe):
+        row, _marker = dxf_probe
+        probe_dir = tempfile.mkdtemp(prefix='fe_measure_dxf_fatal_cleanup_')
+        real_rmtree = shutil.rmtree
+        monkeypatch.setattr(measure_api.tempfile, 'mkdtemp', lambda prefix: probe_dir)
+        monkeypatch.setattr(measure_api, 'call',
+                            lambda *_args: (_ for _ in ()).throw(RuntimeError('transport')))
+        monkeypatch.setattr(measure_api.shutil, 'rmtree',
+                            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError('cleanup')))
+        try:
+            status, detail = measure_api._measure_dxf_units(row, 'session:s')
+            assert status == 'ERROR'
+            assert 'probe_cleanup_failed' in detail
+            assert 'transport_exception' in detail
+            assert os.path.isdir(probe_dir)
+        finally:
+            real_rmtree(probe_dir, ignore_errors=True)

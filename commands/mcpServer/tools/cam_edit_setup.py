@@ -164,6 +164,12 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
     if not (setup or "").strip():
         return error("Provide 'setup' - the CAM setup name (see cam_get).")
 
+    for field, value in (("models", models), ("fixtures", fixtures), ("stock", stock)):
+        if value == []:
+            return error(f"'{field}' cannot be an empty list - clearing that setup selection is "
+                         "unsupported by this tool. Omit the field to leave it unchanged, or pass "
+                         "one or more bodies or occurrences to replace it.")
+
     # parse parameters (may be empty)
     wanted = {}
     if parameters not in (None, "", {}):

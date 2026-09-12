@@ -9,10 +9,97 @@ nesting last, because it restructures what it nests.
 """
 
 from verify_core import (
-    EXPORT_DIR, _RECALL, _arranged, _base_feature_closed, _base_feature_open, _box, _ctx_get,
-    _datum_plane, _drilled, _dwell, _extent_measured, _extruded, _fg, _fgn, _holder_computed,
-    _made_component, _measured, _mesh_round_trip, _num, _rebuilt, _recall, _refused, _repair_no_op,
-    _split_bodies, _stitched, _unstitched, _watch)
+    EXPORT_DIR, _RECALL, _activated, _arranged, _base_feature_open, _box, _captured, _ctx_get,
+    _datum_plane, _document_closed, _document_read, _drilled, _dwell, _extent_measured, _extruded,
+    _fg, _fgn, _holder_computed, _made_component, _measured, _mesh_round_trip, _new_document, _num,
+    _rebuilt, _recall, _refused, _repair_no_op, _split_bodies, _stitched, _unstitched, _watch)
+from verify_layout import _px, _py
+
+
+def _base_feature_state(p):
+    """The complete mode and timeline values used around a base-feature scope."""
+    mode = p.get("mode_detail") or {}
+    timeline = p.get("timeline") or {}
+    rows = timeline.get("timeline") or []
+    return {
+        "design_type": mode.get("design_type"),
+        "has_timeline": mode.get("has_timeline"),
+        "timeline_feature_count": mode.get("timeline_feature_count"),
+        "base_feature_count": mode.get("base_feature_count"),
+        "timeline_count": timeline.get("count"),
+        "returned": timeline.get("returned"),
+        "truncated": timeline.get("truncated") is True,
+        "rows": [[row.get("index"), row.get("name"), row.get("type")] for row in rows],
+    }
+
+
+def _base_feature_parametric(p):
+    """A complete parametric mode/timeline baseline."""
+    state = _base_feature_state(p)
+    count = state["timeline_count"]
+    complete = (isinstance(count, int) and state["returned"] == count
+                and len(state["rows"]) == count and not state["truncated"])
+    return _measured(
+        "complete parametric base-feature baseline",
+        state,
+        state["design_type"] == "parametric" and state["has_timeline"] is True
+        and state["timeline_feature_count"] == count
+        and isinstance(state["base_feature_count"], int) and complete)
+
+
+def _base_feature_direct(p):
+    """An independent mode read while a base-feature scope is open."""
+    mode = p.get("mode_detail") or {}
+    facts = {key: mode.get(key) for key in
+             ("design_type", "has_timeline", "timeline_feature_count")}
+    return _measured(
+        "open base-feature mode",
+        facts,
+        facts["design_type"] == "direct" and facts["has_timeline"] is False
+        and facts["timeline_feature_count"] is None)
+
+
+def _base_feature_same_name(name_key):
+    """An opened scope whose adopted name equals the first document's adopted name."""
+    def check(p):
+        _base_feature_open(p)
+        expected = _RECALL[name_key]
+        actual = p.get("base_feature")
+        return _measured(
+            "same adopted base-feature name before cross-document finish",
+            {"expected": expected, "actual": actual}, actual == expected)
+    return check
+
+
+def _base_feature_added(before_key, name_key):
+    """The complete parametric timeline after one named base feature was added."""
+    def check(p):
+        before = _RECALL[before_key]
+        after = _base_feature_state(p)
+        remaining = list(after["rows"])
+        preserved = True
+        for row in before["rows"]:
+            if row in remaining:
+                remaining.remove(row)
+            else:
+                preserved = False
+        expected_name = _RECALL[name_key]
+        added = (len(remaining) == 1 and remaining[0][1] == expected_name
+                 and remaining[0][2] == "BaseFeature")
+        complete = (after["returned"] == after["timeline_count"] == len(after["rows"])
+                    and not after["truncated"])
+        valid = (
+            after["design_type"] == "parametric" and after["has_timeline"] is True
+            and after["timeline_feature_count"] == after["timeline_count"]
+            and after["timeline_count"] == before["timeline_count"] + 1
+            and after["base_feature_count"] == before["base_feature_count"] + 1
+            and preserved and added and complete)
+        return _measured(
+            f"one BaseFeature named {expected_name} added to the complete timeline",
+            {"before_count": before["timeline_count"], "after": after,
+             "added_rows": remaining, "expected_name": expected_name},
+            valid)
+    return check
 
 
 # --- the CAMEO acts: surface-prep, mesh, and CAM families ride scratch fixtures in the SAME doc -
@@ -150,9 +237,8 @@ _MACHINING = [
     ("sketch_create", {"plane": "xy", "name": "Proj"}, "ok", None),
     ("find_geometry", {"target": "SDel", "kind": "planar_face", "nearest_to": [310, 210, 0], "max_results": 1}, "ok", _fg("proj_face")),
     ("sketch_project", lambda c: {"entities": [_ctx_get(c, "proj_face", "project face")], "sketch_name": "Proj"}, "ok", None),
-    # surface_trim + surface_untrim on an intersecting-sheet topology. Staged in clear space (X=600)
-    # so no other body's surface intersects the sheet - only its own cutter divides it, keeping the
-    # trim deterministic (a coincident surface adds phantom cells and the trim keeps the wrong one).
+    # surface_trim + surface_untrim on intersecting sheets in clear space. The trim precondition
+    # requires the target sheet to be the only visible surface; the hidden cutter still divides it.
     ("model_create_component", {"name": "SHole", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "SH1"}, "ok", None),
     ("sketch_add_geometry", {"geometry": [{"kind": "line", "x1": 600, "y1": 0,
@@ -165,6 +251,13 @@ _MACHINING = [
     ("surface_extrude", {"sketch_name": "SH2", "distance": 10, "symmetric": True}, "ok", None),
     ("find_geometry", {"target": "SHole", "kind": "planar_face", "nearest_to": [620, 0, 20], "max_results": 1}, "ok", _fg("sh_sheet")),
     ("find_geometry", {"target": "SHole", "kind": "cylinder_face", "nearest_to": [620, 0, 20], "max_results": 1}, "ok", _fg("sh_cutter")),
+    ("view_set", {"action": "snapshot"}, "ok", None),
+    ("view_set", {"action": "isolate", "target": ["SHole:1"]},
+     lambda p: p.get("action") == "isolate" and p.get("affected") == ["SHole:1"], None),
+    ("view_set", lambda c: {"action": "hide",
+                            "target": [_ctx_get(c, "sh_cutter", "cylinder cutter")]},
+     lambda p: p.get("action") == "hide" and bool(p.get("bodies"))
+     and all(row.get("visible") is False for row in p["bodies"]), None),
     # the cell bookkeeping is the read-back: at least one cell REMOVED (a trim that removed none
     # kept the whole sheet) and a kept area the phantom-cell gate could measure.
     ("surface_trim", lambda c: {"surface": _ctx_get(c, "sh_sheet", "sheet face"), "trim_tool": _ctx_get(c, "sh_cutter", "cylinder cutter")},
@@ -176,6 +269,15 @@ _MACHINING = [
     ("surface_untrim", lambda c: {"faces": [_ctx_get(c, "sh_trimmed", "trimmed sheet face")], "loop_type": "internal"},
      lambda p: p.get("extent_grew") is True and p.get("faces_created", 0) >= 1
      and p["area_after"] > p["area_before"], None),
+    # Body bulbs are outside snapshot/restore, so show the cutter before restoring occurrences/camera.
+    ("view_set", lambda c: {"action": "show",
+                            "target": [_ctx_get(c, "sh_cutter", "cylinder cutter")]},
+     lambda p: p.get("action") == "show" and bool(p.get("bodies"))
+     and all(row.get("visible") is True for row in p["bodies"]), None),
+    ("view_set", {"action": "restore"},
+     lambda p: p.get("camera_restored") is True and p.get("visual_style_restored") is True
+     and p.get("missing_occurrences") == 0 and p.get("restored_occurrences", 0) >= 1
+     and p.get("snapshot_kept") is False, None),
     # RULED surfaces off a rim edge. A line extruded as a surface gives a vertical sheet whose top
     # rim (z=30) is the seed every ruled beat leaves from; each type builds a DIFFERENT surface off
     # that same edge, so the payload's own ruled_type/direction is what separates them.
@@ -254,8 +356,125 @@ _MACHINING = [
     ("find_geometry", {"target": "Stc", "kind": "planar_face", "nearest_to": [510, 210, 0], "max_results": 1}, "ok", _fg("stc_f1")),
     ("find_geometry", {"target": "Stc", "kind": "planar_face", "nearest_to": [500, 210, 5], "max_results": 1}, "ok", _fg("stc_f2")),
     ("model_stitch", lambda c: {"bodies": [_ctx_get(c, "stc_f1", "stitch a"), _ctx_get(c, "stc_f2", "stitch b")]}, _stitched, None),
-    ("model_base_feature", {"action": "start", "base_feature": "BF1"}, _base_feature_open, None),
-    ("model_base_feature", {"action": "finish", "base_feature": "BF1"}, _base_feature_closed, None),
+    # Preserve the full composed timeline, prove a wrong name leaves BF1 open, then finish by the
+    # actual adopted name and independently read the one-row delta.
+    ("doc_get", {}, _document_read,
+     ("bf_story_doc", _recall("bf_story_doc", lambda p: p["active"]["document_handle"]))),
+    ("design_get", {"include": ["mode", "timeline"], "max_results": 2000},
+     _base_feature_parametric,
+     ("bf_story_before", _recall("bf_story_before", _base_feature_state))),
+    ("model_base_feature",
+     lambda c: {"action": "start", "base_feature": "BF1",
+                "expect_document": _ctx_get(c, "bf_story_doc", "the sweep document")},
+     _base_feature_open,
+     ("bf_story_name", _recall("bf_story_name", lambda p: p["base_feature"]))),
+    ("design_get", {"include": ["mode"]}, _base_feature_direct, None),
+    ("model_base_feature",
+     lambda c: {"action": "finish", "base_feature": "BF1Missing",
+                "expect_document": _ctx_get(c, "bf_story_doc", "the sweep document")},
+     _refused("No captured or existing base feature named 'BF1Missing'",
+              "active document", "exact base_feature returned by start"), None),
+    ("design_get", {"include": ["mode"]}, _base_feature_direct, None),
+    ("model_base_feature",
+     lambda c: {"action": "finish",
+                "base_feature": _ctx_get(c, "bf_story_name", "the adopted BF1 name"),
+                "expect_document": _ctx_get(c, "bf_story_doc", "the sweep document")},
+     lambda p: p.get("editing") is False and len(p.get("closed_scopes") or []) == 1
+     and p.get("named_finished") == _RECALL["bf_story_name"], None),
+    ("design_get", {"include": ["mode", "timeline"], "max_results": 2000},
+     _base_feature_added("bf_story_before", "bf_story_name"),
+     ("bf_story_after", _recall("bf_story_after", _base_feature_state))),
+
+    # Named round: open the same adopted name in the sweep document and one owned scratch document.
+    # Finishing B must leave A direct/no-timeline until A is activated and explicitly finished.
+    ("model_base_feature",
+     lambda c: {"action": "start", "base_feature": "BFCrossNamed",
+                "expect_document": _ctx_get(c, "bf_story_doc", "the sweep document")},
+     _base_feature_open,
+     ("bf_cross_named_a", _recall("bf_cross_named_a", lambda p: p["base_feature"]))),
+    ("design_get", {"include": ["mode"]}, _base_feature_direct, None),
+    ("doc_new",
+     lambda c: {"expect_document": _ctx_get(c, "bf_story_doc", "the sweep document")},
+     _new_document,
+     ("bf_extra_doc", _recall("bf_extra_doc", lambda p: p["document_handle"]))),
+    ("design_get", {"include": ["mode", "timeline"], "max_results": 200},
+     _base_feature_parametric,
+     ("bf_extra_before", _recall("bf_extra_before", _base_feature_state))),
+    ("model_base_feature",
+     lambda c: {"action": "start",
+                "base_feature": _ctx_get(c, "bf_cross_named_a", "the shared scope name"),
+                "expect_document": _ctx_get(c, "bf_extra_doc", "the extra document")},
+     _base_feature_same_name("bf_cross_named_a"),
+     ("bf_cross_named_b", _recall("bf_cross_named_b", lambda p: p["base_feature"]))),
+    ("design_get", {"include": ["mode"]}, _base_feature_direct, None),
+    ("model_base_feature",
+     lambda c: {"action": "finish",
+                "base_feature": _ctx_get(c, "bf_cross_named_b", "the extra document scope"),
+                "expect_document": _ctx_get(c, "bf_extra_doc", "the extra document")},
+     lambda p: p.get("editing") is False and len(p.get("closed_scopes") or []) == 1,
+     None),
+    ("design_get", {"include": ["mode", "timeline"], "max_results": 200},
+     _base_feature_added("bf_extra_before", "bf_cross_named_b"),
+     ("bf_extra_named_after", _recall("bf_extra_named_after", _base_feature_state))),
+    ("doc_activate",
+     lambda c: {"name": _ctx_get(c, "bf_story_doc", "the sweep document"),
+                "expect_document": _ctx_get(c, "bf_extra_doc", "the extra document")},
+     _activated(), None),
+    ("design_get", {"include": ["mode"]}, _base_feature_direct, None),
+    ("model_base_feature",
+     lambda c: {"action": "finish",
+                "base_feature": _ctx_get(c, "bf_cross_named_a", "the sweep document scope"),
+                "expect_document": _ctx_get(c, "bf_story_doc", "the sweep document")},
+     lambda p: p.get("editing") is False and len(p.get("closed_scopes") or []) == 1,
+     None),
+    ("design_get", {"include": ["mode", "timeline"], "max_results": 2000},
+     _base_feature_added("bf_story_after", "bf_cross_named_a"),
+     ("bf_story_named_after", _recall("bf_story_named_after", _base_feature_state))),
+
+    # Unnamed round on the same two documents proves the active-document filter also governs the
+    # legacy finish route. Each document remains independently readable before the other closes.
+    ("model_base_feature",
+     lambda c: {"action": "start", "base_feature": "BFCrossUnnamed",
+                "expect_document": _ctx_get(c, "bf_story_doc", "the sweep document")},
+     _base_feature_open,
+     ("bf_cross_unnamed_a", _recall("bf_cross_unnamed_a", lambda p: p["base_feature"]))),
+    ("design_get", {"include": ["mode"]}, _base_feature_direct, None),
+    ("doc_activate",
+     lambda c: {"name": _ctx_get(c, "bf_extra_doc", "the extra document"),
+                "expect_document": _ctx_get(c, "bf_story_doc", "the sweep document")},
+     _activated(), None),
+    ("model_base_feature",
+     lambda c: {"action": "start",
+                "base_feature": _ctx_get(c, "bf_cross_unnamed_a", "the shared scope name"),
+                "expect_document": _ctx_get(c, "bf_extra_doc", "the extra document")},
+     _base_feature_same_name("bf_cross_unnamed_a"),
+     ("bf_cross_unnamed_b", _recall("bf_cross_unnamed_b", lambda p: p["base_feature"]))),
+    ("design_get", {"include": ["mode"]}, _base_feature_direct, None),
+    ("model_base_feature",
+     lambda c: {"action": "finish",
+                "expect_document": _ctx_get(c, "bf_extra_doc", "the extra document")},
+     lambda p: p.get("editing") is False and len(p.get("closed_scopes") or []) == 1,
+     None),
+    ("design_get", {"include": ["mode", "timeline"], "max_results": 200},
+     _base_feature_added("bf_extra_named_after", "bf_cross_unnamed_b"), None),
+    ("doc_activate",
+     lambda c: {"name": _ctx_get(c, "bf_story_doc", "the sweep document"),
+                "expect_document": _ctx_get(c, "bf_extra_doc", "the extra document")},
+     _activated(), None),
+    ("design_get", {"include": ["mode"]}, _base_feature_direct, None),
+    ("model_base_feature",
+     lambda c: {"action": "finish",
+                "expect_document": _ctx_get(c, "bf_story_doc", "the sweep document")},
+     lambda p: p.get("editing") is False and len(p.get("closed_scopes") or []) == 1,
+     None),
+    ("design_get", {"include": ["mode", "timeline"], "max_results": 2000},
+     _base_feature_added("bf_story_named_after", "bf_cross_unnamed_a"), None),
+    ("doc_close",
+     lambda c: {"name": _ctx_get(c, "bf_extra_doc", "the extra document"),
+                "save_changes": False,
+                "expect_document": _ctx_get(c, "bf_story_doc", "the sweep document")},
+     _document_closed, None),
+    ("design_activate_component", {"occurrence": "Stc:1"}, "ok", None),
 ] + [
     # compute_holder needs a body + a cyl-face axis + a planar end-datum.
     ("model_create_component", {"name": "HolderPart", "activate": True}, _made_component, None),
@@ -340,8 +559,296 @@ _NESTING = _box("ArrP1", ox=200, oy=350) + [
 ]
 
 
+# The asymmetric occurrence-qualified mesh fixture. Its authored box is moved by the layout pass
+# before the occurrence transform is applied, so every expected world bound reads through _px/_py.
+_MESH_POSE = "MeshPose"
+_MESH_POSE_AUTHORED = (180.0, 180.0)
+_MESH_POSE_MOVE = (100.0, 40.0, 30.0)
+_MESH_POSE_TOL = 0.01
+
+
+def _mesh_pose_transform(bounds):
+    """Bounds after Rz(90) and the fixture translation."""
+    mn, mx = bounds
+    points = [(x, y, z) for x in (mn[0], mx[0])
+              for y in (mn[1], mx[1]) for z in (mn[2], mx[2])]
+    moved = [(100.0 - y, 40.0 + x, 30.0 + z) for x, y, z in points]
+    return (tuple(min(p[i] for p in moved) for i in range(3)),
+            tuple(max(p[i] for p in moved) for i in range(3)))
+
+
+def _mesh_pose_bounds():
+    """The fixture's identity, once-transformed and double-transformed world bounds."""
+    x0, y0 = _MESH_POSE_AUTHORED
+    identity = ((_px(_MESH_POSE, x0), _py(_MESH_POSE, y0), 0.0),
+                (_px(_MESH_POSE, x0 + 20.0), _py(_MESH_POSE, y0 + 10.0), 5.0))
+    once = _mesh_pose_transform(identity)
+    return identity, once, _mesh_pose_transform(once)
+
+
+def _mesh_pose_points(payload):
+    """The target's min/max points, normalized across BRep and mesh inspect payloads."""
+    box = payload.get("bbox") if payload.get("kind") == "mesh" else payload
+    box = box or {}
+    out = []
+    for key in ("min_point", "max_point"):
+        point = box.get(key) or {}
+        out.append(tuple(point.get(axis) for axis in ("x", "y", "z")))
+    return tuple(out)
+
+
+def _mesh_pose_bounds_match(got, expected):
+    """Whether two min/max triples agree within the mesh fixture tolerance."""
+    return all(_num(a) and abs(a - b) <= _MESH_POSE_TOL
+               for ga, ea in zip(got, expected) for a, b in zip(ga, ea))
+
+
+def _mesh_pose_body_signature(payload):
+    """The source-body values that must hold across mesh conversion."""
+    mass = payload.get("mass") or {}
+    return (_mesh_pose_points(payload), mass.get("volume"), mass.get("area"))
+
+
+def _mesh_pose_mesh_signature(payload):
+    """The mesh values that must hold across occurrence and instance reads."""
+    return (_mesh_pose_points(payload), payload.get("volume"), payload.get("area"),
+            payload.get("triangle_count"), payload.get("node_count"),
+            payload.get("is_closed"), payload.get("is_oriented"))
+
+
+def _mesh_pose_body(expected, same_as=None):
+    """A source-body oracle requiring exact bounds and independently read physical properties."""
+    def check(p):
+        mass = p.get("mass") or {}
+        got = _mesh_pose_points(p)
+        state = _mesh_pose_body_signature(p)
+        good = (p.get("kind") == "body" and p.get("units") == "mm"
+                and _mesh_pose_bounds_match(got, expected)
+                and _num(mass.get("volume")) and abs(mass["volume"] - 1000.0) <= 0.01
+                and _num(mass.get("area")) and abs(mass["area"] - 700.0) <= 0.01)
+        if same_as:
+            good = good and state == _RECALL.get(same_as)
+        return _measured("MeshPose source volume, area and world bounds",
+                         {"state": state, "expected_bounds": expected,
+                          "same_as": same_as and _RECALL.get(same_as)}, good)
+    return check
+
+
+def _mesh_pose_mesh(expected, same_as=None, reject_bounds=None):
+    """A mesh oracle requiring placement, closure, orientation and scalar geometry."""
+    def check(p):
+        got = _mesh_pose_points(p)
+        state = _mesh_pose_mesh_signature(p)
+        good = (p.get("kind") == "mesh" and p.get("units") == "mm"
+                and _mesh_pose_bounds_match(got, expected)
+                and (reject_bounds is None or not _mesh_pose_bounds_match(got, reject_bounds))
+                and _num(p.get("volume")) and abs(p["volume"] - 1000.0) <= 0.01
+                and _num(p.get("area")) and abs(p["area"] - 700.0) <= 0.01
+                and p.get("triangle_count") == 12 and _num(p.get("node_count"))
+                and p["node_count"] > 0 and p.get("is_closed") is True
+                and p.get("is_oriented") is True)
+        if same_as:
+            good = good and state == _RECALL.get(same_as)
+        return _measured("MeshPose mesh placement and geometry",
+                         {"state": state, "expected_bounds": expected,
+                          "rejected_bounds": reject_bounds,
+                          "same_as": same_as and _RECALL.get(same_as)}, good)
+    return check
+
+
+def _mesh_pose_pose_signature(payload):
+    """Exact pose rows for the minted MeshPose occurrence paths."""
+    wanted = [p for p in (_RECALL.get("mesh_pose_first"), _RECALL.get("mesh_pose_second")) if p]
+    rows = {r.get("name"): r for r in (payload.get("occurrences") or [])}
+    keys = ("component", "origin", "x_axis", "y_axis", "z_axis")
+    return {name: {key: rows.get(name, {}).get(key) for key in keys} for name in wanted}
+
+
+def _mesh_pose_poses(first_moved=True, same_as=None):
+    """A complete occurrence census with exact independent shared-instance placements."""
+    def check(p):
+        first = _RECALL.get("mesh_pose_first")
+        other = _RECALL.get("mesh_pose_second")
+        rows = {r.get("name"): r for r in (p.get("occurrences") or [])}
+        expected = {
+            first: ({"origin": [100.0, 40.0, 30.0],
+                     "x_axis": [0.0, 1.0, 0.0], "y_axis": [-1.0, 0.0, 0.0],
+                     "z_axis": [0.0, 0.0, 1.0]} if first_moved else
+                    {"origin": [0.0, 0.0, 0.0],
+                     "x_axis": [1.0, 0.0, 0.0], "y_axis": [0.0, 1.0, 0.0],
+                     "z_axis": [0.0, 0.0, 1.0]}),
+        }
+        if other:
+            expected[other] = {"origin": [0.0, 0.0, 0.0],
+                               "x_axis": [1.0, 0.0, 0.0], "y_axis": [0.0, 1.0, 0.0],
+                               "z_axis": [0.0, 0.0, 1.0]}
+        signature = _mesh_pose_pose_signature(p)
+        good = (first is not None and p.get("occurrences_truncated") is False
+                and p.get("occurrence_count") == len(p.get("occurrences") or []))
+        for name, pose in expected.items():
+            row = rows.get(name) or {}
+            good = (good and row.get("component") == _MESH_POSE
+                    and all(row.get(key) == value for key, value in pose.items()))
+        if same_as:
+            good = good and signature == _RECALL.get(same_as)
+        return _measured("MeshPose complete occurrence census and exact poses",
+                         {"signature": signature, "expected": expected,
+                          "count": p.get("occurrence_count"),
+                          "returned": len(p.get("occurrences") or []),
+                          "truncated": p.get("occurrences_truncated")}, good)
+    return check
+
+
+def _mesh_pose_census(p):
+    """The complete two-mesh component census with both minted names."""
+    rows = p.get("meshes") or []
+    wanted = {_RECALL.get("mesh_pose_m0"), _RECALL.get("mesh_pose_m1")}
+    got = {row.get("name") for row in rows}
+    good = (p.get("truncated") is False and p.get("count") == len(rows) == 2
+            and got == wanted and all(row.get("triangle_count") == 12 for row in rows))
+    return _measured("MeshPose complete mesh census",
+                     {"count": p.get("count"), "returned": len(rows),
+                      "truncated": p.get("truncated"), "names": sorted(got)}, good)
+
+
 # ACT 7: MESH - a scratch solid becomes a mesh, then the mesh family works it (one mesh per op).
 _MESH = [
+    # A fresh asymmetric 20 x 10 x 5 mm source: identity conversion is the control, then the
+    # occurrence moves through the reproduced Rz90 + [100,40,30] pose before a qualified conversion.
+    ("model_create_component", {"name": _MESH_POSE, "activate": True}, _made_component,
+     ("mesh_pose_first", _recall("mesh_pose_first", lambda p: p["full_path"]))),
+    ("sketch_create", {"plane": "xy", "name": _MESH_POSE + "S"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle",
+                                           "x1": _MESH_POSE_AUTHORED[0],
+                                           "y1": _MESH_POSE_AUTHORED[1],
+                                           "x2": _MESH_POSE_AUTHORED[0] + 20.0,
+                                           "y2": _MESH_POSE_AUTHORED[1] + 10.0}],
+                             "sketch_name": _MESH_POSE + "S"}, "ok", None),
+    ("model_extrude", {"sketch_name": _MESH_POSE + "S", "profile_index": 0, "distance": 5},
+     _extruded, None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("find_geometry", lambda c: {"target": _ctx_get(c, "mesh_pose_first", "first occurrence"),
+                                 "kind": "planar_face", "max_results": 1},
+     "ok", _fg("mesh_pose_body")),
+    ("model_inspect", lambda c: {
+        "target": _ctx_get(c, "mesh_pose_first", "first occurrence") + ":Body1",
+        "include": ["default", "mass"], "accuracy": "very_high", "units": "mm"},
+     lambda p: _mesh_pose_body(_mesh_pose_bounds()[0])(p),
+     ("mesh_pose_source_identity",
+      _recall("mesh_pose_source_identity", _mesh_pose_body_signature))),
+    ("save_as_mesh", lambda c: {"body": _ctx_get(c, "mesh_pose_body", "source body"),
+                                "name": "MeshPoseM0", "quality": "low"},
+     lambda p: _measured("MeshPose identity conversion",
+                         {"name": p.get("name"), "component": p.get("component"),
+                          "source_body": p.get("source_body"),
+                          "triangle_count": p.get("triangle_count")},
+                         p.get("component") == _MESH_POSE and p.get("source_body") == "Body1"
+                         and p.get("name") == "MeshPoseM0"
+                         and p.get("triangle_count") == 12),
+     ("mesh_pose_m0", _recall("mesh_pose_m0", lambda p: p["name"]))),
+    ("model_inspect", lambda c: {
+        "target": (_ctx_get(c, "mesh_pose_first", "first occurrence") + ":"
+                   + _ctx_get(c, "mesh_pose_m0", "identity mesh")),
+        "units": "mm"}, lambda p: _mesh_pose_mesh(_mesh_pose_bounds()[0])(p),
+     ("mesh_pose_m0_identity",
+      _recall("mesh_pose_m0_identity", _mesh_pose_mesh_signature))),
+    # Create the shared placement while the first is still at identity. Fusion then keeps the
+    # second at identity when only the first occurrence is released and moved.
+    ("design_add_instance", lambda c: {
+        "component": _ctx_get(c, "mesh_pose_first", "first occurrence")},
+     lambda p: p.get("created") is True and p.get("component") == _MESH_POSE,
+     ("mesh_pose_second", _recall("mesh_pose_second", lambda p: p["full_path"]))),
+    ("assembly_get", {"include": ["poses"], "max_occurrences": 200, "units": "mm"},
+     _mesh_pose_poses(first_moved=False), None),
+    ("assembly_ground", lambda c: {
+        "occurrence": _ctx_get(c, "mesh_pose_first", "first occurrence"),
+        "ground_to_parent": False},
+     lambda p: p.get("isGroundToParent") is False, None),
+    ("assembly_move", lambda c: {
+        "occurrence": _ctx_get(c, "mesh_pose_first", "first occurrence"),
+        "rotate_deg": 90, "rotate_axis": "z", "units": "mm"},
+     lambda p: p.get("moved") is True and p.get("rotate_deg") == 90.0
+     and p.get("rotate_axis") == "z", None),
+    ("assembly_move", lambda c: {
+        "occurrence": _ctx_get(c, "mesh_pose_first", "first occurrence"),
+        "dx": _MESH_POSE_MOVE[0], "dy": _MESH_POSE_MOVE[1], "dz": _MESH_POSE_MOVE[2],
+        "units": "mm"},
+     lambda p: _measured("MeshPose translated occurrence pose",
+                         {"position": p.get("position"), "translation": p.get("translation")},
+                         p.get("moved") is True
+                         and p.get("position") == {"x": 100.0, "y": 40.0, "z": 30.0}),
+     None),
+    ("assembly_capture_position", {"action": "capture"}, _captured, None),
+    ("assembly_get", {"include": ["poses"], "max_occurrences": 200, "units": "mm"},
+     _mesh_pose_poses(),
+     ("mesh_pose_pose_before",
+      _recall("mesh_pose_pose_before", _mesh_pose_pose_signature))),
+    ("model_inspect", lambda c: {
+        "target": _ctx_get(c, "mesh_pose_first", "first occurrence") + ":Body1",
+        "include": ["default", "mass"], "accuracy": "very_high", "units": "mm"},
+     lambda p: _mesh_pose_body(_mesh_pose_bounds()[1])(p),
+     ("mesh_pose_source_moved",
+      _recall("mesh_pose_source_moved", _mesh_pose_body_signature))),
+    ("model_inspect", lambda c: {
+        "target": (_ctx_get(c, "mesh_pose_first", "first occurrence") + ":"
+                   + _ctx_get(c, "mesh_pose_m0", "identity mesh")),
+        "units": "mm"}, lambda p: _mesh_pose_mesh(_mesh_pose_bounds()[1])(p),
+     ("mesh_pose_m0_moved",
+      _recall("mesh_pose_m0_moved", _mesh_pose_mesh_signature))),
+    ("save_as_mesh", lambda c: {
+        "body": _ctx_get(c, "mesh_pose_first", "first occurrence") + ":Body1",
+        "name": "MeshPoseM1", "quality": "low"},
+     lambda p: _measured("MeshPose occurrence-qualified conversion",
+                         {"name": p.get("name"), "component": p.get("component"),
+                          "source_body": p.get("source_body"),
+                          "triangle_count": p.get("triangle_count")},
+                         p.get("component") == _MESH_POSE and p.get("source_body") == "Body1"
+                         and p.get("name") == "MeshPoseM1"
+                         and p.get("triangle_count") == 12),
+     ("mesh_pose_m1", _recall("mesh_pose_m1", lambda p: p["name"]))),
+    ("model_inspect", lambda c: {
+        "target": (_ctx_get(c, "mesh_pose_first", "first occurrence") + ":"
+                   + _ctx_get(c, "mesh_pose_m1", "qualified mesh")),
+        "units": "mm"},
+     lambda p: _mesh_pose_mesh(_mesh_pose_bounds()[1],
+                               reject_bounds=_mesh_pose_bounds()[2])(p), None),
+    ("mesh_get", lambda c: {
+        "target": _ctx_get(c, "mesh_pose_first", "first occurrence"),
+        "max_results": 10, "units": "mm"}, _mesh_pose_census, None),
+    # Fresh independent reads prove conversion did not move the source, M0 or the captured pose.
+    ("model_inspect", lambda c: {
+        "target": _ctx_get(c, "mesh_pose_first", "first occurrence") + ":Body1",
+        "include": ["default", "mass"], "accuracy": "very_high", "units": "mm"},
+     lambda p: _mesh_pose_body(_mesh_pose_bounds()[1], "mesh_pose_source_moved")(p), None),
+    ("model_inspect", lambda c: {
+        "target": (_ctx_get(c, "mesh_pose_first", "first occurrence") + ":"
+                   + _ctx_get(c, "mesh_pose_m0", "identity mesh")),
+        "units": "mm"},
+     lambda p: _mesh_pose_mesh(_mesh_pose_bounds()[1], "mesh_pose_m0_moved")(p), None),
+    ("assembly_get", {"include": ["poses"], "max_occurrences": 200, "units": "mm"},
+     _mesh_pose_poses(same_as="mesh_pose_pose_before"), None),
+    # Mesh bodies belong to the component: the independent second placement sees the same M1 at
+    # identity, while the first placement remains at its captured rotated and translated pose.
+    ("model_inspect", lambda c: {
+        "target": _ctx_get(c, "mesh_pose_second", "second occurrence") + ":Body1",
+        "include": ["default", "mass"], "accuracy": "very_high", "units": "mm"},
+     lambda p: _mesh_pose_body(_mesh_pose_bounds()[0], "mesh_pose_source_identity")(p), None),
+    ("model_inspect", lambda c: {
+        "target": (_ctx_get(c, "mesh_pose_second", "second occurrence") + ":"
+                   + _ctx_get(c, "mesh_pose_m1", "qualified mesh")),
+        "units": "mm"}, lambda p: _mesh_pose_mesh(_mesh_pose_bounds()[0])(p), None),
+    ("model_inspect", lambda c: {
+        "target": _ctx_get(c, "mesh_pose_first", "first occurrence") + ":Body1",
+        "include": ["default", "mass"], "accuracy": "very_high", "units": "mm"},
+     lambda p: _mesh_pose_body(_mesh_pose_bounds()[1], "mesh_pose_source_moved")(p), None),
+    ("model_inspect", lambda c: {
+        "target": (_ctx_get(c, "mesh_pose_first", "first occurrence") + ":"
+                   + _ctx_get(c, "mesh_pose_m1", "qualified mesh")),
+        "units": "mm"},
+     lambda p: _mesh_pose_mesh(_mesh_pose_bounds()[1],
+                               reject_bounds=_mesh_pose_bounds()[2])(p), None),
+    ("assembly_get", {"include": ["poses"], "max_occurrences": 200, "units": "mm"},
+     _mesh_pose_poses(same_as="mesh_pose_pose_before"), None),
     ("model_create_component", {"name": "Msh", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "MshS"}, "ok", None),
     ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 200, "y1": 300,

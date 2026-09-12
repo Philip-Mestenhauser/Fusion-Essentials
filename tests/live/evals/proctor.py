@@ -302,8 +302,7 @@ def executor_login(env, creds=CREDENTIALS):
 
 
 def launch(prompt, run_dir, model, deny=(), tool_search=False):
-    """Spawn the blind executor on the prompt, watch it, and return (why it ended, the seconds at
-    which each tool call landed)."""
+    """Spawn the executor and return its end reason, call times, and exit code."""
     exe = shutil.which("claude")
     if not exe:
         sys.exit("claude CLI not on PATH - install Claude Code and log in, then rerun")
@@ -328,8 +327,14 @@ def launch(prompt, run_dir, model, deny=(), tool_search=False):
     transcript = os.path.join(run_dir, "transcript.jsonl")
     stderr_chunks = []
     out = open(transcript, "w", encoding="utf-8")
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=out, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", cwd=cwd, env=env)
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=out, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8", cwd=cwd, env=env)
+    except OSError as exc:
+        out.close()
+        with open(os.path.join(run_dir, "stderr.txt"), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(str(exc))
+        return f"executor launch failed: {exc}", [], None
     threading.Thread(target=lambda: stderr_chunks.extend(proc.stderr), daemon=True).start()
     try:
         proc.stdin.write(prompt)
@@ -381,7 +386,12 @@ def launch(prompt, run_dir, model, deny=(), tool_search=False):
         fh.write("".join(stderr_chunks))
     if not ended:
         ended = "report" if proc.returncode == 0 else f"executor exited {proc.returncode}"
-    return ended, live.call_times
+    return ended, live.call_times, proc.returncode
+
+
+def run_outcome(ended, returncode):
+    """Return completed only for a normal zero-exit report."""
+    return "executor_completed" if ended == "report" and returncode == 0 else "executor_failed"
 
 
 def audit(transcript):
@@ -511,6 +521,7 @@ def main():
     set_dir = os.path.join(RESULTS, set_folder)
     os.makedirs(set_dir, exist_ok=True)
 
+    cli_status = 0
     for _ in range(max(1, args.runs)):
         run_dir, nn = next_run_dir(set_dir, scenario_id)
         os.makedirs(run_dir)
@@ -529,13 +540,19 @@ def main():
         with open(os.path.join(run_dir, "prompt.txt"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write(prompt)
         t0 = time.time()
-        ended, call_times = launch(prompt, run_dir, args.model, args.deny, args.tool_search)
+        ended, call_times, returncode = launch(prompt, run_dir, args.model, args.deny, args.tool_search)
+        outcome = run_outcome(ended, returncode)
+        if outcome != "executor_completed":
+            cli_status = 1
         calls, tokens, final = audit(os.path.join(run_dir, "transcript.jsonl"))
         with open(os.path.join(run_dir, "report.txt"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write(final)
         saved = save_result(f"{scenario_id}_{nn}", project, folder, run_dir, call)
         rec.update({"staged": staged, "started": started, "seconds": int(time.time() - t0),
                     "calls": calls, "output_tokens": tokens, "ended": ended,
+                    "outcome": outcome, "executor_exit": returncode,
+                    "execution_state": ("completed" if outcome == "executor_completed" else
+                                        ("staged_only" if calls == 0 else "partial_failed")),
                     "call_times_s": call_times, "saved": saved})
         with open(os.path.join(run_dir, "run.json"), "w", encoding="utf-8") as fh:
             json.dump(rec, fh, indent=1)
@@ -545,10 +562,10 @@ def main():
             if new_index:
                 fh.write(INDEX_HEADER)
             fh.write(index_row(rec))
-        print(f"  ended: {ended}  calls: {calls}  output tokens: {tokens}  "
+        print(f"  ended: {ended}  outcome: {outcome}  calls: {calls}  output tokens: {tokens}  "
               f"seconds: {rec['seconds']}\n  saved: {saved['web_url'] or saved['error']}\n"
               f"== report ==\n{final or '(no final message)'}", flush=True)
-    return 0
+    return cli_status
 
 
 if __name__ == "__main__":

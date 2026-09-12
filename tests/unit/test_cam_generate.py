@@ -537,10 +537,9 @@ class TestEntitlementPreflight:
         assert "Cham" in readiness and "isGenerationAllowed false" in readiness
         assert "run cam_generate to finish the rest" not in readiness
 
-    def test_a_stalled_poll_carries_the_readiness_that_names_them(self, monkeypatch):
-        # the stall warning fires exactly where a blocked op parks: nothing generating, out-of-date
-        # ops left. The verdict naming the blocked ops rides as its own key (an op name and its
-        # reason are unbounded), and the note that warns points the reader at it.
+    def test_an_incomplete_future_overrides_a_stale_idle_tally(self, monkeypatch):
+        # The owned Future is the authoritative running signal while incomplete, even when the
+        # current live tally is idle and still carries an older blocked-entitlement verdict.
         _GENERATIONS.clear()
         _GENERATIONS["gen1"] = {
             "future": SimpleNamespace(isGenerationCompleted=False, numberOfOperations=2,
@@ -554,7 +553,12 @@ class TestEntitlementPreflight:
                                       "readiness": "0 of 2 active ops valid; 1 of them read "
                                                    "isGenerationAllowed false"}, None))
         out = _payload(st.handler(handle="gen1"))
-        assert out["completed"] is False and "WARNING" in out["note"]
-        assert "isGenerationAllowed false" in out["readiness"]
-        assert "'readiness' names what this installation will not generate" in out["note"]
+        readiness = ("Generation Future for handle 'gen1' is incomplete; poll "
+                     "cam_get_status(handle='gen1') before launching generation again.")
+        assert out["completed"] is False
+        assert out["live_states"]["out_of_date"] == 2
+        assert out["live_states"]["generating"] == 0
+        assert out["readiness"] == readiness
+        assert out["live_states"]["readiness"] == readiness
+        assert "handle 'gen1' is still incomplete" in out["note"]
         _GENERATIONS.clear()

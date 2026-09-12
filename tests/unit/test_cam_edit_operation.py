@@ -525,7 +525,7 @@ class TestStuckParameter:
         out = _payload(ce.handler(operation="Adaptive1", parameters={"tool_stepover": "2."}))
         c = out["changed"][0]
         assert c["unchanged"] is True and c["before"] == "2." and c["after"] == "2."
-        assert "changed[].unchanged marks a parameter the request already matched" in out["note"]
+        assert "changed[].unchanged means the requested expression already matched" in out["note"]
 
     def test_the_same_number_spelled_differently_is_an_ok_no_op(self, monkeypatch):
         # The store may keep a number in its own spelling, so a REPEAT of a request already in
@@ -579,6 +579,60 @@ class TestStuckParameter:
         c = out["changed"][0]
         assert "unchanged" not in c and c["after"] == "'keep'"
         assert "changed[].unchanged" not in out["note"]
+
+
+class TestParameterStateGuidance:
+    def test_a_valid_state_is_reported_without_claiming_invalidation(self, monkeypatch):
+        monkeypatch.setattr(ce, "validity_basis", lambda: "manufacture_verified")
+        _install(monkeypatch, params={"tool_feedCutting": "1200"})
+        out = _payload(ce.handler(
+            operation="Adaptive1", parameters={"tool_feedCutting": "1250"}))
+        assert "operationState reads valid in Manufacture after the edit" in out["note"]
+        assert "did not invalidate" not in out["note"]
+        assert "OUT OF DATE" not in out["note"]
+
+    def test_an_observed_stale_state_carries_conditional_generation_guidance(self, monkeypatch):
+        monkeypatch.setattr(ce, "validity_basis", lambda: "manufacture_verified")
+        op = _install(monkeypatch, params={"tool_stepover": "3."})
+        op._operation_state = 1
+        out = _payload(ce.handler(
+            operation="Adaptive1", parameters={"tool_stepover": "2."}))
+        assert "operationState now reads out_of_date" in out["note"]
+        assert "regenerate with cam_generate" in out["note"]
+
+    def test_other_observed_states_publish_their_own_next_step(self, monkeypatch):
+        monkeypatch.setattr(ce, "validity_basis", lambda: "manufacture_verified")
+        cases = [
+            (3, False, False, False, "regenerate with cam_generate"),
+            (1, True, False, False, "poll cam_get_status"),
+            (2, False, True, False, "no generation is needed while it stays parked"),
+            (1, False, False, True, "carries the fault to fix"),
+        ]
+        for state, generating, suppressed, error, expected in cases:
+            op = FakeOp("Adaptive1", {"tool_stepover": "2."},
+                        suppressed=suppressed, is_generating=generating)
+            op._operation_state = state
+            op.hasError = error
+            assert expected in ce._parameter_state_note(op)
+
+    def test_a_valid_state_outside_manufacture_is_qualified(self, monkeypatch):
+        monkeypatch.setattr(ce, "validity_basis", lambda: "unverified_design_workspace")
+        _install(monkeypatch, params={"tool_feedCutting": "1200"})
+        out = _payload(ce.handler(
+            operation="Adaptive1", parameters={"tool_feedCutting": "1250"}))
+        assert "operationState reads valid" in out["note"]
+        assert "unverified_design_workspace" in out["note"]
+        assert "Manufacture workspace" in out["note"]
+        assert "did not invalidate" not in out["note"]
+
+    def test_an_unread_state_requests_a_fresh_operation_read(self, monkeypatch):
+        op = _install(monkeypatch, params={"tool_stepover": "3."})
+        op._state_readable = False
+        out = _payload(ce.handler(
+            operation="Adaptive1", parameters={"tool_stepover": "2."}))
+        assert "operationState did not answer" in out["note"]
+        assert "cam_get(include=['operations'])" in out["note"]
+        assert "OUT OF DATE" not in out["note"]
 
 
 class TestMissingParameter:
@@ -1726,7 +1780,18 @@ class TestASwitchInTheSameCall:
         rows = {c["name"]: c for c in out["changed"]}
         assert rows["numberOfStepovers"]["unlocked_here"] is True
         assert "unlocked_here" not in rows["doMultiplePasses"]
-        assert "read isEditable false at the start of this call" in out["note"]
+        assert "another requested row made it editable first" in out["note"]
+
+    def test_longest_parameter_note_stays_within_the_wire_budget(self, monkeypatch):
+        monkeypatch.setattr(ce, "validity_basis", lambda: "unverified_design_workspace")
+        self._deburr(monkeypatch)
+        out = _payload(ce.handler(operation="Adaptive1",
+                                  parameters={"numberOfStepovers": "1",
+                                              "doMultiplePasses": "true"}))
+        assert len(out["note"]) <= 400
+        for fact in ("changed[].value is evaluated", "validity_basis=unverified_design_workspace",
+                     "changed[].unchanged", "changed[].unlocked_here"):
+            assert fact in out["note"]
 
     def test_a_row_nothing_in_the_call_unlocks_is_written_around_and_restored(self, monkeypatch):
         op = self._deburr(monkeypatch)

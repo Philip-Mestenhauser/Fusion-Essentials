@@ -546,7 +546,8 @@ def _settle_upload_status(call, arguments):
 
 
 def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, timings=None,
-              shots_dir=None, act="", document_pin=None, guarded_tools=None):
+              shots_dir=None, act="", document_pin=None, guarded_tools=None,
+              stop_on_failure=False):
     """Run and judge one sequence while guarding writes to one exact document."""
     call = facade("call")
     rows = []
@@ -562,7 +563,12 @@ def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, tim
         row = (tool, "blocked", note)
         rows.append(row)
         if on_result:
-            on_result(*row)
+            try:
+                on_result(*row)
+            except Exception:
+                if not stop_on_failure:
+                    raise
+        return stop_on_failure
 
     for step in steps:
         if _leaves_no_row(step):
@@ -574,8 +580,14 @@ def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, tim
         try:
             arguments = args(ctx) if callable(args) else dict(args)
         except KeyError as e:
-            block(tool, str(e))
+            if block(tool, str(e)):
+                return rows
             continue
+        except Exception as e:
+            if not stop_on_failure:
+                raise
+            block(tool, "arguments raised {0}: {1}".format(type(e).__name__, e))
+            return rows
 
         authored_value = arguments.get("expect_document")
         authored_expect = (isinstance(authored_value, str) and bool(authored_value.strip()))
@@ -597,20 +609,23 @@ def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, tim
                     and bool(arguments["name"].strip())
                     and not arguments.get("close_all"))
                 if not explicit_recovery:
-                    block(tool, "document pin unresolved ({0}); refusing the write before dispatch"
-                          .format(blocked_reason))
+                    if block(tool, "document pin unresolved ({0}); refusing the write before dispatch"
+                             .format(blocked_reason)):
+                        return rows
                     continue
                 intended_handle, problem = _resolve_document_target(
                     document_pin, arguments["name"])
                 census, active_handle, census_problem = _complete_open_documents()
                 if (problem or census_problem or intended_handle not in
                         {row["document_handle"] for row in (census or [])}):
-                    block(tool, "document recovery target is unconfirmed: {0}".format(
-                        problem or census_problem or "the exact target is not open"))
+                    if block(tool, "document recovery target is unconfirmed: {0}".format(
+                            problem or census_problem or "the exact target is not open")):
+                        return rows
                     continue
                 arguments["name"] = intended_handle
                 if authored_expect and not deliberate_refusal and authored_value != active_handle:
-                    block(tool, "authored expect_document does not match the recovery guard")
+                    if block(tool, "authored expect_document does not match the recovery guard"):
+                        return rows
                     continue
                 if not authored_refusal:
                     arguments["expect_document"] = active_handle
@@ -619,21 +634,24 @@ def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, tim
                 if document_pin.get("snapshot") is None:
                     _pin_snapshot(document_pin)
                 if document_pin.get("blocked_transition") and not authored_refusal:
-                    block(tool, "document pin unresolved ({0}); refusing the write before dispatch"
-                          .format(document_pin["blocked_transition"]))
+                    if block(tool, "document pin unresolved ({0}); refusing the write before dispatch"
+                             .format(document_pin["blocked_transition"])):
+                        return rows
                     continue
                 if tool in ("doc_activate", "doc_close") and arguments.get("name") and not deliberate_refusal:
                     intended_handle, problem = _resolve_document_target(
                         document_pin, arguments["name"])
                     if problem:
                         _invalidate_pin(document_pin, problem)
-                        block(tool, "document transition target is unconfirmed: " + problem)
+                        if block(tool, "document transition target is unconfirmed: " + problem):
+                            return rows
                         continue
                     arguments["name"] = intended_handle
                 if not authored_refusal:
                     retained = document_pin.get("handle")
                     if authored_expect and authored_value != retained:
-                        block(tool, "authored expect_document does not match the retained document pin")
+                        if block(tool, "authored expect_document does not match the retained document pin"):
+                            return rows
                         continue
                     if (_valid_session_handle(retained)
                             and not document_pin.get("blocked_transition")):
@@ -643,8 +661,9 @@ def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, tim
                         pass
                     else:
                         state = document_pin.get("state", "unknown")
-                        block(tool, "document pin unavailable ({0}); refusing the write before dispatch"
-                              .format(state))
+                        if block(tool, "document pin unavailable ({0}); refusing the write before dispatch"
+                                 .format(state)):
+                            return rows
                         continue
 
         if (tool in guarded_tools and tool == "doc_activate"
@@ -653,7 +672,8 @@ def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, tim
                 document_pin, arguments.get("name"))
             if problem:
                 _invalidate_pin(document_pin, problem)
-                block(tool, "document transition target is unconfirmed: " + problem)
+                if block(tool, "document transition target is unconfirmed: " + problem):
+                    return rows
                 continue
             arguments["name"] = intended_handle
         elif tool in guarded_tools and tool == "doc_open":
@@ -722,6 +742,8 @@ def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, tim
                     if not document_pin.get("blocked_transition"):
                         _invalidate_pin(document_pin, problem)
                     status, note = "blocked", problem
+                elif tool == "doc_new":
+                    document_pin.setdefault("owned_documents", []).append(expected)
             elif tool == "doc_activate":
                 problem = (_confirm_transition(document_pin, intended_handle)
                            if _valid_session_handle(intended_handle)
@@ -750,7 +772,17 @@ def run_steps(steps, ctx, trace=False, sleep_s=STEP_SLEEP_S, on_result=None, tim
 
         rows.append((tool, status, note))
         if on_result:
-            on_result(*rows[-1])
+            try:
+                on_result(*rows[-1])
+            except Exception as e:
+                if not stop_on_failure:
+                    raise
+                if status not in ("FAIL", "blocked", "pass*"):
+                    status, note = "blocked", "result callback raised {0}: {1}".format(
+                        type(e).__name__, e)
+                    rows[-1] = (tool, status, note)
+        if stop_on_failure and status in ("FAIL", "blocked", "pass*"):
+            return rows
         if shots_dir and tool == "view_set" and status == "pass" and arguments.get("focus"):
             focus = arguments["focus"]
             expected = (document_pin.get("handle")
@@ -938,11 +970,23 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
         "handle": document.get("document_handle"),
         "snapshot": document if prior.get("document") or current_document else None,
         "blocked_transition": False,
-        "known_documents": dict(prior.get("document_handles") or {})}
+        "known_documents": dict(prior.get("document_handles") or {}),
+        "owned_documents": []}
     _remember_document(document_pin, document)
     if (guarded_tools and document_pin.get("snapshot") is None
             and not document_pin.get("blocked_transition")):
         _pin_snapshot(document_pin)
+    if state is not None and "home_document" not in prior:
+        print("resume refused: the run state has no original active document identity")
+        return 1
+    home_document = prior.get("home_document")
+    if home_document is None:
+        home_document = dict(document_pin.get("snapshot") or {"state": "none"})
+    if (home_document.get("state") == "known"
+            and not _valid_session_handle(home_document.get("document_handle"))):
+        print("run refused: the original active document has no exact session handle")
+        return 1
+    story_document = prior.get("story_document")
     walked = 0
     program = [act[0] for act in ACTS]
 
@@ -972,10 +1016,12 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
             "timings": {t: list(v) for t, v in timings.items()},
             "act_seconds": [list(a) for a in act_seconds],
             "elapsed_s": chunk_started + (time.time() - run_started),
-            "document": document,
+            "document": document, "home_document": home_document,
+            "story_document": story_document,
             "document_handles": dict(document_pin.get("known_documents") or {})})
         return True
 
+    stopped = False
     for name, pre, narrative, fallback in ACTS:
         if name in acts_done and not develop:
             continue
@@ -1025,11 +1071,10 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
         steps = [s for s in steps if met(step_capability(s[2]))]
         # judged_steps, not the act's raw list, is what pairs with the rows below - see its
         # docstring for what a dwell does to the pairing.
-        for step, (tool, status, note) in zip(judged_steps(steps),
-                                              run_steps(steps, ctx, trace=trace, timings=timings,
-                                                        shots_dir=shots_dir, act=name,
-                                                        document_pin=document_pin,
-                                                        guarded_tools=guarded_tools)):
+        act_rows = run_steps(
+            steps, ctx, trace=trace, timings=timings, shots_dir=shots_dir, act=name,
+            document_pin=document_pin, guarded_tools=guarded_tools, stop_on_failure=True)
+        for step, (tool, status, note) in zip(judged_steps(steps), act_rows):
             rows.append((tool, status, note))
             if status in ("pass", "pass*") and predicate_kind(step[2]) == "value":
                 valued.add(tool)
@@ -1038,14 +1083,33 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
             if status in ("pass", "pass*", "expected-refusal"):
                 story = STORY.get(tool, "")
                 notes[tool] = (story + " (fallback fixture)").strip() if mode == "fallback" else story
+        owned_handles = document_pin.get("owned_documents") or []
+        if (story_document is None and name == program[0] and owned_handles
+                and document_pin.get("state") == "known"
+                and document_pin.get("handle") == owned_handles[0]):
+            story_document = dict(document_pin.get("snapshot") or {})
+        if any(status in ("FAIL", "blocked", "pass*") for _tool, status, _note in act_rows):
+            stopped = True
+            break
         if name in POLL_AFTER:
             # one act can leave SEVERAL setups generating, so the boundary poll takes a list as
             # readily as a name and certifies each in turn. 'max_polls' sizes that act's own budget
             # to the families it launched, and is passed only where the act states one.
             targets = POLL_AFTER[name][mode]
             budget = {k: v for k, v in POLL_AFTER[name].items() if k == "max_polls"}
+            poll_start = len(rows)
             for setup in ([targets] if isinstance(targets, str) else targets):
-                poll_generation(rows, notes, setup, valued=valued, **budget)
+                poll_generation(
+                    rows, notes, setup, valued=valued,
+                    document_pin=(document_pin.get("handle")
+                                  if document_pin.get("state") == "known" else None),
+                    **budget)
+                if any(status in ("FAIL", "blocked", "pass*")
+                       for _tool, status, _note in rows[poll_start:]):
+                    stopped = True
+                    break
+        if stopped:
+            break
         if document_pin.get("snapshot") is not None:
             document = document_pin["snapshot"]
         elif document_pin.get("state") != "known":
@@ -1070,6 +1134,70 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
     # A run is COMPLETE when every act of the program has run under this id - in this chunk or an
     # earlier one. Only a complete run stamps, and only a complete run fires the reload beat.
     complete = not develop and set(program) <= set(acts_done)
+
+    needs_home_restore = (story_document is not None
+                          or document_pin.get("handle") != home_document.get("document_handle"))
+    if (complete or stopped) and not keep_open and needs_home_restore:
+        home_handle = home_document.get("document_handle")
+        known_home = home_document.get("state") == "known"
+        snapshot = facade("_document_now")()
+        active_handle = snapshot.get("document_handle")
+        story_handle = (story_document or {}).get("document_handle")
+        needs_census = (known_home and active_handle != home_handle) or (
+            stopped and _valid_session_handle(story_handle) and story_handle != home_handle)
+        census, _census_active, census_problem = (
+            _complete_open_documents()
+            if needs_census else ([], active_handle, None))
+        open_handles = ({row["document_handle"] for row in census}
+                        if census_problem is None else set())
+        if (census_problem is None and needs_census
+                and snapshot.get("state") != "known"):
+            active_row = next(
+                (row for row in census if row["document_handle"] == _census_active), {})
+            snapshot = dict(active_row, document_handle=_census_active, state="known")
+            active_handle = _census_active
+        if census_problem:
+            rows.append(("doc_activate", "blocked", "home restoration refused: " + census_problem))
+        elif known_home and needs_census and home_handle not in open_handles:
+            rows.append(("doc_activate", "blocked",
+                         "home restoration refused: the exact original handle is not open"))
+        else:
+            cleanup_guarded = set(guarded_tools) | {"doc_activate", "doc_close"}
+            if (stopped and _valid_session_handle(story_handle)
+                    and story_handle in open_handles and story_handle != home_handle):
+                close_pin = {
+                    "state": snapshot.get("state", "unknown"),
+                    "handle": active_handle,
+                    "snapshot": snapshot,
+                    "blocked_transition": False,
+                    "known_documents": dict(document_pin.get("known_documents") or {})}
+                _remember_document(close_pin, story_document)
+                rows.extend(run_steps(
+                    [("doc_close", {"name": story_handle, "save_changes": False}, "ok", None)],
+                    ctx, trace=trace, timings=timings, act="HOME RESTORE",
+                    document_pin=close_pin, guarded_tools=cleanup_guarded,
+                    stop_on_failure=True))
+                snapshot = facade("_document_now")()
+                active_handle = snapshot.get("document_handle")
+            if known_home:
+                restore_pin = {
+                    "state": snapshot.get("state", "unknown"),
+                    "handle": active_handle,
+                    "snapshot": snapshot,
+                    "blocked_transition": False,
+                    "known_documents": dict(document_pin.get("known_documents") or {})}
+                _remember_document(restore_pin, home_document)
+                restore_steps = []
+                if active_handle != home_handle:
+                    restore_steps.append(("doc_activate", {"name": home_handle}, "ok", None))
+                restore_steps.append(
+                    ("doc_get", {},
+                     lambda payload: ((payload.get("active") or {}).get("document_handle")
+                                      == home_handle), None))
+                rows.extend(run_steps(
+                    restore_steps, ctx, trace=trace, timings=timings, act="HOME RESTORE",
+                    document_pin=restore_pin, guarded_tools=cleanup_guarded,
+                    stop_on_failure=True))
 
     # THE RELOAD BEAT, after every act: it restarts the server, so no step can be dispatched
     # afterwards and no act can hold it. It appends its own row rather than running through the
@@ -1191,10 +1319,15 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
         # the id is spent: its acts have all run, so a later --resume of it would stamp from the
         # saved ledger without driving a step.
         save_run_state(run_id, dict(load_run_state(run_id) or {}, complete=True))
+    if stopped:
+        print("\nVERIFIED_TOOLS.md NOT rewritten - resolve the FAIL/blocked/pass* steps first.")
     if not complete:
         if develop:
             print("\ndevelopment walk of run {0}: {1} act(s) re-run against its world, receipt not "
                   "written, state not advanced; the document stays open".format(run_id, walked))
+        elif stopped:
+            print("\nrun stopped before act completion; its failed invocation is not resumable - "
+                  "start a new run id")
         elif run_id:
             # the document stays open for the chunk that carries on, and its identity is saved with
             # the state: a resume against a different one is refused rather than run.

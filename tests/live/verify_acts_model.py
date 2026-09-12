@@ -8,16 +8,1027 @@ cameo bodies carry the feature verbs the part has no home for, and the one drivi
 re-driven so every feature follows it.
 """
 
+import math
+
 from verify_core import (
-    _box, _chamfered, _ctx_get, _datum, _datum_plane, _drafted, _drilled, _extent_measured,
-    _extruded, _fg, _fgn, _filleted, _gap_measured, _interference_measured, _joined,
+    _RECALL, _box, _chamfered, _ctx_get, _datum, _datum_plane, _document_closed,
+    _drafted, _drilled, _extent_measured, _extruded, _face_up_at, _fg, _fgn, _filleted,
+    _gap_measured, _home_address, _home_document, _interference_measured, _joined,
     _joint_origin_at, _joint_origins_listed, _lofted, _made_component, _made_component_inactive,
-    _face_up_at, _material_assigned, _matched, _measured, _mirrored, _moved, _near, _offset_faces,
-    _param_added, _param_deleted, _param_read, _param_set_to, _path_count, _patterned, _piped,
-    _prof, _refused, _relation_measured, _relation_passes, _relation_read, _revolved, _shelled,
-    _swept, _watch)
+    _material_assigned, _matched, _measured, _mirrored, _moved, _near, _new_document,
+    _offset_faces, _param_added, _param_deleted, _param_read, _param_set_to, _path_count,
+    _patterned, _piped, _prof, _recall, _refused, _relation_measured, _relation_passes,
+    _relation_read, _revolved, _shelled, _swept, _watch)
 from verify_layout import _px, _py
 
+
+_RADIUS_DIAMETER_TOL_MM = 0.0005
+
+_HOLE_HOST = "HoleHostB"
+_HOLE_ACTIVE = "ActiveA"
+_HOLE_X0 = 2600.0
+_HOLE_ACTIVE_X0 = 2650.0
+_HOLE_VOLUME = 125.663706
+
+
+def _section_created(other_key=None):
+    """Require one generated section name, distinct from an earlier cut when supplied."""
+    def check(p):
+        name = p.get("section")
+        other = _RECALL.get(other_key) if other_key else None
+        return _measured("generated section identity", {"section": name, "other": other},
+                         isinstance(name, str) and bool(name)
+                         and (other_key is None or name != other))
+    return check
+
+
+def _section_census(keys, visible):
+    """Require the complete generated-name and visibility census for the retained sections."""
+    def check(p):
+        rows = p.get("sections") or []
+        expected = [_RECALL.get(key) for key in keys]
+        got = [row.get("name") for row in rows]
+        bulbs = [row.get("visible") for row in rows]
+        return _measured("section analysis census",
+                         {"count": p.get("count"), "names": got, "visible": bulbs},
+                         all(isinstance(name, str) and name for name in expected)
+                         and p.get("count") == len(rows) == len(expected)
+                         and got == expected and bulbs == list(visible))
+    return check
+
+
+def _section_named_clear(removed_key):
+    """Require one exact generated section removed with bounded count facts."""
+    def check(p):
+        removed = _RECALL.get(removed_key)
+        valid = (p.get("section") == removed and p.get("removed") == [removed]
+                 and p.get("removed_count") == 1 and p.get("sections_before") == 2
+                 and p.get("sections_after") == 1 and "remaining" not in p)
+        return _measured("selected section deletion",
+                         {"removed": p.get("removed"), "before": p.get("sections_before"),
+                          "after": p.get("sections_after")},
+                         valid)
+    return check
+
+
+def _section_camera(p):
+    """Return one complete workspace camera record for later equality."""
+    view = p.get("view") or {}
+    if (view.get("projection") not in ("orthographic", "perspective")
+            or not isinstance(view.get("eye"), dict) or not isinstance(view.get("target"), dict)):
+        raise AssertionError(f"section camera is incomplete: {view!r}")
+    return view
+
+
+def _section_camera_unchanged(key):
+    """Require the workspace camera to equal the retained pre-cut record."""
+    def check(p):
+        current, before = _section_camera(p), _RECALL.get(key)
+        return _measured("section clear camera preservation",
+                         {"before": before, "after": current}, current == before)
+    return check
+
+
+def _placed_xyz(component, xyz):
+    """One authored point after the layout pass places its component."""
+    return [_px(component, xyz[0]), _py(component, xyz[1]), xyz[2]]
+
+
+def _hole_body_state(component, low, high, volume):
+    """A body has the exact measured bounds and volume for one hole-participant beat."""
+    def check(p):
+        got_low, got_high = p.get("min_point") or {}, p.get("max_point") or {}
+        want_low, want_high = _placed_xyz(component, low), _placed_xyz(component, high)
+        got_volume = (p.get("mass") or {}).get("volume")
+        bounds_ok = all(
+            _near(got.get(axis), want, 0.01)
+            for got, wanted in ((got_low, want_low), (got_high, want_high))
+            for axis, want in zip(("x", "y", "z"), wanted))
+        return _measured(
+            f"{component} body volume and bounds",
+            {"kind": p.get("kind"), "units": p.get("units"),
+             "accuracy": (p.get("mass") or {}).get("accuracy_used"),
+             "volume": got_volume, "min": got_low, "max": got_high},
+            p.get("kind") == "body" and p.get("units") == "mm"
+            and (p.get("mass") or {}).get("accuracy_used") == "very_high"
+            and _near(got_volume, volume, 0.001) and bounds_ok)
+    return check
+
+
+def _hole_cylinders(component, positions):
+    """The complete radius-2 cylinder census at the expected placed positions."""
+    def check(p):
+        matches = p.get("matches") or []
+        wanted = sorted(tuple(round(v, 3) for v in _placed_xyz(component, pos))
+                        for pos in positions)
+        got = sorted(tuple(round(v, 3) for v in m.get("position", [])) for m in matches)
+        exact_faces = all(
+            m.get("kind") == "cylinder_face" and _near(m.get("radius"), 2.0, 0.001)
+            for m in matches)
+        return _measured(
+            f"{component} radius-2 cylinder census",
+            {"match_count": p.get("match_count"), "returned": p.get("returned"),
+             "positions": got, "units": p.get("units"), "truncated": p.get("truncated")},
+            p.get("units") == "mm"
+            and p.get("match_count") == p.get("returned") == len(wanted)
+            and len(matches) == len(wanted) and p.get("truncated") is not True
+            and exact_faces and got == wanted)
+    return check
+
+
+def _hole_face_bounds(p):
+    """The fresh scoped bore handle resolves to the measured 4 x 4 x 10 mm face."""
+    low = _placed_xyz(_HOLE_HOST, (_HOLE_X0 + 8, 8, 0))
+    high = _placed_xyz(_HOLE_HOST, (_HOLE_X0 + 12, 12, 10))
+    center = _placed_xyz(_HOLE_HOST, (_HOLE_X0 + 10, 10, 5))
+    got_low, got_high = p.get("min_point") or {}, p.get("max_point") or {}
+    got_center = p.get("center") or {}
+    return _measured(
+        "fresh scoped bore face bounds",
+        {"kind": p.get("kind"), "units": p.get("units"),
+         "x": p.get("x"), "y": p.get("y"), "z": p.get("z"),
+         "min": got_low, "max": got_high, "center": got_center},
+        p.get("kind") == "face" and p.get("units") == "mm"
+        and _near(p.get("x"), 4.0, 0.01) and _near(p.get("y"), 4.0, 0.01)
+        and _near(p.get("z"), 10.0, 0.01)
+        and all(_near(got_low.get(axis), want, 0.01)
+                for axis, want in zip(("x", "y", "z"), low))
+        and all(_near(got_high.get(axis), want, 0.01)
+                for axis, want in zip(("x", "y", "z"), high))
+        and all(_near(got_center.get(axis), want, 0.01)
+                for axis, want in zip(("x", "y", "z"), center)))
+
+
+def _hole_host_tree(p):
+    """The component-rooted tree names both B bodies and publishes consumable handles."""
+    tree = p.get("tree") or {}
+    node = tree.get("tree") or {}
+    bodies = node.get("bodies") or []
+    return _measured(
+        "HoleHostB component-rooted body tree",
+        {"root": tree.get("root"), "component": node.get("component"),
+         "body_count": node.get("body_count"),
+         "bodies": [(b.get("name"), bool(b.get("handle"))) for b in bodies]},
+        tree.get("root") == _HOLE_HOST and tree.get("truncated") is False
+        and node.get("component") == _HOLE_HOST and node.get("body_count") == 2
+        and [b.get("name") for b in bodies] == ["Body1", "Body2"]
+        and all(isinstance(b.get("handle"), str) and b["handle"]
+                and b.get("is_solid") is True for b in bodies))
+
+
+def _hole_upper_handle(p):
+    """The exact upper-body handle from the component-rooted tree."""
+    bodies = ((p.get("tree") or {}).get("tree") or {}).get("bodies") or []
+    hit = [b.get("handle") for b in bodies if b.get("name") == "Body1"]
+    if len(hit) != 1 or not isinstance(hit[0], str) or not hit[0]:
+        raise AssertionError(f"HoleHostB Body1 handle is not unique: {hit!r}")
+    return hit[0]
+
+
+def _hole_lower_handle(p):
+    """The exact lower-body handle from the component-rooted tree."""
+    bodies = ((p.get("tree") or {}).get("tree") or {}).get("bodies") or []
+    hit = [b.get("handle") for b in bodies if b.get("name") == "Body2"]
+    if len(hit) != 1 or not isinstance(hit[0], str) or not hit[0]:
+        raise AssertionError(f"HoleHostB Body2 handle is not unique: {hit!r}")
+    return hit[0]
+
+
+def _hole_active_tree(p):
+    """The component-rooted tree names A's sole body and its consumable handle."""
+    tree = p.get("tree") or {}
+    node = tree.get("tree") or {}
+    bodies = node.get("bodies") or []
+    return _measured(
+        "ActiveA component-rooted body tree",
+        {"root": tree.get("root"), "component": node.get("component"),
+         "body_count": node.get("body_count"),
+         "bodies": [(b.get("name"), bool(b.get("handle"))) for b in bodies]},
+        tree.get("root") == _HOLE_ACTIVE and tree.get("truncated") is False
+        and node.get("component") == _HOLE_ACTIVE and node.get("body_count") == 1
+        and [b.get("name") for b in bodies] == ["Body1"]
+        and isinstance(bodies[0].get("handle"), str) and bodies[0]["handle"]
+        and bodies[0].get("is_solid") is True)
+
+
+def _hole_active_handle(p):
+    """The exact A-body handle from the component-rooted tree."""
+    bodies = ((p.get("tree") or {}).get("tree") or {}).get("bodies") or []
+    hit = [b.get("handle") for b in bodies if b.get("name") == "Body1"]
+    if len(hit) != 1 or not isinstance(hit[0], str) or not hit[0]:
+        raise AssertionError(f"ActiveA Body1 handle is not unique: {hit!r}")
+    return hit[0]
+
+
+def _hole_inspect_args(ctx, key):
+    """Mass-and-bounds arguments consuming one retained body handle."""
+    return {"target": _ctx_get(ctx, key, "hole fixture body"), "include": ["default", "mass"],
+            "units": "mm", "accuracy": "very_high"}
+
+
+def _hole_cylinder_args(ctx, key):
+    """Cylinder-census arguments consuming one retained body handle."""
+    return {"target": _ctx_get(ctx, key, "hole fixture body"), "kind": "cylinder_face",
+            "radius": 2, "units": "mm", "max_results": 10}
+
+
+def _hole_point_while_active_a(x, y, z):
+    """A B-authored point before the layout wrapper adds active A's offset."""
+    return [_px(_HOLE_HOST, x) - _px(_HOLE_ACTIVE, 0.0),
+            _py(_HOLE_HOST, y) - _py(_HOLE_ACTIVE, 0.0), z]
+
+
+def _scoped_top_args(ctx):
+    """The upper-face acquisition at the scoped bore point."""
+    return {"target": _ctx_get(ctx, "hh_upper", "HoleHostB upper body"),
+            "kind": "planar_face",
+            "nearest_to": _hole_point_while_active_a(_HOLE_X0 + 10, 10, 10),
+            "units": "mm", "max_results": 1}
+
+
+def _control_top_args(ctx):
+    """The upper-face acquisition at the positive-control bore point."""
+    return {"target": _ctx_get(ctx, "hh_upper", "HoleHostB upper body"),
+            "kind": "planar_face",
+            "nearest_to": _hole_point_while_active_a(_HOLE_X0 + 5, 5, 10),
+            "units": "mm", "max_results": 1}
+
+
+def _scoped_bore_args(ctx):
+    """The complete post-write bore census on the retained upper-body handle."""
+    return {"target": _ctx_get(ctx, "hh_upper", "HoleHostB upper body"),
+            "kind": "cylinder_face", "radius": 2, "units": "mm", "max_results": 1}
+
+
+def _scoped_hole_args(ctx):
+    """The upper-only hole arguments while ActiveA remains the runtime edit target."""
+    return {"face": _ctx_get(ctx, "hh_top", "HoleHostB upper top face"),
+            "hole_type": "simple", "diameter": "4 mm", "extent": "through",
+            "points_space": "world", "units": "mm",
+            "points": [_hole_point_while_active_a(_HOLE_X0 + 10, 10, 10)],
+            "target_bodies": [_ctx_get(ctx, "hh_upper", "HoleHostB upper body")]}
+
+
+def _unscoped_hole_args(ctx):
+    """The positive-control hole arguments with target_bodies intentionally absent."""
+    return {"face": _ctx_get(ctx, "hh_top_control", "HoleHostB upper top face"),
+            "hole_type": "simple", "diameter": "4 mm", "extent": "through",
+            "points_space": "world", "units": "mm",
+            "points": [_hole_point_while_active_a(_HOLE_X0 + 5, 5, 10)]}
+
+
+def _hole_created(scoped):
+    """model_hole reports the face host and the exact participant mode."""
+    def check(p):
+        scope = p.get("scoped_to_bodies")
+        scope_ok = (scope == [f"{_HOLE_HOST}:1:Body1"] if scoped
+                    else "scoped_to_bodies" not in p)
+        suffix = "1" if scoped else "2"
+        return _measured(
+            "scoped hole" if scoped else "unscoped positive-control hole",
+            {"feature": p.get("feature"), "host": p.get("host_component"),
+             "sketch": p.get("placement_sketch"), "scope": scope},
+            p.get("holes") == 1 and p.get("holes_verified") is True
+            and p.get("host_from_face") is True and p.get("host_verified") is True
+            and p.get("host_component") == _HOLE_HOST
+            and p.get("world_lift_component") == _HOLE_HOST
+            and p.get("points_space") == "world" and p.get("feature") == f"Hole{suffix}"
+            and p.get("placement_sketch") == f"Sketch{int(suffix) + 2}" and scope_ok)
+    return check
+
+
+def _hole_timeline(control):
+    """The complete bounded timeline locates each hole and placement sketch in B."""
+    def check(p):
+        timeline = p.get("timeline") or {}
+        rows = timeline.get("timeline") or []
+        required = {("Sketch3", "Sketch", _HOLE_HOST),
+                    ("Hole1", "HoleFeature", _HOLE_HOST)}
+        if control:
+            required |= {("Sketch4", "Sketch", _HOLE_HOST),
+                         ("Hole2", "HoleFeature", _HOLE_HOST)}
+        got = {(r.get("name"), r.get("type"), r.get("component")) for r in rows}
+        active_a_holes = [r.get("name") for r in rows
+                          if r.get("component") == _HOLE_ACTIVE
+                          and r.get("type") == "HoleFeature"]
+        count, returned = timeline.get("count"), timeline.get("returned")
+        return _measured(
+            "complete bounded hole-host timeline",
+            {"count": count, "returned": returned, "required": sorted(required - got),
+             "active_a_holes": active_a_holes, "truncated": timeline.get("truncated")},
+            isinstance(count, int) and count <= 2000 and returned == count == len(rows)
+            and timeline.get("truncated") is not True and required <= got
+            and not active_a_holes)
+    return check
+
+
+def _radius_body_size(label, diameter_mm):
+    """A 10 mm cylinder whose diameter is precise enough to settle the radius boundary."""
+    def check(p):
+        return _measured(
+            label,
+            {"x": p.get("x"), "y": p.get("y"), "z": p.get("z")},
+            _near(p.get("x"), diameter_mm, _RADIUS_DIAMETER_TOL_MM)
+            and _near(p.get("y"), diameter_mm, _RADIUS_DIAMETER_TOL_MM)
+            and _near(p.get("z"), 10.0, 0.01))
+    return check
+
+
+def _radius_filtered_handle(ctx, filtered_key, index):
+    """One actual radius-filtered handle for independent body-size readback."""
+    filtered = _ctx_get(ctx, filtered_key, "the radius-filtered handles")
+    if not isinstance(filtered, list):
+        raise AssertionError(f"filtered handles {filtered!r} are not a list")
+    if not 0 <= index < len(filtered):
+        raise AssertionError(f"filtered handle index {index} is outside {len(filtered)} handles")
+    return {"target": filtered[index], "units": "mm"}
+
+
+def _combine_story_address(p):
+    """Return the story handle while recording the open-document baseline."""
+    _RECALL["combine_open_before"] = p.get("open_count")
+    return _home_address(p)
+
+
+def _combine_owned_active(key):
+    """The new owned document is the sole active row and opened beside the story."""
+    def check(p):
+        active = p.get("active") or {}
+        rows = [r for r in (p.get("open_documents") or []) if r.get("is_active")]
+        return _measured(
+            "owned combine document active at its exact handle",
+            {"active": active.get("document_handle"), "owned": _RECALL.get(key),
+             "open_count": p.get("open_count"), "before": _RECALL.get("combine_open_before")},
+            len(rows) == 1 and active.get("document_handle") == _RECALL.get(key)
+            and rows[0].get("document_handle") == _RECALL.get(key)
+            and p.get("open_count") == _RECALL.get("combine_open_before") + 1)
+    return check
+
+
+def _combine_story_restored(p):
+    """The owned document is gone and the original story handle is active again."""
+    active = p.get("active") or {}
+    rows = [r for r in (p.get("open_documents") or []) if r.get("is_active")]
+    return _measured(
+        "combine scratch closed and story document restored",
+        {"active": active.get("document_handle"), "story": _RECALL.get("combine_story"),
+         "open_count": p.get("open_count"), "before": _RECALL.get("combine_open_before")},
+        len(rows) == 1 and active.get("document_handle") == _RECALL.get("combine_story")
+        and rows[0].get("document_handle") == _RECALL.get("combine_story")
+        and p.get("open_count") == _RECALL.get("combine_open_before"))
+
+
+def _combine_census(label, bodies, low, high, volume, kind="design"):
+    """A complete body census with exact names, lump counts, total volume and bounds."""
+    expected = sorted((name, body_volume, 1) for name, body_volume, _lo, _hi in bodies)
+
+    def check(p):
+        mass = p.get("mass") or {}
+        rows = mass.get("per_body") or []
+        got = sorted((r.get("body"), r.get("volume"), r.get("lump_count")) for r in rows)
+        bounds = ((p.get("min_point") or {}), (p.get("max_point") or {}))
+        bounds_ok = all(_near(point.get(axis), want, 0.01)
+                        for point, wanted in zip(bounds, (low, high))
+                        for axis, want in zip(("x", "y", "z"), wanted))
+        return _measured(
+            label + " complete body census",
+            {"count": mass.get("per_body_count"), "returned": len(rows),
+             "truncated": mass.get("per_body_truncated"), "bodies": got,
+             "volume": mass.get("volume"), "min": bounds[0], "max": bounds[1]},
+            p.get("kind") == kind and p.get("units") == "mm"
+            and mass.get("accuracy_used") == "very_high"
+            and mass.get("per_body_count") == len(expected) == len(rows)
+            and mass.get("per_body_truncated") is False and got == expected
+            and _near(mass.get("volume"), volume, 0.001) and bounds_ok)
+    return check
+
+
+def _combine_body(label, low, high, volume):
+    """One result or restored body has exact bounds, volume and one connected lump."""
+    def check(p):
+        mass = p.get("mass") or {}
+        bounds = ((p.get("min_point") or {}), (p.get("max_point") or {}))
+        bounds_ok = all(_near(point.get(axis), want, 0.01)
+                        for point, wanted in zip(bounds, (low, high))
+                        for axis, want in zip(("x", "y", "z"), wanted))
+        return _measured(
+            label + " body bounds and volume",
+            {"kind": p.get("kind"), "units": p.get("units"), "lumps": p.get("lump_count"),
+             "volume": mass.get("volume"), "min": bounds[0], "max": bounds[1]},
+            p.get("kind") == "body" and p.get("units") == "mm"
+            and mass.get("accuracy_used") == "very_high" and p.get("lump_count") == 1
+            and _near(mass.get("volume"), volume, 0.001) and bounds_ok)
+    return check
+
+
+def _combine_join_outcome(outcome, result_bodies, result_lumps):
+    """The combine response reports one complete result/lump classification."""
+    def check(p):
+        note = p.get("note") or ""
+        note_ok = ("partially fused" in note and "fused NOTHING" not in note
+                   if outcome == "partial" else
+                   ("fused NOTHING" in note if outcome == "none" else "WARNING" not in note))
+        return _measured(
+            outcome + " join result/lump report",
+            {"outcome": p.get("fusion_outcome"), "fused": p.get("fused"),
+             "body_count": p.get("result_body_count"),
+             "bodies_complete": p.get("result_bodies_complete"),
+             "input_lumps": p.get("input_lump_total"),
+             "result_lumps": p.get("result_lump_total"), "feature": p.get("feature")},
+            p.get("fusion_outcome") == outcome
+            and p.get("fused") is (outcome != "none")
+            and p.get("result_body_count") == result_bodies
+            and p.get("result_bodies_complete") is True
+            and p.get("input_lump_total") == 3 and p.get("result_lump_total") == result_lumps
+            and p.get("feature") == "Combine1" and note_ok)
+    return check
+
+
+def _combine_timeline(prefix, joined, component=None):
+    """The bounded timeline is exactly the authored host, bodies and optional combine."""
+    wanted = [(f"{prefix}{i}", "Sketch", component) if j % 2 == 0
+              else (f"Extrude{i + 1}", "ExtrudeFeature", component)
+              for i in range(3) for j in range(2)]
+    if component:
+        wanted.insert(0, (" " + component + ":1", "Occurrence", None))
+    if joined:
+        wanted.append(("Combine1", "CombineFeature", component))
+
+    def check(p):
+        timeline = p.get("timeline") or {}
+        rows = timeline.get("timeline") or []
+        got = [(r.get("name"), r.get("type"), r.get("component") if component else None)
+               for r in rows]
+        return _measured(
+            ("complete combine timeline" if joined else
+             ("restored combine timeline" if component else "restored six-row timeline")),
+            {"count": timeline.get("count"), "returned": timeline.get("returned"),
+             "truncated": timeline.get("truncated"), "rows": got},
+            timeline.get("count") == timeline.get("returned") == len(wanted) == len(rows)
+            and timeline.get("truncated") is not True and got == wanted)
+    return check
+
+
+def _combine_deleted(p, index=6):
+    """Only the authored Combine1 feature at the expected timeline index was deleted."""
+    return _measured(
+        "Combine1 deleted by exact feature name",
+        {"deleted": p.get("deleted"), "feature": p.get("feature"),
+         "index": p.get("index"), "entity_type": p.get("entity_type")},
+        p.get("deleted") is True and p.get("feature") == "Combine1"
+        and p.get("index") == index and p.get("entity_type") == "CombineFeature")
+
+
+def _combine_nonroot_component(p):
+    """The non-root host reports its transformed occurrence and active component."""
+    position = p.get("position") or {}
+    return _measured(
+        "transformed non-root combine host",
+        {"occurrence": p.get("occurrence"), "component": p.get("component"),
+         "position": position, "rotate_deg": p.get("rotate_deg"),
+         "rotate_axis": p.get("rotate_axis"), "activated": p.get("activated")},
+        p.get("created") is True and p.get("occurrence") == "JoinProxyHost:1"
+        and p.get("component") == "JoinProxyHost"
+        and p.get("full_path") == "JoinProxyHost:1" and p.get("units") == "mm"
+        and [position.get(axis) for axis in ("x", "y", "z")] == [100, 40, 30]
+        and _near(p.get("rotate_deg"), 90, 0.001) and p.get("rotate_axis") == "z"
+        and p.get("activated") is True)
+
+
+def _combine_face(position):
+    """One planar-face handle was acquired at the expected world position."""
+    def check(p):
+        matches = p.get("matches") or []
+        got = matches[0] if len(matches) == 1 else {}
+        return _measured(
+            "qualified non-root planar face",
+            {"count": p.get("match_count"), "returned": p.get("returned"),
+             "kind": got.get("kind"), "position": got.get("position")},
+            p.get("units") == "mm" and p.get("match_count") == 6
+            and p.get("returned") == len(matches) == 1
+            and got.get("kind") == "planar_face"
+            and isinstance(got.get("handle"), str) and bool(got["handle"])
+            and len(got.get("position") or []) == len(position)
+            and all(_near(a, b, 0.01) for a, b in zip(got["position"], position))
+            and len(got.get("normal") or []) == 3
+            and all(_near(a, b, 0.001) for a, b in zip(got["normal"], (0, 0, 1))))
+    return check
+
+
+def _combine_pin(ctx, key, args):
+    """Add the exact owned-document pin to one write."""
+    return {**args, "expect_document": _ctx_get(ctx, key, "the combine scratch document")}
+
+
+def _combine_inspect(target=""):
+    """The canonical bounds, mass and complete per-body read arguments."""
+    args = {"include": ["default", "mass"], "units": "mm", "accuracy": "very_high"}
+    if target:
+        args["target"] = target
+    else:
+        args["per_body"] = True
+    return args
+
+
+def _combine_case_rows(case, rectangles, before, after):
+    """Build one isolated root-parametric complete/partial/none combine control."""
+    owned = "combine_" + case + "_doc"
+    prefix = "Join" + case.title()
+    low = tuple(min(body[2][i] for body in before) for i in range(3))
+    high = tuple(max(body[3][i] for body in before) for i in range(3))
+    before_volume = sum(body[1] for body in before)
+    after_low = tuple(min(body[2][i] for body in after) for i in range(3))
+    after_high = tuple(max(body[3][i] for body in after) for i in range(3))
+    after_volume = sum(body[1] for body in after)
+    rows = [
+        ("doc_new",
+         lambda c: {"expect_document": _ctx_get(c, "combine_story", "the story document")},
+         _new_document, (owned, _recall(owned, lambda p: p["document_handle"]))),
+        ("doc_get", {}, _combine_owned_active(owned), None),
+    ]
+    for i, (x1, x2) in enumerate(rectangles):
+        rows += [
+            ("sketch_create",
+             lambda c, name=f"{prefix}{i}": _combine_pin(
+                 c, owned, {"plane": "xy", "name": name}), "ok", None),
+            ("sketch_add_geometry",
+             lambda c, name=f"{prefix}{i}", x1=x1, x2=x2: _combine_pin(
+                 c, owned, {"geometry": [{"kind": "rectangle", "x1": x1, "y1": 0,
+                                          "x2": x2, "y2": 10}],
+                            "sketch_name": name}), "ok", None),
+            ("model_extrude",
+             lambda c, name=f"{prefix}{i}": _combine_pin(
+                 c, owned, {"sketch_name": name, "profile_index": 0,
+                            "distance": 10, "operation": "new"}), _extruded, None),
+        ]
+    if case == "complete":
+        rows += [
+            ("find_geometry", {"target": "Body1", "kind": "planar_face",
+                               "nearest_to": [5, 5, 10], "max_results": 1},
+             "ok", _fg("combine_self_a")),
+            ("find_geometry", {"target": "Body1", "kind": "planar_face",
+                               "nearest_to": [5, 5, 0], "max_results": 1},
+             "ok", _fg("combine_self_b")),
+            ("model_combine",
+             lambda c: _combine_pin(
+                 c, owned, {"target": _ctx_get(c, "combine_self_a", "combine target"),
+                            "tools": [_ctx_get(c, "combine_self_b", "the same body again")],
+                            "operation": "join"}),
+             _refused("same as the target", "distinct bodies"), None),
+        ]
+    rows += [
+        ("model_inspect", _combine_inspect(),
+         _combine_census(case + " before", before, low, high, before_volume), None),
+    ]
+    rows += [("model_inspect", _combine_inspect(name),
+              _combine_body(case + " before " + name, body_low, body_high, volume), None)
+             for name, volume, body_low, body_high in before]
+    rows += [
+        ("model_combine",
+         lambda c: _combine_pin(c, owned, {"target": "Body1", "tools": ["Body2", "Body3"],
+                                                   "operation": "join", "keep_tools": False,
+                                                   "new_component": False}),
+         _combine_join_outcome(case, len(after), len(after)), None),
+        ("model_inspect", _combine_inspect(),
+         _combine_census(case + " after", after, after_low, after_high, after_volume), None),
+    ]
+    rows += [("model_inspect", _combine_inspect(name),
+              _combine_body(case + " after " + name, body_low, body_high, volume), None)
+             for name, volume, body_low, body_high in after]
+    rows += [
+        ("design_get", {"include": ["timeline"], "max_results": 7},
+         _combine_timeline(prefix, True), None),
+        ("design_delete_feature",
+         lambda c: _combine_pin(c, owned, {"feature": "Combine1"}), _combine_deleted, None),
+        ("model_inspect", _combine_inspect(),
+         _combine_census(case + " restored", before, low, high, before_volume), None),
+    ]
+    rows += [("model_inspect", _combine_inspect(name),
+              _combine_body(case + " restored " + name, body_low, body_high, volume), None)
+             for name, volume, body_low, body_high in before]
+    rows += [
+        ("design_get", {"include": ["timeline"], "max_results": 6},
+         _combine_timeline(prefix, False), None),
+        ("doc_activate",
+         lambda c: {"name": _ctx_get(c, "combine_story", "the story document"),
+                    "expect_document": _ctx_get(c, owned, "the combine scratch document")},
+         "ok", None),
+        ("doc_close",
+         lambda c: {"name": _ctx_get(c, owned, "the combine scratch document"),
+                    "save_changes": False,
+                    "expect_document": _ctx_get(c, "combine_story", "the story document")},
+         _document_closed, None),
+        ("doc_get", {}, _combine_story_restored, None),
+    ]
+    return rows
+
+
+_COMBINE_COMPLETE = _combine_case_rows(
+    "complete", ((0, 20), (10, 30), (20, 40)),
+    (("Body1", 2000.0, (0, 0, 0), (20, 10, 10)),
+     ("Body2", 2000.0, (10, 0, 0), (30, 10, 10)),
+     ("Body3", 2000.0, (20, 0, 0), (40, 10, 10))),
+    (("Body1", 4000.0, (0, 0, 0), (40, 10, 10)),))
+
+_COMBINE_PARTIAL = _combine_case_rows(
+    "partial", ((0, 20), (10, 30), (50, 60)),
+    (("Body1", 2000.0, (0, 0, 0), (20, 10, 10)),
+     ("Body2", 2000.0, (10, 0, 0), (30, 10, 10)),
+     ("Body3", 1000.0, (50, 0, 0), (60, 10, 10))),
+    (("Body1", 3000.0, (0, 0, 0), (30, 10, 10)),
+     ("Body4", 1000.0, (50, 0, 0), (60, 10, 10))))
+
+_COMBINE_NONE = _combine_case_rows(
+    "none", ((0, 20), (30, 50), (60, 80)),
+    (("Body1", 2000.0, (0, 0, 0), (20, 10, 10)),
+     ("Body2", 2000.0, (30, 0, 0), (50, 10, 10)),
+     ("Body3", 2000.0, (60, 0, 0), (80, 10, 10))),
+    (("Body1", 2000.0, (0, 0, 0), (20, 10, 10)),
+     ("Body4", 2000.0, (30, 0, 0), (50, 10, 10)),
+     ("Body5", 2000.0, (60, 0, 0), (80, 10, 10))))
+
+
+def _combine_nonroot_partial_rows():
+    """Build one transformed non-root partial join with proxy-face tool handles."""
+    owned = "combine_nonroot_partial_doc"
+    component = "JoinProxyHost"
+    occurrence = component + ":1"
+    before = (
+        ("Body1", 2000.0, (90, 40, 30), (100, 60, 40)),
+        ("Body2", 2000.0, (90, 50, 30), (100, 70, 40)),
+        ("Body3", 1000.0, (90, 90, 30), (100, 100, 40)),
+    )
+    after = (
+        ("Body1", 3000.0, (90, 40, 30), (100, 70, 40)),
+        ("Body4", 1000.0, (90, 90, 30), (100, 100, 40)),
+    )
+    rows = [
+        ("doc_new",
+         lambda c: {"expect_document": _ctx_get(c, "combine_story", "the story document")},
+         _new_document, (owned, _recall(owned, lambda p: p["document_handle"]))),
+        ("doc_get", {}, _combine_owned_active(owned), None),
+        ("model_create_component",
+         lambda c: _combine_pin(
+             c, owned, {"name": component, "x": 100, "y": 40, "z": 30,
+                        "rotate_deg": 90, "rotate_axis": "z", "activate": True}),
+         _combine_nonroot_component, None),
+    ]
+    for i, (x1, x2) in enumerate(((0, 20), (10, 30), (50, 60))):
+        rows += [
+            ("sketch_create",
+             lambda c, name=f"ProxyBox{i}": _combine_pin(
+                 c, owned, {"plane": "xy", "name": name}), "ok", None),
+            ("sketch_add_geometry",
+             lambda c, name=f"ProxyBox{i}", x1=x1, x2=x2: _combine_pin(
+                 c, owned, {"geometry": [{"kind": "rectangle", "x1": x1, "y1": 0,
+                                          "x2": x2, "y2": 10}],
+                            "sketch_name": name}), "ok", None),
+            ("model_extrude",
+             lambda c, name=f"ProxyBox{i}": _combine_pin(
+                 c, owned, {"sketch_name": name, "profile_index": 0,
+                            "distance": 10, "operation": "new"}), _extruded, None),
+        ]
+    rows += [
+        ("model_inspect", {**_combine_inspect(occurrence), "per_body": True},
+         _combine_census("non-root partial before", before,
+                         (90, 40, 30), (100, 100, 40), 5000.0, "occurrence"), None),
+    ]
+    rows += [
+        ("model_inspect", _combine_inspect(occurrence + ":" + name),
+         _combine_body("non-root partial before " + name, low, high, volume), None)
+        for name, volume, low, high in before
+    ]
+    rows += [
+        ("find_geometry", {"target": occurrence + ":Body2", "kind": "planar_face",
+                           "nearest_to": [95, 60, 40], "max_results": 1},
+         _combine_face((95, 60, 40)), _fg("combine_nonroot_tool_a")),
+        ("find_geometry", {"target": occurrence + ":Body3", "kind": "planar_face",
+                           "nearest_to": [95, 95, 40], "max_results": 1},
+         _combine_face((95, 95, 40)), _fg("combine_nonroot_tool_b")),
+        ("model_combine",
+         lambda c: _combine_pin(
+             c, owned, {"target": occurrence + ":Body1",
+                        "tools": [_ctx_get(c, "combine_nonroot_tool_a", "Body2 planar face"),
+                                  _ctx_get(c, "combine_nonroot_tool_b", "Body3 planar face")],
+                        "operation": "join", "keep_tools": False, "new_component": False}),
+         _combine_join_outcome("partial", 2, 2), None),
+        ("model_inspect", {**_combine_inspect(occurrence), "per_body": True},
+         _combine_census("non-root partial after", after,
+                         (90, 40, 30), (100, 100, 40), 4000.0, "occurrence"), None),
+    ]
+    rows += [
+        ("model_inspect", _combine_inspect(occurrence + ":" + name),
+         _combine_body("non-root partial after " + name, low, high, volume), None)
+        for name, volume, low, high in after
+    ]
+    rows += [
+        ("design_get", {"include": ["timeline"], "max_results": 8},
+         _combine_timeline("ProxyBox", True, component), None),
+        ("design_delete_feature",
+         lambda c: _combine_pin(c, owned, {"feature": "Combine1"}),
+         lambda p: _combine_deleted(p, 7), None),
+        ("model_inspect", {**_combine_inspect(occurrence), "per_body": True},
+         _combine_census("non-root partial restored", before,
+                         (90, 40, 30), (100, 100, 40), 5000.0, "occurrence"), None),
+    ]
+    rows += [
+        ("model_inspect", _combine_inspect(occurrence + ":" + name),
+         _combine_body("non-root partial restored " + name, low, high, volume), None)
+        for name, volume, low, high in before
+    ]
+    rows += [
+        ("design_get", {"include": ["timeline"], "max_results": 7},
+         _combine_timeline("ProxyBox", False, component), None),
+        ("doc_activate",
+         lambda c: {"name": _ctx_get(c, "combine_story", "the story document"),
+                    "expect_document": _ctx_get(c, owned, "the combine scratch document")},
+         "ok", None),
+        ("doc_close",
+         lambda c: {"name": _ctx_get(c, owned, "the combine scratch document"),
+                    "save_changes": False,
+                    "expect_document": _ctx_get(c, "combine_story", "the story document")},
+         _document_closed, None),
+        ("doc_get", {}, _combine_story_restored, None),
+    ]
+    return rows
+
+
+_COMBINE_NONROOT_PARTIAL = _combine_nonroot_partial_rows()
+
+_REVOLVE_HOST = "RevolveProof"
+_REVOLVE_OCCURRENCE = _REVOLVE_HOST + ":1"
+_REVOLVE_BASELINE = (
+    ("Body1", 1280 * math.pi, (-10, -10, 0), (10, 10, 20)),
+    ("Body2", 500 * math.pi, (-5, -5, 0), (5, 5, 20)),
+    ("Body3", 80 * math.pi, (28, -2, 0), (32, 2, 20)),
+)
+
+
+def _revolve_story_address(p):
+    """Return the story handle while recording the open-document baseline."""
+    _RECALL["revolve_open_before"] = p.get("open_count")
+    return _home_address(p)
+
+
+def _revolve_owned_active(p):
+    """Require the new revolve document beside the exact story document."""
+    active = p.get("active") or {}
+    rows = [row for row in (p.get("open_documents") or []) if row.get("is_active")]
+    return _measured(
+        "owned revolve document active at its exact handle",
+        {"active": active.get("document_handle"), "owned": _RECALL.get("revolve_participant_doc"),
+         "open_count": p.get("open_count"), "before": _RECALL.get("revolve_open_before")},
+        len(rows) == 1
+        and active.get("document_handle") == _RECALL.get("revolve_participant_doc")
+        and rows[0].get("document_handle") == _RECALL.get("revolve_participant_doc")
+        and p.get("open_count") == _RECALL.get("revolve_open_before") + 1)
+
+
+def _revolve_story_restored(p):
+    """Require the revolve document gone and the exact story document active."""
+    active = p.get("active") or {}
+    rows = [row for row in (p.get("open_documents") or []) if row.get("is_active")]
+    return _measured(
+        "revolve scratch closed and story document restored",
+        {"active": active.get("document_handle"), "story": _RECALL.get("revolve_story"),
+         "open_count": p.get("open_count"), "before": _RECALL.get("revolve_open_before")},
+        len(rows) == 1 and active.get("document_handle") == _RECALL.get("revolve_story")
+        and rows[0].get("document_handle") == _RECALL.get("revolve_story")
+        and p.get("open_count") == _RECALL.get("revolve_open_before"))
+
+
+def _revolve_pin(ctx, args):
+    """Add the exact owned-document pin to one revolve-fixture write."""
+    return {**args, "expect_document": _ctx_get(
+        ctx, "revolve_participant_doc", "the revolve scratch document")}
+
+
+def _revolve_census(label, bodies):
+    """Require one complete participant census with analytical volume and world bounds."""
+    expected = {name: (volume, low, high) for name, volume, low, high in bodies}
+    low = tuple(min(body[2][i] for body in bodies) for i in range(3))
+    high = tuple(max(body[3][i] for body in bodies) for i in range(3))
+
+    def check(p):
+        mass = p.get("mass") or {}
+        rows = mass.get("per_body") or []
+        got = {row.get("body"): row for row in rows}
+        bounds = (p.get("min_point") or {}, p.get("max_point") or {})
+        bounds_ok = all(_near(point.get(axis), want, 0.01)
+                        for point, wanted in zip(bounds, (low, high))
+                        for axis, want in zip(("x", "y", "z"), wanted))
+        bodies_ok = (
+            set(got) == set(expected) and len(rows) == len(expected)
+            and all(row.get("is_solid") is True and row.get("lump_count") == 1
+                    and _near(row.get("volume"), expected[name][0], 0.001)
+                    for name, row in got.items()))
+        return _measured(
+            label + " revolve participant census",
+            {"count": mass.get("per_body_count"), "returned": len(rows),
+             "truncated": mass.get("per_body_truncated"),
+             "bodies": sorted((name, row.get("volume"), row.get("lump_count"))
+                              for name, row in got.items()),
+             "volume": mass.get("volume"), "min": bounds[0], "max": bounds[1]},
+            p.get("kind") == "occurrence" and p.get("units") == "mm"
+            and mass.get("accuracy_used") == "very_high"
+            and mass.get("per_body_count") == len(expected) == len(rows)
+            and mass.get("per_body_truncated") is False and bodies_ok
+            and _near(mass.get("volume"), sum(body[1] for body in bodies), 0.001)
+            and bounds_ok)
+    return check
+
+
+def _revolve_cut(profile, feature, result_bodies, scoped, volume_delta_cm3):
+    """Require the reported cut scope/results and its material-effect mode."""
+    def check(p):
+        scope = p.get("scoped_to_bodies")
+        scope_ok = (scope == [_REVOLVE_OCCURRENCE + ":Body1"] if scoped
+                    else "scoped_to_bodies" not in p)
+        if volume_delta_cm3 is None:
+            effect_ok = ("volume_delta_cm3" not in p
+                         and "body count changed" in (p.get("note") or ""))
+        else:
+            effect_ok = _near(p.get("volume_delta_cm3"), volume_delta_cm3, 0.000001)
+        return _measured(
+            profile + " revolve cut result",
+            {"feature": p.get("feature"), "operation": p.get("operation"),
+             "results": p.get("result_bodies"), "scope": scope,
+             "volume_delta_cm3": p.get("volume_delta_cm3")},
+            p.get("revolved") is True and p.get("feature") == feature
+            and p.get("operation") == "cut" and p.get("sketch") == profile
+            and p.get("component") == _REVOLVE_HOST and p.get("axis") == "z-axis"
+            and _near(p.get("angle_deg"), 360.0, 0.000001)
+            and p.get("result_bodies") == list(result_bodies) and scope_ok and effect_ok)
+    return check
+
+
+def _revolve_deleted(feature):
+    """Require deletion of the exact temporary RevolveFeature."""
+    def check(p):
+        return _measured(
+            feature + " deleted",
+            {"deleted": p.get("deleted"), "feature": p.get("feature"),
+             "index": p.get("index"), "entity_type": p.get("entity_type")},
+            p.get("deleted") is True and p.get("feature") == feature
+            and p.get("index") == 9 and p.get("entity_type") == "RevolveFeature")
+    return check
+
+
+def _revolve_groove_face(p):
+    """Require the new radius-9 groove face at world z=7.5 mm."""
+    matches = p.get("matches") or []
+    groove = [row for row in matches
+              if _near(row.get("radius"), 9.0, 0.001)
+              and len(row.get("position") or []) == 3
+              and _near(row["position"][2], 7.5, 0.01)]
+    return _measured(
+        "radius-9 groove face at its axial position",
+        {"count": p.get("match_count"), "returned": p.get("returned"),
+         "groove": [(row.get("radius"), row.get("position"), row.get("area"))
+                    for row in groove], "truncated": p.get("truncated")},
+        p.get("units") == "mm" and p.get("match_count") == p.get("returned") == len(matches)
+        and p.get("truncated") is not True and len(groove) == 1
+        and _near(groove[0].get("area"), 90 * math.pi, 0.001))
+
+
+def _revolve_body_rows(label, bodies):
+    """Build separate mass-and-bounds reads for every expected participant body."""
+    return [
+        ("model_inspect", _combine_inspect(_REVOLVE_OCCURRENCE + ":" + name),
+         _combine_body(label + " " + name, low, high, volume), None)
+        for name, volume, low, high in bodies
+    ]
+
+
+def _revolve_participant_rows():
+    """Build one isolated scoped, unscoped and splitting revolve-cut proof."""
+    scoped = (
+        ("Body1", 1055 * math.pi, (-10, -10, 0), (10, 10, 20)),
+        _REVOLVE_BASELINE[1], _REVOLVE_BASELINE[2])
+    unscoped = (
+        scoped[0],
+        ("Body2", 420 * math.pi, (-5, -5, 0), (5, 5, 20)),
+        _REVOLVE_BASELINE[2])
+    split = (
+        ("Body1", 320 * math.pi, (-10, -10, 0), (10, 10, 5)),
+        _REVOLVE_BASELINE[1], _REVOLVE_BASELINE[2],
+        ("Body4", 640 * math.pi, (-10, -10, 10), (10, 10, 20)))
+    rows = [
+        ("doc_get", {}, _home_document,
+         ("revolve_story", _recall("revolve_story", _revolve_story_address))),
+        ("doc_new",
+         lambda c: {"expect_document": _ctx_get(c, "revolve_story", "the story document")},
+         _new_document, ("revolve_participant_doc", _recall(
+             "revolve_participant_doc", lambda p: p["document_handle"]))),
+        ("doc_get", {}, _revolve_owned_active, None),
+        ("model_create_component",
+         lambda c: _revolve_pin(c, {"name": _REVOLVE_HOST, "activate": True}),
+         _made_component, None),
+        ("sketch_create",
+         lambda c: _revolve_pin(c, {"name": "RingProfile", "plane": "xz"}), "ok", None),
+        ("sketch_add_geometry",
+         lambda c: _revolve_pin(c, {
+             "sketch_name": "RingProfile",
+             "geometry": [{"kind": "rectangle", "x1": 6, "y1": -20, "x2": 10, "y2": 0}]}),
+         "ok", None),
+        ("model_revolve",
+         lambda c: _revolve_pin(c, {
+             "sketch_name": "RingProfile", "axis": "z", "angle_deg": 360}),
+         _revolved, None),
+        ("sketch_create",
+         lambda c: _revolve_pin(c, {"name": "InnerProfile", "plane": "xy"}), "ok", None),
+        ("sketch_add_geometry",
+         lambda c: _revolve_pin(c, {
+             "sketch_name": "InnerProfile",
+             "geometry": [{"kind": "circle", "cx": 0, "cy": 0, "radius": 5}]}),
+         "ok", None),
+        ("model_extrude",
+         lambda c: _revolve_pin(c, {
+             "sketch_name": "InnerProfile", "distance": 20, "operation": "new"}),
+         _extruded, None),
+        ("sketch_create",
+         lambda c: _revolve_pin(c, {"name": "DecoyProfile", "plane": "xy"}), "ok", None),
+        ("sketch_add_geometry",
+         lambda c: _revolve_pin(c, {
+             "sketch_name": "DecoyProfile",
+             "geometry": [{"kind": "circle", "cx": 30, "cy": 0, "radius": 2}]}),
+         "ok", None),
+        ("model_extrude",
+         lambda c: _revolve_pin(c, {
+             "sketch_name": "DecoyProfile", "distance": 20, "operation": "new"}),
+         _extruded, None),
+        ("sketch_create",
+         lambda c: _revolve_pin(c, {"name": "GrooveProfile", "plane": "xz"}), "ok", None),
+        ("sketch_add_geometry",
+         lambda c: _revolve_pin(c, {
+             "sketch_name": "GrooveProfile",
+             "geometry": [{"kind": "rectangle", "x1": 3, "y1": -10, "x2": 9, "y2": -5}]}),
+         "ok", None),
+        ("sketch_create",
+         lambda c: _revolve_pin(c, {"name": "BandProfile", "plane": "xz"}), "ok", None),
+        ("sketch_add_geometry",
+         lambda c: _revolve_pin(c, {
+             "sketch_name": "BandProfile",
+             "geometry": [{"kind": "rectangle", "x1": 0, "y1": -10, "x2": 11, "y2": -5}]}),
+         "ok", None),
+        ("model_inspect", {**_combine_inspect(_REVOLVE_OCCURRENCE), "per_body": True},
+         _revolve_census("baseline", _REVOLVE_BASELINE), None),
+    ]
+    rows += _revolve_body_rows("baseline", _REVOLVE_BASELINE)
+    cases = (
+        ("scoped", "GrooveProfile", "Revolve2", ("Body1",), True,
+         -225 * math.pi / 1000, scoped),
+        ("unscoped", "GrooveProfile", "Revolve3", ("Body1", "Body2"), False,
+         -305 * math.pi / 1000, unscoped),
+        ("split", "BandProfile", "Revolve4", ("Body1", "Body4"), True, None, split),
+    )
+    for label, profile, feature, result_bodies, is_scoped, delta, after in cases:
+        def cut_args(c, profile=profile, is_scoped=is_scoped):
+            args = {"sketch_name": profile, "component": _REVOLVE_HOST, "axis": "z",
+                    "operation": "cut", "angle_deg": 360}
+            if is_scoped:
+                args["target_bodies"] = [_REVOLVE_HOST + ":Body1"]
+            return _revolve_pin(c, args)
+
+        rows += [
+            ("model_revolve", cut_args,
+             _revolve_cut(profile, feature, result_bodies, is_scoped, delta), None),
+            ("model_inspect", {**_combine_inspect(_REVOLVE_OCCURRENCE), "per_body": True},
+             _revolve_census(label, after), None),
+        ]
+        rows += _revolve_body_rows(label, after)
+        if profile == "GrooveProfile":
+            rows += [
+                ("find_geometry", {"target": _REVOLVE_OCCURRENCE + ":Body1",
+                                   "kind": "cylinder_face", "units": "mm", "max_results": 100},
+                 _revolve_groove_face, None),
+            ]
+        rows += [
+            ("design_delete_feature",
+             lambda c, feature=feature: _revolve_pin(c, {"feature": feature}),
+             _revolve_deleted(feature), None),
+            ("model_inspect", {**_combine_inspect(_REVOLVE_OCCURRENCE), "per_body": True},
+             _revolve_census(label + " restored", _REVOLVE_BASELINE), None),
+        ]
+        rows += _revolve_body_rows(label + " restored", _REVOLVE_BASELINE)
+    rows += [
+        ("doc_activate",
+         lambda c: {"name": _ctx_get(c, "revolve_story", "the story document"),
+                    "expect_document": _ctx_get(
+                        c, "revolve_participant_doc", "the revolve scratch document")},
+         "ok", None),
+        ("doc_close",
+         lambda c: {"name": _ctx_get(c, "revolve_participant_doc",
+                                     "the revolve scratch document"),
+                    "save_changes": False,
+                    "expect_document": _ctx_get(c, "revolve_story", "the story document")},
+         _document_closed, None),
+        ("doc_get", {}, _revolve_story_restored, None),
+    ]
+    return rows
+
+
+_REVOLVE_PARTICIPANTS = _revolve_participant_rows()
 
 # --- ACT 2: SOLIDS - the parts turn solid, each part its own color (mirrors scenario S2) -------
 # The hero solids ride on ACT 1's parametric sketches; the multi-body feature tools that have no
@@ -334,6 +1345,119 @@ _SOLIDS = [
                                           "entity_a": _ctx_get(c, "db_top2", "bench top face"),
                                           "entity_b": _ctx_get(c, "db_floor", "bench floor")},
      _relation_read("clearance", "min_distance"), None),
+    # HOLE-HOST-1: two drillable B solids share z=0, while a separate A plate stays active. The
+    # layout pass gives B and A different cells; the hole callables compensate for A's wrapper
+    # offset so the world points land in B exactly once while every acquired handle stays unchanged.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": _HOLE_HOST, "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "Plate-upper"}, "ok", None),
+    ("sketch_add_geometry",
+     {"geometry": [{"kind": "rectangle", "x1": _HOLE_X0, "y1": 0,
+                    "x2": _HOLE_X0 + 20, "y2": 20}], "sketch_name": "Plate-upper"}, "ok", None),
+    ("model_extrude", {"sketch_name": "Plate-upper", "profile_index": 0, "distance": 10},
+     _extruded, None),
+    ("sketch_create", {"plane": "xy", "name": "Plate-lower"}, "ok", None),
+    ("sketch_add_geometry",
+     {"geometry": [{"kind": "rectangle", "x1": _HOLE_X0, "y1": 0,
+                    "x2": _HOLE_X0 + 20, "y2": 20}], "sketch_name": "Plate-lower"}, "ok", None),
+    ("model_extrude", {"sketch_name": "Plate-lower", "profile_index": 0, "distance": -10},
+     _extruded, None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": _HOLE_ACTIVE, "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "Active-A-Plate"}, "ok", None),
+    ("sketch_add_geometry",
+     {"geometry": [{"kind": "rectangle", "x1": _HOLE_ACTIVE_X0, "y1": 0,
+                    "x2": _HOLE_ACTIVE_X0 + 20, "y2": 20}],
+      "sketch_name": "Active-A-Plate"}, "ok", None),
+    ("model_extrude", {"sketch_name": "Active-A-Plate", "profile_index": 0, "distance": 10},
+     _extruded, None),
+    ("design_activate_component", {"occurrence": _HOLE_ACTIVE + ":1"},
+     lambda p: (p.get("activated") == _HOLE_ACTIVE + ":1"
+                and p.get("active_occurrence") == _HOLE_ACTIVE + ":1"
+                and p.get("active_component") == _HOLE_ACTIVE), None),
+    # The participant is a fresh body handle from a component-rooted tree read. Component scopes
+    # only the tree; the separate timeline reads below use their own explicit full-list bound.
+    ("design_get", {"include": ["tree"], "component": _HOLE_HOST,
+                    "tree_bodies": True, "max_results": 10},
+     _hole_host_tree, ("hh_upper", _hole_upper_handle)),
+    ("design_get", {"include": ["tree"], "component": _HOLE_HOST,
+                    "tree_bodies": True, "max_results": 10},
+     _hole_host_tree, ("hh_lower", _hole_lower_handle)),
+    ("design_get", {"include": ["tree"], "component": _HOLE_ACTIVE,
+                    "tree_bodies": True, "max_results": 10},
+     _hole_active_tree, ("hh_active", _hole_active_handle)),
+    ("model_inspect", lambda c: _hole_inspect_args(c, "hh_upper"),
+     _hole_body_state(_HOLE_HOST, (_HOLE_X0, 0, 0), (_HOLE_X0 + 20, 20, 10), 4000.0),
+     None),
+    ("model_inspect", lambda c: _hole_inspect_args(c, "hh_lower"),
+     _hole_body_state(_HOLE_HOST, (_HOLE_X0, 0, -10), (_HOLE_X0 + 20, 20, 0), 4000.0),
+     None),
+    ("model_inspect", lambda c: _hole_inspect_args(c, "hh_active"),
+     _hole_body_state(_HOLE_ACTIVE, (_HOLE_ACTIVE_X0, 0, 0),
+                      (_HOLE_ACTIVE_X0 + 20, 20, 10), 4000.0), None),
+    ("find_geometry", lambda c: _hole_cylinder_args(c, "hh_upper"),
+     _hole_cylinders(_HOLE_HOST, ()), None),
+    ("find_geometry", lambda c: _hole_cylinder_args(c, "hh_lower"),
+     _hole_cylinders(_HOLE_HOST, ()), None),
+    ("find_geometry", lambda c: _hole_cylinder_args(c, "hh_active"),
+     _hole_cylinders(_HOLE_ACTIVE, ()), None),
+    ("find_geometry", _scoped_top_args,
+     lambda p: _face_up_at(_px(_HOLE_HOST, _HOLE_X0 + 10),
+                           _py(_HOLE_HOST, 10), 10)(p), _fg("hh_top")),
+    ("model_hole", _scoped_hole_args, _hole_created(True), None),
+    # The scoped cut removes exactly one 4 mm x 10 mm bore from upper B. Lower B and active A keep
+    # their original bounds, volume and empty cylinder censuses.
+    ("model_inspect", lambda c: _hole_inspect_args(c, "hh_upper"),
+     _hole_body_state(_HOLE_HOST, (_HOLE_X0, 0, 0), (_HOLE_X0 + 20, 20, 10),
+                      4000.0 - _HOLE_VOLUME), None),
+    ("model_inspect", lambda c: _hole_inspect_args(c, "hh_lower"),
+     _hole_body_state(_HOLE_HOST, (_HOLE_X0, 0, -10), (_HOLE_X0 + 20, 20, 0), 4000.0),
+     None),
+    ("model_inspect", lambda c: _hole_inspect_args(c, "hh_active"),
+     _hole_body_state(_HOLE_ACTIVE, (_HOLE_ACTIVE_X0, 0, 0),
+                      (_HOLE_ACTIVE_X0 + 20, 20, 10), 4000.0), None),
+    ("find_geometry", lambda c: _hole_cylinder_args(c, "hh_upper"),
+     _hole_cylinders(_HOLE_HOST, ((_HOLE_X0 + 10, 10, 5),)), None),
+    ("find_geometry", lambda c: _hole_cylinder_args(c, "hh_lower"),
+     _hole_cylinders(_HOLE_HOST, ()), None),
+    ("find_geometry", lambda c: _hole_cylinder_args(c, "hh_active"),
+     _hole_cylinders(_HOLE_ACTIVE, ()), None),
+    # Reacquire the new bore after the write and consume its real handle. Its 4 x 4 x 10 mm bounds
+    # prove radius, depth and world location independently of model_hole's participant echo.
+    ("find_geometry", _scoped_bore_args,
+     _hole_cylinders(_HOLE_HOST, ((_HOLE_X0 + 10, 10, 5),)), _fg("hh_bore")),
+    ("model_inspect", lambda c: {"target": _ctx_get(c, "hh_bore", "fresh scoped bore face"),
+                                 "units": "mm"}, _hole_face_bounds, None),
+    ("design_get", {"include": ["timeline"], "max_results": 2000},
+     _hole_timeline(False), None),
+    # Positive control: A is explicitly active again and target_bodies is omitted. Both stacked B
+    # bodies lose one bore, proving the lower body was drillable; A still does not change.
+    ("design_activate_component", {"occurrence": _HOLE_ACTIVE + ":1"},
+     lambda p: (p.get("activated") == _HOLE_ACTIVE + ":1"
+                and p.get("active_occurrence") == _HOLE_ACTIVE + ":1"
+                and p.get("active_component") == _HOLE_ACTIVE), None),
+    ("find_geometry", _control_top_args,
+     lambda p: _face_up_at(_px(_HOLE_HOST, _HOLE_X0 + 10),
+                           _py(_HOLE_HOST, 10), 10, tol=2.0)(p), _fg("hh_top_control")),
+    ("model_hole", _unscoped_hole_args, _hole_created(False), None),
+    ("model_inspect", lambda c: _hole_inspect_args(c, "hh_upper"),
+     _hole_body_state(_HOLE_HOST, (_HOLE_X0, 0, 0), (_HOLE_X0 + 20, 20, 10),
+                      4000.0 - 2 * _HOLE_VOLUME), None),
+    ("model_inspect", lambda c: _hole_inspect_args(c, "hh_lower"),
+     _hole_body_state(_HOLE_HOST, (_HOLE_X0, 0, -10), (_HOLE_X0 + 20, 20, 0),
+                      4000.0 - _HOLE_VOLUME), None),
+    ("model_inspect", lambda c: _hole_inspect_args(c, "hh_active"),
+     _hole_body_state(_HOLE_ACTIVE, (_HOLE_ACTIVE_X0, 0, 0),
+                      (_HOLE_ACTIVE_X0 + 20, 20, 10), 4000.0), None),
+    ("find_geometry", lambda c: _hole_cylinder_args(c, "hh_upper"),
+     _hole_cylinders(_HOLE_HOST, ((_HOLE_X0 + 5, 5, 5),
+                                  (_HOLE_X0 + 10, 10, 5))), None),
+    ("find_geometry", lambda c: _hole_cylinder_args(c, "hh_lower"),
+     _hole_cylinders(_HOLE_HOST, ((_HOLE_X0 + 5, 5, -5),)), None),
+    ("find_geometry", lambda c: _hole_cylinder_args(c, "hh_active"),
+     _hole_cylinders(_HOLE_ACTIVE, ()), None),
+    ("design_get", {"include": ["timeline"], "max_results": 2000},
+     _hole_timeline(True), None),
     # feature cameos on same-doc scratch bodies (no natural home on the part for these verbs).
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("model_create_component", {"name": "FeatureCameo", "activate": True}, _made_component, None),
@@ -456,31 +1580,13 @@ _SOLIDS = [
     ("model_pattern_circular", lambda c: {"bodies": [_ctx_get(c, "fc_body", "cameo body")],
                                           "quantity": 3, "axis": "CameoSpin"}, "refused", None),
     ("design_activate_component", {"occurrence": "FeatureCameo:1"}, "ok", None),
-    # a join cameo: two overlapping pads become one body.
-    ("model_create_component", {"name": "CombineCameo", "activate": True}, _made_component, None),
-    ("sketch_create", {"plane": "xy", "name": "CC1"}, "ok", None),
-    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 200, "y1": 100,
-                                           "x2": 230, "y2": 130}],
-                             "sketch_name": "CC1"}, "ok", None),
-    ("model_extrude", {"sketch_name": "CC1", "profile_index": 0, "distance": 10}, _extruded, None),
-    ("sketch_create", {"plane": "xy", "name": "CC2"}, "ok", None),
-    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 220, "y1": 120,
-                                           "x2": 250, "y2": 150}],
-                             "sketch_name": "CC2"}, "ok", None),
-    ("model_extrude", {"sketch_name": "CC2", "profile_index": 0, "distance": 10}, _extruded, None),
-    _watch("CombineCameo:1"),
-    ("find_geometry", {"target": "CombineCameo", "kind": "planar_face", "nearest_to": [215, 115, 10], "max_results": 1}, "ok", _fg("cc_a")),
-    ("find_geometry", {"target": "CombineCameo", "kind": "planar_face", "nearest_to": [235, 135, 10], "max_results": 1}, "ok", _fg("cc_b")),
-    # the same body reached through TWO SEPARATE handles must be refused as its own tool: a
-    # resolution hands back a fresh proxy each time, so an identity-only guard lets it through
-    # and Fusion is asked to join a body to itself.
-    ("find_geometry", {"target": "CombineCameo", "kind": "planar_face", "nearest_to": [215, 115, 0], "max_results": 1}, "ok", _fg("cc_a2")),
-    ("model_combine", lambda c: {"target": _ctx_get(c, "cc_a", "combine target"),
-                                 "tools": [_ctx_get(c, "cc_a2", "the same body again")],
-                                 "operation": "join"}, "refused", None),
-    ("model_combine", lambda c: {"target": _ctx_get(c, "cc_a", "combine target"), "tools": [_ctx_get(c, "cc_b", "combine tool")], "operation": "join"}, _joined, None),
+    # Three isolated root-parametric joins carry the accepted complete, partial and disjoint
+    # controls. Each owns and closes its scratch document, then returns the story to root.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    # the revolve axis as a CYLINDRICAL FACE, off the origin - the case a world key cannot express.
+    ("doc_get", {}, _home_document,
+     ("combine_story", _recall("combine_story", _combine_story_address))),
+] + _COMBINE_COMPLETE + _COMBINE_PARTIAL + _COMBINE_NONE + _COMBINE_NONROOT_PARTIAL + _REVOLVE_PARTICIPANTS + [
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),    # the revolve axis as a CYLINDRICAL FACE, off the origin - the case a world key cannot express.
     # A face mapped to a direction VECTOR keeps the direction and DROPS the location, so the ring is
     # turned about the world axis through the ORIGIN and reported as success: the label is checked
     # AND the geometry measured. Live: a cylinder at x=30, a 2x3 mm profile at x 36-38 on the XZ
@@ -535,6 +1641,115 @@ _SOLIDS = [
      lambda p: (isinstance(p.get("enclosed_profile_indices"), list)
                 and len(p["enclosed_profile_indices"]) > 0
                 and "enclosed" in p.get("note", "")), None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    # Radius filtering uses the full measurement while the returned record stays at three decimals.
+    # Two separately measured cylinders make the target/decoy decision observable in every unit.
+    ("model_create_component", {"name": "RadiusFilterBench", "activate": True},
+     _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "RadiusTargetS"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "circle", "cx": 2300, "cy": 0,
+                                           "radius": 2.68224}],
+                             "sketch_name": "RadiusTargetS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "RadiusTargetS", "profile_index": 0, "distance": 10},
+     _extruded, None),
+    ("sketch_create", {"plane": "xy", "name": "RadiusDecoyS"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "circle", "cx": 2320, "cy": 0,
+                                           "radius": 5}],
+                             "sketch_name": "RadiusDecoyS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "RadiusDecoyS", "profile_index": 0, "distance": 10},
+     _extruded, None),
+    # Position-only acquisition keeps the size proof independent of the radius filter. The target
+    # face set has one cylindrical face; the target edge set has both circular rims, selected ahead
+    # of the decoy by distance to their midpoint.
+    ("find_geometry", {"target": "RadiusFilterBench", "kind": "cylinder_face",
+                       "nearest_to": [2300, 0, 5], "max_results": 1},
+     _matched(1, "cylinder_face"), _fgn("radius_target_faces")),
+    ("model_inspect", lambda c: {"target": _ctx_get(
+        c, "radius_target_faces", "the independently acquired target face")[0], "units": "mm"},
+     _radius_body_size("independent target face is a 2.68224 mm radius cylinder", 5.36448),
+     None),
+    ("find_geometry", {"target": "RadiusFilterBench", "kind": "cylinder_face",
+                       "nearest_to": [2320, 0, 5], "max_results": 1},
+     _matched(1, "cylinder_face"), _fg("radius_decoy_face")),
+    ("model_inspect", lambda c: {"target": _ctx_get(
+        c, "radius_decoy_face", "the independently acquired decoy face"), "units": "mm"},
+     _radius_body_size("independent decoy face is a 5 mm radius cylinder", 10.0), None),
+    ("find_geometry", {"target": "RadiusFilterBench", "kind": "circular_edge",
+                       "nearest_to": [2300, 0, 5], "max_results": 2},
+     _matched(2, "circular_edge"), _fgn("radius_target_edges")),
+    ("model_inspect", lambda c: {"target": _ctx_get(
+        c, "radius_target_edges", "the independently acquired target edges")[0], "units": "mm"},
+     _radius_body_size(
+         "independent target edge resolves to its 2.68224 mm radius owning body", 5.36448),
+     None),
+    # The inside query must include the target and the 0.00124 mm farther query must exclude it.
+    # Each positive call retains every handle. The following model_inspect calls consume the actual
+    # filtered handles; the tight body-size readback proves each one belongs to the target cylinder.
+    ("find_geometry", {"target": "RadiusFilterBench", "kind": "cylinder_face",
+                       "radius": 2.55524, "units": "mm"},
+     _matched(1, "cylinder_face"), _fgn("radius_face_mm")),
+    ("model_inspect", lambda c: _radius_filtered_handle(
+        c, "radius_face_mm", 0),
+     _radius_body_size("mm-filtered face is the 2.68224 mm radius target", 5.36448), None),
+    ("find_geometry", {"target": "RadiusFilterBench", "kind": "cylinder_face",
+                       "radius": 2.554, "units": "mm"},
+     _matched(0, "cylinder_face"), None),
+    ("find_geometry", {"target": "RadiusFilterBench", "kind": "cylinder_face",
+                       "radius": 0.255524, "units": "cm"},
+     _matched(1, "cylinder_face"), _fgn("radius_face_cm")),
+    ("model_inspect", lambda c: _radius_filtered_handle(
+        c, "radius_face_cm", 0),
+     _radius_body_size("cm-filtered face is the 2.68224 mm radius target", 5.36448), None),
+    ("find_geometry", {"target": "RadiusFilterBench", "kind": "cylinder_face",
+                       "radius": 0.2554, "units": "cm"},
+     _matched(0, "cylinder_face"), None),
+    ("find_geometry", {"target": "RadiusFilterBench", "kind": "cylinder_face",
+                       "radius": 0.1006, "units": "in"},
+     _matched(1, "cylinder_face"), _fgn("radius_face_in")),
+    ("model_inspect", lambda c: _radius_filtered_handle(
+        c, "radius_face_in", 0),
+     _radius_body_size("inch-filtered face is the 2.68224 mm radius target", 5.36448), None),
+    ("find_geometry", {"target": "RadiusFilterBench", "kind": "cylinder_face",
+                       "radius": 0.1005511811023622, "units": "in"},
+     _matched(0, "cylinder_face"), None),
+    ("find_geometry", {"target": "RadiusFilterBench", "kind": "circular_edge",
+                       "radius": 2.55524, "units": "mm"},
+     _matched(2, "circular_edge"), _fgn("radius_edges_mm")),
+    ("model_inspect", lambda c: _radius_filtered_handle(
+        c, "radius_edges_mm", 0),
+     _radius_body_size("first mm-filtered edge owns the 2.68224 mm radius target", 5.36448), None),
+    ("model_inspect", lambda c: _radius_filtered_handle(
+        c, "radius_edges_mm", 1),
+     _radius_body_size("second mm-filtered edge owns the 2.68224 mm radius target", 5.36448), None),
+    ("find_geometry", {"target": "RadiusFilterBench", "kind": "circular_edge",
+                       "radius": 2.554, "units": "mm"},
+     _matched(0, "circular_edge"), None),
+    ("find_geometry", {"target": "RadiusFilterBench", "kind": "circular_edge",
+                       "radius": 0.255524, "units": "cm"},
+     _matched(2, "circular_edge"), _fgn("radius_edges_cm")),
+    ("model_inspect", lambda c: _radius_filtered_handle(
+        c, "radius_edges_cm", 0),
+     _radius_body_size("first cm-filtered edge owns the 2.68224 mm radius target", 5.36448), None),
+    ("model_inspect", lambda c: _radius_filtered_handle(
+        c, "radius_edges_cm", 1),
+     _radius_body_size("second cm-filtered edge owns the 2.68224 mm radius target", 5.36448), None),
+    ("find_geometry", {"target": "RadiusFilterBench", "kind": "circular_edge",
+                       "radius": 0.2554, "units": "cm"},
+     _matched(0, "circular_edge"), None),
+    ("find_geometry", {"target": "RadiusFilterBench", "kind": "circular_edge",
+                       "radius": 0.1006, "units": "in"},
+     _matched(2, "circular_edge"), _fgn("radius_edges_in")),
+    ("model_inspect", lambda c: _radius_filtered_handle(
+        c, "radius_edges_in", 0),
+     _radius_body_size(
+         "first inch-filtered edge owns the 2.68224 mm radius target", 5.36448), None),
+    ("model_inspect", lambda c: _radius_filtered_handle(
+        c, "radius_edges_in", 1),
+     _radius_body_size(
+         "second inch-filtered edge owns the 2.68224 mm radius target", 5.36448), None),
+    ("find_geometry", {"target": "RadiusFilterBench", "kind": "circular_edge",
+                       "radius": 0.1005511811023622, "units": "in"},
+     _matched(0, "circular_edge"), None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
 ]
 
@@ -1218,17 +2433,33 @@ _DETAILS = [
                          _path_count(p.get("path"), 1) == 8
                          and p.get("path_closed") is True), None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
-    # Section view: cut along the bore axis line, then clear.
+    # Section lifecycle: preserve the camera, retain both generated names, remove one exact cut,
+    # and independently read the surviving decoy before the existing clear-all cleanup.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     _watch("Bracket:1"),
-    # 'section' is the created analysis's own name, read back off the object the add returned.
-    ("view_section", {"action": "cut", "plane": "xz", "offset": 0},
-     lambda p: bool(p["section"]), None),
+    ("workspace_orient", {}, lambda p: bool(_section_camera(p)),
+     ("section_camera_before", _recall("section_camera_before", _section_camera))),
+    ("view_section", {"action": "cut", "plane": "xz", "offset": 0, "auto_view": False},
+     _section_created(), ("section_one", _recall("section_one", lambda p: p["section"]))),
+    ("view_section", {"action": "cut", "plane": "xy", "offset": 0, "auto_view": False},
+     _section_created("section_one"),
+     ("section_two", _recall("section_two", lambda p: p["section"]))),
+    ("view_section", {"action": "list"},
+     _section_census(("section_one", "section_two"), (False, True)), None),
+    ("view_section", {"action": "clear", "section": "SweepNoSuchSection"},
+     _refused("no section named", "Available"), None),
+    ("view_section", {"action": "list"},
+     _section_census(("section_one", "section_two"), (False, True)), None),
+    ("view_section", lambda c: {"action": "clear",
+                                "section": _ctx_get(c, "section_one", "the first generated cut")},
+     _section_named_clear("section_one"), None),
+    ("view_section", {"action": "list"},
+     _section_census(("section_two",), (True,)), None),
+    ("workspace_orient", {}, _section_camera_unchanged("section_camera_before"), None),
     ("view_screenshot", {"width": 500, "height": 400}, "ok", None),
-    # the clear removed every section it counted and the collection re-read empty; a count that would
-    # not read back publishes a caveat note and the same ok.
     ("view_section", {"action": "clear"},
-     lambda p: (p["removed_count"] == p["sections_before"] >= 1
+     lambda p: (p["removed"] == [_RECALL.get("section_two")]
+                and p["removed_count"] == p["sections_before"] == 1
                 and p["sections_after"] == 0), None),
     ("view_screenshot_multi", {"views": ["front", "top"], "width": 400, "height": 300}, "ok", None),
     # THE RASTER WRITER (NEW-13): file_path also writes the rendered PNG to disk - the extension is
@@ -1565,12 +2796,26 @@ _DETAILS_FB = (
          lambda p: (p["deleted"] is True and p["occurrence"] == "FbJunk:1"
                     and "timeline_warning" not in p), None),
         ("design_activate_component", {"occurrence": "root"}, "ok", None),
-        # 'section' is the created analysis's own name, read back off the object the add returned.
-        ("view_section", {"action": "cut", "plane": "xy", "offset": 5},
-         lambda p: bool(p["section"]), None),
+        ("view_section", {"action": "cut", "plane": "xy", "offset": 5,
+                          "auto_view": False},
+         _section_created(),
+         ("fb_section_one", _recall("fb_section_one", lambda p: p["section"]))),
+        ("view_section", {"action": "cut", "plane": "yz", "offset": 5,
+                          "auto_view": False},
+         _section_created("fb_section_one"),
+         ("fb_section_two", _recall("fb_section_two", lambda p: p["section"]))),
+        ("view_section", {"action": "list"},
+         _section_census(("fb_section_one", "fb_section_two"), (False, True)), None),
+        ("view_section", lambda c: {"action": "clear",
+                                    "section": _ctx_get(c, "fb_section_one",
+                                                        "the first fallback section")},
+         _section_named_clear("fb_section_one"), None),
+        ("view_section", {"action": "list"},
+         _section_census(("fb_section_two",), (True,)), None),
         ("view_screenshot", {"width": 400, "height": 300}, "ok", None),
         ("view_section", {"action": "clear"},
-         lambda p: (p["removed_count"] == p["sections_before"] >= 1
+         lambda p: (p["removed"] == [_RECALL.get("fb_section_two")]
+                    and p["removed_count"] == p["sections_before"] == 1
                     and p["sections_after"] == 0), None),
         ("view_screenshot_multi", {"views": ["front", "top"], "width": 300, "height": 250}, "ok", None),
     ]
@@ -1585,4 +2830,3 @@ _RESIZE_FB = [
                 and "new_errors" not in p), None),
     ("param_delete", {"name": "FbParam"}, _param_deleted("FbParam"), None),
 ]
-

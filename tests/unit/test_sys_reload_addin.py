@@ -141,7 +141,7 @@ class TestStaleCachedSchemaWarning:
 class TestReloadResponseTeachesReconnect:
     """The reload response tells the caller how to refresh its schema and observe the new server."""
 
-    def test_note_teaches_schema_refresh_and_not_health_polling(self, monkeypatch):
+    def test_note_teaches_schema_refresh_and_health_identity(self, monkeypatch):
         _install_event(monkeypatch)
         monkeypatch.setattr(ra.threading, "Timer",
                             lambda *a, **k: types.SimpleNamespace(start=lambda: None))
@@ -152,7 +152,7 @@ class TestReloadResponseTeachesReconnect:
         assert "sys_capability_map" in text and "schema_fingerprint" in text
         assert "only exercising a changed input proves the client consumed it" in text
         assert "reconnects automatically" not in text
-        assert "Do not poll /health" in text
+        assert "verify /health identifies Fusion-Essentials" in text
         # machine-readable pointer for clients that read fields, not prose
         assert res["next"] == "sys_capability_map"
 

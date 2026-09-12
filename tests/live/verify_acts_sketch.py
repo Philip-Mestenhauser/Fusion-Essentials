@@ -8,9 +8,63 @@ sketch geometry and user parameters, never bodies.
 """
 
 from verify_core import (
-    EXPORT_DIR, SVG96_PATH, SVG_PATH, _datum_plane, _dim_measures, _extruded, _made_component,
-    _param_added, _param_favorited, _params_listed, _refused, _svg96_extent, _watch_all)
+    EXPORT_DIR, SVG96_PATH, SVG_PATH, _ctx_get, _datum_plane, _dim_measures, _extruded,
+    _made_component, _param_added, _param_favorited, _params_listed, _refused, _svg96_extent,
+    _watch_all)
 from verify_layout import _px, _py
+
+
+def _radial_state(payload, radii, dimension_values):
+    circles = [(e.get("id"), e.get("center", {}).get("x"), e.get("center", {}).get("y"),
+                e.get("radius")) for e in payload.get("entities", [])
+               if e.get("type") == "circle"]
+    dimensions = payload.get("dimensions") or []
+    expected = [(f"circle:{i}", _px("RetainedDims", 1180 + i * 40),
+                 _py("RetainedDims", 560), radius)
+                for i, radius in enumerate(radii)]
+    return (payload.get("truncated") is False
+            and payload.get("counts", {}).get("circles") == 3
+            and payload.get("dimension_count") == len(dimension_values)
+            and circles == expected
+            and sorted(round(d.get("value"), 4) for d in dimensions)
+            == sorted(dimension_values)
+            and all(d.get("name") and d.get("driving") is True for d in dimensions))
+
+
+def _first_radial_cleanup_args(ctx):
+    """Require the first retained identity to match its independent read and deletion."""
+    wire = _ctx_get(ctx, "radial_first_wire", "the first retained identity")
+    read = _ctx_get(ctx, "radial_first_read", "the first retained dimension row")
+    deleted = _ctx_get(ctx, "radial_first_deleted", "the first deletion response")
+    if not wire or wire != read or wire != deleted:
+        raise AssertionError("first retained dimension identity did not match read-back and cleanup")
+    return {"sketch_name": "RetainedDims", "include_entities": True}
+
+
+def _mixed_radial_cleanup_args(ctx):
+    """Require both mixed identities to match the independent rows and deletion responses."""
+    wire = _ctx_get(ctx, "radial_mixed", "the mixed radial identities")
+    read = _ctx_get(ctx, "radial_mixed_read", "the mixed radial dimension rows")
+    set_name = _ctx_get(ctx, "radial_mixed_set", "the restored completed dimension")
+    retained = _ctx_get(ctx, "radial_mixed_retained_deleted", "the retained deletion")
+    completed = _ctx_get(ctx, "radial_mixed_completed_deleted", "the completed deletion")
+    if (wire != read or wire.get("completed") != set_name
+            or wire.get("retained") != retained or wire.get("completed") != completed):
+        raise AssertionError("mixed dimension identities did not match read-back and cleanup")
+    return {"sketch_name": "RetainedDims", "include_entities": True}
+
+
+def _xray_gaps_2_w3conic(payload):
+    return (payload.get("truncated") is False and payload.get("counts", {}).get("conics") == 1
+            and any(e.get("id") == "conic:0" and e.get("type") == "conic"
+                    for e in payload.get("entities", [])))
+
+
+def _xray_gaps_2_w3earc(payload):
+    return (payload.get("truncated") is False
+            and payload.get("counts", {}).get("elliptical_arcs") == 1
+            and any(e.get("id") == "elliptical_arc:0" and e.get("type") == "elliptical_arc"
+                    for e in payload.get("entities", [])))
 
 
 # --- ACT 1: PARAMETERS + THE PART'S SKETCHES - the bracket, drawn before anything is solid -----
@@ -543,6 +597,82 @@ _SKETCHWORK = [
     ("sketch_dimension", {"dimensions": [{"dim_type": "ellipse_minor_radius",
                                           "entity_one": "ellipse:0"}],
                           "sketch_name": "DimBench"}, _dim_measures(16.0), None),
+    # A missing first reference is a nonmutation control; the later valid entry stays unattempted.
+    ("sketch_create", {"plane": "xy", "name": "RetainedDims"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [
+        {"kind": "circle", "cx": 1180, "cy": 560, "radius": 10},
+        {"kind": "circle", "cx": 1220, "cy": 560, "radius": 10},
+        {"kind": "circle", "cx": 1260, "cy": 560, "radius": 10}],
+        "sketch_name": "RetainedDims"}, "ok", None),
+    ("sketch_get", {"sketch_name": "RetainedDims", "include_entities": True},
+     lambda p: p.get("truncated") is False and _radial_state(p, [10, 10, 10], []), None),
+    ("sketch_dimension", {"dimensions": [
+        {"dim_type": "radius", "entity_one": "circle:99", "value": "1 mm +"},
+        {"dim_type": "radius", "entity_one": "circle:0", "value": "8 mm"}],
+        "sketch_name": "RetainedDims"},
+     _refused("circle:99", "Nothing landed", "1 later entry was not attempted"), None),
+    ("sketch_get", {"sketch_name": "RetainedDims", "include_entities": True},
+     lambda p: p.get("truncated") is False and _radial_state(p, [10, 10, 10], []), None),
+    # A rejected value on the first entry leaves one measured dimension and skips the suffix.
+    ("sketch_dimension", {"dimensions": [
+        {"dim_type": "radius", "entity_one": "circle:0", "value": "1 mm +"},
+        {"dim_type": "radius", "entity_one": "circle:2", "value": "8 mm"}],
+        "sketch_name": "RetainedDims"},
+     lambda p: p.get("dimensioned") == 0 and p.get("results") == []
+     and p.get("failed", {}).get("index") == 0 and p.get("not_attempted") == 1
+     and len(p.get("retained") or []) == 1
+     and p["retained"][0].get("index") == 0 and bool(p["retained"][0].get("parameter"))
+     and p["retained"][0].get("value_driven") is False
+     and p["retained"][0].get("is_driving") is True
+     and "Nothing landed" not in (p.get("note") or ""),
+     ("radial_first_wire", lambda p: p["retained"][0]["parameter"])),
+    ("sketch_get", {"sketch_name": "RetainedDims", "include_entities": True},
+     lambda p: p.get("truncated") is False and _radial_state(p, [10, 10, 10], [10]),
+     ("radial_first_read", lambda p: p["dimensions"][0]["name"])),
+    ("sketch_delete_entity", {"sketch_name": "RetainedDims", "target": "dimension:0"},
+     lambda p: p.get("dimensions_before") == 1 and p.get("dimensions_after") == 0
+     and bool(p.get("parameter")),
+     ("radial_first_deleted", lambda p: p["parameter"])),
+    ("sketch_get", _first_radial_cleanup_args,
+     lambda p: p.get("truncated") is False and _radial_state(p, [10, 10, 10], []), None),
+    # A valid prefix and failed second value publish separate completed and retained identities.
+    ("sketch_dimension", {"dimensions": [
+        {"dim_type": "radius", "entity_one": "circle:0", "value": "12 mm"},
+        {"dim_type": "radius", "entity_one": "circle:1", "value": "1 mm +"},
+        {"dim_type": "radius", "entity_one": "circle:2", "value": "8 mm"}],
+        "sketch_name": "RetainedDims"},
+     lambda p: p.get("dimensioned") == 1 and len(p.get("results") or []) == 1
+     and p["results"][0].get("index") == 0 and p["results"][0].get("value_driven") is True
+     and p["results"][0].get("is_driving") is True
+     and len(p.get("retained") or []) == 1 and p["retained"][0].get("index") == 1
+     and p["retained"][0].get("value_driven") is False
+     and p["retained"][0].get("is_driving") is True
+     and bool(p["results"][0].get("parameter")) and bool(p["retained"][0].get("parameter"))
+     and p["results"][0].get("parameter") != p["retained"][0].get("parameter")
+     and p.get("failed", {}).get("index") == 1 and p.get("not_attempted") == 1,
+     ("radial_mixed", lambda p: {"completed": p["results"][0]["parameter"],
+                                 "retained": p["retained"][0]["parameter"]})),
+    ("sketch_get", {"sketch_name": "RetainedDims", "include_entities": True},
+     lambda p: p.get("truncated") is False and _radial_state(p, [12, 10, 10], [10, 12]),
+     ("radial_mixed_read", lambda p: {
+         "completed": p["dimensions"][0]["name"], "retained": p["dimensions"][1]["name"]})),
+    ("param_set", lambda c: {
+        "name": _ctx_get(c, "radial_mixed", "the mixed radial dimensions")["completed"],
+        "expression": "10 mm"},
+     lambda p: p.get("set") is True and p.get("created") is False
+     and abs(p.get("before", {}).get("value", 0) - 12) < 1e-4
+     and abs(p.get("after", {}).get("value", 0) - 10) < 1e-4,
+     ("radial_mixed_set", lambda p: p["name"])),
+    ("sketch_delete_entity", {"sketch_name": "RetainedDims", "target": "dimension:1"},
+     lambda p: p.get("dimensions_before") == 2 and p.get("dimensions_after") == 1
+     and bool(p.get("parameter")),
+     ("radial_mixed_retained_deleted", lambda p: p["parameter"])),
+    ("sketch_delete_entity", {"sketch_name": "RetainedDims", "target": "dimension:0"},
+     lambda p: p.get("dimensions_before") == 1 and p.get("dimensions_after") == 0
+     and bool(p.get("parameter")),
+     ("radial_mixed_completed_deleted", lambda p: p["parameter"])),
+    ("sketch_get", _mixed_radial_cleanup_args,
+     lambda p: p.get("truncated") is False and _radial_state(p, [10, 10, 10], []), None),
     ("sketch_create", {"plane": "xy", "name": "AutoCon"}, "ok", None),
     ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 600, "y1": 560,
                                            "x2": 700, "y2": 600}],
@@ -686,6 +816,8 @@ _SKETCHWORK = [
                                            "x2": 780, "y2": 60, "cx": 760, "cy": 90,
                                            "rho": 0.6}],
                              "sketch_name": "W3Conic"}, "ok", None),
+    ("sketch_get", {"sketch_name": "W3Conic", "include_entities": True},
+     _xray_gaps_2_w3conic, None),
     ("sketch_add_geometry", {"geometry": [{"kind": "line", "x1": 740, "y1": 60,
                                            "x2": 780, "y2": 60}],
                              "sketch_name": "W3Conic"}, "ok", None),
@@ -694,6 +826,8 @@ _SKETCHWORK = [
     ("sketch_add_geometry", {"geometry": [{"kind": "elliptical_arc", "cx": 840, "cy": 80,
                                            "radius": 30, "minor": 15, "sweep_deg": 180}],
                              "sketch_name": "W3Earc"}, "ok", None),
+    ("sketch_get", {"sketch_name": "W3Earc", "include_entities": True},
+     _xray_gaps_2_w3earc, None),
     ("sketch_add_geometry", {"geometry": [{"kind": "line", "x1": 870, "y1": 80,
                                            "x2": 810, "y2": 80}],
                              "sketch_name": "W3Earc"}, "ok", None),

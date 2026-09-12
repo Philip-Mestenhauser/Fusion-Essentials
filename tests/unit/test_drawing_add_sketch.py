@@ -69,6 +69,8 @@ class TestDraw:
         assert out["entities_drawn"] == 5
         assert out["curves_requested"] == 6          # the 3-point line chain counts as TWO
         assert out["curves_landed"] == 6
+        assert out["coordinates_verified"] is False
+        assert "drawing_export" in out["note"] and "check placement" in out["note"]
         assert out["landed"] == {"lines": 2, "rectangles": 1, "arcs": 1, "circles": 1, "ellipses": 1}
         assert [k for k, _ in state.sketch._drawn] == [
             "lines", "rectangles", "arcs", "ellipses", "circles"]

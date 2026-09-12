@@ -157,10 +157,20 @@ class TestTheTierIsWired:
         assert (verify_core.CAPABILITY_PROBES[tool_verify.CLOUD_TIER]
                 is verify_core._cloud_tier_probe)
 
-    def test_every_cloud_act_declares_the_tier(self):
-        cloud = [name for name, _p, _n, _f in tool_verify.ACTS if name.startswith("ACT 11")]
-        assert len(cloud) == 3, cloud
-        assert all(tool_verify.ACT_NEEDS.get(name) == tool_verify.CLOUD_TIER for name in cloud)
+    def test_every_cloud_act_declares_its_exact_gate(self):
+        ordinary = {
+            "ACT 11a - CLOUD: THE DATA MODEL",
+            "ACT 11b - CLOUD: THE SAVED DOCUMENT",
+            "ACT 11c - CLOUD: THE DRAWING",
+            "ACT 11d - CLOUD: CAM TEMPLATE PERSISTENCE",
+        }
+        link = "ACT 11b2 - CLOUD: LINK GUARD REVIEW"
+        cloud = {name for name, _p, _n, _f in tool_verify.ACTS if name.startswith("ACT 11")}
+        assert cloud == ordinary | {link}
+        assert {name: tool_verify.ACT_NEEDS.get(name) for name in cloud} == {
+            **{name: tool_verify.CLOUD_TIER for name in ordinary},
+            link: tool_verify.CLOUD_LINK_CRASH_REVIEW,
+        }
 
     def test_the_acts_address_the_project_the_loader_read(self):
         # a hub or project name never lives in the repo, so every step naming one has to be carrying

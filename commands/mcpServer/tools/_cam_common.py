@@ -632,11 +632,8 @@ def toolpath_present_tally(ops):
 
 
 def op_state_tally(ops) -> dict:
-    """{valid, out_of_date, errored, generating, generating_settled, suppressed, warnings, total,
-    active, op_sample, warning_sample} over a list of operations - the poll tally. An ERRORED op is
-    its own bucket (it never finishes generating); 'generating' and 'warnings' are overlays on the
-    others, and generating_settled counts the flagged ones whose state already answered."""
-    valid = ood = errored = generating = suppressed = warnings = total = 0
+    """The operation lifecycle tally, with unread states and generating/warning overlays."""
+    valid = ood = errored = generating = suppressed = unread = warnings = total = 0
     generating_settled = 0
     active = None
     op_sample = None
@@ -663,6 +660,8 @@ def op_state_tally(ops) -> dict:
             suppressed += 1
         elif state in (1, 3):
             ood += 1
+        else:
+            unread += 1
         if facts["is_generating"]:
             generating += 1
             if op_settled(facts):
@@ -672,8 +671,8 @@ def op_state_tally(ops) -> dict:
                 active = {"op": facts["name"], "progress": prog}
     return {"valid": valid, "out_of_date": ood, "errored": errored, "generating": generating,
             "generating_settled": generating_settled,
-            "suppressed": suppressed, "warnings": warnings, "total": total, "active": active,
-            "op_sample": op_sample, "warning_sample": warning_sample}
+            "suppressed": suppressed, "unread": unread, "warnings": warnings, "total": total,
+            "active": active, "op_sample": op_sample, "warning_sample": warning_sample}
 
 
 def _warning_phrase(sample) -> str:
@@ -824,10 +823,31 @@ def entitlement_blocked_names(ops) -> list:
     return rows
 
 
-def unfinished_verdict(measure: str, ops) -> str:
-    """The readiness verdict for a scope with operations left to generate: the entitlement-blocked
-    ones NAMED - cam_generate excludes those from its launch - else the plain cam_generate pointer."""
+def unread_verdict(measure: str, unread: int, unsettled: int, stale: int = 0) -> str:
+    """A readiness verdict for operationState reads that did not answer."""
+    state = f"{unread} operation(s) have unread operationState"
+    if unsettled:
+        return (f"{measure}; {state} while isGenerating reads true - poll cam_get_status before "
+                "launching generation again.")
+    reread = (f"{measure}; {state} - re-read with cam_get in the Manufacture workspace before "
+              "choosing a next step.")
+    if not stale:
+        return reread
+    return (reread + f" Separately, {stale} operation(s) read out_of_date; run cam_generate for "
+            "those after the unread state is resolved.")
+
+
+def unfinished_verdict(measure: str, ops, unsettled: int = 0) -> str:
+    """The readiness verdict for unfinished ops, separating active generation from idle work."""
     names = entitlement_blocked_names(ops)
+    if unsettled:
+        active = (f"{measure} - {unsettled} operation(s) still generating; poll cam_get_status "
+                  "before launching generation again.")
+        if not names:
+            return active
+        return (active + f" {len(names)} operation(s) in scope also read isGenerationAllowed "
+                "false and cam_generate EXCLUDES those from a launch: "
+                f"{named_with_remainder(names)}.")
     if not names:
         return f"{measure} - run cam_generate to finish the rest."
     return (f"{measure}; {len(names)} operation(s) in scope read isGenerationAllowed false and "
@@ -869,6 +889,10 @@ def live_readiness():
     valid, ood, errored = tally["valid"], tally["out_of_date"], tally["errored"]
     warned = tally["warnings"]
     active_total = valid + ood + errored          # active = everything not suppressed
+    unsettled = unsettled_count(tally)
+    unread = tally["unread"]
+    measure = (f"{valid} of {active_total} active ops valid" if active_total else
+               f"{tally['total']} operation(s) in scope")
     if errored or setups_errored or programs_errored:
         readiness = ("BLOCKER: "
                      + ", ".join(b for b in [
@@ -876,16 +900,18 @@ def live_readiness():
                          f"{programs_errored} NC program(s)" if programs_errored else "",
                          f"{errored} operation(s)" if errored else ""] if b)
                      + " have errors - the job will not post until fixed.")
+    elif unread:
+        readiness = unread_verdict(measure, unread, unsettled, ood)
     elif active_total and valid == active_total:
-        readiness = ready_verdict(f"{valid} of {active_total} active ops valid",
-                                  warned, samples["warning"], blocked)
+        readiness = ready_verdict(measure, warned, samples["warning"], blocked)
     elif active_total:
-        readiness = unfinished_verdict(f"{valid} of {active_total} active ops valid", ops)
+        readiness = unfinished_verdict(measure, ops, unsettled)
     else:
         readiness = "no active operations to assess."
     return {"valid": valid, "out_of_date": ood, "errored": errored, "generating": tally["generating"],
             "generating_settled": tally["generating_settled"],
-            "suppressed": tally["suppressed"], "warnings": warned, "total": tally["total"],
+            "suppressed": tally["suppressed"], "unread": unread,
+            "warnings": warned, "total": tally["total"],
             "active": tally["active"],
             "setups_errored": setups_errored, "programs_errored": programs_errored,
             "setups_blocked": blocked,

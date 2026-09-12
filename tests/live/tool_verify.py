@@ -84,7 +84,8 @@ from verify_core import (  # noqa: F401
     VERIFIED, _post, call, health_gate, registered_tools, _ctx_get, _Refusal, _refused, Parked,
     Needs, _needs, step_capability, parked_reason, CAPABILITY_PROBES, probe_capabilities,
     capability_met, capability_skip_reason, _machining_extension_probe,
-    CLOUD_TIER, OPT_IN_TIERS, CAPABILITY_DETAIL, _cloud_tier_probe,
+    CLOUD_TIER, CLOUD_LINK_CRASH_REVIEW, OPT_IN_TIERS, CAPABILITY_DETAIL,
+    _cloud_tier_probe, _cloud_link_crash_review_probe,
     _unparked, _PUSH_OPS, _INSPECT_OPS, _is_inspect, _ARG_LOAD_OPS, _arg_load_sites,
     _TRUTHY_ONLY_CALLS, _callee_name, _inspects_argument, _inspects_payload, predicate_kind,
     EXPORT_DIR, SVG_PATH, SVG96_PATH, write_png, MARKER_PNG, _fg, _fgn, _prof, _matched, _face_up_at,
@@ -142,7 +143,8 @@ from verify_acts_cam import (  # noqa: F401
 
 from verify_acts_cloud import (  # noqa: F401
     RUN_FOLDER, MOVED_FOLDER, SOURCE_DOC, COPY_DOC, HOST_DOC, RUN_PATH, MOVED_PATH,
-    RESTORE_VERSION, _CLOUD_DATA, _CLOUD_DOC, _CLOUD_DRAWING, _lit, _files_gone, _xrefs)
+    RESTORE_VERSION, _CLOUD_DATA, _CLOUD_DOC, _CLOUD_LINK, _CLOUD_DRAWING,
+    _lit, _files_gone, _xrefs)
 
 from verify_acts_hub import (  # noqa: F401
     HUB_COMP, HUB_MILL_SETUP, HUB_TURN_SETUP, _HUB, _HUB_JOB, _fully_constrained, _hub_box,

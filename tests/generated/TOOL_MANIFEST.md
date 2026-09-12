@@ -2,7 +2,7 @@
 
 _Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails the suite if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
-**Tools:** 188  |  **Input-kinds:** 21  |  write-status: `·` read · `✎` write · `⚠` destructive
+**Tools:** 188  |  **Input-kinds:** 22  |  write-status: `·` read · `✎` write · `⚠` destructive
 
 ## Input kinds — reference EXISTING geometry/structure with these (don't hand-roll a name/index)
 
@@ -26,6 +26,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | `PlaneRef` | A reference to a PLANE to act on, resolved from ANY of three shapes a user might supply: |
 | `ProfileRef` | A reference to a sketch PROFILE - a stable 'handle' (entityToken, order-stable across rebuilds) |
 | `ProfileRefList` | An ORDERED list of profile references - for loft, where profile ORDER is load-bearing (the loft |
+| `SectionRef` | A reference to one SectionAnalysis by its generated name from view_section cut/list. |
 | `SketchRefList` | A LIST of SKETCHES by name - the reference an operation taking WHOLE sketches needs (a CAM |
 | `SurfaceRef` | The FACE/PLANE a sketch entity is constrained or dimensioned to. Schema and resolution come |
 | `TargetRef` | A reference to a THING to measure/colour, resolved from any of several shapes: |
@@ -40,7 +41,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 |---|---|---|
 | ✎ | `model_arrange` | Nest component occurrences inside a 2D boundary taken from a sketch profile. |
 | ✎ | `model_base_feature` | Open or close a base-feature direct-edit scope; the mesh_* tools open and finish one per call. |
-| ✎ | `model_chamfer` | Bevel (chamfer) edges; model_fillet rounds instead. |
+| ✎ | `model_chamfer` | Bevel edges |
 | ✎ | `model_combine` | Boolean-combine solid bodies: join, cut or intersect 'tools' into 'target', the body that survives. |
 | · | `model_compute_holder` | Profile a solid holder body into CAM tool-holder segments, returned with 'holder_json'. |
 | ✎ | `model_construction` | Add a construction point, axis, or plane; each 'mode' reads its own subset of the inputs. |
@@ -257,7 +258,7 @@ Produces: document_id -> doc_open/data_get. |
 | ⚠ | `data_delete_folder` | Delete a folder on the cloud, IRREVERSIBLY: 'confirm_name' must EXACTLY match the folder's current name. |
 | ✎ | `data_download_file` | Download ONE non-Fusion cloud file to a local folder; the transfer is SYNCHRONOUS and freezes Fusion until it finishes.
 Produces: file_path, size_bytes. |
-| · | `data_get` | Read the CLOUD data model by scope: hubs and projects, one project's files, its folder tree, or ONE file's record |
+| · | `data_get` | Read the CLOUD data model by scope: hubs and projects, one project's files, its folder tree, one folder's summary, or ONE file's record |
 | · | `data_get_upload_status` | Poll a data_upload_file upload: 'state' is uploading, processing, complete (file_id included) or failed. |
 | ✎ | `data_move_file` | Move ONE cloud file into an EXISTING folder of its own project; it creates nothing. |
 | ✎ | `data_switch_hub` | SWITCH the active Autodesk data hub; a switch that takes closes every open document |
@@ -308,7 +309,7 @@ Produces: annot... |
 | · | `view_list_workspaces` | List the Fusion workspaces, each with its id, visible name, product type and whether it is active - the targets view_switch_workspace takes. |
 | ✎ | `view_screenshot` | Capture the current Fusion viewport as an image; 'file_path' also writes the PNG to disk, and the image still returns inline |
 | · | `view_screenshot_multi` | Capture SEVERAL views of the model in ONE call, as separate labelled images - the shape to reach for when judging a 3D layout |
-| ✎ | `view_section` | Cut the model with a live Section Analysis to see inside - a cutaway view, not a geometry edit; 'clear' removes every section in the design. |
+| ✎ | `view_section` | Cut or list live Section Analyses; 'clear' removes one generated section name, or every section when the name is omitted. |
 | ✎ | `view_set` | View-state verbs: aim the camera, isolate/show/hide, set the visual style, toggle the non-body display folders, snapshot and restore - no geometry changes. |
 | ✎ | `view_switch_workspace` | Switch the active Fusion workspace; view_list_workspaces lists the targets. |
 

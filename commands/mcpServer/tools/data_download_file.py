@@ -42,12 +42,14 @@ def handler(file: str = "", project: str = "", folder: str = "", destination_fol
         return error(err)
 
     name = safe(lambda: df.name) or ""
-    # The two signals disagree in OPPOSITE directions, so the NAME leads: a non-CAD upload named
-    # 'probe_note.txt' reads fileExtension 'sql', while a design named 'Gyroscope' carries no
-    # extension in its name at all and only fileExtension ('f3d') answers.
-    ext = name_extension(name) or (safe(lambda: df.fileExtension) or "").strip().lower()
-    if ext in FUSION_NATIVE_EXTENSIONS:
-        return error(f"'{name}' is Fusion-native data (.{ext}) and cannot be downloaded: "
+    name_ext = name_extension(name)
+    type_ext = (safe(lambda: df.fileExtension) or "").strip().lower()
+    # A Fusion-native display name can end in a non-native suffix while fileExtension stays
+    # 'f3d'; a recognized native name suffix remains a conservative fallback.
+    native_ext = (type_ext if type_ext in FUSION_NATIVE_EXTENSIONS else
+                  name_ext if name_ext in FUSION_NATIVE_EXTENSIONS else "")
+    if native_ext:
+        return error(f"'{name}' is Fusion-native data (.{native_ext}) and cannot be downloaded: "
                      "DataFile.download handles only non-Fusion files. Open it (doc_open) and export "
                      "instead - design_export for a design, drawing_export for a drawing, mesh_export "
                      "for a mesh.")

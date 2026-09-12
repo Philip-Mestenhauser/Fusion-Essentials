@@ -12,6 +12,8 @@ also builds adsk.core.ObjectCollection — both seams are patched.
 
 import json
 
+import pytest
+
 import live_api_facts as _api_facts
 from conftest import (FakeCAMParameter, FakeCAMParameters, FakeMachine, FakeSetup, load_tool,
                       make_cam, _make_object_collection)
@@ -485,6 +487,34 @@ class TestRemedyFork:
 # ── set body collections (models / fixtures / stock) ────────────────────────
 
 class TestBodies:
+    @pytest.mark.parametrize("field", ("models", "fixtures", "stock"))
+    @pytest.mark.parametrize("mixed", (False, True), ids=("empty-only", "mixed"))
+    def test_an_empty_selection_is_refused_before_every_accompanying_write(
+            self, monkeypatch, field, mixed):
+        cam = _install(monkeypatch)
+        target = cam.setups.item(0)
+        target._models.add(cam._bodies["Stock"])
+        target._fixtures.add(cam._bodies["Vise"])
+        target._stock.add(cam._bodies["Plate"])
+        kwargs = {field: []}
+        if mixed:
+            kwargs.update(parameters={"stockZHigh": "2.5"}, machine="Haas|VF-2",
+                          wcs={"origin": "vtx-1"}, rename="Renamed",
+                          stock_mode="previous_setup")
+
+        res = ces.handler(setup="Setup1", **kwargs)
+
+        assert res["isError"] is True
+        assert f"'{field}' cannot be an empty list" in res["message"]
+        assert "clearing" in res["message"] and "unsupported by this tool" in res["message"]
+        assert target.name == "Setup1"
+        assert target.parameters.itemByName("stockZHigh").expression == "0.0"
+        assert target.parameters.itemByName("wcs_origin_point").value.value == []
+        assert target.machine is None
+        assert target.stockMode == _STOCK_MODES["RelativeBoxStock"]
+        assert target.fixtureEnabled is False
+        assert (target.models.count, target.fixtures.count, target.stockSolids.count) == (1, 1, 1)
+
     def test_sets_models(self, monkeypatch):
         cam = _install(monkeypatch)
         out = _payload(ces.handler(setup="Setup1", models=["Stock"]))

@@ -150,20 +150,28 @@ def setup_wcs(setup):
     return wcs or None
 
 
-def get_cam_setups_handler() -> dict:
+def get_cam_setups_handler(setup: str = "") -> dict:
     cam, err = get_cam()
     if err:
         return error(err)
 
     setups = []
     setups_truncated = False
+    want = (setup or "").strip()
     try:
-        setups_total = safe(lambda: cam.setups.count, 0) or 0
-        for i in range(setups_total):
-            if i >= _MAX_ITEMS:
-                setups_truncated = True
-                break
-            s = cam.setups.item(i)
+        if want:
+            node, rerr = resolve_cam_node(cam, want, kinds=("setup",), label="setup")
+            if rerr:
+                return error(rerr)
+            setup_indices = None
+            target_setups = [node.obj]
+        else:
+            setups_total = safe(lambda: cam.setups.count, 0) or 0
+            setup_indices = range(min(setups_total, _MAX_ITEMS))
+            target_setups = None
+            setups_truncated = setups_total > _MAX_ITEMS
+        for i, target in enumerate(target_setups if target_setups is not None else setup_indices):
+            s = target if target_setups is not None else cam.setups.item(target)
             models, models_trunc = _model_names(lambda: s.models)
             fixtures, fixtures_trunc = _model_names(lambda: s.fixtures)
             stock, stock_trunc = _model_names(lambda: s.stockSolids)

@@ -49,10 +49,8 @@ _SCOPED = (("sheet_range", "pdf"), ("line_weights", "pdf"),
 _PREVIEW_NOTE = ("The DXF and DWG export option creators are marked a preview feature by Autodesk "
                  "and may change in a future release.")
 
-# DXF and DWG write ONE sheet, measured: the DXF of an 8-sheet drawing carried only sheet index 0's
-# name, and the ACTIVE sheet was absent. PDF is the multi-sheet channel (sheetRange selects).
-_SINGLE_SHEET_NOTE = ("DXF and DWG cover a SINGLE sheet - measured as the first sheet, not the "
-                      "active one. Export PDF for other sheets (sheet_range selects them).")
+_SHEET_SELECTION_NOTE = ("DXF/DWG sheet selection was not verified. Inspect the exported file, "
+                         "or export PDF with sheet_range for explicit sheet selection.")
 
 # The write is still in flight when execute() returns, so the file-landed check polls to this
 # deadline instead of reporting a false failure on the first miss.
@@ -207,10 +205,12 @@ def handler(format: str = "pdf", file_path: str = "", sheet_range: str = "",
     if fmt == "pdf":
         note += " Sheet selection: " + (f"range '{rng}'." if rng else "all sheets.")
     else:
-        note += " " + _SINGLE_SHEET_NOTE
+        note += " " + _SHEET_SELECTION_NOTE
     if is_preview:
         note += " " + _PREVIEW_NOTE
     payload = {"exported": True, "format": fmt, "file_path": path, "size_bytes": size, "note": note}
+    if fmt in ("dxf", "dwg"):
+        payload["sheet_selection_verified"] = False
     payload.update(applied)
     return ok(payload)
 

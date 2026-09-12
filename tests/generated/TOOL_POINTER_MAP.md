@@ -477,6 +477,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' does not accept a write to:
 - (isEditable reads False on each). Nothing was applied. A setup exposes many parameters it takes no write to; set one it does - cam_get(include=['parameters'], setup=...) marks each refusing row edi...
 - parameter(s); no change was applied.
+- ' cannot be an empty list - clearing that setup selection is unsupported by this tool. Omit the field to leave it unchanged, or pass one or more bodies or occurrences to replace it.
 - ' and a 'stock' body list in one call set the setup's stock two ways - 'stock' is the from-solid mode with its bodies. Pass one or the other.
 - This Fusion build's SetupStockModes carries no '
 - ' member, so 'stock_mode=
@@ -575,6 +576,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Setup-sheet generation failed:
 
 ### `cam_get`
+- 'parameter_names', 'include_unavailable' and 'unavailable_offset' apply only with include=['parameters'].
 - Operation rows capped at
 - . Pass 'setup' to scope to one setup, or add 'default' to include for the per-setup operation_count.
 - rows; 'setup' scopes it, strategy_count is the true total.
@@ -599,6 +601,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Generation complete (
 - The per-op tallies could not be read (
 - ), so this rests on the generation Future alone - cam_get for the job's health.
+- Generation Future for handle '
+- ' is still incomplete - check again later with cam_get_status(handle='
+- '). 'readiness' carries the next step.
 
 ### `cam_inspect_toolpaths`
 - The toolpath validity check returned
@@ -793,10 +798,14 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not create destination folder '
 
 ### `data_get`
-- Active hub + its projects. Pass project=<name|id> to list its FILES (add 'folder' to scope, or include=['folders'] for the tree); 'file'=<name|URN> reads ONE file's full record. include=['hubs'] li...
+- Active hub + its projects. Pass project=<name|id> to list its FILES (add 'folder' to scope, include=['summary'] for immediate counts, or include=['folders'] for the tree); 'file'=<name|URN> reads O...
 - One file's record: metadata, version state and LINK state. Dates are UNIX epoch seconds with the UTC ISO string beside each. 'file_extension' is unreliable for a non-CAD upload - the file NAME carr...
-- Files in the project (each with its lineage URN + openable fusionWebURL). 'folder'=<path> scopes to one folder; include=['folders'] shows the folder tree instead; 'file'=<name|URN> reads ONE file's...
+- Files in the project (each with its lineage URN + openable fusionWebURL). 'folder'=<path> scopes to one folder; include=['summary'] reads its identity and immediate counts; include=['folders'] show...
 - All hubs (is_active flags the current one). Switch with data_switch_hub - it CLOSES every open document. Then pass project=<name> to list files.
+- Include slices cannot be combined:
+- include=['hubs'] cannot be combined with project or folder scope inputs.
+- requires 'project' or 'project_id'.
+- Resolved folder identity and immediate file/child-folder counts. A null count is named in unavailable_fields; use include=['folders'] for the bounded folder tree or drop include to list files.
 - Folder tree under 'folder' (the whole project when none is given). Drop include=['folders'] to list a folder's FILES instead.
 - does not apply to the 'file' scope (it reads one file's record in full). Drop 'file' to use include, or drop include.
 
@@ -1256,12 +1265,12 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - active is the focused document; document_id is its cloud lineage URN. document_handle addresses the exact open document, saved or unsaved: use it with doc_activate, doc_close and expect_document. I...
 - numbers_may_lag true: the tip is under
 - s old and these numbers may trail the cloud - re-read; null: its date did not read. A row the collection lists whose flag reads false is is_milestone=true + flag_lagging=true. is_milestone null, mi...
-- The active document has no cloud DataFile (never saved to the cloud); no version history exists. Save it first (doc_save_as).
+- The active document's current cloud DataFile is unavailable, so version history could not be read. Keep using document_handle for session actions and retry doc_get. If this is a new document, use d...
 - Covers three link kinds: kind='xref' (referenced occurrences), kind='derive' (derive features) and kind='unresolved' (an occurrence whose referenced component could not be loaded). all_current is a...
 - No active Design (the active product is not a design); the xref walk needs a design document.
 - The active design has no root component.
 - references = documents that USE this one (drawings made from it, parent assemblies that insert it); the mirror of include=['xref_tree'] (what this design consumes). query_complete is authoritative ...
-- The active document has no cloud DataFile (never saved to the cloud); it cannot be referenced by anything yet. Save it first (doc_save_as).
+- The active document's current cloud DataFile is unavailable, so where-used could not be queried and the relationship is unknown. Keep using document_handle for session actions and retry doc_get. If...
 - parentReferences could not be read (permission/cloud read failure); the where-used relationship is UNKNOWN, not empty - do not conclude nothing uses this document.
 
 ### `doc_insert_derive`
@@ -1435,8 +1444,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Adding a sketch to sheet '
 - entities onto sketch '
 - : Drawing.deleteEntities raises 'API Function not yet implemented' on a drawn curve, so delete the whole sketch in the Fusion UI if it is not wanted.
-- curves, counted off its own collections. Coordinates were taken as
-- , which the drawing STANDARD fixes - 'sheet_units' is the dimension display unit and does not move the geometry. Drawing.deleteEntities raises 'API Function not yet implemented' on a drawn curve, s...
+- curves by collection count; placement coordinates were not verified. Use drawing_export and inspect its output to check placement. Coordinates were taken as
+- , which the drawing STANDARD fixes; sheet_units controls dimension display only. Delete an unwanted sketch in the Fusion UI; Drawing.deleteEntities raises 'API Function not yet implemented' on a dr...
 - Could not add a sketch to sheet '
 
 ### `drawing_create`
@@ -2647,6 +2656,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - No active design. Open or create a document first (see doc_new).
 - 'body' is already a MESH body - save_as_mesh tessellates a BRep solid/surface. To re-triangulate an existing mesh use mesh_remesh; to copy/export it use mesh_export.
 - Could not resolve a component to add the mesh body into.
+- The occurrence-context 'body' has no readable nativeObject - its required component-owned tessellation source is unavailable.
 - Tessellation produced no coordinate/index data - cannot build a mesh body.
 - meshBodies.addByTriangleMeshData returned nothing - no mesh body was created.
 - addByTriangleMeshData returned a mesh body but the component's mesh body count did not increase (
@@ -3095,9 +3105,10 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - No views were captured.
 
 ### `view_section`
-- Use view_screenshot to study the interior; flip=true cuts the other half; view_section(clear) removes the cut.
+- Use view_screenshot to study the interior; flip=true cuts the other half; view_section(clear, section='<generated name>') removes one cut; view_section(clear) removes all cuts.
 - and the camera is aimed at the cut face.
 - ; the camera was left where it was (auto_view=false).
+- 'section' is only valid with action='clear'.
 - No active design. Open a document with design geometry first.
 - All section analyses removed - the model is no longer cut.
 - section analysis(es), but the remaining count could not be read back - view_section(list) confirms whether the model is still cut.
@@ -3112,6 +3123,12 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - ' has no readable bounding box, so there is no centre to cut through and nothing was cut. Pass 'plane' with an explicit 'offset' to place the cut yourself.
 - Provide 'plane' (an origin alias xy/xz/yz, a construction-plane name, or a planar-face handle from find_geometry) or 'through' (an occurrence).
 - Failed to create section (
+- deleteMe() did not confirm removal of section '
+- '. Its current state is unknown; run view_section(list).
+- deleteMe() returned true for section '
+- ', but the remaining sections could not be verified:
+- ', but verification read
+- . Its current state is unknown; run view_section(list).
 
 ### `view_set`
 - 'projection'/'perspective_angle_deg' apply to action='orient', not action='
@@ -3121,8 +3138,6 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - occurrences, so only the first
 - had their visibility saved - restore will not reinstate the rest. Camera and visual style are complete.
 - Camera aimed. Call view_screenshot to capture.
-- Could not read what the viewport currently shows, so the view could not be framed on '
-- ' and the camera was NOT moved. Re-run with fit=false to re-aim only.
 - Camera aimed and framed on '
 - '. Call view_screenshot to capture.
 - ' WITHOUT zooming to it - fit=false keeps the current eye-to-target distance. Pass fit=true (the default) to frame it.
@@ -3130,23 +3145,37 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Unknown orientation '
 - 'perspective_angle_deg' is a field-of-view angle Fusion accepts from 1 to just under 150 degrees (got
 - 'perspective_angle_deg'=
+- needs a perspective camera, but the camera's cameraType could not be read - pass projection='perspective' in the same call to set it explicitly.
 - needs a perspective camera, but the projection in effect is '
 - '. Pass projection='perspective' in the same call.
+- After staging projection '
+- ', camera target reads
+- ', and cameraType could not be read back - projection and focus are unverified.
+- ', and projection reads back '
+- ' - the requested projection did not take and focus is unverified.
 - ' but the camera's cameraType could not be read back - the projection is unverified.
 - ' but the viewport camera reads back '
 - ' - the change did not take.
+- Aimed the camera at '
+- ', but its target reads
+- - the focus did not take.
 - Set 'perspective_angle_deg'=
 - but the camera's perspectiveAngle could not be read back
 - - the field of view is unverified.
 - Set the camera extents to frame '
 - ) but the viewport reads back
-- - the framing did not take, and the view is left where it was.
+- - the framing did not verify;
+- and projection reads '
+- ', so the camera remains partially changed.
 - 'perspective_angle_deg' must be a number (got '
-- needs a perspective camera, but the camera's cameraType could not be read - pass projection='perspective' in the same call to set it explicitly.
-- ' against the current view (a bounding box, the camera's axes, or its extents would not read), so the view is NOT framed on it. Re-run with fit=false to re-aim only.
+- Could not read what the viewport currently shows, so the view could not be framed on '
+- ' and the camera was NOT moved. Re-run with fit=false to re-aim only.
 - 'focus': nothing named '
 - ' to frame - no occurrence and no sketch carries that name.
 - Occurrence lookup said:
+- ' after fitting the whole model, but the viewport frame could not be read before aiming at '
+- '; the focus was not applied.
+- ' against the current view (a bounding box, the camera's axes, or its extents would not read), so the view is NOT framed on it. Re-run with fit=false to re-aim only.
 - Visibility changed. view_screenshot to view; view_set(restore) to undo.
 - Visibility changed. view_screenshot to view. Body bulbs are NOT captured by snapshot/restore - undo a body with the opposite hide/show.
 - PARTIAL: only the first

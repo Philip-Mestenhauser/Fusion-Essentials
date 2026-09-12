@@ -147,6 +147,46 @@ class _StubbornViewport(Viewport):
         self._assigned.append(value)
 
 
+class _WholeModelFitViewport(Viewport):
+    """A viewport whose isFitView assignment replaces the requested target with the model center."""
+
+    @property
+    def camera(self):
+        return Viewport.camera.fget(self)
+
+    @camera.setter
+    def camera(self, value):
+        Viewport.camera.fset(self, value)
+        if value.isFitView:
+            self._cam.target = FakePoint(50, 50, 50)
+            self._cam.eye = FakePoint(50, 50, 150)
+            self._cam.viewExtents = 100.0
+            self._cam.isFitView = False
+
+
+class _WrongPerspectiveReadbackViewport(_WholeModelFitViewport):
+    """A staged perspective camera whose focused assignment reads back wrong."""
+
+    @property
+    def camera(self):
+        return _WholeModelFitViewport.camera.fget(self)
+
+    @camera.setter
+    def camera(self, value):
+        import adsk.core
+        _WholeModelFitViewport.camera.fset(self, value)
+        if len(self._assigned) >= 2:
+            self._cam.cameraType = adsk.core.CameraTypes.OrthographicCameraType
+            self._cam.target = FakePoint(9, 8, 7)
+
+
+def _project_focus_at_requested_fill(vp):
+    """Make the assigned focus box read back at the requested viewport fill."""
+    vp.modelToViewSpace = lambda p: types.SimpleNamespace(
+        x=vp.width / 4 + p.x * vp.width / 4,
+        y=vp.height / 4 + p.z * vp.height / 4)
+
+
 def _doc(name, data_file_id=None):
     """The active document. Never saved -> dataFile reads None (measured); only a saved document
     hands back one."""
@@ -849,6 +889,21 @@ class TestFocusFraming:
         assert out["applied"]["frame_ratio"] is None
         assert iv.app.activeViewport.camera.viewExtents == before   # zoom untouched
 
+    def test_a_zero_size_perspective_focus_is_re_aimed_without_scale(self, monkeypatch):
+        import adsk.core
+        point = types.SimpleNamespace(name="W3Pt", boundingBox=make_bbox((5, 5, 0), (5, 5, 0)))
+        _install(monkeypatch, [FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))])
+        monkeypatch.setattr(iv._common, "find_sketch", lambda d, n, remedy=None: (point, None))
+        iv.app.activeViewport._cam.cameraType = adsk.core.CameraTypes.PerspectiveCameraType
+        monkeypatch.setattr(iv.app.activeViewport, "modelToViewSpace",
+                            lambda p: types.SimpleNamespace(x=300, y=200), raising=False)
+        out = _payload(iv.handler(action="orient", orientation="top", focus="W3Pt"))
+        assert out["applied"]["no_measurable_size"] is True
+        assert out["applied"]["frame_ratio"] is None
+        assert (iv.app.activeViewport.camera.target.x,
+                iv.app.activeViewport.camera.target.y,
+                iv.app.activeViewport.camera.target.z) == (5, 5, 0)
+
     def test_an_unreadable_bounding_box_is_refused_not_reported_as_framed(self, monkeypatch):
         # No box, no ratio. Returning ok here would publish "framed on X" over a whole-model view.
         blind = FakeOcc("Blind", bbox=None)
@@ -869,6 +924,19 @@ class TestFocusFraming:
         monkeypatch.setattr(iv.app, "activeViewport", vp)
         res = iv.handler(action="orient", orientation="front", focus="Part")
         assert res["isError"] is True and "did not take" in res["message"]
+
+    def test_perspective_projection_failure_reports_the_camera_that_moved(self, monkeypatch):
+        import adsk.core
+        near = FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
+        _install(monkeypatch, [near])
+        iv.app.activeViewport._cam.cameraType = adsk.core.CameraTypes.PerspectiveCameraType
+        res = iv.handler(action="orient", orientation="front", focus="Part")
+        assert res["isError"] is True
+        assert "target reads the focus 'Part'" in res["message"]
+        assert "projection reads 'perspective'" in res["message"]
+        assert "left where it was" not in res["message"]
+        cam = iv.app.activeViewport.camera
+        assert (cam.target.x, cam.target.y, cam.target.z) == (1, 1, 1)
 
     def test_fit_false_re_aims_without_framing_and_says_so(self, monkeypatch):
         near = FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
@@ -894,13 +962,14 @@ class TestFocusFraming:
         near = FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
         far = FakeOcc("FarAway", bbox=make_bbox((400, 0, 0), (402, 2, 2)))
         _install(monkeypatch, [near, far])
-        # a viewport that refuses the projection: the orient errors on the read-back, and framing
-        # sits AFTER that check so a failed call leaves the design exactly as it found it.
         vp = _StubbornViewport(adsk.core.CameraTypes.OrthographicCameraType)
         monkeypatch.setattr(iv.app, "activeViewport", vp)
         res = iv.handler(action="orient", orientation="front", focus="Part",
                          projection="perspective")
         assert res["isError"] is True and "did not take" in res["message"]
+        assert "target reads (0.0, 0.0, 0.0)" in res["message"]
+        assert "isFitView reads 'false'" in res["message"]
+        assert "focus is unverified" in res["message"]
         assert vp._fit_calls == 0
         assert near.isLightBulbOn is True and far.isLightBulbOn is True
 
@@ -1006,13 +1075,79 @@ class TestProjection:
     def test_projection_combines_with_an_orientation_in_one_call(self, monkeypatch):
         import adsk.core
         _install(monkeypatch, [self._part()])
+        vp = _WholeModelFitViewport(camera=_camera())
+        _project_focus_at_requested_fill(vp)
+        monkeypatch.setattr(iv.app, "activeViewport", vp)
         out = _payload(iv.handler(action="orient", orientation="front", projection="perspective",
                                   focus="Part"))
         assert out["applied"]["orientation"] == "front"
         assert out["applied"]["projection"] == "perspective"
+        assert out["applied"]["frame_fill"] == 1.0
         cam = iv.app.activeViewport.camera
         assert cam.cameraType == adsk.core.CameraTypes.PerspectiveCameraType
-        assert (cam.upVector.x, cam.upVector.y, cam.upVector.z) == (0, 0, 1)   # orientation kept
+        assert (cam.target.x, cam.target.y, cam.target.z) == (1, 1, 1)
+        assert (cam.upVector.x, cam.upVector.y, cam.upVector.z) == (0, 0, 1)
+        assert len(vp._assigned) == 2
+
+    def test_perspective_focus_corrects_from_projected_readbacks(self, monkeypatch):
+        import adsk.core
+        import math
+        _install(monkeypatch, [self._part()])
+        vp = _WholeModelFitViewport(camera=_camera())
+
+        def projected(p):
+            divisor = 16 if len(vp._assigned) == 2 else 4
+            return types.SimpleNamespace(x=vp.width / 4 + p.x * vp.width / divisor,
+                                         y=vp.height / 4 + p.z * vp.height / divisor)
+
+        vp.modelToViewSpace = projected
+        monkeypatch.setattr(iv.app, "activeViewport", vp)
+        out = _payload(iv.handler(action="orient", orientation="front",
+                                  projection="perspective", focus="Part"))
+        cam = vp.camera
+        distance = math.sqrt((cam.eye.x - cam.target.x) ** 2
+                             + (cam.eye.y - cam.target.y) ** 2
+                             + (cam.eye.z - cam.target.z) ** 2)
+        assert out["applied"]["frame_fill"] == 1.0
+        assert distance < 100
+        assert len(vp._assigned) == 3
+        assert cam.cameraType == adsk.core.CameraTypes.PerspectiveCameraType
+
+    def test_wrong_projection_during_perspective_frame_reports_actual_target(self, monkeypatch):
+        _install(monkeypatch, [self._part()])
+        vp = _WrongPerspectiveReadbackViewport(camera=_camera())
+        monkeypatch.setattr(iv.app, "activeViewport", vp)
+        res = iv.handler(action="orient", orientation="front", projection="perspective",
+                         focus="Part")
+        assert res["isError"] is True
+        assert "target reads (9.0, 8.0, 7.0)" in res["message"]
+        assert "projection reads 'orthographic'" in res["message"]
+        assert "target reads the focus" not in res["message"]
+
+    def test_early_perspective_stop_reports_the_attempts_actually_made(self, monkeypatch):
+        import adsk.core
+        _install(monkeypatch, [self._part()])
+        vp = iv.app.activeViewport
+        vp._cam.cameraType = adsk.core.CameraTypes.PerspectiveCameraType
+        vp._cam.eye = FakePoint(0, 0, 0)
+        vp._cam.target = FakePoint(0, 0, 0)
+        vp.modelToViewSpace = lambda p: types.SimpleNamespace(x=300 + p.x, y=200 + p.z)
+        res = iv.handler(action="orient", focus="Part")
+        assert res["isError"] is True
+        assert "after 1 attempt" in res["message"]
+        assert "after 5 attempts" not in res["message"]
+
+    def test_already_current_orthographic_projection_does_not_replace_focus(self, monkeypatch):
+        _install(monkeypatch, [self._part()])
+        vp = _WholeModelFitViewport(camera=_camera())
+        monkeypatch.setattr(iv.app, "activeViewport", vp)
+        out = _payload(iv.handler(action="orient", orientation="top", projection="orthographic",
+                                  focus="Part"))
+        cam = vp.camera
+        assert out["applied"]["projection"] == "orthographic"
+        assert (cam.target.x, cam.target.y, cam.target.z) == (1, 1, 1)
+        assert cam.isFitView is False
+        assert len(vp._assigned) == 2
 
     def test_a_projection_that_does_not_take_is_an_error(self, monkeypatch):
         # the viewport swallows the assignment and keeps reading back orthographic - that must be
@@ -1034,10 +1169,12 @@ class TestProjection:
         monkeypatch.setattr(iv.app, "activeViewport",
                             _StubbornViewport(adsk.core.CameraTypes.PerspectiveCameraType,
                                               type_readable=False))
-        res = iv.handler(action="orient", projection="perspective")
+        res = iv.handler(action="orient", projection="perspective", focus="Part")
         assert res["isError"] is True
         assert "cameraType could not be read back" in res["message"]
-        assert "projection is unverified" in res["message"]
+        assert "projection and focus are unverified" in res["message"]
+        assert "target reads (0.0, 0.0, 0.0)" in res["message"]
+        assert "isFitView reads 'false'" in res["message"]
         assert "did not take" not in res["message"]
         assert "None" not in res["message"]
 

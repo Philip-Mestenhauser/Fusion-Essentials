@@ -13,8 +13,10 @@ tools deliberately not driven unattended, `PENDING` the honest todo.
 from verify_acts_cam import (
     CAM_SETUP, FLIP_SETUP, MACHINING_EXTENSION, _CAM, _CAM_DELIVER, _CAM_EXTENSION,
     _CAM_FB_DELIVER, _CAM_GREEN, _CAM_MULTI_POST, _CAM_SCOPE, _CAM_SECOND_SETUP, _CAM_STORY,
-    _MX_SETUP, _SW_SETUP, _SW_SETUP2, _SWARF_RIG)
-from verify_acts_cloud import _CLOUD_DATA, _CLOUD_DOC, _CLOUD_DRAWING
+    _CAM_TEMPLATE_CLEANUP, _CAM_TEMPLATE_MODES, _MX_SETUP, _SW_SETUP, _SW_SETUP2, _SWARF_RIG,
+    _TEMPLATE_GENERATE_SETUP)
+from verify_acts_cloud import (
+    _CLOUD_CAM_PERSISTENCE, _CLOUD_DATA, _CLOUD_DOC, _CLOUD_DRAWING, _CLOUD_LINK)
 from verify_acts_census import (
     HUB_POCKET_SETUP, _CENSUS_EXT, _CENSUS_EXT_READ, _CENSUS_LONG, _CENSUS_LONG_READ, _CENSUS_MILL,
     _CENSUS_MILL_READ, _CENSUS_POCKET, _CENSUS_POCKET_READ, _CENSUS_TURN, _CENSUS_TURN_READ)
@@ -28,7 +30,7 @@ from verify_acts_model import (
     _DETAILS, _DETAILS_FB, _RESIZE, _RESIZE_FB, _SOLIDS, _SOLIDS_FB)
 from verify_acts_motion import _MOTION, _VISE
 from verify_acts_sketch import _SKELETON, _SKETCHWORK
-from verify_core import CLOUD_TIER, _DWELL, _PLANE_VIEW, _SKETCH_PLANE
+from verify_core import CLOUD_LINK_CRASH_REVIEW, CLOUD_TIER, _DWELL, _PLANE_VIEW, _SKETCH_PLANE
 from verify_layout import (
     _CHUNK_OF, _COMPONENTS, _PATTERNED, _PLACED_BOX, _SLOTS, _framed, _place_points, _place_slots,
     _place_walk, _placed, _sketch_reading_order, _sketches_first)
@@ -97,6 +99,12 @@ _ACT_PROGRAM = [
     # fixtures.
     ("ACT 10a - CAM: JOB + GENERATE", ("model_inspect", {"target": "STOCK:1"}), _CAM_STORY, _CAM),
     ("ACT 10b - CAM: DELIVERABLES", ("cam_get", {"include": ["operations"], "setup": CAM_SETUP}), _CAM_DELIVER, _CAM_FB_DELIVER),
+    # The clean skip/generate pair needs the local template the narrative saved. Its empty fallback
+    # leaves the scratch lane's original apply and teardown unchanged.
+    ("ACT 10b1 - CAM: TEMPLATE MODES",
+     ("cam_get", {"include": ["operations"], "setup": CAM_SETUP}), _CAM_TEMPLATE_MODES, []),
+    ("ACT 10b1b - CAM: TEMPLATE CLEANUP",
+     ("cam_get", {"include": ["operations"], "setup": CAM_SETUP}), _CAM_TEMPLATE_CLEANUP, []),
     # The cameo's plain milling setup and the component-scope beats: a base-licence job on the same
     # drafted block, so it runs where the extension act below does not. It depends on nothing the
     # story built, hence no precondition and no fallback.
@@ -171,15 +179,14 @@ _ACT_PROGRAM = [
     # poll certifies the document, and this act reads the tree a watcher is left with.
     ("ACT 10f - CAM: THE TREE LEFT BEHIND",
      ("cam_get", {"include": ["operations"], "setup": CAM_SETUP}), _CAM_GREEN, []),
-    # THE OPT-IN CLOUD TIER, after the whole unattended story and before the discard: the acts that
-    # write into an operator's own hub. They depend on nothing the story built and nothing depends on
-    # them, and the tier holds all three back whole where cloud_config names no hub (ACT_NEEDS
-    # below), which is what an unconfigured run stamps as skipped. Each act ends by activating the
-    # document the session was on when the tier started, so a chunk boundary may fall between them
-    # and a partial --acts run leaves the session where it found it.
+    # The opt-in cloud tier writes into an operator's hub; the link-guard review stays separately
+    # quarantined. Each act restores the captured home document before its boundary, so a chunked
+    # or partial run leaves the session where it found it.
     ("ACT 11a - CLOUD: THE DATA MODEL", None, _CLOUD_DATA, []),
     ("ACT 11b - CLOUD: THE SAVED DOCUMENT", None, _CLOUD_DOC, []),
+    ("ACT 11b2 - CLOUD: LINK GUARD REVIEW", None, _CLOUD_LINK, []),
     ("ACT 11c - CLOUD: THE DRAWING", None, _CLOUD_DRAWING, []),
+    ("ACT 11d - CLOUD: CAM TEMPLATE PERSISTENCE", None, _CLOUD_CAM_PERSISTENCE, []),
     ("FINALE", None, _FINALE, None),
 ]
 
@@ -250,7 +257,9 @@ ACTS = [(name, pre, _framed(_placed(narr, _SLOTS)), _framed(fb) if fb is not Non
 ACT_NEEDS = {
     "ACT 11a - CLOUD: THE DATA MODEL": CLOUD_TIER,
     "ACT 11b - CLOUD: THE SAVED DOCUMENT": CLOUD_TIER,
+    "ACT 11b2 - CLOUD: LINK GUARD REVIEW": CLOUD_LINK_CRASH_REVIEW,
     "ACT 11c - CLOUD: THE DRAWING": CLOUD_TIER,
+    "ACT 11d - CLOUD: CAM TEMPLATE PERSISTENCE": CLOUD_TIER,
     "ACT 10c - CAM: EXTENSION STRATEGIES": MACHINING_EXTENSION,
     "ACT 10c11 - CAM: THE EXTENSION FAMILIES": MACHINING_EXTENSION,
     "ACT 10c12 - CAM: THE EXTENSION FAMILIES READ": MACHINING_EXTENSION,
@@ -268,6 +277,9 @@ POLL_AFTER = {
     # CAM writes start - a write landing while a generation free-runs is what parks the process. The
     # fallback lane creates a Setup2 of its own and launches nothing, so it polls nothing.
     "ACT 10b - CAM: DELIVERABLES": {"narrative": "Setup2", "fallback": []},
+    # The direct-generate apply is the last write in this act; the existing bounded poll certifies
+    # its clean setup before the component-scope act starts another CAM write.
+    "ACT 10b1 - CAM: TEMPLATE MODES": {"narrative": _TEMPLATE_GENERATE_SETUP, "fallback": []},
     # The two cameo acts route to their narrative always (no precondition), so both modes name the
     # same setup - the poll has to answer whichever key run() looks up.
     "ACT 10b2 - CAM: COMPONENT SCOPE": {"narrative": _SW_SETUP2, "fallback": _SW_SETUP2},
@@ -1028,9 +1040,9 @@ STORY = {
                      "reaches it when two documents share the name 'Untitled'; the cloud tier then "
                      "switches between the source, the host, the copy and the drawing by lineage "
                      "URN and comes home the same way"),
-    "drawing_get": ("the sheet read every write and both exports are taken behind: export_index "
-                    "1-based and contiguous (the numbering drawing_export's sheet_range takes, "
-                    "obtainable nowhere else) with exactly one sheet active"),
+    "drawing_get": ("the complete native sheet collection read every write and both exports are "
+                    "taken behind: collection_index is 1-based and contiguous, export order "
+                    "remains unknown, and exactly one row agrees with active_sheet"),
     "drawing_update": ("a drawing generated moments ago reports itself already up to date; then, "
                        "after the source is edited and saved, the refresh that ran with the count "
                        "of references stale before it - the number separating it from a no-op"),
@@ -1076,4 +1088,4 @@ EXCLUDED = {
 # tool moves it out of here into STEPS. test_tool_verify_complete.py enforces that every
 # registered tool is covered, excluded, or listed here, so a NEWLY added tool can't decay coverage
 # silently - it fails the gate until someone scripts it, excuses it, or adds it here deliberately.
-PENDING = frozenset({"drawing_get_status"})
+PENDING = frozenset()

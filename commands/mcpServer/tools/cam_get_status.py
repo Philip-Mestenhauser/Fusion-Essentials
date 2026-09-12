@@ -226,6 +226,17 @@ def _futures(entry: dict) -> list:
     return entry.get("futures") or [entry["future"]]
 
 
+def _owned_future_readiness(live: dict, key: str, future_done: bool) -> str:
+    """The readiness line for a handle that owns the Future being read."""
+    if future_done:
+        return live.get("readiness", "")
+    pending = (f"Generation Future for handle '{key}' is incomplete; poll "
+               f"cam_get_status(handle='{key}') before launching generation again.")
+    blocked = bool(live.get("errored") or live.get("setups_errored")
+                   or live.get("programs_errored"))
+    return ((live.get("readiness") or "") + " " + pending).strip() if blocked else pending
+
+
 def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
     """The handle path: scope to a cam_generate-launched Future and report its progress. The per-op
     tallies read the ACTIVE document, so they ride only where the generating document is CONFIRMED
@@ -309,13 +320,22 @@ def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
     completed = future_done and (_cam_common.unsettled_count(live) == 0)
     payload["completed"] = completed
     payload["completion_basis"] = basis   # whose operations settled this verdict
+    owned_readiness = _owned_future_readiness(live, key, future_done)
+    live = dict(live)
+    live["readiness"] = owned_readiness
     payload["live_states"] = live  # valid/out_of_date/errored/generating/suppressed (+ setup/program for document)
-    # _cam_common's own verdict sentence, which embeds an operation name and its warning text - a key
-    # of its own, since a note that inlined it could not be bounded.
-    payload["readiness"] = live.get("readiness", "")
+    # A handle owns its incomplete Future, so the top-level and nested verdict are the same next step.
+    payload["readiness"] = owned_readiness
 
     if not completed:
-        payload["note"] = _incomplete_note(live) + count_caveat
+        blocked = bool(live.get("errored") or live.get("setups_errored")
+                       or live.get("programs_errored"))
+        if not future_done and not blocked:
+            payload["note"] = (f"Generation Future for handle '{key}' is still incomplete - "
+                               f"check again later with cam_get_status(handle='{key}'). "
+                               "'readiness' carries the next step." + count_caveat)
+        else:
+            payload["note"] = _incomplete_note(live) + count_caveat
         return ok(payload)
 
     # The health lists cover the scope the tally above settled on - `basis` names that same scope,
@@ -340,7 +360,7 @@ def _op_tally(ops) -> dict:
     # reading plainly ready over a job the document-level one would demote.
     return {"valid": t["valid"], "out_of_date": t["out_of_date"], "errored": t["errored"],
             "generating": t["generating"], "generating_settled": t["generating_settled"],
-            "suppressed": t["suppressed"],
+            "suppressed": t["suppressed"], "unread": t["unread"],
             "warnings": t["warnings"], "total": t["total"],
             "active": t["active"], "setups_errored": 0, "programs_errored": 0,
             # the OWNING setup's blocked_by, filled by _scope_state - a scoped verdict reads the
@@ -356,17 +376,21 @@ def _scope_readiness(t: dict, ops=()) -> str:
     so a scoped poll cannot say 'ready to post' over warnings, or over a blocked owning setup,
     that the document poll would name."""
     active_total = t["valid"] + t["out_of_date"] + t["errored"]
+    unsettled = _cam_common.unsettled_count(t)
+    unread = t.get("unread", 0)
+    measure = (f"{t['valid']} of {active_total} active ops valid" if active_total else
+               f"{t['total']} operation(s) in scope")
     if t["errored"]:
         return (f"BLOCKER: {t['errored']} operation(s) have errors - "
                 "the job will not post until fixed.")
+    if unread:
+        return _cam_common.unread_verdict(measure, unread, unsettled, t["out_of_date"])
     if active_total and t["valid"] == active_total:
-        return _cam_common.ready_verdict(f"{t['valid']} of {active_total} active ops valid",
-                                         t.get("warnings", 0),
+        return _cam_common.ready_verdict(measure, t.get("warnings", 0),
                                          (t.get("samples") or {}).get("warning"),
                                          t.get("setups_blocked"))
     if active_total:
-        return _cam_common.unfinished_verdict(
-            f"{t['valid']} of {active_total} active ops valid", ops)
+        return _cam_common.unfinished_verdict(measure, ops, unsettled)
     return "no active operations to assess."
 
 

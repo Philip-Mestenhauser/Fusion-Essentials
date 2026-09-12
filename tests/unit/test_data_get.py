@@ -43,6 +43,12 @@ def stub(monkeypatch):
             "file_facts_handler": staticmethod(lambda **kw: _ok({"matched_by": "urn",
                                                                  "file": {"name": "notes.txt"},
                                                                  "seen": dict(kw)})),
+            "folder_summary_handler": staticmethod(
+                lambda **kw: _ok({"exists": True, "project": {"name": kw.get("project")},
+                                  "folder": {"path": kw.get("folder") or "(project root)"},
+                                  "immediate_file_count": 2,
+                                  "immediate_child_folder_count": 1,
+                                  "unavailable_fields": [], "seen": dict(kw)})),
             "list_folders_handler": staticmethod(
                 lambda **kw: _ok({"project": kw.get("project"), "folder_count": 4,
                                   "folders": ["f1", "f2"]})),
@@ -70,6 +76,18 @@ class TestScopeDispatch:
         out = _payload(dge.handler(project="P1", include=["folders"]))
         assert out["scope"] == "folders"
         assert out["folder_count"] == 4
+
+    def test_project_with_summary_reads_one_folders_identity_and_counts(self, stub):
+        out = _payload(dge.handler(
+            project="Ignored", project_id="project:id", folder="Parts",
+            include=["summary"]))
+        assert out["scope"] == "summary"
+        assert out["immediate_file_count"] == 2
+        assert out["immediate_child_folder_count"] == 1
+        assert out["seen"] == {
+            "project": "Ignored", "project_id": "project:id", "folder": "Parts",
+        }
+        assert "unavailable_fields" in out["note"]
 
     def test_truncated_folder_walk_gets_the_budget_note(self, stub, monkeypatch):
         # a budget-cut walk must TEACH the narrower next step (lower max_depth / scope with
@@ -307,11 +325,31 @@ class TestGuards:
     def test_every_advertised_slice_actually_dispatches(self, stub):
         # A name in _SLICES that no branch reads falls THROUGH to the default project listing - a
         # silent ok for a slice never built. Each must switch the read to its own 'scope'.
-        reached_by = {"hubs": {}, "folders": {"project": "P1"}}
+        reached_by = {
+            "hubs": {},
+            "folders": {"project": "P1"},
+            "summary": {"project": "P1"},
+        }
         assert sorted(reached_by) == sorted(dge._SLICES), "a slice with no scope stated to reach it"
         for name in dge._SLICES:
             out = _payload(dge.handler(include=[name], **reached_by[name]))
             assert out["scope"] == name, name
+
+    def test_summary_requires_a_project(self, stub):
+        assert "requires 'project' or 'project_id'" in error_message(
+            dge.handler(include=["summary"]))
+
+    def test_scope_slices_cannot_be_combined(self, stub):
+        res = dge.handler(project="P1", include=["summary", "folders"])
+        assert "cannot be combined" in error_message(res)
+
+    def test_hubs_rejects_project_or_folder_and_folders_rejects_no_project(self, stub):
+        assert "cannot be combined with project or folder scope" in error_message(
+            dge.handler(project="P1", include=["hubs"]))
+        assert "cannot be combined with project or folder scope" in error_message(
+            dge.handler(folder="Parts", include=["hubs"]))
+        assert "requires 'project' or 'project_id'" in error_message(
+            dge.handler(include=["folders"]))
 
     def test_cloud_error_propagates(self, monkeypatch):
         stub_tool_module(monkeypatch, "_data_read",

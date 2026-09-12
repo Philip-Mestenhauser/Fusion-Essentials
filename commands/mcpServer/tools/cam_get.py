@@ -15,11 +15,12 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import (CM_TO_UNIT, iter_collection, measured, named_with_remainder, ok, error,
                       read_flag, safe, terse)
-from ._cam_common import (STRATEGY_PAIR_NOTE, choice_expressions, get_cam, find_setup,
-                          resolve_cam_node, resolve_operation, strategy_pair)
+from ._cam_common import (STRATEGY_PAIR_NOTE, choice_expressions, expression_error, get_cam,
+                          find_setup, resolve_cam_node, resolve_operation, strategy_pair)
 from ._cam_presets import _preset_names, _presets_named
 from ..guidance.loader import STRATEGY_RECIPE_ID
 from . import _inputs
+from . import _cam_read as _cr
 
 app = adsk.core.Application.get()
 
@@ -53,8 +54,7 @@ def _unwrap(result):
 def _slice_setups(cam, setup):
     """The setups orientation default: machine + model/fixture/stock + per-setup operation_count (the
     REAL total, incl. ops nested in folders) + folder_count (the depth breadcrumb)."""
-    from . import _cam_read as _cr
-    return _unwrap(_cr.get_cam_setups_handler())
+    return _unwrap(_cr.get_cam_setups_handler(setup=setup))
 
 
 def _dedupe_orientation(out, inc):
@@ -93,7 +93,6 @@ def _slice_operations(cam, setup):
     normal op is {name,tool,strategy,state}; a suppressed/errored op keeps its flags and stands out).
     Bounded: across all setups the operation rows are capped (the counts in the default setups slice
     are unbounded, so the agent always sees the true total; 'setup' scopes to one setup)."""
-    from . import _cam_read as _cr
     payload, err = _unwrap(_cr.get_cam_operations_handler(setup=setup))
     if payload:
         emitted = 0
@@ -173,7 +172,6 @@ _REFERENCE_CENSUS = (
 def _slice_references(cam, setup):
     """Each setup's external X-ref models/fixtures/stock -> source document, plus the census sentence
     saying which entries that count covers (see _REFERENCE_CENSUS)."""
-    from . import _cam_read as _cr
     payload, err = _unwrap(_cr.get_setup_references_handler(setup=setup))
     if payload:
         rows = payload.get("setups") or []
@@ -192,7 +190,6 @@ def _slice_nc_programs(cam):
     """The NC/post programs - SUMMARY only (name, machine, post, op count + post_parameter_count). The
     full post_parameters are the post's static schema (often 60+ rows, identical across programs), a
     deeper level not dumped here - point at it rather than flooding (CLAUDE.md 'point, don't inline')."""
-    from . import _cam_read as _cr
     payload, err = _unwrap(_cr.get_nc_programs_handler())
     if payload:
         for p in payload.get("nc_programs", []):
@@ -204,20 +201,17 @@ def _slice_nc_programs(cam):
 
 def _slice_time(cam, setup, units):
     """Machining cycle-time estimate (per setup + per operation), suppressed ops excluded."""
-    from . import _cam_read as _cr
     return _unwrap(_cr.get_machining_time_handler(setup=setup, units=units))
 
 
 def _slice_machine(cam, setup, units):
     """The machine's own LIMITS per setup: spindle speed range + per-axis travels, off the machine's
     kinematics. Distinct from 'machines' (the catalog of machines you can assign)."""
-    from . import _cam_read as _cr
     return _unwrap(_cr.get_machine_limits_handler(setup=setup, units=units))
 
 
 def _slice_tools(cam):
     """The distinct cutting tools used across operations (the tool sheet)."""
-    from . import _cam_read as _cr
     return _unwrap(_cr.get_tool_list_handler())
 
 
@@ -249,7 +243,6 @@ def _slice_inspection(cam, measure, max_results, units):
     """The recorded surface-inspection (probing) results: a per-measure state rollup + its worst
     out-of-tolerance point by default; 'measure'=<index> (or '<index>/<path>') drills that scope's
     out-of-tolerance points, capped by 'max_results'."""
-    from . import _cam_read as _cr
     return _unwrap(_cr.get_inspection_results_handler(
         measure=measure, max_results=max_results, units=units))
 
@@ -391,6 +384,152 @@ _SETUP_PARAM_NOTE = (
     "scaled into 'units', 'expression' is the authored text in the document's display unit. "
     "Subtract within ONE of them.")
 
+_PARAMETER_NAME_CAP = 20
+_UNAVAILABLE_PARAMETER_CAP = 50
+_DISCOVERY_NOTE = (
+    "Exact queries use internal parameter names. Unavailable pages match readable rows whose "
+    "visible and enabled flags did not both read true; each flag is independent and null means "
+    "unread. Controlling relationships are unknown.")
+
+
+def _parameter_options(parameter_names, include_unavailable, unavailable_offset):
+    """(exact names, unavailable flag, offset, error) after validating discovery inputs."""
+    if parameter_names is None:
+        names = []
+    elif not isinstance(parameter_names, list):
+        return None, None, None, "'parameter_names' must be an array of exact internal-name strings."
+    elif not parameter_names:
+        return None, None, None, "'parameter_names' cannot be empty; omit it when no exact lookup is needed."
+    elif len(parameter_names) > _PARAMETER_NAME_CAP:
+        return None, None, None, (f"'parameter_names' accepts at most {_PARAMETER_NAME_CAP} names; "
+                                  f"received {len(parameter_names)}.")
+    else:
+        names = []
+        for name in parameter_names:
+            if not isinstance(name, str) or not name or name != name.strip():
+                return None, None, None, (
+                    "Each 'parameter_names' item must be a non-empty exact string without leading "
+                    "or trailing whitespace.")
+            if name in names:
+                return None, None, None, f"'parameter_names' repeats exact name '{name}'."
+            names.append(name)
+    if include_unavailable is not None and not isinstance(include_unavailable, bool):
+        return None, None, None, "'include_unavailable' must be true or false."
+    if unavailable_offset is None:
+        offset = 0
+    elif (not isinstance(unavailable_offset, int) or isinstance(unavailable_offset, bool)
+          or unavailable_offset < 0):
+        return None, None, None, "'unavailable_offset' must be a non-negative integer."
+    else:
+        offset = unavailable_offset
+    if unavailable_offset is not None and include_unavailable is not True:
+        return None, None, None, "'unavailable_offset' requires include_unavailable=true."
+    return names, include_unavailable is True, offset, None
+
+
+def _expanded_parameter(p, requested_name=None, selection_flags=None):
+    """One parameter's values, diagnostics, choices and independent nullable state flags."""
+    flags = selection_flags or {
+        "visible": read_flag(lambda: p.isVisible),
+        "enabled": read_flag(lambda: p.isEnabled)}
+    row = {"name": safe(lambda: p.name), "title": safe(lambda: p.title),
+           "expression": safe(lambda: p.expression),
+           "visible": flags["visible"], "enabled": flags["enabled"],
+           "editable": read_flag(lambda: p.isEditable),
+           "deprecated": read_flag(lambda: p.isDeprecated)}
+    if requested_name is not None:
+        row["requested_name"] = requested_name
+    choices = choice_expressions(p)
+    if choices:
+        row["choices"] = choices
+    eval_error, eval_warning = expression_error(p)
+    if eval_error:
+        row["error"] = eval_error
+    if eval_warning:
+        row["warning"] = eval_warning
+    return row
+
+
+def _exact_parameters(param_coll, names, target):
+    """(expanded rows, error) for exact itemByName lookups, keeping misses apart from failures."""
+    if param_coll is None:
+        return None, error(
+            f"{target} parameter collection could not be read. Retry the same scoped query.")
+    rows = []
+    for name in names:
+        try:
+            p = param_coll.itemByName(name)
+        except Exception as exc:
+            return None, error(
+                f"Parameter lookup for '{name}' on {target} failed: {exc}. Retry the scoped exact "
+                "query; if it repeats, use include_unavailable=true to inspect readable rows.")
+        if p is None:
+            return None, error(
+                f"No parameter with exact internal name '{name}' on {target}. Check its spelling "
+                "and case, or use include_unavailable=true and follow next_offset to discover names.")
+        rows.append(_expanded_parameter(p, name))
+    return rows, None
+
+
+def _unavailable_parameters(param_coll, offset=0):
+    """A bounded match page with explicit incomplete collection and item-read evidence."""
+    base = {"parameters": [], "offset": offset, "next_offset": None, "returned_count": 0,
+            "readable_matching_count": 0, "collection_count": None, "readable_count": 0,
+            "unread_item_count": None, "collection_complete": False, "truncated": None}
+    if param_coll is None:
+        return base
+    try:
+        total = int(param_coll.count)
+    except Exception:
+        return base
+    base["collection_count"] = total
+    unread = 0
+    matches = []
+    matching = 0
+    readable = 0
+    for index in range(total):
+        try:
+            p = param_coll.item(index)
+        except Exception:
+            p = None
+        if p is None:
+            unread += 1
+            continue
+        readable += 1
+        flags = {"visible": read_flag(lambda p=p: p.isVisible),
+                 "enabled": read_flag(lambda p=p: p.isEnabled)}
+        if flags["visible"] is True and flags["enabled"] is True:
+            continue
+        position = matching
+        matching += 1
+        if position >= offset and len(matches) < _UNAVAILABLE_PARAMETER_CAP:
+            matches.append((p, flags))
+    rows = [_expanded_parameter(p, selection_flags=flags) for p, flags in matches]
+    complete = unread == 0
+    has_readable_tail = offset + len(rows) < matching
+    base.update({"parameters": rows, "returned_count": len(rows),
+                 "next_offset": offset + len(rows) if has_readable_tail else None,
+                 "readable_matching_count": matching,
+                 "readable_count": readable, "unread_item_count": unread,
+                 "collection_complete": complete,
+                 "truncated": True if has_readable_tail else (False if complete else None)})
+    return base
+
+
+def _add_parameter_discovery(out, param_coll, names, include_unavailable, unavailable_offset,
+                             target):
+    """Add requested expanded parameter views, returning an exact-lookup error if any."""
+    if names:
+        rows, err = _exact_parameters(param_coll, names, target)
+        if err:
+            return err
+        out["requested_parameters"] = rows
+        out["requested_parameter_count"] = len(rows)
+    if include_unavailable:
+        out["unavailable"] = _unavailable_parameters(param_coll, unavailable_offset)
+    out["note"] = _DISCOVERY_NOTE
+    return None
+
 
 def _stock_extents(param_coll, factor, unit) -> dict:
     """{units, <name>: {value, expression}} for the computed stock/model extents that ARE present. A
@@ -410,7 +549,8 @@ def _stock_extents(param_coll, factor, unit) -> dict:
     return out
 
 
-def _slice_setup_parameters(cam, setup, units):
+def _slice_setup_parameters(cam, setup, units, parameter_names=None, include_unavailable=False,
+                            unavailable_offset=0):
     """ONE SETUP's own parameters (the read-back side of cam_edit_setup's writes): the visible rows
     grouped by section, plus the computed stock extents."""
     factor = CM_TO_UNIT.get((units or "mm").strip().lower())
@@ -423,6 +563,12 @@ def _slice_setup_parameters(cam, setup, units):
     if params is None:
         return None, error(f"Setup '{setup}' exposes no readable parameters - nothing about its "
                            "stock or job settings can be read.")
+    if parameter_names or include_unavailable:
+        out = {"setup": safe(lambda: s.name)}
+        derr = _add_parameter_discovery(
+            out, params, parameter_names or [], include_unavailable, unavailable_offset,
+            f"setup '{safe(lambda: s.name) or setup}'")
+        return (None, derr) if derr else (out, None)
     groups, hidden = _grouped_visible_params(params)
     out = {"setup": safe(lambda: s.name), "sections": groups,
            "parameter_count": sum(len(v) for v in groups.values()),
@@ -437,20 +583,29 @@ def _slice_setup_parameters(cam, setup, units):
     return out, None
 
 
-def _slice_parameters(cam, operation, setup, units="mm"):
+def _slice_parameters(cam, operation, setup, units="mm", parameter_names=None,
+                      include_unavailable=False, unavailable_offset=0):
     """ONE operation's machining parameters, or ONE setup's own (pass 'setup' with no 'operation'),
     visible-only and grouped by section. With BOTH named, 'setup' scopes which operation of that
     name is read."""
     if not (operation or "").strip():
         if (setup or "").strip():
-            return _slice_setup_parameters(cam, setup, units)
+            return _slice_setup_parameters(
+                cam, setup, units, parameter_names, include_unavailable, unavailable_offset)
         return None, error("include=['parameters'] needs 'operation' - the operation whose settings to "
                            "read (scope first with cam_get(setup=..., include=['operations'])); or "
                            "'setup' alone for that SETUP's own parameters (stock mode + extents).")
     op, oerr = _resolve_op_in_scope(cam, operation, setup)
     if oerr:
         return None, oerr
-    groups, hidden = _grouped_visible_params(safe(lambda: op.parameters))
+    params = safe(lambda: op.parameters)
+    if parameter_names or include_unavailable:
+        out = {"operation": safe(lambda: op.name)}
+        derr = _add_parameter_discovery(
+            out, params, parameter_names or [], include_unavailable, unavailable_offset,
+            f"operation '{safe(lambda: op.name) or operation}'")
+        return (None, derr) if derr else (out, None)
+    groups, hidden = _grouped_visible_params(params)
     out = {"operation": safe(lambda: op.name),
            "sections": groups,
            "parameter_count": sum(len(v) for v in groups.values()),
@@ -551,16 +706,25 @@ def handler(include=None, setup: str = "", operation: str = "", preset: str = ""
             scope: str = "", library: str = "", tool_type: str = "", vendor: str = "",
             machine_type: str = "",
             template_location: str = "", template_url: str = "", template_depth: int = 0,
-            measure: str = "", max_results: int = 0, units: str = "mm") -> dict:
+            measure: str = "", max_results: int = 0, units: str = "mm",
+            parameter_names=None, include_unavailable=None, unavailable_offset=None) -> dict:
     """See TOOL_DESCRIPTION."""
-    cam, cerr = get_cam()
-    if not cam:
-        return error(cerr)
-
     inc = _normalize_include(include)
     bad = [s for s in inc if s not in _SLICES and s not in _DEFAULT_NAMES]
     if bad:
         return error(f"Unknown include {bad}. Valid: {', '.join(_SLICES + _DEFAULT_NAMES)}.")
+    parameter_names, include_unavailable_value, unavailable_offset_value, perr = _parameter_options(
+        parameter_names, include_unavailable, unavailable_offset)
+    if perr:
+        return error(perr)
+    if (parameter_names or include_unavailable is not None or unavailable_offset is not None
+            ) and "parameters" not in inc:
+        return error("'parameter_names', 'include_unavailable' and 'unavailable_offset' apply only "
+                     "with include=['parameters'].")
+
+    cam, cerr = get_cam()
+    if not cam:
+        return error(cerr)
 
     deep = [s for s in inc if s in _SLICES]
     want_default = not deep or any(s in _DEFAULT_NAMES for s in inc)
@@ -579,7 +743,9 @@ def handler(include=None, setup: str = "", operation: str = "", preset: str = ""
         if e:
             return e
     if "parameters" in inc:                     # deep: ONE operation's (or setup's) settings, grouped
-        out["parameters"], e = _slice_parameters(cam, operation, setup, units)
+        out["parameters"], e = _slice_parameters(
+            cam, operation, setup, units, parameter_names, include_unavailable_value,
+            unavailable_offset_value)
         if e:
             return e
     if "tool" in inc:                           # deep: ONE operation's tool + presets (preset= drills)
@@ -670,8 +836,15 @@ tool = (
             "items": {"type": "string", "enum": list(_SLICES + _DEFAULT_NAMES)},
             "description": "'default'/'setups' keeps the setups slice beside them."})
     .add_input_property("setup", {"type": "string",
-            "description": "Scopes the operations/strategies/references/time/machine slices."})
+            "description": "Scopes the default setup orientation and the operations/strategies/references/time/machine slices."})
     .add_input_property("operation", {"type": "string"})
+    .add_input_property("parameter_names", {"type": "array", "minItems": 1,
+            "maxItems": _PARAMETER_NAME_CAP, "items": {"type": "string"},
+            "description": "With 'parameters': exact internal names."})
+    .add_input_property("include_unavailable", {"type": "boolean",
+            "description": "With 'parameters': include rows not both visible and enabled."})
+    .add_input_property("unavailable_offset", {"type": "integer", "minimum": 0,
+            "description": "Continue the unavailable listing at this offset."})
     .add_input_property("preset", {"type": "string",
             "description": "With include=['tool']: this preset's feeds/speeds."})
     .add_input_property("scope", {"type": "string",
@@ -690,8 +863,7 @@ tool = (
             "description": "Default 4."})
     .add_input_property("measure", {"type": "string",
             "description": "One measure by INDEX ('0'), or one of its paths ('0/1')."})
-    .add_input_property("max_results", {"type": "integer",
-            "description": "Default 50, max 200."})
+    .add_input_property("max_results", {"type": "integer"})
     .add_input_property(*_inputs.UNITS.as_property())
     .strict_schema()
 )

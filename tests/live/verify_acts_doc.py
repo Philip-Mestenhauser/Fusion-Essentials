@@ -10,6 +10,7 @@ run() fires after every act: the add-in reload, which restarts the server and so
 """
 
 import json
+import os
 import time
 import urllib.request
 
@@ -17,7 +18,7 @@ from verify_core import (
     BASE, EXPORT_DIR, NOTE_MAX, SERVER_NAME, SVG_PATH, _RECALL, _activated, _ctx_get,
     _document_closed, _document_read, _exported_bytes, _extruded, _fg, _home_address,
     _home_document, _imported_curves, _imported_sketches, _made_component, _measured,
-    _new_document, _num, _recall, _refused, _watch, facade)
+    _new_document, _num, _param_added, _param_deleted, _param_read, _recall, _refused, _watch, facade)
 from verify_layout import _DRIFT_CHUNKS, drift_row
 
 
@@ -28,6 +29,41 @@ def _story_address(p):
     """Return the story document's exact handle while recording the open count."""
     _RECALL["open_before"] = p.get("open_count")
     return _home_address(p)
+
+
+def _home_cloud_identity_unavailable(p):
+    """Require the current cloud identity and both dependent slices to stay unknown."""
+    active = p.get("active") or {}
+    versions, used_in = p.get("versions") or {}, p.get("used_in") or {}
+    exceptions = (p.get("summary") or {}).get("exceptions") or []
+    text = json.dumps({"active": active, "versions": versions, "used_in": used_in}).lower()
+    return _home_document(p) and _measured(
+        "no current cloud identity makes cloud history and where-used unavailable",
+        {"active": active, "versions": versions, "used_in": used_in,
+         "exceptions": exceptions},
+        active.get("has_data_file") is False and active.get("is_saved") is False
+        and active.get("document_id") is None
+        and "current cloud identity unavailable" in active.get("save_state", "")
+        and any("data_file_unavailable" in e.get("unsaved", []) for e in exceptions)
+        and versions.get("available") is False and used_in.get("available") is False
+        and "could not be read" in versions.get("note", "")
+        and "relationship is unknown" in used_in.get("note", "")
+        and all(term in text for term in (
+            "keep using document_handle", "retry doc_get",
+            "if this is a new document, use doc_save_as"))
+        and not any(claim in text for claim in (
+            "never saved", "no version history exists", "cannot be referenced")))
+
+
+def _scratch_gone_story_active(p):
+    """doc_get after the scratch is closed: the story document is active at its original handle."""
+    rows = [r for r in (p.get("open_documents") or []) if r.get("is_active")]
+    here = _home_address(p) if len(rows) == 1 else None
+    return _measured("the scratch is closed and the session is back on the story document",
+                     {"open_count": p.get("open_count"), "open_before": _RECALL["open_before"],
+                      "active": here, "story": _RECALL["story_doc"]},
+                     p.get("open_count") == _RECALL["open_before"]
+                     and here == _RECALL["story_doc"])
 
 
 def _scratch_opened_beside_it(p):
@@ -44,23 +80,90 @@ def _scratch_opened_beside_it(p):
                      and here is not None and here != _RECALL["story_doc"])
 
 
-def _scratch_gone_story_active(p):
-    """doc_get after the scratch is closed: the session is back to the count it opened with, and
-    the story document is active at the address it answered to all along."""
-    rows = [r for r in (p.get("open_documents") or []) if r.get("is_active")]
-    here = _home_address(p) if len(rows) == 1 else None
-    return _measured("the scratch is closed and the session is back on the story document",
-                     {"open_count": p.get("open_count"), "open_before": _RECALL["open_before"],
-                      "active": here, "story": _RECALL["story_doc"]},
-                     p.get("open_count") == _RECALL["open_before"]
-                     and here == _RECALL["story_doc"])
+def _handle_args(ctx, key, name, expression):
+    """Build a parameter write pinned to the exact document saved in key."""
+    return {"name": name, "expression": expression,
+            "expect_document": _ctx_get(ctx, key, "the exact owned document handle")}
 
 
-# The scratch beat, in the order that leaves nothing behind: read the address, open the second
-# document, switch both ways by exact handle, come home, and close the scratch by its own handle -
-# never whatever is in front, which is what a bare doc_close would take.
+def _camera_target(p):
+    """Return the independently read camera target, or None."""
+    target = (p.get("view") or {}).get("target") or {}
+    values = tuple(target.get(axis) for axis in ("x", "y", "z"))
+    return values if all(type(value) in (int, float) for value in values) else None
+
+
+# workspace_orient reports camera points to 0.001 cm; model_inspect retains more precision.
+_CAMERA_TARGET_TOLERANCE_CM = 0.001
+_VIEW_FOCUS_RUN = str(time.time_ns())
+
+
+def _world_box(name):
+    """Return a predicate for one current occurrence box in world-axis centimetres."""
+    expected = f"occurrence '{name}'"
+
+    def check(p):
+        points = [p.get(key) or {} for key in ("min_point", "max_point")]
+        values = [point.get(axis) for point in points for axis in ("x", "y", "z")]
+        return (p.get("target") == expected and p.get("kind") == "occurrence"
+                and p.get("frame") == "world axes (axis-aligned)"
+                and p.get("oriented") is False and p.get("units") == "cm"
+                and all(type(value) in (int, float) for value in values))
+    return check
+
+
+def _focus_center_cm(*keys):
+    """Return the union center of recalled model boxes in camera centimetres."""
+    boxes = [_RECALL.get(key) or {} for key in keys]
+    if not boxes or any(box.get("units") != "cm" for box in boxes):
+        return None
+    points = []
+    for box in boxes:
+        lo, hi = box.get("min_point") or {}, box.get("max_point") or {}
+        values = tuple((lo.get(axis), hi.get(axis)) for axis in ("x", "y", "z"))
+        if any(type(value) not in (int, float) for pair in values for value in pair):
+            return None
+        points.append(values)
+    return tuple((min(point[axis][0] for point in points)
+                  + max(point[axis][1] for point in points)) / 2 for axis in range(3))
+
+
+def _camera_focus_read(projection, *keys, differs_from=()):
+    """Return a predicate comparing camera target to current independently read geometry."""
+    def check(p):
+        actual = _camera_target(p)
+        expected = _focus_center_cm(*keys)
+        previous = _focus_center_cm(*differs_from) if differs_from else None
+        matches = (actual is not None and expected is not None
+                   and all(abs(a - e) <= _CAMERA_TARGET_TOLERANCE_CM
+                           for a, e in zip(actual, expected)))
+        moved = (previous is None or any(abs(e - old) > _CAMERA_TARGET_TOLERANCE_CM
+                                        for e, old in zip(expected or (), previous)))
+        return _measured("camera target matches current focus geometry",
+                         {"target_cm": actual, "expected_cm": expected,
+                          "projection": (p.get("view") or {}).get("projection"),
+                          "different_subject": moved},
+                         matches and moved
+                         and (p.get("view") or {}).get("projection") == projection)
+    return check
+
+
+def _retained_png(path):
+    """Return a predicate requiring the requested screenshot file to contain bytes."""
+    def check(payload):
+        size = os.path.getsize(path) if os.path.isfile(path) else None
+        reported = f"file_path={path}" in str(payload)
+        return _measured("current-view PNG retained on disk",
+                         {"file_path": path, "size_bytes": size, "reported": reported},
+                         reported and _num(size) and size > 0)
+    return check
+
+
+# The scratch beat owns two handles, proves wrong-tab and stale-handle refusals before mutation,
+# then returns home and writes and reads on the surviving exact target.
 _SCRATCH_DOCUMENT = [
-    ("doc_get", {}, _home_document, ("story_doc", _recall("story_doc", _story_address))),
+    ("doc_get", {"include": ["default", "versions", "used_in"]},
+     _home_cloud_identity_unavailable, ("story_doc", _recall("story_doc", _story_address))),
     ("doc_new", {}, _new_document, None),
     ("doc_get", {}, _scratch_opened_beside_it, ("scratch_doc", _home_address)),
     ("doc_activate", lambda c: {"name": _ctx_get(c, "story_doc", "the story document")},
@@ -69,9 +172,25 @@ _SCRATCH_DOCUMENT = [
      _activated(), None),
     ("doc_activate", lambda c: {"name": _ctx_get(c, "story_doc", "the story document")},
      _activated(), None),
+    ("param_add", lambda c: _handle_args(c, "scratch_doc", "HandleWrong", "1 mm"),
+     _refused("active_document_changed", "doc_activate"), None),
+    ("param_get", {"name": "HandleWrong"}, _refused("HandleWrong"), None),
+    ("doc_activate", lambda c: {"name": _ctx_get(c, "scratch_doc", "the scratch document")},
+     _activated(), None),
+    ("param_get", {"name": "HandleWrong"}, _refused("HandleWrong"), None),
+    ("doc_activate", lambda c: {"name": _ctx_get(c, "story_doc", "the story document")},
+     _activated(), None),
     ("doc_close", lambda c: {"name": _ctx_get(c, "scratch_doc", "the scratch document"),
                              "save_changes": False}, _document_closed, None),
+    ("param_add", lambda c: _handle_args(c, "scratch_doc", "HandleClosed", "3 mm"),
+     _refused("unknown_document_handle", "doc_get"), None),
+    ("param_get", {"name": "HandleClosed"}, _refused("HandleClosed"), None),
     ("doc_get", {}, _scratch_gone_story_active, None),
+    ("param_add", lambda c: _handle_args(c, "story_doc", "HandleRecovered", "2 mm"),
+     _param_added("HandleRecovered", 2), None),
+    ("param_get", {"name": "HandleRecovered"}, _param_read("HandleRecovered", 2), None),
+    ("param_delete", {"name": "HandleRecovered"}, _param_deleted("HandleRecovered"), None),
+    ("param_get", {"name": "HandleRecovered"}, _refused("HandleRecovered"), None),
 ]
 
 
@@ -206,7 +325,39 @@ _SHOWCASE = [
     # The tour opens with a snapshot and closes on 'restore', which is what makes it checkable -
     # camera, style and every visibility bulb come back to the state the tour started from.
     ("view_set", {"action": "snapshot"}, "ok", None),
-    ("view_set", {"action": "orient", "orientation": "front", "focus": ["ViseBase:1", "STOCK:1"]},
+    # Projection plus focus is checked against current geometry and retained as current-view PNGs.
+    ("model_inspect", {"target": "ViseBase:1", "units": "cm"}, _world_box("ViseBase:1"),
+     ("view_focus_vise_box", _recall("view_focus_vise_box", lambda p: p))),
+    ("model_inspect", {"target": "STOCK:1", "units": "cm"}, _world_box("STOCK:1"),
+     ("view_focus_stock_box", _recall("view_focus_stock_box", lambda p: p))),
+    ("view_set", {"action": "orient", "orientation": "top",
+                  "focus": ["ViseBase:1", "STOCK:1"], "projection": "orthographic"},
+     "ok", None),
+    ("workspace_orient", {},
+     _camera_focus_read("orthographic", "view_focus_vise_box", "view_focus_stock_box"), None),
+    ("view_screenshot", {"view": "current", "width": 500, "height": 400,
+                         "file_path": EXPORT_DIR + "/view-focus-" + _VIEW_FOCUS_RUN + "-ortho.png"},
+     _retained_png(EXPORT_DIR + "/view-focus-" + _VIEW_FOCUS_RUN + "-ortho.png"), None),
+    ("view_set", {"action": "orient", "orientation": "top",
+                  "focus": ["ViseBase:1", "STOCK:1"], "projection": "perspective"},
+     lambda p: p.get("applied", {}).get("frame_fill") is not None, None),
+    ("workspace_orient", {},
+     _camera_focus_read("perspective", "view_focus_vise_box", "view_focus_stock_box"), None),
+    ("view_screenshot", {"view": "current", "width": 500, "height": 400,
+                         "file_path": EXPORT_DIR + "/view-focus-" + _VIEW_FOCUS_RUN + "-persp.png"},
+     _retained_png(EXPORT_DIR + "/view-focus-" + _VIEW_FOCUS_RUN + "-persp.png"), None),
+    ("model_inspect", {"target": "JawMoving:1", "units": "cm"}, _world_box("JawMoving:1"),
+     ("view_focus_jaw_box", _recall("view_focus_jaw_box", lambda p: p))),
+    ("view_set", {"action": "orient", "focus": "JawMoving:1"},
+     lambda p: p.get("applied", {}).get("frame_fill") is not None, None),
+    ("workspace_orient", {},
+     _camera_focus_read("perspective", "view_focus_jaw_box",
+                        differs_from=("view_focus_vise_box", "view_focus_stock_box")), None),
+    ("view_screenshot", {"view": "current", "width": 500, "height": 400,
+                         "file_path": EXPORT_DIR + "/view-focus-" + _VIEW_FOCUS_RUN + "-refocus.png"},
+     _retained_png(EXPORT_DIR + "/view-focus-" + _VIEW_FOCUS_RUN + "-refocus.png"), None),
+    ("view_set", {"action": "orient", "orientation": "front",
+                  "focus": ["ViseBase:1", "STOCK:1"], "projection": "orthographic"},
      "ok", None),
     ("view_set", {"action": "orient", "orientation": "back", "fit": False}, "ok", None),
     ("view_set", {"action": "orient", "orientation": "left", "fit": False}, "ok", None),
@@ -449,10 +600,10 @@ _FINALE = [
 # after it would reach a socket that is coming down. It is a post-run beat instead, and what it
 # has to establish is that the restart HAPPENED. The reload is DEFERRED - the handler starts a
 # timer and returns while the server is still answering - so a /health read taken when the call
-# comes back describes the state before the teardown, and would pass identically against a server
-# that never left. Watching /health go DOWN and then answer again is what tells those apart.
+# comes back describes the pre-teardown state. Attested calls require fresh load/session identities;
+# legacy calls observe /health going down and answering again.
 _RELOAD_PROBE_GAP_S = 0.25
-_RELOAD_PROBE_TIMEOUT_S = 1.0
+_RELOAD_PROBE_TIMEOUT_S = 5.0
 # Attempt budgets, not deadlines, so the beat's cost is bounded the way poll_generation's is: 40
 # probes to catch the teardown and 60 to see the re-import answer, a quarter-second apart, each
 # probe itself capped by the timeout above. A budget that runs out ends the beat, never the wait.
@@ -490,70 +641,255 @@ def _poll_health(up, polls):
     return False
 
 
+def _reload_handle(value):
+    return (isinstance(value, str) and value.startswith("session:")
+            and len(value) > len("session:") and not any(c.isspace() for c in value))
+
+
+def _reload_census(call, phase="census"):
+    try:
+        is_error, payload = call("doc_get", {})
+    except Exception as e:
+        return None, f"{phase} doc_get did not answer: {e}"
+    if is_error or not isinstance(payload, dict) or payload.get("truncated") is not False:
+        return None, f"{phase} census was unreadable or truncated"
+    rows = payload.get("open_documents")
+    count = payload.get("open_count")
+    if not isinstance(rows, list) or type(count) is not int or count != len(rows):
+        return None, f"{phase} census was incomplete"
+    handles = []
+    for row in rows:
+        if not isinstance(row, dict) or not _reload_handle(row.get("document_handle")):
+            return None, f"{phase} census had an invalid document handle"
+        if row.get("document_handle") in handles:
+            return None, f"{phase} census had duplicate document handles"
+        handles.append(row["document_handle"])
+    active = payload.get("active")
+    if not isinstance(active, dict):
+        return None, f"{phase} active document was unreadable"
+    active_handle = active.get("document_handle")
+    active_rows = [r for r in rows if r.get("is_active") is True]
+    if not _reload_handle(active_handle) or len(active_rows) != 1:
+        return None, f"{phase} active document was not uniquely readable"
+    if active_rows[0].get("document_handle") != active_handle:
+        return None, f"{phase} active document did not match its census row"
+    return {"handle": active_handle, "document_id": active.get("document_id"),
+            "name": active.get("name"), "rows": rows}, None
+
+
+def _reload_cleanup(call, scratch, home):
+    """Close only the proven scratch and independently restore the original home."""
+    problems = []
+    state, problem = _reload_census(call, "cleanup")
+    if problem:
+        return False, problem
+    if not _reload_handle(scratch):
+        problems.append("scratch ownership unresolved")
+    elif scratch in {row["document_handle"] for row in state["rows"]}:
+        try:
+            is_error, closed = call("doc_close", {
+                "name": scratch, "save_changes": False, "expect_document": state["handle"]})
+            if (is_error or not isinstance(closed, dict)
+                    or not isinstance(closed.get("closed"), list)
+                    or len(closed["closed"]) != 1 or closed.get("closed_count") != 1):
+                problems.append("scratch close was not confirmed")
+        except Exception as e:
+            problems.append(f"scratch close raised: {e}")
+        state, problem = _reload_census(call, "scratch cleanup")
+        if problem:
+            return False, "; ".join(problems + [problem])
+        if scratch in {row["document_handle"] for row in state["rows"]}:
+            problems.append("owned scratch remains open")
+    handles = {row["document_handle"] for row in state["rows"]}
+    target = home["handle"] if home["handle"] in handles else home["document_id"]
+    if not target:
+        matches = [row for row in state["rows"] if row.get("name") == home["name"]]
+        if len(matches) != 1:
+            return False, "; ".join(problems + ["unsaved home is not uniquely identifiable"])
+        target = matches[0]["document_handle"]
+    try:
+        is_error, activated = call("doc_activate", {
+            "name": target, "expect_document": state["handle"]})
+        if is_error:
+            problems.append("original home activation refused: " + str(activated)[:NOTE_MAX])
+    except Exception as e:
+        problems.append(f"original home activation raised: {e}")
+    restored, problem = _reload_census(call, "home restoration")
+    if problem:
+        problems.append(problem)
+    elif (_reload_handle(target) and restored["handle"] != target) or (
+            not _reload_handle(target) and restored["document_id"] != target):
+        problems.append("original home identity did not read back")
+    if problems:
+        return False, "; ".join(problems)
+    return True, "scratch cleanup and home restoration verified"
+
+
+def _reload_owned_handle(call, old_handle, nonce_name):
+    """Recover scratch ownership from its surviving handle or active nonce."""
+    state, problem = _reload_census(call, "scratch ownership")
+    if problem:
+        return None
+    if old_handle in {row["document_handle"] for row in state["rows"]}:
+        return old_handle
+    try:
+        is_error, payload = call("param_get", {"name": nonce_name})
+    except Exception:
+        return None
+    par = payload.get("parameter") if isinstance(payload, dict) else None
+    if (not is_error and isinstance(par, dict) and par.get("name") == nonce_name
+            and par.get("value") == 17):
+        return state["handle"]
+    return None
+
+
+def _reload_document_probe(call, old_handle, home, nonce_name):
+    def ask(tool, args):
+        try:
+            is_error, payload = call(tool, args)
+        except Exception as e:
+            return True, str(e)
+        return is_error, payload
+
+    payload, problem = _reload_census(call, "post-reload")
+    if problem:
+        return False, problem, None
+    fresh = payload["handle"]
+    if fresh == old_handle:
+        return False, "post-reload scratch handle was not fresh", None
+    is_error, nonce = ask("param_get", {"name": nonce_name})
+    par = (nonce or {}).get("parameter") if isinstance(nonce, dict) else None
+    if (is_error or not isinstance(par, dict) or par.get("name") != nonce_name
+            or par.get("value") != 17):
+        return False, "post-reload nonce did not identify the owned scratch", None
+    is_error, stale = ask("param_add", {"name": "ReloadStale", "expression": "1 mm",
+                                        "expect_document": old_handle})
+    if not is_error or "unknown_document_handle" not in str(stale):
+        return False, "the expired scratch handle did not refuse before writing", fresh
+    is_error, absent = ask("param_get", {"name": "ReloadStale"})
+    if not is_error or "Parameter not found" not in str(absent):
+        return False, "the stale-handle parameter was not absent", fresh
+    is_error, added = ask("param_add", {"name": "ReloadRecovered", "expression": "2 mm",
+                                        "expect_document": fresh})
+    par = (added or {}).get("parameter") if isinstance(added, dict) else None
+    if (is_error or not isinstance(par, dict) or added.get("added") is not True
+            or par.get("name") != "ReloadRecovered" or par.get("value") != 2):
+        return False, "fresh scratch handle did not write and read back", fresh
+    is_error, read_back = ask("param_get", {"name": "ReloadRecovered"})
+    par = (read_back or {}).get("parameter") if isinstance(read_back, dict) else None
+    if is_error or not isinstance(par, dict) or par.get("value") != 2:
+        return False, "fresh scratch parameter did not read back", fresh
+    is_error, deleted = ask("param_delete", {"name": "ReloadRecovered",
+                                              "expect_document": fresh})
+    if is_error or not isinstance(deleted, dict) or deleted.get("deleted") is not True:
+        return False, "fresh scratch cleanup did not delete the recovery parameter", fresh
+    is_error, absent = ask("param_get", {"name": "ReloadRecovered"})
+    if not is_error or "Parameter not found" not in str(absent):
+        return False, "fresh scratch cleanup was not read back", fresh
+    return True, "fresh scratch handle recovered and stale handle refused", fresh
+
 def reload_smoke(rows, notes, valued=None, down_polls=_RELOAD_DOWN_POLLS,
                  up_polls=_RELOAD_UP_POLLS, expected_attestation=None):
-    """Reload the add-in, watch the server go down and come back, and read the fresh registry.
-
-    Appends ONE row for sys_reload_addin and, only on a restart it OBSERVED end to end, registers
-    the tool in 'valued' - the receipt's covered bucket - the same way a STEPS value predicate
-    does. Its pass reads values: the scheduling sentence off the call, the two /health states, and
-    the tool's own name out of the restarted registry.
-
-    A beat that cannot confirm the restart appends NO row and prints why. The tool then falls to
-    its EXCLUDED entry and the receipt keeps a skipped row, which is the honest reading of what
-    happened: nothing was observed to claim, and the evidence every other tool's rows carry was
-    gathered before this beat ran and is untouched by it."""
-    # the wire read and the shot-list note as the facade holds them - see verify_core.facade
+    """Reload the add-in and verify a run-owned document survives with fresh identity."""
     call, STORY = facade("call"), facade("STORY")
+    home, problem = _reload_census(call, "pre-reload")
+    if problem:
+        print("  reload beat: " + problem)
+        return
+    if home["document_id"] is not None and (
+            not isinstance(home["document_id"], str) or not home["document_id"].startswith("urn:")):
+        print("  reload beat: original home lineage is invalid")
+        return
+    if not home["document_id"]:
+        matches = [row for row in home["rows"] if row.get("name") == home["name"]]
+        if not home["name"] or len(matches) != 1:
+            print("  reload beat: unsaved home name is not unique")
+            return
     try:
+        is_error, created = call("doc_new", {"expect_document": home["handle"]})
+    except Exception as e:
+        print("  reload beat: could not create owned scratch: " + str(e)[:NOTE_MAX])
+        return
+    canary = (created or {}).get("document_handle") if isinstance(created, dict) else None
+    if (is_error or not isinstance(created, dict) or created.get("created") is not True
+            or not _reload_handle(canary)
+            or canary in {row["document_handle"] for row in home["rows"]}):
+        print("  reload beat: owned scratch creation was not verified")
+        return
+    nonce_name = "ReloadNonce" + canary.split(":")[-1][:8]
+    fresh = None
+    cleanup_note = None
+    try:
+        is_error, added = call("param_add", {
+            "name": nonce_name, "expression": "17 mm", "expect_document": canary})
+        par = (added or {}).get("parameter") if isinstance(added, dict) else None
+        if (is_error or not isinstance(par, dict) or added.get("added") is not True
+                or par.get("name") != nonce_name or par.get("value") != 17):
+            raise RuntimeError("owned scratch nonce was not verified")
+        is_error, before_nonce = call("param_get", {"name": nonce_name})
+        par = (before_nonce or {}).get("parameter") if isinstance(before_nonce, dict) else None
+        if (is_error or not isinstance(par, dict) or par.get("name") != nonce_name
+                or par.get("value") != 17):
+            raise RuntimeError("owned scratch nonce did not read back before reload")
         is_error, payload = call("sys_reload_addin", {})
+        if is_error or "Reload scheduled" not in str(payload):
+            raise RuntimeError(f"no reload was scheduled - {str(payload)[:NOTE_MAX]}")
+        current_attestation = None
+        if expected_attestation is not None:
+            for attempt in range(up_polls):
+                if attempt:
+                    time.sleep(_RELOAD_PROBE_GAP_S)
+                try:
+                    current_health = facade("health_gate")()
+                    current_attestation = facade("attestation_identity")(current_health)
+                except (OSError, ValueError, SystemExit):
+                    continue
+                if current_attestation and all(
+                        current_attestation.get(field) != expected_attestation.get(field)
+                        for field in ("load_id", "session_id")):
+                    break
+            else:
+                raise RuntimeError("reload did not establish a new load and session identity")
+            if not all(current_attestation.get(field) == expected_attestation.get(field)
+                       for field in ("implementation_fingerprint", "schema_fingerprint")):
+                raise RuntimeError("new server did not prove the expected build")
+            if "sys_reload_addin" not in facade("registered_tools")(current_health):
+                raise RuntimeError("restarted tools/list did not return sys_reload_addin")
+            restart_note = "new load and session identities proved the expected build"
+        else:
+            if not _poll_health(False, down_polls):
+                raise RuntimeError(f"/health kept answering across {down_polls} probes")
+            if not _poll_health(True, up_polls):
+                raise RuntimeError(f"/health did not answer again within {up_polls} probes")
+            restart_note = f"/health stopped answering and answered again as {SERVER_NAME}"
+        try:
+            found = call("sys_find_tool", {"query": _RELOAD_SMOKE_QUERY})[1]
+        except Exception as e:
+            raise RuntimeError(f"registry read did not come back: {e}")
+        matches = found.get("tools") or [] if isinstance(found, dict) else []
+        names = [m.get("tool") for m in matches if isinstance(m, dict)]
+        if "sys_reload_addin" not in names:
+            raise RuntimeError("restarted registry did not return sys_reload_addin")
+        ok, note, fresh = _reload_document_probe(call, canary, home, nonce_name)
+        if not ok:
+            raise RuntimeError(note)
+        cleanup_ok, cleanup_note = _reload_cleanup(call, fresh, home)
+        if not cleanup_ok:
+            raise RuntimeError(cleanup_note)
+        rows.append(("sys_reload_addin", "pass",
+                     f"{restart_note}; the restarted "
+                     f"registry returned {len(names)} match(es) for '{_RELOAD_SMOKE_QUERY}', "
+                     "sys_reload_addin among them"))
+        notes["sys_reload_addin"] = STORY.get("sys_reload_addin", "")
+        if valued is not None:
+            valued.add("sys_reload_addin")
+        return current_attestation
     except Exception as e:
-        # the teardown can cut the response short; nothing was observed either way
-        is_error, payload = True, f"the reload call did not come back: {e}"
-    if is_error or "Reload scheduled" not in str(payload):
-        print(f"  reload beat: no reload was scheduled - {str(payload)[:NOTE_MAX]}")
-        return
-    if not _poll_health(False, down_polls):
-        print(f"  reload beat: /health kept answering across {down_polls} probes - the restart was "
-              "not observed, so the run claims nothing for it")
-        return
-    if not _poll_health(True, up_polls):
-        print(f"  reload beat: /health did not answer again within {up_polls} probes - the add-in "
-              "is down; start it from Fusion's Scripts and Add-Ins dialog (Shift+S)")
-        return
-    current_attestation = None
-    if expected_attestation is not None:
-        current_health = facade("health_gate")()
-        current_attestation = facade("attestation_identity")(current_health)
-        same_build = all(current_attestation and current_attestation.get(field)
-                         == expected_attestation.get(field)
-                         for field in ("implementation_fingerprint", "schema_fingerprint"))
-        new_generation = all(current_attestation and current_attestation.get(field)
-                             != expected_attestation.get(field)
-                             for field in ("load_id", "session_id"))
-        if not same_build or not new_generation:
-            print("  reload beat: the new server did not prove the expected build and new session")
-            return
-        if "sys_reload_addin" not in facade("registered_tools")(current_health):
-            print("  reload beat: the restarted tools/list did not return sys_reload_addin")
-            return
-    try:
-        found = call("sys_find_tool", {"query": _RELOAD_SMOKE_QUERY})[1]
-    except Exception as e:
-        found = f"the registry read did not come back: {e}"
-    # a refusal answers with the error TEXT rather than a payload, so the match list reads empty
-    # off it and needs no separate error flag
-    matches = found.get("tools") or [] if isinstance(found, dict) else []
-    names = [m.get("tool") for m in matches if isinstance(m, dict)]
-    if "sys_reload_addin" not in names:
-        print("  reload beat: the restarted server answered, but its registry did not return "
-              f"sys_reload_addin - {str(found)[:NOTE_MAX]}")
-        return
-    rows.append(("sys_reload_addin", "pass",
-                 f"/health stopped answering and answered again as {SERVER_NAME}; the restarted "
-                 f"registry returned {len(names)} match(es) for '{_RELOAD_SMOKE_QUERY}', "
-                 "sys_reload_addin among them"))
-    notes["sys_reload_addin"] = STORY.get("sys_reload_addin", "")
-    if valued is not None:
-        valued.add("sys_reload_addin")
-    return current_attestation
+        print("  reload beat: " + str(e)[:NOTE_MAX])
+    finally:
+        if cleanup_note is None:
+            owned = fresh or _reload_owned_handle(call, canary, nonce_name)
+            cleanup_ok, cleanup_note = _reload_cleanup(call, owned, home)
+        if cleanup_note and not cleanup_note.startswith("scratch cleanup and home restoration"):
+            print("  reload beat: cleanup unresolved for " + canary
+                  + ": " + cleanup_note[:NOTE_MAX])

@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.join(TESTS_DIR, "live"))
 import tool_verify  # noqa: E402
 import verify_core  # noqa: E402  probe_capabilities/capability_skip_reason read their tables here
 import verify_runner  # noqa: E402  source_hash reads SRC_ROOT/_HERE off ITS namespace, not the facade
+import verify_acts_doc  # noqa: E402  canonical document-handle lifecycle rows
 
 _ATTESTATION = {"implementation_fingerprint": "a" * 64, "schema_fingerprint": "b" * 64,
                 "load_id": "fixture-load", "session_id": "fixture-session"}
@@ -329,7 +330,8 @@ class _Harness:
         return False, self.answer if self.answer is not None else {"n": 1}
 
     def _write(self, rows, version, date, src_hash, path=None, notes=None, act_modes=None, attestation=None):
-        self.wrote.update(ledger=dict(rows), src_hash=src_hash, attestation=attestation)
+        self.wrote.update(ledger=dict(rows), src_hash=src_hash, attestation=attestation,
+                          act_modes=list(act_modes or []))
         return "VERIFIED_TOOLS.md"
 
     def tools_called(self):
@@ -357,20 +359,37 @@ class TestTheReceiptContract:
         assert h.run() == 1 and not h.wrote
         assert "NOT rewritten" in capsys.readouterr().out
 
+    def test_a_failed_poll_stops_before_act_completion_and_later_acts(
+            self, monkeypatch, tmp_path):
+        acts = [
+            ("ACT P", None, [("a_get", {}, "ok", None)], []),
+            ("ACT LATER", None, [("b_get", {}, "ok", None)], []),
+        ]
+        h = _Harness(monkeypatch, tmp_path, acts=acts, poll_after={
+            "ACT P": {"narrative": "Mill", "fallback": []}})
+        monkeypatch.setattr(
+            tool_verify, "poll_generation",
+            lambda rows, notes, setup, valued=None, **kw:
+            rows.append(("cam_get_status", "FAIL", "generation failed")))
+        assert h.run(run_id="poll-fail") == 1
+        assert "b_get" not in h.tools_called() and "reload beat" not in h.tools_called()
+        assert not Path(tool_verify.run_state_path("poll-fail")).exists()
+
     def test_an_acts_own_poll_budget_reaches_the_generation_poll(self, monkeypatch, tmp_path):
         # a census act launches sixteen operations at once; the runner's default budget would end
         # the poll while the work is still running and fail an act that is only slow.
         polled = []
         monkeypatch.setattr(tool_verify, "poll_generation",
-                            lambda rows, notes, setup, valued=None, max_polls=40:
-                            polled.append((setup, max_polls)))
+                            lambda rows, notes, setup, valued=None, max_polls=40,
+                            document_pin=None:
+                            polled.append((setup, max_polls, document_pin)))
         acts = [("ACT P", None, [("a_get", {}, "ok", None)], []),
                 ("ACT Q", None, [("a_get", {}, "ok", None)], [])]
         h = _Harness(monkeypatch, tmp_path, acts=acts, poll_after={
             "ACT P": {"narrative": "Mill", "fallback": [], "max_polls": 90},
             "ACT Q": {"narrative": "Turn", "fallback": []}})
         h.run()
-        assert polled == [("Mill", 90), ("Turn", 40)]
+        assert polled == [("Mill", 90, None), ("Turn", 40, None)]
 
 
 class TestResumableRun:
@@ -388,6 +407,22 @@ class TestResumableRun:
         # the document is saved as the chunk leaves it, so the next chunk can refuse another one
         assert state["document"]["name"] == "Untitled"
         assert "--run r1 --resume" in capsys.readouterr().out
+
+    def test_a_chunk_persists_home_and_legacy_state_cannot_resume(
+            self, monkeypatch, tmp_path, capsys):
+        first = _Harness(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            tool_verify, "registered_tools", _registered(["a_get", "b_get"], {"a_get"}))
+        assert first.run(run_id="r1", acts_spec="ACT A") == 0
+        state = tool_verify.load_run_state("r1")
+        assert state["home_document"]["document_handle"] == "session:fixture-document"
+        state.pop("home_document")
+        tool_verify.save_run_state("r1", state)
+
+        second = _Harness(monkeypatch, tmp_path)
+        assert second.run(run_id="r1", resume=True) == 1
+        assert "b_get" not in second.tools_called()
+        assert "no original active document identity" in capsys.readouterr().out
 
     def test_the_resume_carries_the_ctx_and_stamps_from_the_union(self, monkeypatch, tmp_path):
         first = _Harness(monkeypatch, tmp_path)
@@ -677,46 +712,59 @@ class TestResumableRun:
             assert not path.exists()
             assert list(tmp_path.iterdir()) == []
 
-    def test_a_capability_skipped_act_is_checkpointed_before_the_next_act(
+    def test_the_cloud_link_quarantine_is_checkpointed_and_not_replayed(
             self, monkeypatch, tmp_path):
+        link_name = "ACT 11b2 - CLOUD: LINK GUARD REVIEW"
+        link_act = next(act for act in tool_verify.ACTS if act[0] == link_name)
         acts = [
-            ("ACT G", None, [("a_get", {}, "ok", None)], []),
+            link_act,
             ("ACT B", None, [("b_get", {}, lambda payload: payload["n"] == 1, None)], []),
         ]
+        link_tools = {step[0] for step in tool_verify.judged_steps(link_act[2])}
+        registered = sorted(link_tools | {"b_get"})
         first = _Harness(monkeypatch, tmp_path, acts=acts)
-        monkeypatch.setattr(tool_verify, "ACT_NEEDS", {"ACT G": "fake_tier"})
-        probes = []
-        monkeypatch.setattr(verify_runner, "probe_capabilities",
-                            lambda capabilities: probes.append(tuple(capabilities))
-                            or {"fake_tier": False})
+        monkeypatch.setattr(tool_verify, "registered_tools", _registered(registered))
+        monkeypatch.setattr(
+            tool_verify, "ACT_NEEDS", {link_name: tool_verify.CLOUD_LINK_CRASH_REVIEW})
         first_call = first._call
 
         def interrupted_call(tool, args):
             if tool == "b_get":
                 raise RuntimeError("chunk interrupted")
+            if tool == "doc_new":
+                raise AssertionError("quarantined link act dispatched")
             return first_call(tool, args)
 
         monkeypatch.setattr(tool_verify, "call", interrupted_call)
         with pytest.raises(RuntimeError, match="chunk interrupted"):
             first.run(run_id="r1")
         saved = tool_verify.load_run_state("r1")
-        assert saved["acts_done"] == ["ACT G"]
-        assert saved["act_modes"] == [["ACT G", "skipped(fake_tier not entitled)"]]
-        assert saved["gated"] == {"a_get": "fake_tier not entitled"}
-        assert saved["entitlements"] == {"fake_tier": False}
+        reason = tool_verify.capability_skip_reason(
+            tool_verify.CLOUD_LINK_CRASH_REVIEW,
+            {tool_verify.CLOUD_LINK_CRASH_REVIEW: False})
+        assert saved["acts_done"] == [link_name]
+        assert saved["act_modes"] == [[link_name, f"skipped({reason})"]]
+        assert set(saved["gated"]) == link_tools
+        assert set(saved["gated"].values()) == {reason}
+        assert saved["entitlements"] == {tool_verify.CLOUD_LINK_CRASH_REVIEW: False}
         assert saved["source_hash"] == "0" * 64
         assert saved["attestation"] == _ATTESTATION
         assert saved["document"]["name"] == "Untitled"
+        assert "doc_new" not in first.tools_called()
 
         second = _Harness(monkeypatch, tmp_path, acts=acts)
-        monkeypatch.setattr(tool_verify, "ACT_NEEDS", {"ACT G": "fake_tier"})
+        monkeypatch.setattr(tool_verify, "registered_tools", _registered(registered))
+        monkeypatch.setattr(
+            tool_verify, "ACT_NEEDS", {link_name: tool_verify.CLOUD_LINK_CRASH_REVIEW})
         monkeypatch.setattr(verify_runner, "probe_capabilities",
                             lambda capabilities: (_ for _ in ()).throw(
-                                AssertionError("completed gated act was repeated")))
+                                AssertionError("completed quarantine was repeated")))
         assert second.run(run_id="r1", resume=True) == 0
-        assert "a_get" not in second.tools_called()
-        assert second.wrote["ledger"] == {
-            "a_get": "skipped: fake_tier not entitled", "b_get": "covered"}
+        assert "doc_new" not in second.tools_called()
+        assert second.wrote["ledger"]["joint_drive"] == "skipped: " + reason
+        assert second.wrote["ledger"]["b_get"] == "covered"
+        assert second.wrote["act_modes"] == [
+            (link_name, f"skipped({reason})"), ("ACT B", "narrative")]
 
 
 class TestSourceDriftDuringRun:
@@ -1055,6 +1103,26 @@ class TestCapabilityTier:
         assert reason.startswith("cloud_tier not entitled")
         assert "cloud_config.local.json" in reason and "hub, project, folder" in reason
 
+    def test_the_cloud_link_review_is_a_separate_dormant_act_before_drawing(self):
+        names = [name for name, _pre, _narr, _fb in tool_verify._ACT_PROGRAM]
+        link = "ACT 11b2 - CLOUD: LINK GUARD REVIEW"
+        assert names.index("ACT 11b - CLOUD: THE SAVED DOCUMENT") < names.index(link)
+        assert names.index(link) < names.index("ACT 11c - CLOUD: THE DRAWING")
+        program = {name: narr for name, _pre, narr, _fb in tool_verify._ACT_PROGRAM}
+        assert program[link] == tool_verify._CLOUD_LINK
+        assert not [step for step in tool_verify._CLOUD_DOC if step[0] == "joint_drive"]
+        assert tool_verify.ACT_NEEDS[link] == tool_verify.CLOUD_LINK_CRASH_REVIEW
+        for safe in ("ACT 11a - CLOUD: THE DATA MODEL",
+                     "ACT 11b - CLOUD: THE SAVED DOCUMENT",
+                     "ACT 11c - CLOUD: THE DRAWING"):
+            assert tool_verify.ACT_NEEDS[safe] == tool_verify.CLOUD_TIER
+        assert tool_verify._cloud_link_crash_review_probe() is False
+        reason = tool_verify.capability_skip_reason(
+            tool_verify.CLOUD_LINK_CRASH_REVIEW,
+            {tool_verify.CLOUD_LINK_CRASH_REVIEW: False})
+        assert "deferred" in reason and "unverified" in reason
+        assert "owner-approved crash review" in reason
+
     @staticmethod
     def _detailed(monkeypatch):
         """A capability whose probe answers false and whose skip row carries a detail sentence."""
@@ -1126,7 +1194,10 @@ class TestCapabilityTier:
                 return False, {"machining_capabilities": {"observed_generation": flags}}
             if tool == "doc_get":
                 return False, {"active": {"name": "Untitled", "document_id": None,
-                                           "document_handle": "session:test"}}
+                                           "document_handle": "session:test"},
+                               "document_id": None, "truncated": False, "open_count": 1,
+                               "open_documents": [{"name": "Untitled", "is_active": True,
+                                                   "document_handle": "session:test"}]}
             if tool == "design_get":
                 return False, {"feature_count": 1}
             if tool == "doc_new":
@@ -1201,7 +1272,7 @@ class TestCapabilityTier:
             monkeypatch, acts, {"ACT E": "machining_extension"}, entitled=True,
             tools=["a_get", "doc_new"])
         assert seen == ["doc_get", "design_get", "doc_new", "doc_get", "design_get",
-                        "workspace_orient", "a_get"]
+                        "workspace_orient", "a_get", "doc_get", "design_get", "doc_get"]
         assert ledger["a_get"] == "covered"
 
     def test_a_gated_act_polls_nothing(self, monkeypatch):
@@ -1221,11 +1292,13 @@ class TestCapabilityTier:
         # would leave the rest uncertified while the run still read green.
         polled = []
         monkeypatch.setattr(tool_verify, "poll_generation",
-                            lambda rows, notes, setup, valued=None: polled.append(setup))
+                            lambda rows, notes, setup, valued=None, document_pin=None:
+                            polled.append((setup, document_pin)))
         acts = [("ACT G", None, [("a_get", {}, "ok", None)], [])]
-        self._run(monkeypatch, acts, {}, entitled=True, tools=["a_get", "workspace_orient"],
+        self._run(monkeypatch, acts, {}, entitled=True,
+                  tools=["a_get", "doc_new", "workspace_orient"],
                   poll_after={"ACT G": {"narrative": ["One", "Two"], "fallback": ["One", "Two"]}})
-        assert polled == ["One", "Two"]
+        assert polled == [("One", "session:test"), ("Two", "session:test")]
 
     def test_an_unreadable_probe_holds_the_steps_back_and_says_so(self, monkeypatch):
         def call(tool, args):
@@ -1504,7 +1577,7 @@ class TestFacadeLateBinding:
                                                         "empty_toolpaths": []}))
         monkeypatch.setattr(tool_verify, "STORY", {"cam_get_status": "stubbed story line"})
         rows, notes, valued = [], {}, set()
-        tool_verify.poll_generation(rows, notes, "DemoSetup", valued=valued)
+        tool_verify.poll_generation(rows, notes, "FacadeSetup", valued=valued)
         assert rows == [("cam_get_status", "pass", "4 valid, non-empty toolpaths")]
         assert notes["cam_get_status"] == "stubbed story line"
         assert valued == {"cam_get_status"}
@@ -1526,15 +1599,64 @@ _SCHEDULED = ("Reload scheduled. Make your next tool call after ~3 seconds - the
 
 
 def _reload_wire(reload_answer=(False, _SCHEDULED), found=("sys_reload_addin", "doc_get")):
-    """The two wire calls the reload beat makes, stubbed: sys_reload_addin's own answer, and the
-    registry search the smoke reads."""
+    """A mutable session for the reload lifecycle without Autodesk objects."""
+    state = {"active": "session:home", "documents": {
+        "session:home": "Home", "session:other": "Other"}, "parameters": {}, "seen": []}
+
     def call(tool, args):
+        state["seen"].append((tool, dict(args)))
+        if tool == "doc_get":
+            active = state["active"]
+            return False, {"active": {"name": state["documents"][active],
+                                      "document_handle": active},
+                           "truncated": False, "open_count": len(state["documents"]),
+                           "open_documents": [{"name": name, "document_handle": handle,
+                                               "is_active": handle == active}
+                                              for handle, name in state["documents"].items()]}
+        if tool == "doc_new":
+            state["active"] = "session:canary-old"
+            state["documents"][state["active"]] = "Canary"
+            return False, {"created": True, "document_handle": state["active"]}
         if tool == "sys_reload_addin":
             if isinstance(reload_answer, Exception):
                 raise reload_answer
+            if reload_answer == (False, _SCHEDULED):
+                state["documents"] = {handle + "-new": name
+                                      for handle, name in state["documents"].items()}
+                state["active"] += "-new"
             return reload_answer
+        if tool == "doc_activate":
+            assert args.get("expect_document") == state["active"]
+            if args["name"] not in state["documents"]:
+                return True, "unknown_document_handle"
+            state["active"] = args["name"]
+            return False, {"activated": True}
+        if tool == "doc_close":
+            assert args.get("expect_document") == state["active"]
+            name = state["documents"].pop(args["name"])
+            if state["active"] == args["name"]:
+                state["active"] = next(h for h, n in state["documents"].items() if n == "Other")
+            return False, {"closed": [name], "closed_count": 1}
+        if tool in ("param_add", "param_delete"):
+            expected = args.get("expect_document")
+            if expected not in state["documents"]:
+                return True, {"blocked_by": ["unknown_document_handle"]}
+            assert expected == state["active"]
+            if tool == "param_delete":
+                state["parameters"].pop(args["name"])
+                return False, {"deleted": True}
+            value = int(args["expression"].split()[0])
+            state["parameters"][args["name"]] = value
+            return False, {"added": True, "parameter": {"name": args["name"], "value": value}}
+        if tool == "param_get":
+            assert set(args) == {"name"}
+            if args["name"] in state["parameters"]:
+                return False, {"parameter": {"name": args["name"],
+                                             "value": state["parameters"][args["name"]]}}
+            return True, f"Parameter not found: '{args['name']}'."
         return False, {"query": args.get("query"), "tool_count": len(found),
                        "tools": [{"tool": name} for name in found]}
+    call.state = state
     return call
 
 
@@ -1588,6 +1710,52 @@ class TestReloadBeat:
         assert "answered again" in rows[0][2] and "sys_reload_addin among them" in rows[0][2]
         assert notes["sys_reload_addin"] == "stubbed reload story"
         assert valued == {"sys_reload_addin"}
+
+    @pytest.mark.parametrize("failure", ["nonce", "reload", "registry", "fresh_write"])
+    def test_failed_reload_stage_cleans_owned_scratch_and_restores_home(
+            self, monkeypatch, failure):
+        wire = _reload_wire()
+
+        def call(tool, args):
+            if ((failure == "nonce" and tool == "param_add"
+                 and args["name"].startswith("ReloadNonce"))
+                    or (failure == "reload" and tool == "sys_reload_addin")
+                    or (failure == "registry" and tool == "sys_find_tool")
+                    or (failure == "fresh_write" and tool == "param_add"
+                        and args["name"] == "ReloadRecovered")):
+                return True, "deliberate stage failure"
+            return wire(tool, args)
+
+        rows, notes, valued = self._drive(monkeypatch, call, _health(True, False, True))
+        assert not rows and not notes and not valued
+        assert sorted(wire.state["documents"].values()) == ["Home", "Other"]
+        assert wire.state["documents"][wire.state["active"]] == "Home"
+        assert any(tool == "doc_close" for tool, _args in wire.state["seen"])
+
+    def test_close_refusal_preserves_failure_and_still_restores_home(self, monkeypatch):
+        wire = _reload_wire()
+
+        def call(tool, args):
+            return (True, "close refused") if tool == "doc_close" else wire(tool, args)
+
+        rows, _notes, valued = self._drive(monkeypatch, call, _health(True, False, True))
+        assert not rows and not valued
+        assert "Canary" in wire.state["documents"].values()
+        assert wire.state["documents"][wire.state["active"]] == "Home"
+
+    @pytest.mark.parametrize("count", [True, 2.0, None])
+    def test_invalid_census_count_refuses_before_scratch_creation(self, monkeypatch, count):
+        wire = _reload_wire()
+
+        def call(tool, args):
+            error, payload = wire(tool, args)
+            if tool == "doc_get":
+                payload["open_count"] = count
+            return error, payload
+
+        rows, _notes, valued = self._drive(monkeypatch, call, _health(True, False, True))
+        assert not rows and not valued
+        assert [tool for tool, _args in wire.state["seen"]] == ["doc_get"]
 
     def test_a_server_that_never_goes_down_banks_nothing(self, monkeypatch):
         # The false positive the down-then-up watch exists to refuse: the reload is DEFERRED, so a
@@ -1677,9 +1845,6 @@ class TestReloadBeat:
             seen.append(tool)
             if tool == "a_get":
                 return False, {"n": 1}
-            if tool == "doc_get":
-                return False, {"active": {"name": "Untitled", "document_id": None,
-                                           "document_handle": "session:test"}}
             if tool == "design_get":
                 return False, {"feature_count": 1}
             return wire(tool, args)
@@ -1711,7 +1876,9 @@ class TestReloadBeat:
 
         assert tool_verify.run(write_json=False) == 0
         assert ledger == {"a_get": "covered", "sys_reload_addin": "covered"}
-        assert seen == ["a_get", "sys_reload_addin", "sys_find_tool"]
+        assert seen[0] == "a_get"
+        assert seen.index("sys_reload_addin") < seen.index("sys_find_tool")
+        assert "param_add" in seen and "param_delete" in seen
         assert [row["session_id"] for row in registry_health] == [
             "fixture-session", "fixture-session-2"]
 
@@ -1843,7 +2010,7 @@ class _DocumentWire:
     """A session whose exact handles and active tab change like the document tools report."""
 
     def __init__(self, drift_after_write=False, drift_after_doc_get=None,
-                 invalid_handle_tool=None):
+                 invalid_handle_tool=None, refuse_close=False):
         self.documents = {
             "session:home": {"name": "Home", "document_id": "urn:home"},
             "session:intruder": {"name": "Intruder", "document_id": "urn:intruder"},
@@ -1852,6 +2019,7 @@ class _DocumentWire:
         self.drift_after_write = drift_after_write
         self.drift_after_doc_get = drift_after_doc_get
         self.invalid_handle_tool = invalid_handle_tool
+        self.refuse_close = refuse_close
         self.seen = []
         self.created = 0
         self.doc_reads = 0
@@ -1900,6 +2068,8 @@ class _DocumentWire:
             target = args.get("name") or self.active
             if target not in self.documents:
                 return True, "not open"
+            if self.refuse_close:
+                return True, "close refused"
             name = self.documents.pop(target)["name"]
             if self.active == target:
                 self.active = list(self.documents)[-1]
@@ -1918,7 +2088,7 @@ class _DocumentWire:
 
 
 def _run_document_program(monkeypatch, tmp_path, wire, acts, writes, run_id=None,
-                          shots_dir=None):
+                          shots_dir=None, poll_after=None, reload_smoke=None):
     wrote = {}
     names = sorted({step[0] for _name, _pre, narrative, fallback in acts
                     for step in list(narrative) + list(fallback or [])
@@ -1932,9 +2102,10 @@ def _run_document_program(monkeypatch, tmp_path, wire, acts, writes, run_id=None
     monkeypatch.setattr(
         tool_verify, "write_verified",
         lambda rows, *a, **k: wrote.update(ledger=dict(rows)) or "VERIFIED_TOOLS.md")
-    monkeypatch.setattr(tool_verify, "reload_smoke",
-                        lambda rows, notes, valued=None, **kw: _reloaded_attestation())
-    monkeypatch.setattr(tool_verify, "POLL_AFTER", {})
+    monkeypatch.setattr(
+        tool_verify, "reload_smoke",
+        reload_smoke or (lambda rows, notes, valued=None, **kw: _reloaded_attestation()))
+    monkeypatch.setattr(tool_verify, "POLL_AFTER", poll_after or {})
     monkeypatch.setattr(tool_verify, "EXCLUDED", {})
     monkeypatch.setattr(tool_verify, "STORY", {})
     monkeypatch.setattr(tool_verify, "ACT_NEEDS", {})
@@ -1945,6 +2116,123 @@ def _run_document_program(monkeypatch, tmp_path, wire, acts, writes, run_id=None
 
 
 class TestWithinActDocumentPin:
+    def test_canonical_failure_stops_steps_poll_and_acts_then_restores_home(
+            self, monkeypatch, tmp_path, capsys):
+        wire = _DocumentWire()
+        polled = []
+        monkeypatch.setattr(
+            tool_verify, "poll_generation",
+            lambda rows, notes, setup, valued=None, **kw: polled.append(setup))
+        acts = [
+            ("ACT 0 - OVERTURE", None, [
+                ("doc_new", {}, lambda p: p["created"] is True, None),
+                ("a_get", {}, lambda p: p.get("ok") is False, None),
+                ("model_write", {}, lambda p: p["changed"] is True, None),
+            ], []),
+            ("ACT LATER", None, [
+                ("model_write", {}, lambda p: p["changed"] is True, None),
+            ], []),
+        ]
+        code, wrote = _run_document_program(
+            monkeypatch, tmp_path, wire, acts, {"doc_new", "model_write"},
+            run_id="fail-fast", poll_after={
+                "ACT 0 - OVERTURE": {"narrative": "Setup", "fallback": []}})
+        called = [tool for tool, _args in wire.seen]
+        assert code == 1 and not wrote and not polled
+        assert called.count("doc_new") == 1 and "model_write" not in called
+        assert wire.active == "session:home" and "session:new1" not in wire.documents
+        assert called.index("doc_close") < called.index("doc_activate")
+        footer = capsys.readouterr().out
+        assert "failed invocation is not resumable" in footer and "--resume" not in footer
+
+    def test_refused_story_close_stays_fatal_but_home_is_restored(
+            self, monkeypatch, tmp_path):
+        wire = _DocumentWire(refuse_close=True)
+        acts = [("ACT 0 - OVERTURE", None, [
+            ("doc_new", {}, lambda p: p["created"] is True, None),
+            ("a_get", {}, lambda p: p.get("ok") is False, None),
+        ], [])]
+        code, wrote = _run_document_program(
+            monkeypatch, tmp_path, wire, acts, {"doc_new"})
+        assert code == 1 and not wrote and wire.active == "session:home"
+        assert "session:new1" in wire.documents
+        called = [tool for tool, _args in wire.seen]
+        assert called.index("doc_close") < called.index("doc_activate")
+
+    def test_unrelated_activated_tab_is_restored_but_never_closed(
+            self, monkeypatch, tmp_path):
+        wire = _DocumentWire()
+        acts = [("ACT SWITCH", None, [
+            ("doc_activate", {"name": "session:intruder"}, "ok", None),
+            ("a_get", {}, lambda p: p.get("ok") is False, None),
+        ], [])]
+        code, wrote = _run_document_program(
+            monkeypatch, tmp_path, wire, acts, {"doc_activate"})
+        called = [tool for tool, _args in wire.seen]
+        assert code == 1 and not wrote and wire.active == "session:home"
+        assert "session:intruder" in wire.documents and "doc_close" not in called
+
+    def test_argument_exception_stops_and_restores_home(self, monkeypatch, tmp_path):
+        wire = _DocumentWire()
+        acts = [("ACT 0 - OVERTURE", None, [
+            ("doc_new", {}, lambda p: p["created"] is True, None),
+            ("a_get", lambda _ctx: 1 / 0, "ok", None),
+            ("model_write", {}, lambda p: p["changed"] is True, None),
+        ], [])]
+        code, wrote = _run_document_program(
+            monkeypatch, tmp_path, wire, acts, {"doc_new", "model_write"})
+        called = [tool for tool, _args in wire.seen]
+        assert code == 1 and not wrote and "model_write" not in called
+        assert wire.active == "session:home" and "session:new1" not in wire.documents
+
+    def test_result_callback_exception_stops_and_restores_home(self, monkeypatch, tmp_path):
+        wire = _DocumentWire()
+        original = verify_runner.run_steps
+        raised = []
+
+        def wrapped(*args, **kwargs):
+            def on_result(_tool, _status, _note):
+                if not raised:
+                    raised.append(True)
+                    raise RuntimeError("observer failed")
+            return original(*args, on_result=on_result, **kwargs)
+
+        monkeypatch.setattr(verify_runner, "run_steps", wrapped)
+        acts = [("ACT 0 - OVERTURE", None, [
+            ("doc_new", {}, lambda p: p["created"] is True, None),
+            ("model_write", {}, lambda p: p["changed"] is True, None),
+        ], [])]
+        code, wrote = _run_document_program(
+            monkeypatch, tmp_path, wire, acts, {"doc_new", "model_write"})
+        called = [tool for tool, _args in wire.seen]
+        assert code == 1 and not wrote and raised == [True]
+        assert "model_write" not in called
+        assert wire.active == "session:home" and "session:new1" not in wire.documents
+
+    def test_clean_completion_restores_home_before_reload(self, monkeypatch, tmp_path):
+        wire = _DocumentWire()
+        at_reload = []
+
+        def reload_smoke(rows, notes, valued=None, **kw):
+            at_reload.append(wire.active)
+            return _reloaded_attestation()
+
+        acts = [
+            ("ACT 0 - OVERTURE", None, [
+                ("doc_new", {}, lambda p: p["created"] is True, None),
+            ], []),
+            ("FINALE", None, [
+                ("doc_close", {"save_changes": False}, "ok", None),
+            ], []),
+        ]
+        code, wrote = _run_document_program(
+            monkeypatch, tmp_path, wire, acts, {"doc_new", "doc_close"},
+            reload_smoke=reload_smoke)
+        assert code == 0 and wrote
+        assert wire.active == "session:home" and at_reload == ["session:home"]
+        called = [tool for tool, _args in wire.seen]
+        assert called.index("doc_close") < called.index("doc_activate")
+
     def test_home_address_requires_the_active_row_exact_handle(self):
         payload = {
             "active": {"name": "Home", "document_handle": "session:home"},
@@ -2110,3 +2398,96 @@ class TestActualSchemaBinding:
                             lambda payload, with_session=False: (response, "another-session"))
         with pytest.raises(SystemExit, match="session changed"):
             verify_core.registered_tools(health)
+
+
+
+class TestDocumentHandleLifecycleRows:
+    def test_scratch_rows_pin_wrong_tab_close_and_recovery(self):
+        rows = verify_acts_doc._SCRATCH_DOCUMENT
+        names = [row[0] for row in rows]
+        assert names == [
+            "doc_get", "doc_new", "doc_get", "doc_activate", "doc_activate",
+            "doc_activate", "param_add", "param_get", "doc_activate", "param_get",
+            "doc_activate", "doc_close", "param_add",
+            "param_get", "doc_get", "param_add", "param_get", "param_delete",
+            "param_get",
+        ]
+        ctx = {"story_doc": "session:A", "scratch_doc": "session:B",
+               "recovered_doc": "session:B"}
+        wrong_args = rows[6][1](ctx)
+        assert wrong_args["expect_document"] == "session:B"
+        assert rows[6][2].fragments == ("active_document_changed", "doc_activate")
+        assert rows[7][2].fragments == ("HandleWrong",)
+        assert rows[8][1](ctx)["name"] == "session:B"
+        assert rows[9][0] == "param_get" and rows[9][1]["name"] == "HandleWrong"
+        assert rows[9][2].fragments == ("HandleWrong",)
+        assert rows[10][1](ctx)["name"] == "session:A"
+        stale_args = rows[12][1]({"scratch_doc": "session:B"})
+        assert stale_args["expect_document"] == "session:B"
+        assert rows[12][2].fragments == ("unknown_document_handle", "doc_get")
+        assert rows[13][2].fragments == ("HandleClosed",)
+        recovered_args = rows[15][1](ctx)
+        assert recovered_args["expect_document"] == "session:A"
+        assert verify_acts_doc._param_added("HandleRecovered", 2)(
+            {"added": True, "parameter": {"name": "HandleRecovered",
+             "value": 2, "value_units": "mm"}})
+        assert rows[17][2].__name__ == "check"
+        assert rows[18][2].fragments == ("HandleRecovered",)
+
+
+    def test_reload_probe_requires_fresh_handle_and_restores_home(self):
+        calls = []
+        recovered = [False]
+        doc_reads = [
+            {"active": {"name": "Canary", "document_handle": "session:new"},
+             "truncated": False, "open_count": 1, "open_documents": [
+                 {"name": "Canary", "is_active": True, "document_handle": "session:new"}]},
+            {"active": {"name": "Home", "document_handle": "session:home2"},
+             "truncated": False, "open_count": 1, "open_documents": [
+                 {"name": "Home", "is_active": True, "document_handle": "session:home2"}]},
+            {"active": {"name": "Home", "document_handle": "session:home2",
+                        "document_id": None},
+             "truncated": False, "open_count": 1, "open_documents": [
+                 {"name": "Home", "is_active": True, "document_handle": "session:home2"}]},
+        ]
+
+        def call(tool, args):
+            calls.append((tool, dict(args)))
+            if tool == "doc_get":
+                return False, doc_reads.pop(0)
+            if tool == "param_get" and args["name"].startswith("ReloadNonce"):
+                return False, {"parameter": {"name": args["name"], "value": 17}}
+            if tool == "param_get" and args["name"] == "ReloadRecovered" and recovered[0]:
+                return False, {"parameter": {"name": "ReloadRecovered", "value": 2}}
+            if tool == "param_get":
+                return True, "Parameter not found: " + args["name"]
+            if tool == "param_add" and args["expect_document"] == "session:old":
+                return True, {"blocked_by": ["unknown_document_handle"]}
+            if tool == "param_add":
+                recovered[0] = True
+                return False, {"added": True, "parameter": {
+                    "name": "ReloadRecovered", "value": 2}}
+            if tool == "param_delete":
+                recovered[0] = False
+                return False, {"deleted": True}
+            if tool == "doc_close":
+                return False, {"closed": ["Canary"], "closed_count": 1}
+            if tool == "doc_activate":
+                return False, {"activated": True}
+            raise AssertionError(tool)
+
+        ok, note, fresh_handle = verify_acts_doc._reload_document_probe(
+            call, "session:old", {"handle": "session:home", "document_id": None, "name": "Home"},
+            "ReloadNonceX")
+        assert ok, note
+        assert fresh_handle == "session:new"
+        assert "fresh scratch handle recovered" in note
+        stale = [args for tool, args in calls
+                  if tool == "param_add" and args["name"] == "ReloadStale"]
+        fresh = [args for tool, args in calls
+                 if tool == "param_add" and args["name"] == "ReloadRecovered"]
+        assert stale == [{"name": "ReloadStale", "expression": "1 mm",
+                          "expect_document": "session:old"}]
+        assert fresh == [{"name": "ReloadRecovered", "expression": "2 mm",
+                          "expect_document": "session:new"}]
+        assert not [tool for tool, _args in calls if tool in ("doc_close", "doc_activate")]

@@ -1,26 +1,23 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Cloud data-model READ cores data_get delegates to: the project list, a project's file listing,
-its folder tree, and ONE file's facts. Each file is read in its own try/except and folder recursion
-is depth/count-capped, since these calls hit cloud data on the main thread."""
+"""Cloud project, file, folder-summary, folder-tree, and single-file read cores for data_get."""
 
 import datetime
 import time
 
 import adsk.core
 
-from ._common import ok, error, safe
+from ._common import counted, error, ok, read_flag, safe
 from ._data_common import (_data, _find_project, _folder_path_string, navigate_folder_path,
                            resolve_file_reference)
 
 app = adsk.core.Application.get()
 
-MAP_BLURB = ("the cloud READ cores data_get delegates to - list_projects_handler (the active "
-             "hub's projects), list_project_files_handler (one project's files, folder-scoped), "
-             "list_folders_handler (the bounded folder TREE, whole project or one folder) "
-             "and file_facts_handler (ONE file's metadata + link state) - over _walk_folder and "
-             "_folder_tree_bounded, the capped/deadlined walks RECORDING an unreadable folder")
+MAP_BLURB = ("cloud READ cores for data_get: list_projects_handler (hub projects), "
+             "list_project_files_handler (scoped project files), folder_summary_handler "
+             "(folder identity + immediate counts), list_folders_handler (bounded folder tree), "
+             "file_facts_handler (one file's metadata + links); the capped walks record unread folders")
 
 # Every DataFile property read and every dataFolders/dataFiles enumeration is a synchronous cloud
 # round-trip on Fusion's MAIN thread, so these caps bound a whole-project walk; a bigger project is
@@ -96,7 +93,7 @@ def list_projects_handler() -> dict:
 def _folder_scope(root, folder):
     """(start folder, its cleaned path, None) for a 'folder' scope, else (None, None, error result).
     An unread sibling list and a genuine miss are DIFFERENT refusals; '' scopes to `root` itself."""
-    want = (folder or "").strip().strip("/")
+    want = (folder or "").strip().replace("\\", "/").strip("/")
     if not want:
         return root, "", None
     start, path, miss = navigate_folder_path(root, want)
@@ -142,14 +139,12 @@ def list_project_files_handler(project: str = "", project_id: str = "",
     except Exception as e:
         return error(f"Could not access root folder of project '{target.name}': {e}")
 
-    # Scope to a sub-folder path if given (navigate there, then walk only it).
-    want_folder = bool((folder or "").strip().strip("/"))
     start_folder, start_path, scope_err = _folder_scope(root, folder)
     if scope_err:
         return scope_err
 
     try:
-        if want_folder and not recursive:
+        if not recursive:
             # immediate files only - do not descend
             for f in start_folder.dataFiles.asArray():
                 if len(files) >= _MAX_FILES:
@@ -170,8 +165,8 @@ def list_project_files_handler(project: str = "", project_id: str = "",
 
     payload = {
     "project": {"name": target.name, "id": target.id},
-    "folder": (start_path or "(project root)") if want_folder else "(whole project)",
-    "recursive": bool(recursive) if want_folder else True,
+    "folder": start_path or ("(whole project)" if recursive else "(project root)"),
+    "recursive": bool(recursive),
     "file_count": len(files),
     "truncated": truncated["value"],
     "time_truncated": truncated.get("time_truncated", False),
@@ -186,6 +181,49 @@ def list_project_files_handler(project: str = "", project_id: str = "",
         payload["folders_unreadable"] = truncated["unread_count"]
         payload["folders_unreadable_at"] = truncated.get("unread", [])
     return ok(payload)
+
+
+def folder_summary_handler(project: str = "", project_id: str = "", folder: str = "") -> dict:
+    """Return one resolved folder's identity and immediate file/folder counts."""
+    if not (project or project_id):
+        return error("Provide either 'project' (name) or 'project_id'.")
+    try:
+        data = _data()
+        target, available = _find_project(data, name=project or None,
+                                          project_id=project_id or None)
+    except Exception as e:
+        return error(f"Could not access projects: {e}")
+    if not target:
+        ident = project_id or project
+        return error(f"Project not found: {ident}. Available: {', '.join(available) or '(none)'}")
+    try:
+        root = target.rootFolder
+    except Exception as e:
+        return error(f"Could not access root folder of project '{safe(lambda: target.name)}': {e}")
+    start, path, scope_err = _folder_scope(root, folder)
+    if scope_err:
+        return scope_err
+
+    file_count = counted(lambda: start.dataFiles.count)
+    child_folder_count = counted(lambda: start.dataFolders.count)
+    unavailable = []
+    if file_count is None:
+        unavailable.append("immediate_file_count")
+    if child_folder_count is None:
+        unavailable.append("immediate_child_folder_count")
+    return ok({
+        "exists": True,
+        "project": {"name": safe(lambda: target.name), "id": safe(lambda: target.id)},
+        "folder": {
+            "name": safe(lambda: start.name),
+            "id": safe(lambda: start.id),
+            "path": path or "(project root)",
+            "is_root": read_flag(lambda: start.isRoot),
+        },
+        "immediate_file_count": file_count,
+        "immediate_child_folder_count": child_folder_count,
+        "unavailable_fields": unavailable,
+    })
 
 
 # How many unreadable folder paths the walk names before it just counts them - the flag and the
@@ -522,6 +560,6 @@ def _prune_empty_folder_lists(nodes):
             del n["folders"]
 
 
-# The four handlers above are the project, file-list, folder-tree and single-file read cores
+# The handlers above are the project, file-list, folder-summary, folder-tree and single-file cores
 # data_get delegates to (data_get is the registered rich read; these carry the cloud-error guards
 # and caps). No register_tool() here - this module exposes cores, not tools.

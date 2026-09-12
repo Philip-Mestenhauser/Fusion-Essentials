@@ -13,6 +13,8 @@ without touching a camera.
 
 import json
 
+import pytest
+
 from conftest import (
     Camera,
     FakeApplication,
@@ -76,9 +78,12 @@ class FakeSectionAnalyses:
             s._owner = self
         self.last_input = None
         self.add_calls = 0
+        self.count_raises = False
 
     @property
     def count(self):
+        if self.count_raises:
+            raise RuntimeError("count unavailable")
         return len(self._items)
 
     def item(self, i):
@@ -366,6 +371,16 @@ class TestAutoViewAim:
 # ── list / clear ─────────────────────────────────────────────────────────────
 
 class TestListClear:
+    @pytest.fixture
+    def section_rig(self, monkeypatch):
+        def install_sections(rows):
+            sections = _install(existing_sections=rows)
+            design = sv.app.activeProduct
+            monkeypatch.setattr(sv._common, "design", lambda: design)
+            monkeypatch.setattr(sv._inputs._common, "design", lambda: design)
+            return sections
+        return install_sections
+
     def test_list_reports_sections(self):
         _install(existing_sections=[FakeSection("Section1"), FakeSection("Section2")])
         out = _payload(sv.handler(action="list"))
@@ -434,3 +449,88 @@ class TestListClear:
         assert sorted(out["removed"]) == ["Section1", "Section2", "Section3", "Section4"]
         assert all(s._deleted for s in made)
         assert secs._items == []          # nothing left cutting the model
+
+    def test_named_clear_removes_only_the_exact_match_and_reports_bounded_counts(self, section_rig):
+        target, decoy = FakeSection("Section1"), FakeSection("Section2")
+        section_rig([target, decoy])
+        out = _payload(sv.handler(action="clear", section="section1"))
+        assert target._deleted is True and decoy._deleted is False
+        assert out == {"action": "clear", "section": "Section1", "removed_count": 1,
+                       "removed": ["Section1"], "sections_before": 2, "sections_after": 1,
+                       "note": "Removed section 'Section1'; 1 remain."}
+
+    def test_non_unique_unreadable_missing_or_blank_name_never_reaches_delete(
+            self, section_rig):
+        class UnreadableSection:
+            """A SectionAnalysis whose generated name cannot be read."""
+            isLightBulbOn = True
+
+            def __init__(self):
+                self._deleted = False
+
+            @property
+            def name(self):
+                raise RuntimeError("name unavailable")
+
+            def deleteMe(self):
+                self._deleted = True
+                return True
+
+        cases = [
+            (" ", [FakeSection("Section1")]),
+            ("Missing", [FakeSection("Section1"), FakeSection("Section2")]),
+            ("SECTION1", [FakeSection("Section1"), FakeSection("section1")]),
+            ("Section1", [FakeSection("Section1"), UnreadableSection()]),
+        ]
+        for selector, rows in cases:
+            section_rig(rows)
+            res = sv.handler(action="clear", section=selector)
+            assert res["isError"] is True
+            assert not any(row._deleted for row in rows)
+
+    @pytest.mark.parametrize("mode", ["false", "raises", "no_effect", "unread_after",
+                                      "decoy_changed"])
+    def test_failed_or_unverified_named_delete_never_claims_success(
+            self, section_rig, monkeypatch, mode):
+        target, decoy = FakeSection("Section1"), FakeSection("Section2")
+        sections = section_rig([target, decoy])
+        if mode == "false":
+            target._delete_ok = False
+        elif mode == "raises":
+            monkeypatch.setattr(target, "deleteMe", lambda: (_ for _ in ()).throw(
+                RuntimeError("delete unavailable")))
+        elif mode == "no_effect":
+            target._owner = None
+        elif mode == "unread_after":
+            def delete_then_hide_count():
+                sections._items.remove(target)
+                target._deleted = True
+                sections.count_raises = True
+                return True
+            monkeypatch.setattr(target, "deleteMe", delete_then_hide_count)
+        else:
+            sections._items.extend(FakeSection(f"Section{i}") for i in range(3, 12))
+            original_delete = target.deleteMe
+
+            def delete_then_change_decoy():
+                deleted = original_delete()
+                decoy.name = "Other"
+                return deleted
+            monkeypatch.setattr(target, "deleteMe", delete_then_change_decoy)
+        res = sv.handler(action="clear", section="Section1")
+        assert res["isError"] is True
+        assert decoy._deleted is False
+        if mode == "decoy_changed":
+            assert res["message"].count("(+2 more not listed)") == 2
+            assert "Section10" not in res["message"] and "Section11" not in res["message"]
+
+    @pytest.mark.parametrize("action,args", [
+        ("cut", {"plane": "xy", "auto_view": False}),
+        ("list", {}),
+    ])
+    def test_section_selector_is_refused_on_other_actions(self, section_rig, action, args):
+        existing = FakeSection("Section1")
+        sections = section_rig([existing])
+        res = sv.handler(action=action, section="Section1", **args)
+        assert res["isError"] is True and "only valid with action='clear'" in res["message"]
+        assert existing._deleted is False and sections.add_calls == 0

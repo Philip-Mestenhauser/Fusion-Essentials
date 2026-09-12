@@ -5,8 +5,10 @@
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import pytest
+import adsk
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "live"))
 import measure_api  # noqa: E402
@@ -322,6 +324,75 @@ def test_check_rejects_old_ledger_without_source_identity(monkeypatch, tmp_path,
     assert "complete stamp/source/loaded identity" in capsys.readouterr().out
 
 
+def test_measure_source_hash_binds_required_source_closure(monkeypatch, tmp_path):
+    source_root = tmp_path / "repo"
+    relative_files = (
+        "commands/mcpServer/tools/sys_execute_script.py",
+        "commands/mcpServer/tools/_common.py",
+        "tests/live/verify_core.py",
+        "tests/live/cloud_config.py",
+        "Fusion-Essentials.py",
+        "lib/loaded_attestation.py",
+    )
+    for relative in relative_files:
+        target = source_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("source = 'fixture'\n", encoding="utf-8")
+    copied_measure = source_root / "tests" / "live" / "measure_api.py"
+    copied_measure.parent.mkdir(parents=True, exist_ok=True)
+    copied_measure.write_bytes(Path(measure_api.__file__).read_bytes())
+    monkeypatch.setattr(measure_api, "REPO_ROOT", str(source_root))
+    monkeypatch.setattr(measure_api, "__file__", str(copied_measure))
+    baseline = measure_api._measure_source_hash()
+    for relative in relative_files:
+        target = source_root / relative
+        original = target.read_bytes()
+        target.write_bytes(original + b"\n# source drift\n")
+        assert measure_api._measure_source_hash() != baseline
+        target.write_bytes(original)
+
+
+def test_check_allows_disabled_runtime_identity_when_source_is_current(monkeypatch, tmp_path, capsys):
+    source_hash = "a" * 64
+    ledger = tmp_path / "VERIFIED_API_FACTS.md"
+    ledger.write_text(_ledger_text(source_hash), encoding="utf-8")
+    disabled = dict(_ATTESTATION, implementation_fingerprint="c" * 64,
+                    schema_fingerprint="d" * 64, load_id="disabled-load",
+                    session_id="disabled-session")
+    monkeypatch.setattr(measure_api, "LEDGER", str(ledger))
+    monkeypatch.setattr(measure_api, "health_gate", lambda: _health(disabled))
+    monkeypatch.setattr(measure_api, "_fusion_version", lambda health=None: "test")
+    monkeypatch.setattr(measure_api, "_measure_source_hash", lambda: source_hash)
+    assert measure_api.check() == 0
+    output = capsys.readouterr().out
+    assert "contracts current" in output
+    assert "implementation_fingerprint" in output and "schema_fingerprint" in output
+
+
+@pytest.mark.parametrize("field", ["complete", "loaded_matches_source"])
+def test_check_refuses_incomplete_current_health(monkeypatch, tmp_path, field):
+    source_hash = "a" * 64
+    ledger = tmp_path / "VERIFIED_API_FACTS.md"
+    ledger.write_text(_ledger_text(source_hash), encoding="utf-8")
+    bad = _health()
+    bad["attestation"][field] = False
+    monkeypatch.setattr(measure_api, "LEDGER", str(ledger))
+    monkeypatch.setattr(measure_api, "health_gate", lambda: bad)
+    monkeypatch.setattr(measure_api, "_measure_source_hash", lambda: source_hash)
+    with pytest.raises(SystemExit, match="complete loaded implementation"):
+        measure_api.check()
+
+
+def test_check_requires_all_historical_loaded_fields(monkeypatch, tmp_path, capsys):
+    ledger = tmp_path / "VERIFIED_API_FACTS.md"
+    ledger.write_text("Stamp: Fusion test | verified fixture | source " + "a" * 64 + "\n"
+                      + "Loaded: implementation " + "a" * 64 + " | schema " + "b" * 64
+                      + " | load fixture-load\n", encoding="utf-8")
+    monkeypatch.setattr(measure_api, "LEDGER", str(ledger))
+    assert measure_api.check() == 1
+    assert "complete stamp/source/loaded identity" in capsys.readouterr().out
+
+
 def test_run_refuses_publication_when_source_changes_mid_run(monkeypatch, capsys):
     owned = "session:" + "a" * 32
     monkeypatch.setattr(measure_api, "ROWS", [{"id": "probe", "body": "pass",
@@ -380,3 +451,47 @@ def test_run_refuses_publication_when_loaded_identity_changes_mid_run(
     monkeypatch.setattr(measure_api, "call", call)
     assert measure_api.run_measurements(write_json=False) == 1
     assert field + " changed" in capsys.readouterr().out
+
+
+@pytest.fixture
+def seeded_design_cast(monkeypatch):
+    def apply(design):
+        monkeypatch.setattr(adsk.fusion.Design, "cast",
+                            lambda value: value if value is design else None)
+    return apply
+
+
+def test_dxf_units_row_reaches_getter_with_non_design_active_product(seeded_design_cast, tmp_path):
+    row = next(r for r in measure_api.ROWS if r["id"] == "dxf-sketch-options-units-read-is-fatal")
+    design = SimpleNamespace()
+    line = SimpleNamespace(addByTwoPoints=lambda *points: None)
+    sketch = SimpleNamespace(sketchCurves=SimpleNamespace(
+        sketchLines=line, count=1), profiles=SimpleNamespace())
+    design.rootComponent = SimpleNamespace(
+        xYConstructionPlane=object(),
+        sketches=SimpleNamespace(add=lambda plane: sketch))
+
+    class Options:
+        objectType = "adsk::fusion::DXFSketchExportOptions"
+
+        def __getattribute__(self, name):
+            if name == "units":
+                raise AssertionError("units getter reached")
+            return object.__getattribute__(self, name)
+
+    design.exportManager = SimpleNamespace(
+        createDXFSketchExportOptions=lambda path, selected: Options())
+    document = SimpleNamespace(products=SimpleNamespace(
+        itemByProductType=lambda name: design))
+    app = SimpleNamespace(activeProduct=object(), activeDocument=document)
+
+    seeded_design_cast(design)
+    emitted = []
+    namespace = {"adsk": adsk, "app": app,
+                 "dump_shape": lambda label, obj: 1,
+                 "emit": lambda ok, detail: emitted.append((ok, detail))}
+    body = row["body"].replace('"__FE_DXF_MARKER_PATH__"', repr(str(tmp_path / "marker.json")))
+    exec(compile("def probe():\n" + body, "dxf-row", "exec"), namespace)
+    namespace["probe"]()
+    assert emitted and emitted[0][0] is False
+    assert "units getter reached" in emitted[0][1]

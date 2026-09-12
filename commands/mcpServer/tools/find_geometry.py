@@ -3,6 +3,8 @@
 
 """MCP building block: scan a part's faces/edges/vertices and return short-lived HANDLES to them."""
 
+import math
+
 import adsk.core
 import adsk.fusion
 
@@ -123,6 +125,15 @@ def _dist(a, b):
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
 
 
+def _radius_value(g, inv_k):
+    """An unrounded radius in requested units, or None when it cannot be read."""
+    raw = safe(lambda: g.radius)
+    if not isinstance(raw, (int, float)) or isinstance(raw, bool) or not math.isfinite(raw):
+        return None
+    value = raw * inv_k
+    return value if math.isfinite(value) else None
+
+
 def _plane_frame(g, inv_k):
     """A planar face's own orthonormal frame in WORLD coordinates - origin plus x_world/y_world/
     normal - or None when any part of it cannot be read (a partial frame locates nothing)."""
@@ -161,12 +172,14 @@ def _face_record(face, inv_k):
         rec["normal"] = nrm
     if kind == "planar_face":
         rec["frame"] = _plane_frame(g, inv_k)
+    radius_value = None
     if kind == "cylinder_face":
-        rec["radius"] = _common.measured(lambda: g.radius, inv_k, 3)
+        radius_value = _radius_value(g, inv_k)
+        rec["radius"] = round(radius_value, 3) if radius_value is not None else None
         ax = safe(lambda: g.axis)
         if ax:
             rec["axis"] = [round(ax.x, 3), round(ax.y, 3), round(ax.z, 3)]
-    return rec
+    return rec, radius_value
 
 
 def _edge_record(edge, inv_k):
@@ -185,8 +198,10 @@ def _edge_record(edge, inv_k):
     rec = {"handle": handle, "kind": kind,
             "position": [round(pt.x * inv_k, 3), round(pt.y * inv_k, 3), round(pt.z * inv_k, 3)] if pt else None,
             "length": _common.measured(lambda: edge.length, inv_k, 3)}
+    radius_value = None
     if kind in ("circular_edge", "arc_edge"):
-        rec["radius"] = _common.measured(lambda: g.radius, inv_k, 3)
+        radius_value = _radius_value(g, inv_k)
+        rec["radius"] = round(radius_value, 3) if radius_value is not None else None
     elif kind in ("ellipse_edge", "elliptical_arc_edge"):
         # Two radii, so the single-value 'radius' filter selects no elliptical edge.
         rec["major_radius"] = _common.measured(lambda: g.majorRadius, inv_k, 3)
@@ -199,7 +214,7 @@ def _edge_record(edge, inv_k):
         d = _geom.unit_vector_between(safe(lambda: g.startPoint), safe(lambda: g.endPoint), decimals=4)
         if d is not None:
             rec["direction"] = d
-    return rec
+    return rec, radius_value
 
 
 def handler(target: str = "", kind: str = "", radius: float = None,
@@ -227,7 +242,10 @@ def handler(target: str = "", kind: str = "", radius: float = None,
     knd = (kind or "").strip().lower()
     want_faces = (not knd) or knd in _FACE_KINDS
     want_edges = (not knd) or knd in _EDGE_KINDS
-    want_verts = knd == "vertex"
+    want_verts = knd == "vertex" and radius is None
+    requested_radius = float(radius) if radius is not None else None
+    radius_tolerance = (max(0.05 * requested_radius, 1e-6)
+                        if requested_radius is not None else None)
 
     matches = []
     for occ, body in pairs:
@@ -237,14 +255,22 @@ def handler(target: str = "", kind: str = "", radius: float = None,
         recs = []
         if want_faces:
             for f in (safe(lambda body=body: list(body.faces)) or []):
-                rec = _face_record(f, inv_k)
+                rec, measured_radius = _face_record(f, inv_k)
                 if knd in _FACE_KINDS and rec["kind"] != knd:
+                    continue
+                if (requested_radius is not None
+                        and not (measured_radius is not None
+                                 and abs(measured_radius - requested_radius) <= radius_tolerance)):
                     continue
                 recs.append(rec)
         if want_edges:
             for e in (safe(lambda body=body: list(body.edges)) or []):
-                rec = _edge_record(e, inv_k)
+                rec, measured_radius = _edge_record(e, inv_k)
                 if knd in _EDGE_KINDS and rec["kind"] != knd:
+                    continue
+                if (requested_radius is not None
+                        and not (measured_radius is not None
+                                 and abs(measured_radius - requested_radius) <= radius_tolerance)):
                     continue
                 recs.append(rec)
         if want_verts:
@@ -258,13 +284,6 @@ def handler(target: str = "", kind: str = "", radius: float = None,
             for rec in recs:
                 rec["hidden"] = True
         matches.extend(recs)
-
-    # radius filter (cylinder faces / circular edges). A record whose radius did not read carries
-    # None, and cannot match a radius it never answered - it is skipped, not compared.
-    if radius is not None:
-        r = float(radius)
-        matches = [m for m in matches if m.get("radius") is not None
-                   and abs(m["radius"] - r) <= max(0.05 * r, 1e-6)]
 
     # sort by distance to nearest_to, else leave in discovery order
     if isinstance(nearest_to, (list, tuple)) and len(nearest_to) == 3:

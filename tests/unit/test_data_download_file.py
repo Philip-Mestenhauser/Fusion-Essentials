@@ -1,8 +1,7 @@
 """Unit tests for ``data_download_file`` - one non-Fusion cloud file onto local disk.
 
 The bugs worth pinning are the ones that would send a caller away with nothing, or with a lie:
-the Fusion-native refusal (which must read the file's NAME, since fileExtension is measured wrong
-for a non-CAD upload), the local-path composition, the stale-file trap (an existing file at the
+the Fusion-native refusal, the local-path composition, the stale-file trap (an existing file at the
 target would satisfy the landed check for a download that never wrote), and the landed gate itself -
 exercised through the SAME FileLanded postcondition the Item declares.
 """
@@ -86,20 +85,21 @@ class TestFusionNativeRefusal:
             ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path)))
 
     def test_a_lying_file_extension_does_not_refuse_a_plain_text_file(self, resolves, tmp_path):
-        # Measured: an uploaded .txt reports fileExtension 'sql'. Reading the NAME is what keeps a
-        # real, downloadable file from being refused (or a design from slipping through).
+        # Measured: an uploaded .txt reports fileExtension 'sql'. Both signals remain non-native,
+        # so the ordinary text-file download route stays available.
         df = _cloud_file(name="probe_note.txt", file_extension="sql", writes="hello")
         resolves(df)
         out = _payload(ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path)))
         assert out["downloaded"] is True
         assert os.path.basename(out["file_path"]) == "probe_note.txt"
 
-    def test_the_name_outranks_a_file_extension_claiming_fusion_data(self, resolves, tmp_path):
-        # fileExtension is not trusted where the name disagrees: a named .txt downloads even when
-        # the property reports a Fusion extension.
-        resolves(_cloud_file(name="notes.txt", file_extension="f3d", writes="hello"))
-        out = _payload(ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path)))
-        assert out["downloaded"] is True
+    def test_dotted_native_name_is_refused_before_download_or_staging(self, resolves, tmp_path):
+        df = _cloud_file(name="Bracket.revA", file_extension="f3d", writes="unsupported")
+        resolves(df)
+        msg = error_message(ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path)))
+        assert "Fusion-native data (.f3d)" in msg and "design_export" in msg
+        assert df._calls == []
+        assert list(tmp_path.iterdir()) == []
 
 
 class TestPathHandling:

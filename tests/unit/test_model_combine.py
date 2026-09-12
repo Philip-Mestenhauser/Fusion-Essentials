@@ -430,11 +430,11 @@ class TestDirectModeNoFeature:
 
 # ── body-split: a cut/intersect that DISCONNECTS the single target warns naming the pieces ──
 
-def _feature_with_bodies(names, lumps=None):
-    """A CombineFeature whose `bodies` are the result bodies named, each carrying `lumps` when the
-    test models a lump count."""
-    return type("F", (), {"name": "Combine1",
-                          "bodies": _NamedCollection(make_body(n, lumps) for n in names)})()
+def _feature_with_bodies(names, lumps=None, collection_type=_NamedCollection):
+    """A CombineFeature with named result bodies and optional per-body lump counts."""
+    per_body = lumps if isinstance(lumps, dict) else {}
+    bodies = [make_body(n, per_body.get(n) if per_body else lumps) for n in names]
+    return type("F", (), {"name": "Combine1", "bodies": collection_type(bodies)})()
 
 
 class TestBodySplit:
@@ -463,65 +463,126 @@ class TestBodySplit:
 
 # ── a join that fused nothing ────────────────────────────────────────────────────────────────
 #
-# MEASURED (parametric, 2705.0.87): joining two DISJOINT solids reports success and the feature's
-# result holds BOTH input bodies - nothing is consumed, nothing merges. So several RESULT BODIES is
-# the primary nothing-fused verdict. A single result body carrying several LUMPS is the second arm,
-# and in DIRECT mode - no feature to count result bodies on - the body census answers instead.
+# A complete result-body enumeration plus every body's lump count distinguishes outcomes: one result
+# lump is complete, fewer result lumps than inputs is partial, and an unchanged total is none; unread
+# or contradictory evidence is unknown. Direct mode keeps its separate body-census fallback.
 
 class TestDisjointJoin:
-    def test_a_join_that_left_two_separate_bodies_is_the_nothing_fused_verdict(self):
-        # The measured live shape for the case this row was filed on (a block 44 mm from its stub).
-        cf = _install(["Tensioner", "Stub"], lumps={"Tensioner": 1, "Stub": 1})
-        cf.add = lambda inp: _feature_with_bodies(["Tensioner", "Stub"])
-        out = _payload(cb.handler(target="Tensioner", tools=["Stub"], operation="join"))
-        assert out["disjoint_join"] is True
-        assert out["fused"] is False
-        assert out["result_body_count"] == 2
-        # the warning NAMES the pieces that are still standing
-        assert "fused NOTHING" in out["note"]
-        assert "left 2 separate bodies (Tensioner, Stub)" in out["note"]
-        # the remedy is the parametric one - there IS a timeline feature to remove
+    def test_complete_fusion_reports_one_result_lump(self):
+        cf = _install(["Base", "Boss"], lumps={"Base": 1, "Boss": 1})
+        cf.add = lambda inp: _feature_with_bodies(["Base"], lumps=1)
+        out = _payload(cb.handler(target="Base", tools=["Boss"], operation="join"))
+        assert out["fusion_outcome"] == "complete" and out["fused"] is True
+        assert out["input_lump_total"] == 2 and out["result_lump_total"] == 1
+        assert out["result_body_count"] == 1 and out["result_bodies_complete"] is True
+        assert out["lump_count"] == 1 and "WARNING" not in out["note"]
+
+    def test_partial_fusion_counts_every_result_body_lump(self):
+        cf = _install(["Target", "Touch", "Far"],
+                      lumps={"Target": 1, "Touch": 1, "Far": 1})
+        cf.add = lambda inp: _feature_with_bodies(
+            ["Target", "Far"], lumps={"Target": 1, "Far": 1})
+        out = _payload(cb.handler(target="Target", tools=["Touch", "Far"], operation="join"))
+        assert out["fusion_outcome"] == "partial" and out["fused"] is True
+        assert out["input_lump_total"] == 3 and out["result_lump_total"] == 2
+        assert out["result_body_count"] == 2 and out["result_bodies_complete"] is True
+        assert out["disjoint_join"] is True and "partially fused" in out["note"]
+        assert "fused NOTHING" not in out["note"]
+
+    def test_no_fusion_keeps_every_input_lump(self):
+        cf = _install(["Target", "ToolA", "ToolB"],
+                      lumps={"Target": 1, "ToolA": 1, "ToolB": 1})
+        cf.add = lambda inp: _feature_with_bodies(
+            ["Target", "ToolA", "ToolB"], lumps=1)
+        out = _payload(cb.handler(target="Target", tools=["ToolA", "ToolB"],
+                                  operation="join"))
+        assert out["fusion_outcome"] == "none" and out["fused"] is False
+        assert out["input_lump_total"] == out["result_lump_total"] == 3
+        assert out["result_body_count"] == 3 and out["result_bodies_complete"] is True
+        assert out["disjoint_join"] is True and "fused NOTHING" in out["note"]
+        assert "Target, ToolA, ToolB" in out["note"]
         assert "design_delete_feature" in out["note"]
 
-    def test_a_kept_tools_join_claims_no_verdict_from_the_result_count(self):
-        # What a KEPT tool body does to the feature's result set is not measured, so a several-body
-        # result there may be the kept copies rather than a failed fuse. Silence beats a warning that
-        # can fire on a good join.
+    def test_multi_lump_inputs_are_counted_by_lump(self):
+        cf = _install(["Frame", "Clip"], lumps={"Frame": 2, "Clip": 1})
+        cf.add = lambda inp: _feature_with_bodies(["Frame"], lumps=3)
+        out = _payload(cb.handler(target="Frame", tools=["Clip"], operation="join"))
+        assert out["fusion_outcome"] == "none" and out["fused"] is False
+        assert out["input_lump_total"] == out["result_lump_total"] == 3
+
+    def test_unreadable_input_lump_reports_unknown(self):
+        cf = _install(["A", "B"], lumps={"A": 1})
+        cf.add = lambda inp: _feature_with_bodies(["A"], lumps=1)
+        out = _payload(cb.handler(target="A", tools=["B"], operation="join"))
+        assert out["fusion_outcome"] == "unknown"
+        assert out["input_lump_total"] is None and out["result_lump_total"] == 1
+        assert "fused" not in out and "disjoint_join" not in out
+        assert "UNKNOWN" in out["note"]
+        assert "Move the pieces into contact" not in out["note"] and "join again" not in out["note"]
+        assert "model_inspect(include=['mass'], per_body=true)" in out["note"]
+        assert "mass.per_body_truncated=false" in out["note"]
+        assert "readable lump_count for every returned body" in out["note"]
+        assert "before deciding whether geometry needs to move" in out["note"]
+
+    def test_unreadable_result_lump_reports_unknown(self):
+        cf = _install(["A", "B"], lumps={"A": 1, "B": 1})
+        cf.add = lambda inp: _feature_with_bodies(["A"])
+        out = _payload(cb.handler(target="A", tools=["B"], operation="join"))
+        assert out["fusion_outcome"] == "unknown"
+        assert out["result_bodies_complete"] is True
+        assert "result_lump_total" not in out and "lump_count" not in out
+        assert "fused" not in out and "fused NOTHING" not in out["note"]
+
+    def test_unread_result_item_cannot_be_mistaken_for_no_fusion(self):
+        class UnreadSecond(_NamedCollection):
+            """A result collection whose declared second item cannot be read."""
+            def item(self, index):
+                if index == 1:
+                    raise RuntimeError("unread result")
+                return super().item(index)
+
+        cf = _install(["A", "B", "C"], lumps={"A": 1, "B": 1, "C": 1})
+        cf.add = lambda inp: _feature_with_bodies(
+            ["A", "B", "C"], lumps=1, collection_type=UnreadSecond)
+        out = _payload(cb.handler(target="A", tools=["B", "C"], operation="join"))
+        assert out["fusion_outcome"] == "unknown"
+        assert out["result_body_count"] == 3 and out["result_bodies_complete"] is False
+        assert "result_lump_total" not in out and "lump_count" not in out
+        assert "fused" not in out and "fused NOTHING" not in out["note"]
+
+    def test_kept_tools_join_preserves_its_unclassified_route(self):
         cf = _install(["Base", "Boss"], lumps={"Base": 1, "Boss": 1})
-        cf.add = lambda inp: _feature_with_bodies(["Base", "Boss"])
-        out = _payload(cb.handler(target="Base", tools=["Boss"], operation="join", keep_tools=True))
-        assert "disjoint_join" not in out and "WARNING" not in out["note"]
+        cf.add = lambda inp: _feature_with_bodies(["Base", "Boss"], lumps=1)
+        out = _payload(cb.handler(target="Base", tools=["Boss"], operation="join",
+                                  keep_tools=True))
+        assert "fusion_outcome" not in out and "disjoint_join" not in out
+        assert "WARNING" not in out["note"]
 
     def test_the_direct_mode_census_catches_a_tool_body_left_standing(self):
-        # No feature to count result bodies on. A join that consumed its tool drops the host count by
-        # one; the fake here consumes nothing while the volume moves, so the tool is still standing.
         cf = FakeCombineFeatures(returns_nothing=True)
         _install(["T", "a"], cf=cf, design_type=0)
         body = cb._inputs._common.target_component(None).bRepBodies._items[0]
         body.volume = 100.0
 
         def landed_without_consuming(inp):
-            body.volume = 260.0        # the boolean touched the target, so the no-op gate passes
-            return None                # ... but the tool body was not consumed
+            body.volume = 260.0
+            return None
 
         cf.add = landed_without_consuming
         out = _payload(cb.handler(target="T", tools=["a"], operation="join"))
         assert out["disjoint_join"] is True and out["fused"] is False
         assert out["unfused_tool_bodies"] == 1
         assert "did not fuse into the" in out["note"]
-        # direct mode has no timeline entry to delete
         assert "design_delete_feature" not in out["note"] and "undo in Fusion" in out["note"]
 
     def test_the_direct_mode_census_says_nothing_when_the_tools_were_kept(self):
-        # keep_tools means nothing is consumed BY DESIGN, so a standing tool body is not evidence of
-        # a failed fuse - the census cannot speak here, and a warning would fire on a good join.
         cf = FakeCombineFeatures(returns_nothing=True)
         _install(["T", "a"], cf=cf, design_type=0)
         body = cb._inputs._common.target_component(None).bRepBodies._items[0]
         body.volume = 100.0
 
         def landed(inp):
-            body.volume = 260.0        # a real fuse: the target grew, the kept tool still stands
+            body.volume = 260.0
             return None
 
         cf.add = landed
@@ -534,96 +595,18 @@ class TestDisjointJoin:
         out = _payload(cb.handler(target="T", tools=["a"], operation="join"))
         assert "disjoint_join" not in out and "WARNING" not in out["note"]
 
-    def test_a_multi_lump_single_result_body_is_the_second_arm(self):
-        # If the platform ever hands back ONE body holding disconnected lumps, that is also a join
-        # that fused nothing - kept covered, with the comparison carried as data.
-        cf = _install(["Tensioner", "Stub"], lumps={"Tensioner": 1, "Stub": 1})
-        cf.add = lambda inp: _feature_with_bodies(["Tensioner"], lumps=2)
-        out = _payload(cb.handler(target="Tensioner", tools=["Stub"], operation="join"))
-        assert out["lump_count"] == 2 and out["disjoint_join"] is True
-        assert "2-lump body" in out["note"] and "do not touch" in out["note"]
-        assert "nothing fused: the result holds the same 2 lumps the inputs did" in out["note"]
-        assert out["input_lump_total"] == 2 and out["fused"] is False
-
-    def test_a_multi_lump_input_is_counted_by_its_lumps_not_by_the_body(self):
-        # A 2-lump target joined with a 1-lump tool holds THREE lumps between them. Counting BODIES
-        # instead of lumps makes the total 2, so a 3-lump result reads as a fuse that happened, and
-        # any per-BODY wording of the verdict is false for this shape.
-        cf = _install(["Frame", "Clip"], lumps={"Frame": 2, "Clip": 1})
-        cf.add = lambda inp: _feature_with_bodies(["Frame"], lumps=3)
-        out = _payload(cb.handler(target="Frame", tools=["Clip"], operation="join"))
-        assert out["input_lump_total"] == 3
-        assert out["fused"] is False
-        assert "the result holds the same 3 lumps the inputs did" in out["note"]
-        assert "one lump per input body" not in out["note"]
-
-    def test_an_unreadable_input_lump_leaves_the_verdict_unstated(self):
-        # One input whose lumps will not read: the total is unknown, so the payload publishes null
-        # and no 'fused' verdict at all rather than a comparison against a guessed total.
-        cf = _install(["A", "B"], lumps={"A": 1})          # 'B' carries no lumps
-        cf.add = lambda inp: _feature_with_bodies(["A"], lumps=2)
-        out = _payload(cb.handler(target="A", tools=["B"], operation="join"))
-        assert out["disjoint_join"] is True
-        assert out["input_lump_total"] is None and "fused" not in out
-        assert "nothing fused" not in out["note"]
-
-    def test_a_fused_join_is_a_clean_ok(self):
-        cf = _install(["Base", "Boss"], lumps={"Base": 1, "Boss": 1})
-        cf.add = lambda inp: _feature_with_bodies(["Base"], lumps=1)
-        out = _payload(cb.handler(target="Base", tools=["Boss"], operation="join"))
-        assert out["lump_count"] == 1
-        assert "disjoint_join" not in out and "fused" not in out
-        assert "WARNING" not in out["note"]
-
-    def test_a_partial_fuse_warns_without_claiming_nothing_fused(self):
-        # three 1-lump inputs -> a 2-lump result: two of them DID fuse, one is still floating. The
-        # warning has to fire, but the "nothing fused" clause would be a false statement here.
-        cf = _install(["T", "a", "b"], lumps={"T": 1, "a": 1, "b": 1})
-        cf.add = lambda inp: _feature_with_bodies(["T"], lumps=2)
-        out = _payload(cb.handler(target="T", tools=["a", "b"], operation="join"))
-        assert out["disjoint_join"] is True and out["lump_count"] == 2
-        assert "nothing fused" not in out["note"]
-        assert out["input_lump_total"] == 3 and out["fused"] is True
-
     def test_direct_mode_reads_the_lumps_off_the_target(self):
-        # No feature object to read result bodies from, so the join's landing place IS the target.
-        # Without that fallback a direct-mode disjoint join stays silent - the mode the live
-        # occurrences were built in.
         cf = FakeCombineFeatures(returns_nothing=True)
         _install(["T", "a"], cf=cf, design_type=0, lumps={"T": 2, "a": 1})
         out = _payload(cb.handler(target="T", tools=["a"], operation="join"))
-        assert out["lump_count"] == 2
-        assert out["disjoint_join"] is True
-        # direct mode has no timeline entry to delete - the remedy must not send the caller there
+        assert out["lump_count"] == 2 and out["disjoint_join"] is True
         assert "design_delete_feature" not in out["note"] and "undo in Fusion" in out["note"]
 
-    def test_an_unreadable_lump_count_claims_nothing(self):
-        # Bodies with no readable lumps: the payload must carry no lump_count and no warning rather
-        # than a fabricated verdict either way.
-        cf = _install(["A", "B"])
-        cf.add = lambda inp: _feature_with_bodies(["A"])
-        out = _payload(cb.handler(target="A", tools=["B"], operation="join"))
-        assert "lump_count" not in out and "disjoint_join" not in out
-
     def test_a_multi_lump_cut_is_not_reported_as_a_disjoint_join(self):
-        # A cut can legitimately leave a multi-lump body; the disjoint-JOIN claim is about fusing.
         cf = _install(["Ring", "Bore"], lumps={"Ring": 1, "Bore": 1})
         cf.add = lambda inp: _feature_with_bodies(["Ring"], lumps=2)
         out = _payload(cb.handler(target="Ring", tools=["Bore"], operation="cut"))
-        assert out["lump_count"] == 2          # still published - it is a fact about the result
-        assert "disjoint_join" not in out
-
-    def test_several_result_bodies_leave_the_lump_read_unstated(self):
-        # With more than one result body there is no single 'the join landed here' body to read, so
-        # no lump count is published (picking one body's lumps would describe part of the result as
-        # if it were the whole). The verdict still lands - from the body COUNT, the primary arm.
-        cf = _install(["A", "B"], lumps={"A": 1, "B": 1})
-        cf.add = lambda inp: _feature_with_bodies(["A", "B"], lumps=2)
-        out = _payload(cb.handler(target="A", tools=["B"], operation="join"))
-        assert "lump_count" not in out
-        assert out["disjoint_join"] is True and out["result_body_count"] == 2
-        assert "input_lump_total" not in out       # that comparison belongs to the lump arm only
-
+        assert out["lump_count"] == 2 and "disjoint_join" not in out
 
 # -- both boolean flags go through set_verified -------------------------------------------------
 #

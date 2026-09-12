@@ -336,7 +336,7 @@ class TestStatusHandler:
         out = _payload(st.handler(handle="latest"))
         assert out["handle"] == "gen2" and out["completed"] is True
 
-    def test_stall_warning_when_nothing_generating_but_ood_remains(self, monkeypatch):
+    def test_incomplete_owned_future_overrides_idle_stale_launch_guidance(self, monkeypatch):
         st._GENERATIONS["gen1"] = {
             "future": SimpleNamespace(isGenerationCompleted=False, numberOfOperations=2,
                                       numberOfCompleted=0),
@@ -349,7 +349,10 @@ class TestStatusHandler:
                                             readiness="0 of 2 active ops valid - run cam_generate to finish the rest."))
         out = _payload(st.handler(handle="gen1"))
         assert out["completed"] is False
-        assert "WARNING" in out["note"]
+        assert out["readiness"] == out["live_states"]["readiness"]
+        assert "cam_get_status(handle='gen1')" in out["readiness"]
+        assert "run cam_generate" not in out["readiness"]
+        assert "Future" in out["note"] and "cam_get_status(handle='gen1')" in out["note"]
 
     # ── operations_completed is DISCLOSED, not smoothed (CAM-13b) ───────────────────────────────
     #
@@ -1104,10 +1107,10 @@ class TestSameDocumentIdentity:
 
 # ── status_handler live-poll path: NO cam_generate handle (inline / UI generation) ──────────────────
 
-def _live_op(name, state=0, generating=False, error=False):
-    """One op as the live tally reads it - `generating` is the flag the poll waits on."""
+def _live_op(name, state=0, generating=False, error=False, state_readable=True):
+    """One op as the live tally reads it - generating is the flag the poll waits on."""
     op = SharedOp(name, operation_state=state, has_error=error,
-                  error="broken" if error else "")
+                  error="broken" if error else "", state_readable=state_readable)
     op.isGenerating = generating
     return op
 
@@ -1530,6 +1533,84 @@ class TestStatusLivePoll:
         assert out["target"] == "document"
         assert out["completed"] is False
         assert out["live_states"]["generating"] == 1
+
+    @pytest.mark.parametrize("route", ["handle", "target"])
+    def test_active_scoped_work_has_consistent_poll_guidance(self, monkeypatch, route):
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        op = _live_op("Face1", state=1, generating=True)
+        cam = _FakeCAM([_setup("Roughing", [op])])
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        if route == "handle":
+            monkeypatch.setattr(st, "document_key", lambda: "urn:doc")
+            st._GENERATIONS["gen1"] = {
+                "future": SimpleNamespace(isGenerationCompleted=False, numberOfOperations=1,
+                                          numberOfCompleted=0),
+                "target": "setup 'Roughing'", "scope": "setup", "target_name": "Roughing",
+                "started_at": 0.0, "total": 1, "doc_name": "Doc", "doc_urn": "urn:doc",
+                "doc_key": "urn:doc"}
+            out = _payload(st.handler(handle="gen1"))
+        else:
+            out = _payload(st.handler(target="Roughing"))
+        assert out["completed"] is False
+        assert out["live_states"]["generating"] == 1
+        assert out["live_states"]["generating_settled"] == 0
+        assert out["readiness"] == out["live_states"]["readiness"]
+        if route == "handle":
+            assert "handle='gen1'" in out["readiness"]
+        assert "poll cam_get_status" in out["readiness"]
+        assert "run cam_generate" not in out["readiness"]
+        assert "check again later" in out["note"]
+
+    @pytest.mark.parametrize("state,state_readable", [(0, False), (99, True)])
+    @pytest.mark.parametrize("generating", [True, False])
+    def test_scoped_unread_or_unknown_state_has_an_explicit_next_read(
+            self, monkeypatch, generating, state, state_readable):
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        op = _live_op("Face1", state=state, generating=generating,
+                      state_readable=state_readable)
+        cam = _FakeCAM([_setup("Roughing", [op])])
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        out = _payload(st.handler(target="Face1"))
+        readiness = out["readiness"]
+        assert out["live_states"]["unread"] == 1
+        assert "unread operationState" in readiness
+        if generating:
+            assert out["completed"] is False
+            assert "poll cam_get_status" in readiness
+        else:
+            assert out["completed"] is True
+            assert "re-read with cam_get in the Manufacture workspace" in readiness
+        assert "run cam_generate" not in readiness
+        assert readiness != "no active operations to assess."
+
+    def test_mixed_scoped_stale_and_unread_states_keep_both_next_steps(self, monkeypatch):
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        ops = [_live_op("Stale", state=1),
+               _live_op("Unknown", state=99, state_readable=True)]
+        cam = _FakeCAM([_setup("Roughing", ops)])
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        out = _payload(st.handler(target="Roughing"))
+        readiness = out["readiness"]
+        assert out["live_states"]["out_of_date"] == 1
+        assert out["live_states"]["unread"] == 1
+        assert "1 operation(s) read out_of_date" in readiness
+        assert "run cam_generate for those" in readiness
+        assert "unread operationState" in readiness
+        assert "re-read with cam_get in the Manufacture workspace" in readiness
+        assert "ready to post" not in readiness
+
+    def test_idle_stale_target_without_an_owned_future_keeps_generate_guidance(self, monkeypatch):
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        cam = _FakeCAM([_setup("Roughing", [_live_op("Face1", state=1)])])
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        out = _payload(st.handler(target="Face1"))
+        assert out["completed"] is True
+        assert "run cam_generate" in out["readiness"]
+        assert "poll this handle" not in out["readiness"]
 
     def test_document_completed_only_when_nothing_generating(self, monkeypatch):
         monkeypatch.setattr(st._cam_common, "get_cam", lambda: (object(), None))

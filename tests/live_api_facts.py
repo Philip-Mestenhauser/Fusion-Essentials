@@ -4,8 +4,8 @@
 from these values, so the mocks carry measured data, not hand-typed claims. Each value is
 owned by the measurement row of the same name in tests/live/VERIFIED_API_FACTS.md."""
 
-FUSION_VERSION = "2705.1.11"
-VERIFIED_ON = "2026-09-07"
+FUSION_VERSION = "2705.1.15"
+VERIFIED_ON = "2026-09-11"
 
 # '<adsk namespace>.<Class>' -> {member: int} - seeded onto the mock adsk modules.
 ENUMS = {
@@ -898,6 +898,12 @@ SHAPES = {
     "DrawingSketches": [
         "add", "cast", "classType", "count", "isValid", "item",
         "itemByName", "objectType", "thisown",
+    ],
+    "Ellipse3D": [
+        "asNurbsCurve", "cast", "center", "classType", "copy", "create",
+        "curveType", "evaluator", "getData", "isValid", "majorAxis", "majorRadius",
+        "minorRadius", "normal", "objectType", "set", "this", "thisown",
+        "transformBy",
     ],
     "ExportManager": [
         "cast", "classType", "createC3MFExportOptions", "createDXFFlatPatternExportOptions", "createDXFSketchExportOptions", "createFusionArchiveExportOptions",

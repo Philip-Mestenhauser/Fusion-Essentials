@@ -243,6 +243,90 @@ class TestFolderScoping:
         assert "no subfolder 'Ghost' in 'Parts'" in res["message"]
 
 
+class TestFolderSummary:
+    def _identified_project(self):
+        project = _sample_project()
+        project.id = "project:cam"
+        project.rootFolder.id = "folder:root"
+        project.rootFolder._folders[0].id = "folder:templates"
+        return project
+
+    def test_root_summary_reads_identity_and_immediate_counts_without_enumerating(self, cloud,
+                                                                                  monkeypatch):
+        project = self._identified_project()
+        cloud(project)
+
+        def count_only(items):
+            return SimpleNamespace(
+                count=len(items),
+                asArray=lambda: pytest.fail("summary must not enumerate collection arrays"))
+
+        monkeypatch.setattr(
+            FakeDataFolder, "dataFiles",
+            property(lambda folder: count_only(folder._files)))
+        monkeypatch.setattr(
+            FakeDataFolder, "dataFolders",
+            property(lambda folder: count_only(folder._folders)))
+
+        out = _payload(dm.folder_summary_handler(project="CAM"))
+        assert out["exists"] is True
+        assert out["project"] == {"name": "CAM", "id": "project:cam"}
+        assert out["folder"] == {
+            "name": "Root", "id": "folder:root",
+            "path": "(project root)", "is_root": True,
+        }
+        assert out["immediate_file_count"] == 1
+        assert out["immediate_child_folder_count"] == 2
+        assert out["unavailable_fields"] == []
+
+    def test_project_id_precedes_a_conflicting_name_and_named_folder_is_exact(self, cloud):
+        project = self._identified_project()
+        other = make_data_tree(name="Wrong", files=[_file("Other", "urn:lin:OTHER")])
+        other.id = "project:wrong"
+        cloud(other, project)
+        out = _payload(dm.folder_summary_handler(
+            project="Wrong", project_id="project:cam", folder="Workflow Templates"))
+        assert out["project"] == {"name": "CAM", "id": "project:cam"}
+        assert out["folder"] == {
+            "name": "Workflow Templates", "id": "folder:templates",
+            "path": "Workflow Templates", "is_root": False,
+        }
+        assert out["immediate_file_count"] == 2
+        assert out["immediate_child_folder_count"] == 0
+
+    def test_empty_folder_is_known_zero_while_an_unread_count_is_known_unknown(self, cloud):
+        empty = FakeDataFolder("Empty", folder_id="folder:empty")
+        project = make_data_tree(name="CAM", folders=[empty])
+        project.id = "project:cam"
+        cloud(project)
+        out = _payload(dm.folder_summary_handler(project="CAM", folder="Empty"))
+        assert out["exists"] is True
+        assert out["immediate_file_count"] == 0
+        assert out["immediate_child_folder_count"] == 0
+        assert out["unavailable_fields"] == []
+
+        unread = FakeDataFolder("Unread", folder_id="folder:unread", files_raise="cloud read failed")
+        project = make_data_tree(name="CAM", folders=[unread])
+        project.id = "project:cam"
+        cloud(project)
+        out = _payload(dm.folder_summary_handler(project="CAM", folder="Unread"))
+        assert out["exists"] is True and out["folder"]["id"] == "folder:unread"
+        assert out["immediate_file_count"] is None
+        assert out["immediate_child_folder_count"] == 0
+        assert out["unavailable_fields"] == ["immediate_file_count"]
+
+    def test_missing_path_and_unread_sibling_census_are_distinct_refusals(self, cloud):
+        cloud(self._identified_project())
+        missing = error_message(dm.folder_summary_handler(project="CAM", folder="Ghost"))
+        assert "not found" in missing and "Subfolders there:" in missing
+
+        blind = FakeDataFolder("Root", folders_raise="cloud read failed", is_root=True)
+        cloud(FakeDataProject("CAM", project_id="project:cam", root_folder=blind))
+        unread = error_message(dm.folder_summary_handler(project="CAM", folder="Ghost"))
+        assert "could not be read" in unread and "is unknown" in unread
+        assert "not found" not in unread
+
+
 # ── _file_summary: per-file fields + guarded getters ───────────────────────
 
 class TestUnreadableFolders:
@@ -307,12 +391,14 @@ class TestTruncation:
         assert out["file_count"] == cap
         assert out["truncated"] is True
 
-    def test_recursive_field_always_true_for_whole_project(self, cloud):
-        # No folder given -> the reported 'recursive' is True regardless of the arg.
+    @pytest.mark.parametrize("folder", ["", "/", "\\"])
+    def test_recursive_false_root_aliases_list_immediate_files_only(self, cloud, folder):
         cloud(_sample_project())
-        out = _payload(dm.list_project_files_handler(project="CAM", recursive=False))
-        assert out["recursive"] is True
-        assert out["folder"] == "(whole project)"
+        out = _payload(dm.list_project_files_handler(
+            project="CAM", folder=folder, recursive=False))
+        assert [f["name"] for f in out["files"]] == ["RootPart"]
+        assert out["recursive"] is False
+        assert out["folder"] == "(project root)"
 
     def test_folder_visit_budget_stops_a_wide_walk(self, cloud, monkeypatch):
         # A wide tree with few files per folder never trips the FILE cap, yet each folder is a

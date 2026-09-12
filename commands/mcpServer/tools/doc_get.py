@@ -40,10 +40,8 @@ _DOC_NOISE = {"is_active": False, "is_visible": True, "is_saved": True, "is_modi
 
 
 def _doc_save_facts(doc):
-    """Save state read from the DATA FILE, never from doc.isSaved (which can read False on a document
-    carrying a real cloud DataFile): (data_file_or_none, is_modified, is_saved), never-saved being no
-    DataFile and unsaved being in-session modifications. The DataFile is fetched ONCE and handed back
-    - every doc.dataFile access is a cloud round-trip on the main thread."""
+    """Return (DataFile or None, is_modified, is_saved) from one current identity read."""
+    # Each DataFile access is a cloud round-trip; doc.isSaved can be false with a real DataFile.
     df = safe(lambda: doc.dataFile)
     is_modified = safe(lambda: doc.isModified)
     is_saved = (df is not None) and (is_modified is not True)
@@ -57,8 +55,7 @@ def _active_document_facts():
     doc = safe(lambda: app.activeDocument)
     if not doc:
         return None
-    # is_saved / has_data_file / never-saved all derive from the DataFile, fetched ONCE here and
-    # reused below - the field reads never re-fetch doc.dataFile.
+    # is_saved, has_data_file and cloud identity derive from the DataFile fetched once here.
     df, is_modified, is_saved = _doc_save_facts(doc)
     has_df = df is not None
     info = {
@@ -74,8 +71,7 @@ def _active_document_facts():
         "fusion_web_url": None,
         "has_data_file": has_df,
     }
-    # An UNSAVED document has no DataFile (the case to surface, not guess a URN for). df was
-    # already resolved by _doc_save_facts above - reuse it, do not re-fetch doc.dataFile.
+    # No DataFile means current cloud identity is unavailable; it does not establish history.
     if df:
         info["document_id"] = safe(lambda: df.id)
         info["version_id"] = safe(lambda: df.versionId)
@@ -89,8 +85,10 @@ def _active_document_facts():
             "fresh data_get reads for cloud identity; doc_save version_confirmed is true only when "
             "fresh comparable before/after reads observed an advance, while false/pending is unknown.")
     if not has_df:
-        info["save_state"] = ("never saved to the cloud - no document_id (URN) yet; save it first "
-                              "(doc_save_as) before addressing it by id.")
+        info["save_state"] = (
+            "current cloud identity unavailable - no document_id (URN) or version fields could be "
+            "read. Keep using document_handle for session actions and retry doc_get. If this is "
+            "a new document, use doc_save_as.")
     elif is_modified:
         info["save_state"] = (f"unsaved changes - document_id is the latest SAVED cloud version "
                               f"(number {info['version_number']}); a cloud copy/open won't include "
@@ -104,10 +102,7 @@ _OPEN_DOCS_CAP = 50   # a big assembly can load hundreds of reference docs into 
 
 
 def _open_documents(max_results=_OPEN_DOCS_CAP):
-    """Every document open in the session (the superset of visible tabs), terse rows + the active flag.
-    Returns (rows, summary, truncated). The summary leads with the exceptions - docs with UNSAVED work -
-    computed over the FULL list, so a close-all caller sees what it would lose even when the row list
-    itself is capped. Rows are capped at max_results (default _OPEN_DOCS_CAP)."""
+    """Return capped open-document rows plus full-count identity/save-state exceptions."""
     docs = safe(lambda: app.documents)
     if docs is None:
         return [], {"open_count": 0, "exceptions": []}, False
@@ -126,8 +121,7 @@ def _open_documents(max_results=_OPEN_DOCS_CAP):
                 rows.append({"name": None, "readable": False})
             continue
         name = safe(lambda d=d: d.name)
-        # never-saved / modified / saved all come from the DataFile, not doc.isSaved (which can read
-        # False on a doc that has a real URN) - so a row's is_saved and its exception status agree.
+        # Current DataFile availability and modification state determine the row and exceptions.
         df, is_modified, is_saved = _doc_save_facts(d)
         has_df = df is not None
         if i < cap:
@@ -144,12 +138,13 @@ def _open_documents(max_results=_OPEN_DOCS_CAP):
             # The opaque handle identifies a document across index shifts; open:N remains positional.
             row["open_index"] = i
             rows.append(row)
-        # exception = unsaved work: NEVER-SAVED (no DataFile) OR modified-since-save - what a
-        # close-all would lose. Computed over EVERY open document, not just the capped rows.
+        # A missing current cloud identity or modified state stays visible beyond the row cap.
         if not has_df or is_modified is True:
-            exceptions.append({"name": name,
-                               "unsaved": [r for r, on in (("never_saved", not has_df),
-                                                           ("modified", is_modified is True)) if on]})
+            exceptions.append({
+                "name": name,
+                "unsaved": [r for r, on in (("data_file_unavailable", not has_df),
+                                             ("modified", is_modified is True)) if on],
+            })
     summary = {"open_count": total, "exceptions": exceptions}
     return rows, summary, total > len(rows)
 
@@ -205,9 +200,12 @@ def _slice_versions(versions_max=_VERSIONS_CAP):
     doc = safe(lambda: app.activeDocument)
     df = safe(lambda: doc.dataFile) if doc else None
     if not df:
-        return {"available": False,
-                "note": ("The active document has no cloud DataFile (never saved to the cloud); no "
-                         "version history exists. Save it first (doc_save_as).")}
+        return {
+            "available": False,
+            "note": ("The active document's current cloud DataFile is unavailable, so version "
+                     "history could not be read. Keep using document_handle for session actions "
+                     "and retry doc_get. If this is a new document, use doc_save_as."),
+        }
     latest = safe(lambda: df.latestVersionNumber)
     open_vnum = safe(lambda: df.versionNumber)
     cap = max(1, int(versions_max))
@@ -555,9 +553,13 @@ def _slice_used_in(used_in_max=_USED_IN_CAP):
     doc = safe(lambda: app.activeDocument)
     df = safe(lambda: doc.dataFile) if doc else None
     if not df:
-        return {"available": False,
-                "note": ("The active document has no cloud DataFile (never saved to the cloud); it "
-                         "cannot be referenced by anything yet. Save it first (doc_save_as).")}
+        return {
+            "available": False,
+            "note": ("The active document's current cloud DataFile is unavailable, so where-used "
+                     "could not be queried and the relationship is unknown. Keep using "
+                     "document_handle for session actions and retry doc_get. If this is a new "
+                     "document, use doc_save_as."),
+        }
     has_parents = safe(lambda: df.hasParentReferences, None)
     coll = safe(lambda: df.parentReferences)
     if coll is None:
@@ -611,9 +613,7 @@ def _slice_used_in(used_in_max=_USED_IN_CAP):
 def handler(max_results: int = _OPEN_DOCS_CAP, include=None, versions_max: int = _VERSIONS_CAP,
             xref_max: int = _XREF_CAP, max_depth=None, used_in_max: int = _USED_IN_CAP) -> dict:
     """See TOOL_DESCRIPTION."""
-    # ONE read of the active document's record, for the guard AND the projection built from it: a
-    # slice read answers for the SAME document, so a missing one is refused here rather than
-    # reported by a slice as "never saved to the cloud".
+    # ONE read of the active document's record, for the guard AND the projection built from it.
     active = _active_document_facts()
     if active is None:
         return error("No active document. Open or create one first (doc_open / doc_new).")

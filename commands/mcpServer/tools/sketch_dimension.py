@@ -449,25 +449,30 @@ def _one(sketch, entry):
     if not dim:
         return None, (f"Adding the {dt} dimension returned nothing.")
 
-    set_value = None
+    value_driven = False
+    set_error = None
     if (value or "").strip():
         try:
             dim.parameter.expression = value.strip()
-            set_value = value.strip()
+            value_driven = True
         except Exception as e:
-            return None, (f"Dimension added but could not set value '{value}': {e}.")
+            set_error = f"Dimension added but could not set value '{value}': {e}."
 
+    parameter = safe(lambda: dim.parameter)
     out = {
     "dim_type": dt,
-    "parameter": safe(lambda: dim.parameter.name),
+    "parameter": safe(lambda: parameter.name) if parameter is not None else None,
     # the value is READ BACK off the parameter - what Fusion holds, not an echo of the request
-    "value": safe(lambda: dim.parameter.expression),
-    "value_driven": set_value is not None,
+    "value": safe(lambda: parameter.expression) if parameter is not None else None,
+    "value_driven": value_driven,
     # READ BACK off the dimension: a driving dimension controls the geometry, a driven one only
     # reports it - which of the two the API actually made is not assumed from the request.
     "is_driving": safe(lambda: dim.isDriving),
     "note": "Drive it later by name via param_set." + _TYPE_NOTES.get(dt, ""),
     }
+    if set_error:
+        retained = out if out["parameter"] else _sketch_batch.UNKNOWN_RETENTION
+        return retained, set_error
     if dt in _SURFACE_TYPES:
         out["surface"] = _inputs.surface_ref_label(surf)
     # A negative DISTANCE does not mirror: the solver places the point at the SIGNED offset, and a

@@ -447,30 +447,24 @@ class TestPreviewNote:
                                               file_path=str(tmp_path / "p.pdf")))["note"].lower()
 
 
-# ── sheet coverage: DXF/DWG write ONE sheet, PDF is the multi-sheet channel ───
+# ── sheet selection disclosure ────────────────────────────────────────────────
 
-class TestSingleSheetCoverage:
-    def test_dxf_and_dwg_notes_state_single_sheet_coverage(self, install, tmp_path):
+class TestSheetSelectionDisclosure:
+    @pytest.mark.parametrize("fmt", ["dxf", "dwg"])
+    def test_dxf_and_dwg_disclose_unverified_sheet_selection(self, install, tmp_path, fmt):
         install()
-        assert "SINGLE sheet" in _payload(_run(format="dxf",
-                                               file_path=str(tmp_path / "s.dxf")))["note"]
-        install()
-        assert "SINGLE sheet" in _payload(_run(format="dwg",
-                                               file_path=str(tmp_path / "s.dwg")))["note"]
-
-    def test_the_note_names_the_first_sheet_and_denies_the_active_one(self, install, tmp_path):
-        # WHICH sheet is the load-bearing half: the measured DXF of an 8-sheet drawing carried
-        # sheet index 0 and NOT the active sheet, so a caller who reads "the active sheet" here
-        # exports the wrong one and cannot tell from the payload.
-        install()
-        note = _payload(_run(format="dxf", file_path=str(tmp_path / "which.dxf")))["note"]
-        assert "first sheet" in note
-        assert "not the active one" in note
+        out = _payload(_run(format=fmt, file_path=str(tmp_path / ("sheet." + fmt))))
+        assert out["sheet_selection_verified"] is False
+        assert "not verified" in out["note"]
+        assert "Inspect the exported file" in out["note"]
+        assert "PDF with sheet_range" in out["note"]
+        assert "first sheet" not in out["note"] and "active" not in out["note"]
 
     def test_pdf_note_claims_no_single_sheet_limit(self, install, tmp_path):
         install()
-        note = _payload(_run(format="pdf", file_path=str(tmp_path / "s.pdf")))["note"]
-        assert "SINGLE sheet" not in note and "all sheets" in note
+        out = _payload(_run(format="pdf", file_path=str(tmp_path / "s.pdf")))
+        assert "all sheets" in out["note"]
+        assert "sheet_selection_verified" not in out
 
 
 # ── guards ────────────────────────────────────────────────────────────────────

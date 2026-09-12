@@ -10,7 +10,7 @@ code is the source of truth — match the nearest existing tool when in doubt.
 
 ## Planning files
 
-Keep `plans` sparse. `plans/backlog.md` is the single ledger for actionable work; update an existing row instead of creating another plan or status report.
+Keep `plans` sparse. `plans/backlog.md` is the single ledger for actionable work; ready handoffs for native testing or acceptance belong in `plans/<BACKLOG-ROW-ID>.md`, update an existing row instead of creating a competing plan or status report, and delete the matching plan when its backlog row is removed.
 Put agent scratch files, reports, evidence, exports and worker handoffs in the gitignored `outputs/` directory. Reserve `tests/live/evals/results/` for actual eval runs and `.cache` for tooling caches and isolated worktrees. Remove disposable scaffolding when a task finishes.
 
 ## Read vs Edit — the two kinds (and the read shapes)
@@ -98,6 +98,12 @@ matters, once. A rich read's deep `include=` returns the slice asked for, not th
 ## What "done" means, and how much verification a change buys
 
 A change is done when its live sweep row passes on the real Fusion session, and its receipt is restamped.
+Fixes and features may be committed only after independent review, live evaluation of the affected
+capabilities on the exact loaded candidate, matching receipts and passing required checks.
+Offline-only checkpoints are not eligible; keep unfinished work in isolated worktrees and ignored backups.
+Each changed observable behavior must have a reproducible demonstration in the existing live sweep,
+with an independent effect check in the same change. Internal helpers are exercised through their
+affected public behavior; accounting for a tool name alone does not validate new logic.
 Mock unit tests prove handler logic and nothing about Fusion: they encode the builder's beliefs, and a
 wrong belief pinned by a test is the most confident way to ship a lie. So: one test per plausible bug,
 no test per function, no mutant theater in review (a reviewer runs a handful of mutants, not dozens), and

@@ -15,7 +15,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error
 
-_SLICES = ("hubs", "folders")
+_SLICES = ("hubs", "folders", "summary")
 
 # Folder-tree depth a caller who names none gets (each level is a slow cloud fetch).
 _MAX_DEPTH_DEFAULT = 4
@@ -89,9 +89,26 @@ def handler(project: str = "", project_id: str = "", folder: str = "", recursive
                             "wrong file. Pass the lineage URN to be exact.")
         return ok(out)
 
+    if len(set(inc)) > 1:
+        return error(f"Include slices cannot be combined: {inc}. Request one of {', '.join(_SLICES)}.")
+    if "hubs" in inc and (have_project or (folder or "").strip()):
+        return error("include=['hubs'] cannot be combined with project or folder scope inputs.")
+    if any(s in inc for s in ("folders", "summary")) and not have_project:
+        return error(f"include={inc} requires 'project' or 'project_id'.")
+
     # ── scoped to a project ──────────────────────────────────────────────────
     if have_project:
         from . import _data_read as data_read
+        if "summary" in inc:
+            out, e = _unwrap(data_read.folder_summary_handler(
+                project=project, project_id=project_id, folder=folder))
+            if e:
+                return e
+            out["scope"] = "summary"
+            out["note"] = ("Resolved folder identity and immediate file/child-folder counts. "
+                           "A null count is named in unavailable_fields; use include=['folders'] "
+                           "for the bounded folder tree or drop include to list files.")
+            return ok(out)
         if "folders" in inc:
             out, e = _unwrap(data_read.list_folders_handler(
                 project=project, project_id=project_id, max_depth=max_depth, folder=folder,
@@ -127,8 +144,9 @@ def handler(project: str = "", project_id: str = "", folder: str = "", recursive
             return e
         out["scope"] = "files"
         out["note"] = ("Files in the project (each with its lineage URN + openable fusionWebURL). "
-                       "'folder'=<path> scopes to one folder; include=['folders'] shows the folder tree "
-                       "instead; 'file'=<name|URN> reads ONE file's full record (dates, authors, "
+                       "'folder'=<path> scopes to one folder; include=['summary'] reads its identity "
+                       "and immediate counts; include=['folders'] shows the folder tree instead; "
+                       "'file'=<name|URN> reads ONE file's full record (dates, authors, "
                        "version and link state). (Cloud read - see 'truncated'.)")
         if out.get("time_truncated"):
             at = out.get("time_truncated_at") or "(project root)"
@@ -161,7 +179,8 @@ def handler(project: str = "", project_id: str = "", folder: str = "", recursive
         return e
     out["scope"] = "projects"
     out["note"] = ("Active hub + its projects. Pass project=<name|id> to list its FILES (add 'folder' to "
-                   "scope, or include=['folders'] for the tree); 'file'=<name|URN> reads ONE file's full "
+                    "scope, include=['summary'] for immediate counts, or include=['folders'] for the "
+                    "tree); 'file'=<name|URN> reads ONE file's full "
                    "record. include=['hubs'] lists all hubs. This is the CLOUD data model (networked); "
                    "for the open-document SESSION see doc_get.")
     if out.get("time_truncated"):
@@ -172,7 +191,7 @@ def handler(project: str = "", project_id: str = "", folder: str = "", recursive
 
 TOOL_DESCRIPTION = (
     "Read the CLOUD data model by scope: hubs and projects, one project's files, its folder tree, "
-    "or ONE file's record. Open documents are doc_get."
+    "one folder's summary, or ONE file's record. Open documents are doc_get."
 )
 
 tool = (
@@ -184,7 +203,7 @@ tool = (
     .add_input_property("recursive", {"type": "boolean"})
     .add_input_property("include", {"type": "array",
             "items": {"type": "string", "enum": list(_SLICES)},
-            "description": "'folders' reads the folder tree."})
+            "description": "Folder summary or tree slice."})
     .add_input_property("max_depth", {"type": "integer",
             "description": "Depth of the folder tree."})
     .add_input_property("folder_budget", {"type": "integer",

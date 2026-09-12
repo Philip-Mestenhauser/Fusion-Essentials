@@ -22,9 +22,9 @@ generator folds into live_api_facts.py; a row whose misuse kills its own script 
 ``facts_on_pass`` and the runner records those when the row passes. Every row runs as its OWN
 script because a raise can escape try/except entirely and kill the whole Python.Run invocation,
 eating its printed output (out-of-range item() does exactly that, observed live) - so one row's
-abort can never swallow another row's result. expect="raise_or_abort" rows assert a misuse that
-never returns a value: a caught raise prints PASS, and a script-level error ALSO confirms the
-claim. Rows with needs="cam" run LAST: on the first one, the runner stands up a CAM world (a box,
+abort can never swallow another row's result. Ordinary rows require an emitted verdict;
+a script-level error remains ERROR. The DXF fatal getter requires a fresh boundary marker and
+the exact native error. Rows with needs="cam" run LAST: on the first one, the runner stands up a CAM world (a box,
 MeasureSetup, two face ops, MeasureFolder holding the second op) through the server's own tools;
 if that build fails, every cam row reports ERROR with the failing step instead of crashing the
 run. Extend coverage by adding rows, not code.
@@ -35,11 +35,14 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
+import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from tool_verify import (  # noqa: E402  shared HTTP plumbing
+from verify_core import (  # noqa: E402  direct wire/health helpers; no facade binding
     attestation_identity, call, health_gate, registered_tools)
 import cloud_config  # noqa: E402  the operator's hub/project/folder, never a literal in this file
 CLOUD_PROJECT = cloud_config.PROJECT
@@ -878,33 +881,54 @@ ROWS = [
     },
     {
         "id": "item-oor-brepbodies",
-        "claim": "BRepBodies.item(out-of-range) never returns None - it raises RuntimeError. This row's body catches the raise and gates on its type; the expect also accepts a script-level abort, so a PASS does not say which of the two the run saw. The abort half is not this row's measurement either way: it is the live observation the module docstring records, that an out-of-range item() raise escaped try/except and killed a whole script invocation",
+        "claim": "BRepBodies.item(9999) on a collection with count at most 9999 raises RuntimeError; its catch and verdict return through the read-only script channel",
         "encoded_in": "tests/fakes/scaffold.py _NamedCollection.item",
-        "need_box": True,
-        "expect": "raise_or_abort",
+        "read_only": True,
         "facts_on_pass": {"behavior.collection_item_out_of_range_raises": True},
         "body": """
-    try:
-        r = des.rootComponent.bRepBodies.item(9999)
-        emit(False, "item-oor-brepbodies: returned " + repr(r) + " with no raise")
-    except Exception as e:
-        emit(type(e).__name__ == "RuntimeError",
-             "item-oor-brepbodies: raised catchably " + type(e).__name__ + ": " + str(e)[:60])
+    d = adsk.fusion.Design.cast(
+        app.activeDocument.products.itemByProductType("DesignProductType"))
+    bodies = d.rootComponent.bRepBodies
+    count = bodies.count
+    if count > 9999:
+        emit(False, "item-oor-brepbodies: fixture count=" + str(count) + " makes 9999 valid")
+    else:
+        try:
+            r = bodies.item(9999)
+            emit(False, "item-oor-brepbodies: count=" + str(count)
+                 + " returned " + repr(r) + " with no raise")
+        except RuntimeError as e:
+            emit(True, "item-oor-brepbodies: count=" + str(count)
+                 + " caught RuntimeError: " + str(e)[:60])
+        except Exception as e:
+            emit(False, "item-oor-brepbodies: count=" + str(count) + " caught "
+                 + type(e).__name__ + ": " + str(e)[:60])
 """,
     },
     {
         "id": "item-oor-sketches",
-        "claim": "Sketches.item(out-of-range) never returns None - it raises. This row's body catches the raise and gates on its type; the expect also accepts a script-level abort, so a PASS does not say which of the two the run saw. The abort half is not this row's measurement either way: it is the live observation the module docstring records, that an out-of-range item() raise escaped try/except and killed a whole script invocation",
+        "claim": "Sketches.item(9999) on a collection with count at most 9999 raises RuntimeError; its catch and verdict return through the read-only script channel",
         "encoded_in": "tests/fakes/scaffold.py _NamedCollection.item",
-        "expect": "raise_or_abort",
+        "read_only": True,
         "facts_on_pass": {"behavior.collection_item_out_of_range_raises": True},
         "body": """
-    try:
-        r = des.rootComponent.sketches.item(9999)
-        emit(False, "item-oor-sketches: returned " + repr(r) + " with no raise")
-    except Exception as e:
-        emit(type(e).__name__ == "RuntimeError",
-             "item-oor-sketches: raised catchably " + type(e).__name__)
+    d = adsk.fusion.Design.cast(
+        app.activeDocument.products.itemByProductType("DesignProductType"))
+    sketches = d.rootComponent.sketches
+    count = sketches.count
+    if count > 9999:
+        emit(False, "item-oor-sketches: fixture count=" + str(count) + " makes 9999 valid")
+    else:
+        try:
+            r = sketches.item(9999)
+            emit(False, "item-oor-sketches: count=" + str(count)
+                 + " returned " + repr(r) + " with no raise")
+        except RuntimeError as e:
+            emit(True, "item-oor-sketches: count=" + str(count)
+                 + " caught RuntimeError: " + str(e)[:60])
+        except Exception as e:
+            emit(False, "item-oor-sketches: count=" + str(count) + " caught "
+                 + type(e).__name__ + ": " + str(e)[:60])
 """,
     },
     {
@@ -3306,22 +3330,46 @@ ROWS = [
         "id": "closed-document-name-raises",
         "claim": ("Reading .name on a CLOSED document's held wrapper raises RuntimeError "
                   "'An API Object refers to a deleted Object'. This row catches the raise and "
-                  "gates on its message; the expect also accepts a script-level abort, so a PASS "
-                  "does not say which of the two the run saw"),
+                  "gates on its message in the read-only script channel"),
         "encoded_in": ("_write_guard.py name-read comment in document_key; "
                        "tests/unit/test_view_set.py _DocWrapper raises contract"),
-        "expect": "raise_or_abort",
+        "read_only": True,
         "body": """
     DT = adsk.core.DocumentTypes.FusionDesignDocumentType
     d1 = app.documents.add(DT)
-    d1.close(False)
+    initial_closed = False
+    final_closed = False
+    passed = False
+    detail = "initial close was not confirmed"
     try:
-        n = d1.name
-        emit(False, "closed-document-name-raises: answered " + repr(n) + " with no raise")
-    except Exception as e:
-        emit(type(e).__name__ == "RuntimeError" and "deleted Object" in str(e),
-             "closed-document-name-raises: raised catchably " + type(e).__name__
-             + ": " + str(e)[:60])
+        try:
+            d1.close(False)
+            initial_closed = d1.isValid is False
+            final_closed = initial_closed
+            if not initial_closed:
+                detail = "close returned but isValid stayed true"
+        except Exception as e:
+            detail = "close raised " + type(e).__name__ + ": " + str(e)[:60]
+        if initial_closed:
+            try:
+                n = d1.name
+                detail = "answered " + repr(n) + " with no raise"
+            except RuntimeError as e:
+                passed = "deleted Object" in str(e)
+                detail = "caught RuntimeError: " + str(e)[:60]
+            except Exception as e:
+                detail = "wrong exception " + type(e).__name__ + ": " + str(e)[:60]
+    finally:
+        if not initial_closed:
+            try:
+                if d1.isValid:
+                    d1.close(False)
+                final_closed = d1.isValid is False
+            except Exception as e:
+                detail += "; cleanup close failed " + type(e).__name__ + ": " + str(e)[:40]
+                final_closed = False
+    emit(bool(initial_closed and final_closed and passed),
+         "closed-document-name-raises: " + detail)
 """,
     },
     {
@@ -3742,9 +3790,7 @@ ROWS = [
     kinds = []
     n = 0
     members = False
-    major = None
-    minor = None
-    centred = False
+    observed = []
     tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
     try:
         d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
@@ -3756,30 +3802,34 @@ ROWS = [
         solid = r2.features.extrudeFeatures.addSimple(
             sk.profiles.item(0), adsk.core.ValueInput.createByReal(1.0),
             adsk.fusion.FeatureOperations.NewBodyFeatureOperation).bodies.item(0)
-        ell = None
+        ellipses = []
         seen = set()
         for i in range(solid.edges.count):
             g = solid.edges.item(i).geometry
             seen.add(type(g).__name__ + ":" + str(g.curveType))
-            if g.curveType == adsk.core.Curve3DTypes.Ellipse3DCurveType and ell is None:
-                ell = g
+            if g.curveType == adsk.core.Curve3DTypes.Ellipse3DCurveType:
+                ellipses.append((i, g))
         kinds = sorted(seen)
-        if ell is not None:
-            n = dump_shape("Ellipse3D", ell)
-            names = [x for x in dir(ell) if not x.startswith("_")]
-            members = ("center" in names and "majorRadius" in names and "minorRadius" in names)
+        if ellipses:
+            n = dump_shape("Ellipse3D", ellipses[0][1])
+            members = all(
+                "center" in dir(g) and "majorRadius" in dir(g) and "minorRadius" in dir(g)
+                for _, g in ellipses)
             if members:
-                major = ell.majorRadius
-                minor = ell.minorRadius
-                c = ell.center
-                centred = abs(c.x) < 1e-9 and abs(c.y) < 1e-9 and abs(c.z) < 1e-9
+                for edge_index, g in ellipses:
+                    c = g.center
+                    observed.append((edge_index, c.x, c.y, c.z, g.majorRadius, g.minorRadius))
     finally:
         tmp.close(False)
-    emit(n > 0 and members and centred
-         and abs(major - 2.0) < 1e-6 and abs(minor - 1.0) < 1e-6,
-         "shape-dump-ellipse3d: " + str(n) + " attrs majorRadius=" + repr(major)
-         + " minorRadius=" + repr(minor) + " (drawn 2.0 x 1.0 cm) centre-at-origin="
-         + repr(centred) + " edge curve types=" + str(kinds))
+    cap_values = sorted((row[1:] for row in observed), key=lambda cap: cap[2])
+    expected = [(0.0, 0.0, 0.0, 2.0, 1.0), (0.0, 0.0, 1.0, 2.0, 1.0)]
+    caps_match = len(cap_values) == len(expected) and all(
+        all(abs(actual - wanted) < 1e-6 for actual, wanted in zip(got, want))
+        for got, want in zip(cap_values, expected))
+    emit(n > 0 and members and caps_match,
+         "shape-dump-ellipse3d: " + str(n) + " attrs ellipse edges=" + repr(observed)
+         + " (expected centers (0,0,0)/(0,0,1), radii 2.0 x 1.0 cm) edge curve types="
+         + str(kinds))
 """,
     },
     {
@@ -5927,13 +5977,13 @@ ROWS = [
                   "deleted: it raises RuntimeError, and the message names '3 : Given URL does not "
                   "point to a template'. So a delete's read-back cannot ask this to confirm "
                   "absence - the asset WALK must - and any caller reading it needs safe(). This "
-                  "row catches the raise and gates on its message; the expect also accepts a "
-                  "script-level abort, so a PASS does not say which of the two the run saw"),
+                  "read-only row catches the RuntimeError and gates on its message"),
         "encoded_in": ("cam_delete_template.py's safe()-wrapped loads_after read and the comment "
                        "naming the asset walk as the load-bearing leg"),
         "needs": "cam",
-        "expect": "raise_or_abort",
+        "read_only": True,
         "body": """
+    import uuid
     cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
     setup = None
     for i in range(cam.setups.count):
@@ -5948,23 +5998,68 @@ ROWS = [
     if tmpl is None:
         emit(False, "cam-templateaturl-raises-on-deleted-url: no CAMTemplate to import")
         return
-    tmpl.name = "MeasureTmplRaise"
+    tmpl.name = "MeasureTmplRaise_" + uuid.uuid4().hex
     lib = adsk.cam.CAMManager.get().libraryManager.templateLibrary
     local = lib.urlByLocation(adsk.cam.LibraryLocations.LocalLibraryLocation)
-    url = lib.importTemplate(tmpl, local)
-    if not url or not lib.deleteAsset(url):
-        emit(False, "cam-templateaturl-raises-on-deleted-url: could not stage a deleted url")
-        return
-    # The misuse: the asset at this url is gone. A null return here would REFUTE the claim.
+    url = None
+    owned_url = "<unreadable owned URL>"
+    initial_cleanup_ok = False
+    cleanup_detail = "asset was not imported"
+    def cleanup(require_delete):
+        if owned_url == "<unreadable owned URL>":
+            try:
+                lib.deleteAsset(url)
+            except Exception as e:
+                return False, "owned URL unreadable; cleanup raised " + type(e).__name__
+            return False, "owned URL unreadable; absence cannot be verified"
+        try:
+            removed = lib.deleteAsset(url)
+        except Exception as e:
+            removed = None
+            delete_detail = "deleteAsset raised " + type(e).__name__ + ": " + str(e)[:60]
+        else:
+            delete_detail = "deleteAsset returned " + repr(removed)
+        try:
+            gone = all(u.toString() != owned_url for u in lib.childAssetURLs(local))
+        except Exception as e:
+            return False, owned_url + " absence check raised " + type(e).__name__ + ": " + str(e)[:60]
+        if not gone:
+            return False, owned_url + " remains in childAssetURLs; " + delete_detail
+        if require_delete and removed is not True:
+            return False, owned_url + " initial deletion unconfirmed; " + delete_detail
+        return True, owned_url + " absent; " + delete_detail
     try:
-        r = lib.templateAtURL(url)
-        emit(False, "cam-templateaturl-raises-on-deleted-url: returned " + repr(r)
-             + " with no raise - the docstring's null contract holds after all")
-    except Exception as e:
-        msg = str(e).strip().splitlines()[0]
-        emit(type(e).__name__ == "RuntimeError" and "does not point to a template" in msg,
-             "cam-templateaturl-raises-on-deleted-url: raised catchably "
-             + type(e).__name__ + ": " + msg[:80])
+        url = lib.importTemplate(tmpl, local)
+        if not url:
+            cleanup_detail = "import returned no URL"
+        else:
+            try:
+                owned_url = url.toString()
+            except Exception as e:
+                cleanup_detail = "owned URL unreadable: " + type(e).__name__ + ": " + str(e)[:60]
+            else:
+                initial_cleanup_ok, cleanup_detail = cleanup(True)
+                if initial_cleanup_ok:
+                    try:
+                        lib.templateAtURL(url)
+                    except RuntimeError as e:
+                        msg = str(e).strip().splitlines()[0]
+                        passed = "does not point to a template" in msg
+                        cleanup_detail += "; caught RuntimeError: " + msg[:100]
+                    except Exception as e:
+                        passed = False
+                        cleanup_detail += "; wrong exception " + type(e).__name__ + ": " + str(e)[:80]
+                    else:
+                        passed = False
+                        cleanup_detail += "; returned without RuntimeError"
+                else:
+                    passed = False
+    finally:
+        if url is not None and not initial_cleanup_ok:
+            _cleanup_ok, retry_detail = cleanup(False)
+            cleanup_detail += "; final cleanup " + retry_detail
+    emit(bool(initial_cleanup_ok and passed),
+         "cam-templateaturl-raises-on-deleted-url: " + cleanup_detail)
 """,
     },
     {
@@ -6681,17 +6776,29 @@ ROWS = [
     },
     {
         "id": "dxf-sketch-options-units-read-is-fatal",
-        "claim": ("A DXF options units read can abort Python.Run without a caught "
-                  "verdict. An opaque abort is ERROR, not proof; this row uses the run-owned "
-                  "scratch and creates no additional document."),
+        "claim": ("A DXF options units read reaches an actual "
+                  "DXFSketchExportOptions on a one-curve sketch, then aborts with the exact "
+                  "native RuntimeError before a caught or returned verdict."),
         "encoded_in": ("design_export.py's no-dxf_units comment and _write_dxf (which never reads "
                        "units); tests/unit/test_design_export.py's DXF options fake"),
-        "expect": "raise_or_abort",
         "facts_on_pass": {"behavior.dxf_sketch_options_units_read_raises": True},
         "body": """
-    import os, tempfile
+    import json, os, tempfile
+    _probe_path = "__FE_DXF_MARKER_PATH__"
+    _probe_nonce = "__FE_DXF_NONCE__"
+    _probe_scratch = "__FE_DXF_SCRATCH__"
+    _probe_source_sha = "__FE_DXF_SOURCE_SHA__"
+    def _probe(phase, **fields):
+        record = {"row_id": "dxf-sketch-options-units-read-is-fatal",
+                  "nonce": _probe_nonce, "scratch": _probe_scratch,
+                  "source_sha256": _probe_source_sha, "phase": phase}
+        record.update(fields)
+        with open(_probe_path, "w", encoding="utf-8") as _fh:
+            json.dump(record, _fh, separators=(",", ":"))
+            _fh.flush()
+            os.fsync(_fh.fileno())
     # The document exists before Python.Run, so an uncatchable abort cannot leak a new tab.
-    d = adsk.fusion.Design.cast(app.activeProduct)
+    d = adsk.fusion.Design.cast(app.activeDocument.products.itemByProductType("DesignProductType"))
     root = d.rootComponent
     sk = root.sketches.add(root.xYConstructionPlane)
     sk.sketchCurves.sketchLines.addByTwoPoints(
@@ -6700,10 +6807,22 @@ ROWS = [
     # units read below, so this path is never written.
     opts = d.exportManager.createDXFSketchExportOptions(
         os.path.join(tempfile.gettempdir(), "unused_measure_dxf_units.dxf"), sk)
+    _object_type = opts.objectType
+    _curve_count = sk.sketchCurves.count
+    if _object_type != "adsk::fusion::DXFSketchExportOptions" or _curve_count != 1:
+        emit(False, "dxf-sketch-options-units-read-is-fatal: precondition mismatch objectType="
+             + repr(_object_type) + " curves=" + repr(_curve_count))
+        return
     try:
+        _probe("getter_ready", options_object_type=_object_type, curve_count=_curve_count)
         u = opts.units
+        _probe("getter_returned", options_object_type=_object_type,
+               curve_count=_curve_count, returned=repr(u))
         emit(False, "dxf-sketch-options-units-read-is-fatal: answered " + repr(u) + " with no raise")
     except Exception as e:
+        _probe("getter_caught", options_object_type=_object_type,
+               curve_count=_curve_count, exception_type=type(e).__name__,
+               exception_message=str(e))
         emit(False, "dxf-sketch-options-units-read-is-fatal: raised CATCHABLY "
              + type(e).__name__ + ": " + str(e)[:60])
 """,
@@ -6863,6 +6982,86 @@ def _compose(row):
                             body=body.strip("\n") + "\n")
 
 
+_DXF_FATAL_ERROR_LINE = (
+    "RuntimeError: 3 : Distance unit is not supported by DXF. Please select a different unit")
+
+def _dxf_probe_detail(status, marker, payload):
+    return json.dumps({"status": status, "marker": marker, "error": str(payload)},
+                      sort_keys=True, separators=(",", ":"))
+
+def _judge_dxf_fatal(marker, is_error, payload, row_id, nonce, scratch, source_sha):
+    if not isinstance(marker, dict):
+        return "ERROR", _dxf_probe_detail("missing_or_malformed_marker", marker, payload)
+    expected = {"row_id": row_id, "nonce": nonce, "scratch": scratch,
+                "source_sha256": source_sha}
+    if any(marker.get(key) != value for key, value in expected.items()):
+        return "ERROR", _dxf_probe_detail("marker_identity_mismatch", marker, payload)
+    if marker.get("options_object_type") != "adsk::fusion::DXFSketchExportOptions":
+        return "ERROR", _dxf_probe_detail("options_type_unproven", marker, payload)
+    if marker.get("curve_count") != 1:
+        return "ERROR", _dxf_probe_detail("one_curve_unproven", marker, payload)
+    phase = marker.get("phase")
+    if phase in ("getter_returned", "getter_caught"):
+        return "FAIL", _dxf_probe_detail("getter_did_not_abort", marker, payload)
+    if phase != "getter_ready":
+        return "ERROR", _dxf_probe_detail("getter_boundary_unproven", marker, payload)
+    if not is_error:
+        return "FAIL", _dxf_probe_detail("no_channel_error", marker, payload)
+    if _DXF_FATAL_ERROR_LINE not in str(payload).splitlines():
+        return "ERROR", _dxf_probe_detail("different_native_error", marker, payload)
+    return "PASS", _dxf_probe_detail("exact_fatal_getter", marker, payload)
+
+def _measure_dxf_units(row, scratch):
+    base_script = _compose(row)
+    source_sha = hashlib.sha256(base_script.encode("utf-8")).hexdigest()
+    nonce = uuid.uuid4().hex
+    probe_dir = tempfile.mkdtemp(prefix="fe_measure_dxf_fatal_")
+    marker_path = os.path.join(probe_dir, "marker.json")
+    replacements = {
+        '"__FE_DXF_MARKER_PATH__"': repr(marker_path),
+        '"__FE_DXF_NONCE__"': repr(nonce),
+        '"__FE_DXF_SCRATCH__"': repr(scratch),
+        '"__FE_DXF_SOURCE_SHA__"': repr(source_sha),
+    }
+    script = base_script
+    for token, value in replacements.items():
+        script = script.replace(token, value)
+    marker = None
+    status, detail = "ERROR", ""
+    try:
+        if "__FE_DXF_" in script:
+            status, detail = "ERROR", _dxf_probe_detail(
+                "placeholder_residual", marker, "")
+        else:
+            try:
+                is_error, payload = call("sys_execute_script", {
+                    "script": script, "expect_document": scratch})
+            except Exception as exc:
+                status, detail = "ERROR", _dxf_probe_detail(
+                    "transport_exception", marker, exc)
+            else:
+                try:
+                    with open(marker_path, encoding="utf-8") as fh:
+                        marker = json.load(fh)
+                except (OSError, ValueError):
+                    marker = None
+                status, detail = _judge_dxf_fatal(
+                    marker, is_error, payload, row["id"], nonce, scratch, source_sha)
+    finally:
+        try:
+            resolved_dir = os.path.realpath(probe_dir)
+            resolved_root = os.path.realpath(tempfile.gettempdir())
+            if (os.path.dirname(resolved_dir) != resolved_root
+                    or not os.path.basename(resolved_dir).startswith("fe_measure_dxf_fatal_")):
+                raise OSError("refusing to remove an unexpected DXF probe directory")
+            shutil.rmtree(resolved_dir)
+        except OSError as exc:
+            status, detail = "ERROR", _dxf_probe_detail(
+                "probe_cleanup_failed",
+                {"prior_status": status, "prior_detail": detail, "marker": marker}, exc)
+    return status, detail
+
+
 def _verdict_lines(payload):
     text = payload if isinstance(payload, str) else json.dumps(payload)
     return [ln.strip() for ln in text.splitlines() if ln.strip().startswith(("PASS ", "FAIL "))]
@@ -7006,12 +7205,23 @@ _LOADED_RE = re.compile(
 
 
 def _measure_source_hash():
-    """Return the normalized hash of this harness and the capture trust boundary."""
-    entries = [("tests/live/measure_api.py", __file__)]
+    """Return the normalized hash of the measurement and loaded tool source closure."""
+    entries = [
+        ("tests/live/measure_api.py", __file__),
+        ("tests/live/verify_core.py", os.path.join(REPO_ROOT, "tests", "live", "verify_core.py")),
+        ("tests/live/cloud_config.py", os.path.join(REPO_ROOT, "tests", "live", "cloud_config.py")),
+    ]
     entries.extend((rel, os.path.join(REPO_ROOT, *rel.split("/")))
                    for rel in _ATTESTATION_TCB)
+    mcp_root = os.path.join(REPO_ROOT, "commands", "mcpServer")
+    for dirpath, _dirnames, filenames in os.walk(mcp_root):
+        for filename in sorted(filenames):
+            if filename.endswith(".py"):
+                path = os.path.join(dirpath, filename)
+                rel = os.path.relpath(path, REPO_ROOT).replace(os.sep, "/")
+                entries.append((rel, path))
     hasher = hashlib.sha256()
-    for rel, source_path in entries:
+    for rel, source_path in sorted(entries):
         with open(source_path, encoding="utf-8", newline=None) as fh:
             source = fh.read().replace("\r\n", "\n").replace("\r", "\n")
         hasher.update(rel.encode("utf-8") + b"\0" + source.encode("utf-8") + b"\0")
@@ -7204,13 +7414,19 @@ def check():
     if _measure_source_hash() != stamped_source:
         problems.append("ledger source hash does not match the measurement/capture source - "
                         "re-run the measurements to refresh the stamp")
-    for field in ("implementation_fingerprint", "schema_fingerprint"):
-        if stamped_attestation[field] != current_attestation[field]:
-            problems.append("ledger loaded {0} does not match the current server".format(field))
     if problems:
         print("\n".join(problems))
         return 1
-    print("contracts current: Fusion {0}, verified {1}, all rows PASS".format(live, stamped_date))
+    runtime_differences = [field for field in ("implementation_fingerprint", "schema_fingerprint")
+                           if stamped_attestation[field] != current_attestation[field]]
+    if runtime_differences:
+        detail = ("source-current API contracts under current runtime registration; historical "
+                  "loaded identity retained; runtime fields differing: "
+                  + ", ".join(runtime_differences))
+    else:
+        detail = "exact loaded implementation/schema identity matches the historical run"
+    print("contracts current: Fusion {0}, verified {1}, all rows PASS; {2}".format(
+        live, stamped_date, detail))
     return 0
 
 
@@ -7274,11 +7490,15 @@ def run_measurements(write_json, only=None):
                 results.append((row, "ERROR", "cam world: " + cam_world["err"]))
                 print("  {0:6} {1:28} {2}".format("ERROR", row["id"], "cam world: " + cam_world["err"][:70]))
                 continue
-            script_args = {"script": _compose(row), "expect_document": scratch}
-            if row.get("read_only"):
-                script_args["read_only"] = True
-            is_error, payload = call("sys_execute_script", script_args)
-            status, detail = _judge(row, is_error, payload)
+            if row["id"] == "dxf-sketch-options-units-read-is-fatal":
+                status, detail = _measure_dxf_units(row, scratch)
+                payload = ""
+            else:
+                script_args = {"script": _compose(row), "expect_document": scratch}
+                if row.get("read_only"):
+                    script_args["read_only"] = True
+                is_error, payload = call("sys_execute_script", script_args)
+                status, detail = _judge(row, is_error, payload)
             if status == "PASS":
                 facts.update(row.get("facts_on_pass") or {})
                 facts.update(_fact_lines(payload))

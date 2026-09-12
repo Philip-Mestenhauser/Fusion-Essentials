@@ -11,7 +11,8 @@ from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import apply_rename, ok, error, safe, read_flag
 from ._cam_common import (get_cam, enumeration_remedy, expression_error, matched_quoting,
-                          parse_parameters, resolve_cam_node, unquote_expression)
+                          op_primary_state, op_state_facts, parse_parameters, resolve_cam_node,
+                          unquote_expression, validity_basis)
 from ._cam_presets import resolve_operation_preset
 from .cam_create_operation import (_NO_INDEX, _doc_tool_at, _names_the_same_tool,
                                    _operation_name_clash, _tool_at, _tool_facts,
@@ -285,18 +286,34 @@ def _applied_clause(parts):
 
 _PARAM_READ = "cam_get(include=['parameters'], operation=...)"
 
-_PARAM_NOTE = ("Parameters set. changed[].value is the platform's evaluated read and can LAG a valid "
-               "set (echoing the pre-set value); 'after' and the evaluation gate are the trustworthy "
-               "signals. The toolpath is now OUT OF DATE - regenerate it with cam_generate "
-               "(be in the Manufacture workspace).")
+_PARAM_NOTE = ("Parameters set. changed[].value is evaluated and may lag; changed[].after plus "
+               "the evaluation gate confirm the write.")
 
-_UNCHANGED_NOTE = ("changed[].unchanged marks a parameter the request already matched: it was set "
-                   "and its expression reads the same, which is the one case an unmoved read-back "
-                   "confirms rather than contradicts.")
 
-_UNLOCKED_NOTE = ("changed[].unlocked_here marks a parameter that read isEditable false at the "
-                  "start of this call and true once the rest of the call had been applied - it was "
-                  "written after them, not refused.")
+def _parameter_state_note(op) -> str:
+    """The operation lifecycle state observed after parameter writes."""
+    state = op_primary_state(op_state_facts(op))
+    if state == "unread":
+        return ("operationState did not answer after the edit; re-read with "
+                "cam_get(include=['operations']) in the Manufacture workspace.")
+    basis = validity_basis()
+    if basis != "manufacture_verified":
+        return (f"operationState reads {state}, validity_basis={basis}; re-read in Manufacture "
+                "workspace before generation.")
+    if state in ("out_of_date", "no_toolpath"):
+        return (f"operationState now reads {state} in Manufacture - regenerate with cam_generate.")
+    if state == "valid":
+        return "operationState reads valid in Manufacture after the edit."
+    if state == "generating":
+        return "The operation is generating - poll cam_get_status before another edit or launch."
+    if state == "suppressed":
+        return "The operation reads suppressed; no generation is needed while it stays parked."
+    return ("The operation reads error; cam_get(include=['operations']) carries the fault to fix "
+            "before generation.")
+
+_UNCHANGED_NOTE = ("changed[].unchanged means the requested expression already matched.")
+
+_UNLOCKED_NOTE = ("changed[].unlocked_here means another requested row made it editable first.")
 
 _LOCKED_REFUSAL = (
     "Operation '{operation}' does not accept a write to: {names} (isEditable reads False on each"
@@ -602,7 +619,7 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
     out.update(pre_records)
     notes = list(pre_notes)
     if changed:
-        notes.append(_PARAM_NOTE)
+        notes.append(_PARAM_NOTE + " " + _parameter_state_note(op))
     if any(c.get("unchanged") for c in changed):
         notes.append(_UNCHANGED_NOTE)
     if any(c.get("unlocked_here") for c in changed):
@@ -634,7 +651,7 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
 
 TOOL_DESCRIPTION = (
     "Edit a CAM operation: its parameters (the feeds/speeds/depths no other CAM tool reaches), its "
-    "cutting tool, preset, name or suppression. Regenerate with cam_generate after."
+    "cutting tool, preset, name or suppression. Re-read the operation state after."
 )
 
 tool = (

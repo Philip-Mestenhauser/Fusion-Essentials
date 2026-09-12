@@ -10,10 +10,12 @@ world and not component-local.
 """
 
 import json
+import os
+import sys
 
 import adsk.core
 
-from conftest import Circle3D, MakeDesign, MeshBody, load_tool, _NamedCollection
+from conftest import Circle3D, MakeDesign, MeshBody, load_tool, _NamedCollection, _Vertex
 
 fg = load_tool("find_geometry")
 
@@ -189,6 +191,11 @@ class FakeDesign(MakeDesign):
 
 import pytest
 
+_TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_TESTS_DIR, "live"))
+import verify_acts_model as model_acts  # noqa: E402
+import tool_verify  # noqa: E402
+
 
 @pytest.fixture(autouse=True)
 def _plane_cast(monkeypatch):
@@ -341,14 +348,74 @@ class TestFind:
         # only the r8mm pin; handle is the composite '<token>|@...'
         assert out["returned"] == 1 and out["matches"][0]["handle"].startswith("PIN|@")
 
-    def test_a_record_whose_radius_did_not_read_is_skipped_by_the_radius_filter(self):
-        # measured() answers None for a radius the curve would not give, and subtracting from that
-        # raises inside the handler. An edge whose radius never read cannot match one either.
-        blind = FakeEdge("BLIND", _blind_radius_circle(), (1.0, 0, 0))
-        good = FakeEdge("R8", _circle(0.8), (2.0, 0, 0))
-        _install([FakeOcc("X:1", "X", [FakeBody(edges=[blind, good])])])
-        out = _payload(fg.handler(target="X:1", radius=8, units="mm"))
-        assert out["returned"] == 1 and out["matches"][0]["handle"].startswith("R8|@")
+    def test_radius_filter_excludes_vertices_while_an_unfiltered_vertex_query_still_works(self):
+        vertex = _Vertex(_Pt(1.0, 2.0, 3.0))
+        vertex.entityToken = "VERTEX"
+        _install([FakeOcc("X:1", "X", [FakeBody(vertices=[vertex])])])
+
+        unfiltered = _payload(fg.handler(target="X:1", kind="vertex", units="mm"))
+        assert unfiltered["returned"] == 1
+        assert unfiltered["matches"][0]["handle"].startswith("VERTEX|@vertex:")
+
+        filtered = _payload(fg.handler(
+            target="X:1", kind="vertex", radius=8, units="mm"))
+        assert filtered["match_count"] == 0
+        assert filtered["returned"] == 0
+        assert filtered["matches"] == []
+
+    @pytest.mark.parametrize(("units", "within", "outside", "display"), [
+        ("mm", 2.55524, 2.554, 2.682),
+        ("cm", 0.255524, 0.2554, 0.268),
+        ("in", 0.1006, 0.1005511811023622, 0.106),
+    ])
+    @pytest.mark.parametrize("kind", ["cylinder_face", "circular_edge"])
+    def test_radius_filter_compares_the_unrounded_measurement(
+            self, kind, units, within, outside, display):
+        if kind == "cylinder_face":
+            body = FakeBody(faces=[_cyl("TARGET", 0.268224, (0, 0, 0)),
+                                   _cyl("DECOY", 0.5, (1, 0, 0))])
+        else:
+            body = FakeBody(edges=[
+                FakeEdge("TARGET", _circle(0.268224), (0.268224, 0, 0)),
+                FakeEdge("DECOY", _circle(0.5, (1, 0, 0)), (1.5, 0, 0)),
+            ])
+        _install([FakeOcc("X:1", "X", [body])])
+
+        included = _payload(fg.handler(
+            target="X:1", kind=kind, radius=within, units=units))
+        assert included["returned"] == 1
+        assert included["matches"][0]["handle"].startswith("TARGET|@")
+        assert included["matches"][0]["radius"] == display
+
+        excluded = _payload(fg.handler(
+            target="X:1", kind=kind, radius=outside, units=units))
+        assert excluded["returned"] == 0
+
+    @pytest.mark.parametrize("kind", ["cylinder_face", "circular_edge"])
+    def test_a_record_whose_radius_did_not_read_is_skipped_by_the_radius_filter(
+            self, kind):
+        if kind == "cylinder_face":
+            blind_geo = _CylGeo(1.0)
+            del blind_geo.radius
+            body = FakeBody(faces=[
+                FakeFace("BLIND", blind_geo, (1.0, 0, 0)),
+                _cyl("R8", 0.8, (2.0, 0, 0)),
+            ])
+        else:
+            body = FakeBody(edges=[
+                FakeEdge("BLIND", _blind_radius_circle(), (1.0, 0, 0)),
+                FakeEdge("R8", _circle(0.8), (2.0, 0, 0)),
+            ])
+        _install([FakeOcc("X:1", "X", [body])])
+
+        unfiltered = _payload(fg.handler(target="X:1", kind=kind, units="mm"))
+        radii = {m["handle"].split("|@")[0]: m["radius"] for m in unfiltered["matches"]}
+        assert radii == {"BLIND": None, "R8": 8.0}
+
+        filtered = _payload(fg.handler(
+            target="X:1", kind=kind, radius=8, units="mm"))
+        assert filtered["returned"] == 1
+        assert filtered["matches"][0]["handle"].startswith("R8|@")
 
     def test_nearest_to_sorts(self):
         # faces at world 10cm (FAR) and 1cm (NEAR); nearest_to is in mm.
@@ -394,6 +461,89 @@ class TestFind:
         flags = {m["handle"].split("|@")[0]: m.get("hidden") for m in out["matches"]}
         assert flags == {"SHOWN": None, "HIDDEN": True}
 
+
+class TestRadiusSweepOracles:
+    def test_size_oracle_rejects_widths_that_reverse_the_boundary_outcomes(self):
+        check = model_acts._radius_body_size("target cylinder", 5.36448)
+        assert check({"x": 5.36448, "y": 5.36448, "z": 10.0}) is True
+
+        for diameter in (5.36, 5.37):
+            with pytest.raises(AssertionError):
+                check({"x": diameter, "y": diameter, "z": 10.0})
+
+    @staticmethod
+    def _steps_for_saved_key(key):
+        index = next(i for i, step in enumerate(model_acts._SOLIDS)
+                     if step[3] and step[3][0] == key)
+        return model_acts._SOLIDS[index:index + 2]
+
+    def test_composed_readback_accepts_equivalent_opaque_handles(self, monkeypatch):
+        steps = (self._steps_for_saved_key("radius_target_faces")
+                 + self._steps_for_saved_key("radius_face_mm"))
+        calls = []
+
+        def call(tool, args):
+            calls.append((tool, dict(args)))
+            if tool == "find_geometry":
+                handle = "opaque:filtered" if "radius" in args else "opaque:independent"
+                return False, {"matches": [{"handle": handle, "kind": "cylinder_face"}]}
+            if tool == "model_inspect":
+                return False, {"x": 5.36448, "y": 5.36448, "z": 10.0}
+            raise AssertionError(f"unexpected composed tool {tool}")
+
+        monkeypatch.setattr(tool_verify, "call", call)
+        ctx = {}
+        rows = tool_verify.run_steps(steps, ctx, sleep_s=0)
+
+        assert [row[1] for row in rows] == ["pass", "pass", "pass", "pass"]
+        assert ctx["radius_target_faces"] == ["opaque:independent"]
+        assert ctx["radius_face_mm"] == ["opaque:filtered"]
+        assert [args["target"] for tool, args in calls if tool == "model_inspect"] == [
+            "opaque:independent", "opaque:filtered"]
+
+    def test_composed_filtered_decoy_readback_is_rejected(self, monkeypatch):
+        steps = self._steps_for_saved_key("radius_face_mm")
+        calls = []
+
+        def call(tool, args):
+            calls.append((tool, dict(args)))
+            if tool == "find_geometry":
+                return False, {"matches": [
+                    {"handle": "opaque:decoy", "kind": "cylinder_face"}]}
+            if tool == "model_inspect":
+                return False, {"x": 10.0, "y": 10.0, "z": 10.0}
+            raise AssertionError(f"unexpected composed tool {tool}")
+
+        monkeypatch.setattr(tool_verify, "call", call)
+        ctx = {}
+        rows = tool_verify.run_steps(steps, ctx, sleep_s=0)
+
+        assert [row[1] for row in rows] == ["pass", "FAIL"]
+        assert ctx["radius_face_mm"] == ["opaque:decoy"]
+        assert [args["target"] for tool, args in calls if tool == "model_inspect"] == [
+            "opaque:decoy"]
+
+    def test_each_positive_sweep_query_retains_handles_for_the_readback_consumers(self):
+        inside = {("mm", 2.55524), ("cm", 0.255524), ("in", 0.1006)}
+        positives = [
+            step for step in model_acts._SOLIDS
+            if (step[0] == "find_geometry" and isinstance(step[1], dict)
+                and (step[1].get("units"), step[1].get("radius")) in inside)
+        ]
+        assert len(positives) == 6
+        assert {(step[1]["kind"], step[1]["units"]) for step in positives} == {
+            (kind, units)
+            for kind in ("cylinder_face", "circular_edge")
+            for units in ("mm", "cm", "in")
+        }
+        assert all(step[3] is not None for step in positives)
+
+        consumers = [
+            step for step in model_acts._SOLIDS
+            if (step[0] == "model_inspect" and callable(step[1])
+                and "_radius_filtered_handle" in step[1].__code__.co_names)
+        ]
+        assert len(consumers) == 9
 
 # ── the search space is disclosed, so a HOLE in it is never published as a complete result ──────
 #

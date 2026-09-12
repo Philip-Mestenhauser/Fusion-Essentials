@@ -297,33 +297,167 @@ def _frame_ratio(cam, focus_bb, frame_w, frame_h):
     return max(fw / frame_w, fh / frame_h) * _FRAME_MARGIN
 
 
+def _aim_camera(cam, target, orientation):
+    """Aim one camera at target and return the standoff fallback, if any."""
+    if orientation:
+        dx, dy, dz = _ORIENTATIONS[orientation]
+        ux, uy, uz = _view_common.up_vector(orientation)
+        dmag = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
+        dist, fallback = _view_common.standoff_distance(cam)
+        cam.target = target
+        cam.eye = adsk.core.Point3D.create(target.x + dx / dmag * dist,
+                                           target.y + dy / dmag * dist,
+                                           target.z + dz / dmag * dist)
+        cam.upVector = adsk.core.Vector3D.create(ux, uy, uz)
+        return fallback
+    eye, old_target = cam.eye, cam.target
+    cam.eye = adsk.core.Point3D.create(eye.x + target.x - old_target.x,
+                                       eye.y + target.y - old_target.y,
+                                       eye.z + target.z - old_target.z)
+    cam.target = target
+    return None
+
+
+def _point_values(point):
+    """Return a readable point as an xyz tuple, else None."""
+    if point is None:
+        return None
+    values = safe(lambda: (float(point.x), float(point.y), float(point.z)))
+    return values if values is not None and all(math.isfinite(v) for v in values) else None
+
+
+def _same_point(left, right):
+    """Whether two readable points agree within camera read-back tolerance."""
+    a, b = _point_values(left), _point_values(right)
+    return a is not None and b is not None and all(abs(x - y) <= 1e-6 for x, y in zip(a, b))
+
+
+def _box_corners(bb):
+    """Return the eight world corners of a readable axis-aligned box."""
+    lo, hi = safe(lambda: bb.minPoint), safe(lambda: bb.maxPoint)
+    if lo is None or hi is None:
+        return []
+    return [adsk.core.Point3D.create(x, y, z)
+            for x in (lo.x, hi.x) for y in (lo.y, hi.y) for z in (lo.z, hi.z)]
+
+
+def _projected_box(vp, bb):
+    """Return the focus box bounds in viewport pixels, else None."""
+    points = [safe(lambda p=p: vp.modelToViewSpace(p)) for p in _box_corners(bb)]
+    if len(points) != 8 or any(p is None for p in points):
+        return None
+    xs = [safe(lambda p=p: float(p.x)) for p in points]
+    ys = [safe(lambda p=p: float(p.y)) for p in points]
+    if any(v is None or not math.isfinite(v) for v in xs + ys):
+        return None
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+_PERSPECTIVE_FRAME_ATTEMPTS = 5
+_PERSPECTIVE_FILL_TOLERANCE = 0.12
+
+
+def _perspective_frame(vp, cam, focus_bb, target, label):
+    """Frame a perspective focus from projected readbacks or return an honest error."""
+    width, height = safe(lambda: float(vp.width)), safe(lambda: float(vp.height))
+    if not width or not height or width <= 0 or height <= 0:
+        current = safe(lambda: vp.camera)
+        current_target = _point_values(safe(lambda: current.target))
+        current_type = safe(lambda: current.cameraType)
+        projection = "unreadable" if current_type is None else _projection_key(current_type)
+        return None, (f"Could not read the viewport size while framing '{label}'; camera target "
+                      f"reads {current_target if current_target is not None else 'unreadable'} and "
+                      f"projection reads '{projection}', so the focus was not applied.")
+    desired_w, desired_h = width / _FRAME_MARGIN, height / _FRAME_MARGIN
+    last = None
+    attempts = 0
+    for attempts in range(1, _PERSPECTIVE_FRAME_ATTEMPTS + 1):
+        cam.isFitView = False
+        vp.camera = cam
+        vp.refresh()
+        read_cam = vp.camera
+        actual_target = safe(lambda: read_cam.target)
+        actual_type = safe(lambda: read_cam.cameraType)
+        bounds = _projected_box(vp, focus_bb)
+        if not _is_perspective(actual_type):
+            projection = "unreadable" if actual_type is None else _projection_key(actual_type)
+            found = _point_values(actual_target)
+            return None, (f"Camera target reads "
+                          f"{found if found is not None else 'unreadable'} and projection reads "
+                          f"'{projection}'; perspective framing on '{label}' is unverified.")
+        if not _same_point(actual_target, target):
+            found = _point_values(actual_target)
+            return None, (f"Aimed the camera at '{label}', but its target reads "
+                          f"{found if found is not None else 'unreadable'}; framing is unverified.")
+        if bounds is None:
+            return None, (f"Camera target reads the focus '{label}' and projection reads "
+                          f"'{_projection_key(actual_type)}', but its projected bounds could not "
+                          "be read; framing is unverified.")
+        left, top, right, bottom = bounds
+        span_w, span_h = right - left, bottom - top
+        if span_w <= 0 and span_h <= 0:
+            return {"camera": read_cam, "frame_fill": None,
+                    "no_measurable_size": True}, None
+        fill = max(span_w / desired_w, span_h / desired_h)
+        contained = left >= 0 and top >= 0 and right <= width and bottom <= height
+        last = (bounds, fill, contained, actual_type)
+        if (contained and 1 - _PERSPECTIVE_FILL_TOLERANCE <= fill
+                <= 1 + _PERSPECTIVE_FILL_TOLERANCE):
+            return {"camera": read_cam, "frame_fill": round(fill, 4)}, None
+        eye = safe(lambda: read_cam.eye)
+        target_read = safe(lambda: read_cam.target)
+        eye_values, target_values = _point_values(eye), _point_values(target_read)
+        if (eye_values is None or target_values is None
+                or not math.isfinite(fill) or fill <= 0):
+            break
+        ex, ey, ez = eye_values
+        tx, ty, tz = target_values
+        dx, dy, dz = ex - tx, ey - ty, ez - tz
+        distance = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if distance <= 0:
+            break
+        next_distance = distance * fill
+        corners = _box_corners(focus_bb)
+        depth = max((abs((p.x - tx) * dx / distance + (p.y - ty) * dy / distance
+                         + (p.z - tz) * dz / distance) for p in corners), default=0.0)
+        next_distance = max(next_distance, depth * 1.05 + 1e-6)
+        if not math.isfinite(next_distance) or abs(next_distance - distance) <= 1e-7:
+            break
+        cam = read_cam
+        cam.eye = adsk.core.Point3D.create(tx + dx / distance * next_distance,
+                                           ty + dy / distance * next_distance,
+                                           tz + dz / distance * next_distance)
+    if last is None:
+        detail = "projected bounds were unreadable"
+        actual_type = safe(lambda: vp.camera.cameraType)
+        projection = "unreadable" if actual_type is None else _projection_key(actual_type)
+    else:
+        bounds, fill, contained, actual_type = last
+        detail = f"projected bounds={tuple(round(v, 2) for v in bounds)}, fill={fill:.3f}"
+        projection = _projection_key(actual_type)
+    return None, (f"Camera target reads the focus '{label}' and projection reads '{projection}', "
+                  f"but framing did not verify after {attempts} "
+                  f"attempt{'s' if attempts != 1 else ''} "
+                  f"({detail}); the camera remains at that read-back state.")
+
+
 def _do_orient(design, orientation, focus, fit, projection="", perspective_angle_deg=None):
     vp = app.activeViewport
-    # Measured BEFORE anything moves: the live frame is the baseline a focus framing scales from,
-    # so the framed path never needs a whole-model fit. Orientation does not change these spans on
-    # an orthographic camera, so one read here serves the camera this call is about to build.
-    frame = _frame_world_spans(vp) if (focus and fit) else None
     applied = {}
-    cam = vp.camera  # build the FINAL camera on ONE object, assign once (no double move)
+    cam = vp.camera
 
-    # Target: the focus entity's bbox center if given, else keep the current target.
     target = cam.target
     focus_bb = None
     if focus:
         names = [n.strip() for n in (focus if isinstance(focus, list) else [focus]) if str(n).strip()]
         boxes, labels, kinds = [], [], []
         for nm in names:
-            # An OCCURRENCE first, then a SKETCH by the same name - sketch work is a whole category
-            # of what there is to look at and owns no occurrence to aim at. Both carry a
-            # boundingBox, which is all framing needs, so the arithmetic is identical for either.
             o, focus_err = _FOCUS.resolve(nm)
             if o is None:
                 sk, sketch_err = _common.find_sketch(design, nm, remedy=_FOCUS_SKETCH_REMEDY)
                 if sketch_err:
                     return error(sketch_err)
                 if sk is None:
-                    # BOTH kinds were tried, so a refusal naming only one sends the caller looking
-                    # in the wrong place.
                     return error(f"'focus': nothing named '{nm}' to frame - no occurrence and no "
                                  f"sketch carries that name."
                                  + (f" Occurrence lookup said: {focus_err}" if focus_err else ""))
@@ -331,8 +465,6 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
             if focus_err:
                 return error(focus_err)
             labels.append(safe(lambda o=o: o.name) or nm)
-            # The SOLIDS-ONLY box where the subject places bodies: an occurrence's plain box counts
-            # its sketches and construction geometry too, which frames the sketch instead of the part.
             bx, kind = _view_common.focus_box(o)
             if bx is not None:
                 boxes.append(bx)
@@ -340,105 +472,116 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
         if not boxes:
             return error(f"'focus': none of {labels} has a readable bounding box, so there is "
                          "nothing to frame on. Re-run with fit=false to re-aim only.")
-        # SEVERAL names frame their UNION - a group of related parts or sketches belongs on screen
-        # together, and framing one member of a group hides the rest of it.
         bb = _union_box(boxes)
         focus_bb = bb
         o = types.SimpleNamespace(name=", ".join(labels), boundingBox=bb)
-        if bb:
-            target = adsk.core.Point3D.create((bb.minPoint.x + bb.maxPoint.x) / 2,
-                                              (bb.minPoint.y + bb.maxPoint.y) / 2,
-                                              (bb.minPoint.z + bb.maxPoint.z) / 2)
+        target = adsk.core.Point3D.create((bb.minPoint.x + bb.maxPoint.x) / 2,
+                                          (bb.minPoint.y + bb.maxPoint.y) / 2,
+                                          (bb.minPoint.z + bb.maxPoint.z) / 2)
         applied["focus"] = safe(lambda: o.name)
-        # A union carrying even one full box is framed on more than solids, so it says so.
         applied["extents"] = "solids" if all(k == "solids" for k in kinds) else "all_geometry"
 
-    # Orientation: set eye/target/up EXPLICITLY (camera.viewOrientation does not reliably move the
-    # eye/target in this flow). Keep the current eye->target distance so framing is stable; fit
-    # tightens it afterward.
-    standoff_fallback = None
+    orientation_key = ""
     if orientation:
-        key = orientation.strip().lower()
-        if key not in _ORIENTATIONS:
+        orientation_key = orientation.strip().lower()
+        if orientation_key not in _ORIENTATIONS:
             return error(f"Unknown orientation '{orientation}'. Valid: {', '.join(_ORIENTATIONS)}.")
-        dx, dy, dz = _ORIENTATIONS[key]
-        ux, uy, uz = _view_common.up_vector(key)
-        dmag = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
-        # The shared standoff read, so this orient and view_screenshot's place the eye the same
-        # distance out and disclose the same fallback.
-        dist, standoff_fallback = _view_common.standoff_distance(cam)
-        cam.target = target
-        cam.eye = adsk.core.Point3D.create(target.x + dx / dmag * dist,
-                                           target.y + dy / dmag * dist,
-                                           target.z + dz / dmag * dist)
-        cam.upVector = adsk.core.Vector3D.create(ux, uy, uz)
-        applied["orientation"] = key
-    else:
-        # focus-only: re-aim at the new target, preserving the current view direction
-        e0, t0 = cam.eye, cam.target
-        cam.eye = adsk.core.Point3D.create(e0.x + (target.x - t0.x),
-                                           e0.y + (target.y - t0.y),
-                                           e0.z + (target.z - t0.z))
-        cam.target = target
+        applied["orientation"] = orientation_key
 
-    # Projection rides the SAME camera object as the orientation, so one assignment applies both.
     want_key = ""
     if projection:
         want_key = projection.strip().lower()
         if want_key not in _PROJECTIONS:
             return error(f"Unknown projection '{projection}'. Valid: {', '.join(_PROJECTIONS)}.")
+
     angle_deg = None
     if perspective_angle_deg is not None:
         try:
             angle_deg = float(perspective_angle_deg)
         except (TypeError, ValueError):
             return error(f"'perspective_angle_deg' must be a number (got '{perspective_angle_deg}').")
-        # The field-of-view range Fusion's setter actually accepts, live-measured: 1.0 is accepted
-        # and 0.99 raises; 149.99 is accepted and 150 raises ("3 : Invalid parameter value").
         if not 1 <= angle_deg < 150:
             return error("'perspective_angle_deg' is a field-of-view angle Fusion accepts from 1 "
                          f"to just under 150 degrees (got {angle_deg}).")
-        # The angle is only meaningful on a perspective camera: honour an explicit 'projection',
-        # else read the camera's current type rather than assuming one.
-        if want_key:
-            effective = _camera_type(want_key)
-        else:
-            effective = safe(lambda: cam.cameraType)
-            # An UNREADABLE type leaves no projection to name - say that, rather than reporting a
-            # projection whose name is the missing read.
-            if effective is None:
-                return error(f"'perspective_angle_deg'={angle_deg} needs a perspective camera, but "
-                             "the camera's cameraType could not be read - pass "
-                             "projection='perspective' in the same call to set it explicitly.")
+        effective = _camera_type(want_key) if want_key else safe(lambda: cam.cameraType)
+        if effective is None:
+            return error(f"'perspective_angle_deg'={angle_deg} needs a perspective camera, but "
+                         "the camera's cameraType could not be read - pass "
+                         "projection='perspective' in the same call to set it explicitly.")
         if not _is_perspective(effective):
             return error(f"'perspective_angle_deg'={angle_deg} needs a perspective camera, but the "
                          f"projection in effect is '{_projection_key(effective)}'. Pass "
                          "projection='perspective' in the same call.")
+
+    frame = None
+    if (focus and fit and not want_key
+            and not _is_perspective(safe(lambda: cam.cameraType))):
+        frame = _frame_world_spans(vp)
+
+    standoff_fallback = _aim_camera(cam, target, orientation_key)
     if want_key:
         cam.cameraType = _camera_type(want_key)
     if angle_deg is not None:
-        # Assigned AFTER cameraType - perspectiveAngle is valid only on a perspective camera.
-        # The property is RADIANS: a fresh perspective camera reads 0.39479, which is Fusion's
-        # 22.62 deg default field of view (live-verified).
+        # Camera.perspectiveAngle reads and writes radians; this tool accepts degrees.
         cam.perspectiveAngle = math.radians(angle_deg)
 
-    # Flipping cameraType leaves the extents inconsistent with the type it now carries: assigning
-    # such a camera raises "Camera type must be orthographic for extents" unless isFitView
-    # recomputes them, so a projection change fits whether or not 'fit' asked for it.
+    projection_staged = False
+    if focus and want_key:
+        cam.isFitView = True
+        vp.camera = cam
+        vp.refresh()
+        projection_staged = True
+        # Read the staged projection before rebuilding the camera around the focus.
+        staged_cam = safe(lambda: vp.camera)
+        got_type = safe(lambda: staged_cam.cameraType)
+        staged_target = _point_values(safe(lambda: staged_cam.target))
+        staged_target_text = staged_target if staged_target is not None else "unreadable"
+        staged_fit = safe(lambda: staged_cam.isFitView)
+        staged_fit_text = (str(staged_fit).lower()
+                           if isinstance(staged_fit, bool) else "unreadable")
+        if got_type is None:
+            return error(f"After staging projection '{want_key}', camera target reads "
+                         f"{staged_target_text}, isFitView reads '{staged_fit_text}', and cameraType "
+                         "could not be read back - projection and focus are unverified.")
+        got_key = _projection_key(got_type)
+        if got_key != want_key:
+            return error(f"After staging projection '{want_key}', camera target reads "
+                         f"{staged_target_text}, isFitView reads '{staged_fit_text}', and projection "
+                         f"reads back '{got_key}' - the requested projection did not take and focus "
+                         "is unverified.")
+        cam = staged_cam
+        cam.isFitView = False
+        standoff_fallback = _aim_camera(cam, target, orientation_key)
+        if fit and not _is_perspective(got_type):
+            frame = _frame_world_spans(vp)
+
     ratio = None
-    if focus and fit and frame is None and not want_key:
-        # Falling back to a whole-model fit here would answer a framing request with the very view
-        # framing exists to avoid, and report ok for it. Refuse instead.
-        return error(f"Could not read what the viewport currently shows, so the view could not be "
-                     f"framed on '{applied.get('focus')}' and the camera was NOT moved. Re-run "
-                     "with fit=false to re-aim only.")
-    if focus and fit and frame is not None and not want_key:
-        # Frame ON the focus, in the same assignment that aims the camera: scale the extents by the
-        # share the occurrence takes of the frame measured above. No fit, so nothing zooms out.
+    perspective_frame = None
+    is_perspective_focus = (focus and fit
+                            and _is_perspective(safe(lambda: cam.cameraType)))
+    if is_perspective_focus:
+        perspective_frame, framing_error = _perspective_frame(
+            vp, cam, focus_bb, target, applied.get("focus"))
+        if framing_error:
+            return error(framing_error)
+        cam = perspective_frame["camera"]
+        if perspective_frame.get("no_measurable_size"):
+            applied["frame_ratio"] = None
+            applied["no_measurable_size"] = True
+        else:
+            applied["frame_fill"] = perspective_frame["frame_fill"]
+    elif focus and fit:
+        if frame is None:
+            if projection_staged:
+                return error(f"Projection reads '{want_key}' after fitting the whole model, but "
+                             f"the viewport frame could not be read before aiming at "
+                             f"'{applied.get('focus')}'; the focus was not applied.")
+            return error(f"Could not read what the viewport currently shows, so the view could not "
+                         f"be framed on '{applied.get('focus')}' and the camera was NOT moved. Re-run "
+                         "with fit=false to re-aim only.")
         ratio = _frame_ratio(cam, focus_bb, *frame)
         extents = safe(lambda: cam.viewExtents)
         if ratio == 0.0:
-            # Nothing to zoom to; the camera is re-aimed at it and the zoom is left alone.
             applied["frame_ratio"] = None
             applied["no_measurable_size"] = True
             ratio = None
@@ -448,15 +591,13 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
                          "view is NOT framed on it. Re-run with fit=false to re-aim only.")
         if ratio is not None:
             cam.viewExtents = extents * ratio
-    elif fit or want_key:
-        # No focus to frame on (or a projection change, which REQUIRES a fit to recompute the
-        # extents before the camera can be assigned at all) - fit the whole model.
+    elif fit or (want_key and not projection_staged):
         cam.isFitView = True
-    vp.camera = cam                # single assignment -> single move
-    # Fusion repaints on the camera ASSIGNMENT, not on this refresh: skipping the refresh here was
-    # measured NOT to hide the intermediate whole-model fit, so the refresh stays unconditional and
-    # the visible zoom-out has to be fixed by not assigning a fitted camera at all.
-    vp.refresh()
+
+    if perspective_frame is None:
+        vp.camera = cam
+        vp.refresh()
+
     note = "Camera aimed. Call view_screenshot to capture."
     if focus:
         if fit:
@@ -471,9 +612,8 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
         applied["standoff_fallback_cm"] = standoff_fallback
         note += (f" standoff_fallback_cm={cm}: the camera's eye-target distance did not read as a "
                  f"positive number, so {cm} cm stood in as the standoff for this orient.")
+
     if want_key:
-        # None means the property was UNREADABLE, which is a different report from a read that
-        # shows the change did not take.
         got_type = safe(lambda: vp.camera.cameraType)
         if got_type is None:
             return error(f"Set projection '{want_key}' but the camera's cameraType could not be "
@@ -486,12 +626,17 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
         if not fit:
             note += (" Changing the projection recomputes the camera extents, so the view was "
                      "fitted even though fit was false.")
+
+    if focus:
+        actual_target = safe(lambda: vp.camera.target)
+        if not _same_point(actual_target, target):
+            found = _point_values(actual_target)
+            return error(f"Aimed the camera at '{applied.get('focus')}', but its target reads "
+                         f"{found if found is not None else 'unreadable'} - the focus did not take.")
+
     if angle_deg is not None:
-        # Read BACK off the camera: a written angle survives the assignment bit-exactly, and the
-        # forced fit above does not move it. None means the property was unreadable, not zero.
         raw = safe(lambda: vp.camera.perspectiveAngle)
         if raw is None:
-            # Name the projection only when it READS - an unreadable type has no name to report.
             got_type = safe(lambda: vp.camera.cameraType)
             where = f" (projection '{_projection_key(got_type)}')" if got_type is not None else ""
             return error(f"Set 'perspective_angle_deg'={angle_deg} but the camera's "
@@ -503,21 +648,22 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
             applied["perspective_angle_requested_deg"] = round(angle_deg, 4)
             note += (" The camera settled on a different perspective angle than requested - "
                      "'perspective_angle_deg' is what it reads back.")
+
     if ratio is not None:
-        # The zoom is a WRITE the platform can drop (view_screenshot's own zoom guards the same
-        # property), and a dropped one leaves the previous frame in place while the payload claims
-        # the occurrence fills it - so it is read back rather than assumed.
         want = safe(lambda: cam.viewExtents)
         got = safe(lambda: vp.camera.viewExtents)
         if want is None or got is None or abs(got - want) > max(1e-6, abs(want) * 0.02):
+            target_state = ("target reads the requested focus" if _same_point(
+                safe(lambda: vp.camera.target), target) else "target does not read the requested focus")
+            projection_state = _projection_key(safe(lambda: vp.camera.cameraType))
             return error(f"Set the camera extents to frame '{applied.get('focus')}' "
                          f"({'unreadable' if want is None else format(want, '.4f')}) but the "
                          f"viewport reads back "
                          f"{'unreadable' if got is None else format(got, '.4f')} - the framing did "
-                         "not take, and the view is left where it was.")
+                         f"not verify; {target_state} and projection reads '{projection_state}', "
+                         "so the camera remains partially changed.")
         applied["frame_ratio"] = round(ratio, 6)
     return ok({"action": "orient", "applied": applied, "note": note})
-
 
 def _partial_suffix(done):
     """The sentence a mid-list failure appends naming what ALREADY changed. A multi-target

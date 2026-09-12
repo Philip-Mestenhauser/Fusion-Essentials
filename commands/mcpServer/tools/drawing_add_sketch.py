@@ -241,12 +241,13 @@ def handler(geometry=None, sheet_name: str = "", name: str = "") -> dict:
         "curves_requested": sum(expected.values()),
         "curves_landed": total_landed,
         "landed": landed,
-        "note": (f"Sketch '{sketch_name}' on sheet '{on_sheet}' carries {total_landed} curves, counted "
-                 f"off its own collections. Coordinates were taken as {units_said}, which the "
-                 "drawing STANDARD fixes - 'sheet_units' is the dimension display unit and does not "
-                 "move the geometry. Drawing.deleteEntities raises 'API Function not yet "
-                 "implemented' on a drawn curve, so only the whole sketch is deletable, in the "
-                 "Fusion UI. drawing_export writes the PDF that shows it."),
+        "coordinates_verified": False,
+        "note": (f"Sketch '{sketch_name}' on sheet '{on_sheet}' has {total_landed} curves by "
+                 "collection count; placement coordinates were not verified. Use drawing_export and "
+                 f"inspect its output to check placement. Coordinates were taken as {units_said}, which "
+                 "the drawing STANDARD fixes; sheet_units "
+                 "controls dimension display only. Delete an unwanted sketch in the Fusion UI; "
+                 "Drawing.deleteEntities raises 'API Function not yet implemented' on a drawn curve."),
     })
 
 

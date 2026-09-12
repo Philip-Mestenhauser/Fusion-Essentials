@@ -348,7 +348,7 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
     want_faces = face_handles not in (None, "", [])
     if want_faces and edge_handles not in (None, "", []):
         return error("Pass 'faces' or 'edges', not both: 'faces' works on every edge of the named "
-                     "faces, 'edges' on exactly the edges handed in.")
+                     "faces, 'edges' uses the supplied edge handles as seeds.")
     # 'edges' (a GeometryHandleList of edge handles) takes precedence - closes the
     # 'fillet THESE specific edges' gap. The kind resolves+validates each handle to a BRep edge.
     blanket_note = None
@@ -556,6 +556,8 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
         "edge_selection": edge_src,
         "edges_requested": edges.count,
         "note": (f"Edges {'rounded' if kind == 'fillet' else 'beveled'}. Pair with view_screenshot."
+                 + (" Chamfer tangent-chain selection includes tangentially connected edges."
+                    if kind == "chamfer" else "")
                  + measured_note
                  + (" " + "/".join(sorted(verified)) + _is_are(verified)
                     + " read back off the created feature, not echoed." if verified else "")

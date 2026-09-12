@@ -1,10 +1,9 @@
 """Unit tests for ``model_base_feature.py`` - opening and closing a base-feature edit scope.
 
-Pinned: start opens a scope and CAPTURES the object (the API then hides it from enumeration, so a
-by-name re-find cannot work); finish closes the captured objects, keeps the handle of any scope that
-did not confirm closed, and never gates on mode - while a scope is open the design reads direct.
-The mode-guard rejection names the required mode (PARAMETRIC), and the capability map get_mode_handler
-publishes is derived from the same reader that guard runs on.
+Pinned: start captures the hidden scope with its document identity; finish selects only the active
+document's captured objects, keeps any unknown-owner or failed-close handle, and never gates on mode.
+An explicit name must resolve before mutation. The mode-guard rejection names PARAMETRIC, and the
+capability map get_mode_handler is derived from the same reader that guard runs on.
 """
 
 import json
@@ -140,7 +139,7 @@ class FakeDesign(MakeDesign):
                          timeline=None if no_timeline else _Timeline(timeline_count))
 
 
-def _install(monkeypatch, design):
+def _install(monkeypatch, design, document_handle="session:test"):
     """Point the shared _common.design/target_component at `design`."""
     _wire_modes(monkeypatch)
     app = type("A", (), {"activeProduct": design})()
@@ -149,7 +148,13 @@ def _install(monkeypatch, design):
     monkeypatch.setattr(adsk.fusion.Design, "cast", lambda x: x if isinstance(x, FakeDesign) else None)
     monkeypatch.setattr(dm._inputs._common, "design", lambda: design)
     monkeypatch.setattr(dm._inputs._common, "target_component", lambda d: d.rootComponent)
+    monkeypatch.setattr(dm._write_guard, "active_document_handle", lambda: document_handle)
     return design
+
+
+def _open_handles():
+    """The base-feature handles retained in the document-owned scope store."""
+    return [bf for _owner, bf in dm._OPEN_BASE_FEATURES]
 
 
 def _payload(result):
@@ -214,7 +219,7 @@ class TestBaseFeature:
         assert out["base_feature"] == bf.name
         # the open scope was CAPTURED (the only handle to it - it is now invisible to enumeration)
         assert out["open_scope_count"] == 1
-        assert bf in dm._OPEN_BASE_FEATURES
+        assert bf in _open_handles()
 
     def test_start_names_the_base_feature(self, monkeypatch):
         des = _install(monkeypatch, FakeDesign(design_type=1))
@@ -231,6 +236,13 @@ class TestBaseFeature:
         assert res["isError"] is True and "startEdit returned false" in res["message"]
         # the orphan feature is deleted and nothing is captured
         assert bf.deleted is True
+        assert dm._OPEN_BASE_FEATURES == []
+
+    def test_start_refuses_before_mutation_when_document_identity_is_unreadable(self, monkeypatch):
+        des = _install(monkeypatch, FakeDesign(design_type=1), document_handle=None)
+        res = dm.handler(action="start", base_feature="OwnedUnknown")
+        assert res["isError"] is True and "document identity is unreadable" in res["message"]
+        assert des.rootComponent.features.baseFeatures.added == []
         assert dm._OPEN_BASE_FEATURES == []
 
     def test_finish_closes_the_captured_open_scope(self, monkeypatch):
@@ -267,12 +279,73 @@ class TestBaseFeature:
         out = _payload(dm.handler(action="finish", base_feature="Scope1"))
         assert out["editing"] is False and bf.finish_count == 1
 
-    def test_finish_unknown_name_is_not_an_error(self, monkeypatch):
-        # finish must NEVER error on a missing name - erroring without closing leaks the open scope.
-        # An unknown name simply finds nothing to finish by name; it still closes captured scopes.
+    def test_enumerable_named_finish_discloses_active_captured_scope_remains(self, monkeypatch):
+        # Offline response-shape control only: it does not claim Fusion enumerates Old while an
+        # independently captured Open scope exists.
+        old = _FakeBaseFeature("Old")
+        _install(monkeypatch, FakeDesign(design_type=0, base_features=_Coll([old]), no_timeline=True))
+        open_scope = _FakeBaseFeature("Open")
+        dm._OPEN_BASE_FEATURES.append(("session:test", open_scope))
+
+        out = _payload(dm.handler(action="finish", base_feature="Old"))
+        assert old.finish_count == 1 and out["named_finished"] == "Old"
+        assert open_scope.finish_count == 0 and _open_handles() == [open_scope]
+        assert out["editing"] is None and out["open_scope_count"] == 1
+        assert "owned by the active document remains open" in out["note"]
+        assert "DIFFERENT session" not in out["note"]
+
+    def test_wrong_name_refuses_before_finish_then_returned_name_closes(self, monkeypatch):
+        des = _install(monkeypatch, FakeDesign(design_type=1))
+        started = _payload(dm.handler(action="start", base_feature="OwnedScope"))
+        bf = des.rootComponent.features.baseFeatures.added[-1]
+        refused = dm.handler(action="finish", base_feature="MissingScope")
+        assert refused["isError"] is True
+        assert "No captured or existing base feature named 'MissingScope'" in refused["message"]
+        assert "'OwnedScope'" in refused["message"]
+        assert bf.finish_count == 0 and bf.editing is True
+        assert _open_handles() == [bf]
+
+        out = _payload(dm.handler(action="finish", base_feature=started["base_feature"]))
+        assert bf.finish_count == 1 and bf.editing is False
+        assert out["named_finished"] == "OwnedScope"
+        assert out["open_scope_count"] == 0
+
+    @pytest.mark.parametrize("with_name", [False, True])
+    def test_finish_only_closes_active_document_scopes(self, monkeypatch, with_name):
         _install(monkeypatch, FakeDesign(design_type=1))
-        out = _payload(dm.handler(action="finish", base_feature="Ghost"))
-        assert out["named_finished"] is None and out["open_scope_count"] == 0
+        owner = {"handle": "session:b"}
+        monkeypatch.setattr(dm._write_guard, "active_document_handle",
+                            lambda: owner["handle"])
+        scope_a = _FakeBaseFeature("OwnedShared")
+        scope_b = _FakeBaseFeature("OwnedShared")
+        dm._OPEN_BASE_FEATURES.extend([
+            ("session:a", scope_a),
+            ("session:b", scope_b),
+        ])
+
+        args = {"action": "finish"}
+        if with_name:
+            args["base_feature"] = "OwnedShared"
+        out_b = _payload(dm.handler(**args))
+        assert scope_b.finish_count == 1
+        assert scope_a.finish_count == 0
+        assert _open_handles() == [scope_a]
+        assert out_b["open_scope_count"] == 1
+
+        owner["handle"] = "session:a"
+        out_a = _payload(dm.handler(**args))
+        assert scope_a.finish_count == 1
+        assert _open_handles() == []
+        assert out_a["open_scope_count"] == 0
+
+    def test_finish_refuses_before_mutation_when_captured_ownership_is_unknown(self, monkeypatch):
+        _install(monkeypatch, FakeDesign(design_type=1))
+        unknown = _FakeBaseFeature("UnknownOwner")
+        dm._OPEN_BASE_FEATURES.append((None, unknown))
+        res = dm.handler(action="finish")
+        assert res["isError"] is True and "no readable document owner" in res["message"]
+        assert unknown.finish_count == 0
+        assert _open_handles() == [unknown]
 
     def test_finish_no_open_scope_is_idempotent(self, monkeypatch):
         _install(monkeypatch, FakeDesign(design_type=1))
@@ -297,8 +370,10 @@ class TestBaseFeature:
                                            "error": "finishEdit blew up"}]
         assert out["editing"] is None                  # not a confirmed False
         assert out["open_scope_count"] == 1
-        assert dm._OPEN_BASE_FEATURES == [bf]          # the handle survives the call
+        assert _open_handles() == [bf]                 # the handle survives the call
         assert "may still be" in out["note"]
+        assert "handles are KEPT" in out["note"]
+        assert "remains open" not in out["note"]
 
     def test_a_kept_handle_still_closes_the_scope_on_a_retry(self, monkeypatch):
         # what keeping the handle buys: the caller can finish again and actually close it.
@@ -307,7 +382,7 @@ class TestBaseFeature:
         bf = des.rootComponent.features.baseFeatures.added[-1]
         bf.finishEdit = lambda: (_ for _ in ()).throw(RuntimeError("transient"))
         dm.handler(action="finish")
-        assert dm._OPEN_BASE_FEATURES == [bf]
+        assert _open_handles() == [bf]
         del bf.finishEdit                              # the retry meets a working finishEdit
         out = _payload(dm.handler(action="finish"))
         assert bf.finish_count == 1 and bf.editing is False
@@ -323,7 +398,10 @@ class TestBaseFeature:
         out = _payload(dm.handler(action="finish"))
         assert out["closed_scopes"] == []
         assert out["unclosed_scopes"] == [{"name": bf.name, "finished": False}]
-        assert dm._OPEN_BASE_FEATURES == [bf]
+        assert out["editing"] is None
+        assert _open_handles() == [bf]
+        assert "may still be" in out["note"] and "handles are KEPT" in out["note"]
+        assert "remains open" not in out["note"]
 
     def test_one_failing_scope_does_not_hold_the_others_open(self, monkeypatch):
         # two scopes, the inner one raising: the outer still closes and only the failing handle is
@@ -336,7 +414,7 @@ class TestBaseFeature:
         out = _payload(dm.handler(action="finish"))
         assert [c["name"] for c in out["closed_scopes"]] == [first.name]
         assert first.finish_count == 1
-        assert dm._OPEN_BASE_FEATURES == [second]
+        assert _open_handles() == [second]
         assert out["open_scope_count"] == 1
 
     def test_a_raising_named_finish_is_disclosed_not_reported_as_finished(self, monkeypatch):
@@ -355,6 +433,6 @@ class TestBaseFeature:
         des = _install(monkeypatch, FakeDesign(design_type=0, no_timeline=True))
         bf = _FakeBaseFeature("Open")
         bf._coll = des.rootComponent.features.baseFeatures
-        dm._OPEN_BASE_FEATURES.append(bf)
+        dm._OPEN_BASE_FEATURES.append(("session:test", bf))
         out = _payload(dm.handler(action="finish"))
         assert bf.finish_count == 1 and out["open_scope_count"] == 0

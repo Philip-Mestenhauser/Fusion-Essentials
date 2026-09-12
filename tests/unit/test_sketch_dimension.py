@@ -29,6 +29,23 @@ class FakeParam:
         self.value = 1.0            # cm, signed - a negative distance is the mirror-trap signal
 
 
+class _RejectingParam:
+    """A parameter that keeps its measured expression when a requested expression is rejected."""
+
+    def __init__(self, name="d1"):
+        self.name = name
+        self._expression = "10 mm"
+        self.value = 1.0
+
+    @property
+    def expression(self):
+        return self._expression
+
+    @expression.setter
+    def expression(self, value):
+        raise RuntimeError("bad expression")
+
+
 class FakeDim:
     def __init__(self, tag, is_driving=True):
         self.tag = tag
@@ -56,7 +73,9 @@ class FakeDims:
         self.driving = []          # the isDriving passed on each add, in call order
     def _rec(self, *call):
         self.calls.append(call)
-        return FakeDim(call[0], is_driving=self.driving[-1] if self.driving else True)
+        dim = FakeDim(call[0], is_driving=self.driving[-1] if self.driving else True)
+        dim.parameter.name = f"d{len(self.calls)}"
+        return dim
     def addDistanceDimension(self, p1, p2, orient, tp, isDriving=True):
         self.driving.append(isDriving)
         return self._rec("distance", orient, p1, p2)
@@ -209,6 +228,19 @@ def _raiser(message):
     def _add(*a, **kw):
         raise RuntimeError(message)
     return _add
+
+
+def _reject_radial_expression_at(sketch, call_index):
+    """Make one radial dimension keep its measured expression when a requested value is rejected."""
+    add = sketch.sketchDimensions.addRadialDimension
+
+    def rejecting_add(circle, point, isDriving=True):
+        dim = add(circle, point, isDriving)
+        if len(sketch.sketchDimensions.calls) - 1 == call_index:
+            dim.parameter = _RejectingParam(dim.parameter.name)
+        return dim
+
+    sketch.sketchDimensions.addRadialDimension = rejecting_add
 
 
 # ── the 'component' SCOPE ────────────────────────────────────────────────────
@@ -1053,6 +1085,45 @@ class TestBatch:
         assert "1 later entry was not attempted" in res["message"]
         assert s.sketchDimensions.calls == []
 
+    def test_a_first_value_failure_reports_the_retained_identity_and_unattempted_suffix(
+            self, monkeypatch):
+        s = _install(monkeypatch)
+        _reject_radial_expression_at(s, 0)
+        out = _payload(sd.handler(dimensions=[
+            {"dim_type": "radius", "entity_one": "circle:0", "value": "oops"},
+            {"dim_type": "radius", "entity_one": "circle:1", "value": "8 mm"}]))
+        assert out["dimensioned"] == 0 and out["requested"] == 2 and out["results"] == []
+        assert out["failed"]["index"] == 0 and "could not set value" in out["failed"]["error"]
+        assert out["not_attempted"] == 1
+        assert out["retained"][0]["index"] == 0
+        assert out["retained"][0]["parameter"] == "d1"
+        assert out["retained"][0]["value"] == "10 mm"
+        assert out["retained"][0]["value_driven"] is False
+        assert out["retained"][0]["is_driving"] is True
+        assert "0 of 2 dimensions completed" in out["note"]
+        assert "Nothing landed" not in out["note"]
+        assert [c[0] for c in s.sketchDimensions.calls] == ["radius"]
+
+    def test_a_mixed_value_failure_keeps_completed_and_retained_dimensions_separate(
+            self, monkeypatch):
+        s = _install(monkeypatch)
+        _reject_radial_expression_at(s, 1)
+        out = _payload(sd.handler(dimensions=[
+            {"dim_type": "radius", "entity_one": "circle:0", "value": "12 mm"},
+            {"dim_type": "radius", "entity_one": "circle:1", "value": "oops"},
+            {"dim_type": "radius", "entity_one": "circle:0", "value": "8 mm"}]))
+        assert out["dimensioned"] == 1 and out["requested"] == 3
+        assert [(r["index"], r["parameter"], r["value"]) for r in out["results"]] == [
+            (0, "d1", "12 mm")]
+        assert [(r["index"], r["parameter"], r["value"]) for r in out["retained"]] == [
+            (1, "d2", "10 mm")]
+        assert out["failed"]["index"] == 1 and out["not_attempted"] == 1
+        assert out["results"][0]["is_driving"] is True
+        assert out["retained"][0]["value_driven"] is False
+        assert out["retained"][0]["is_driving"] is True
+        assert "1 of 3 dimensions completed" in out["note"]
+        assert [c[0] for c in s.sketchDimensions.calls] == ["radius", "radius"]
+
     def test_an_unknown_field_is_refused_naming_it_and_the_legal_fields(self, monkeypatch):
         s = _install(monkeypatch)
         res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0",
@@ -1147,25 +1218,23 @@ class TestGuards:
         # not driven -> value echoes the dimension's auto-measured expression
         assert first["value"] == "10 mm"
 
-    def test_value_set_failure_is_reported(self, monkeypatch):
+    def test_an_unreadable_retained_identity_stays_unknown(self, monkeypatch):
         s = _install(monkeypatch)
 
-        # the parameter rejects the expression -> the handler must surface an error, not false success
-        class _BadParam:
-            name = "d1"
-            @property
-            def expression(self):
-                return "10 mm"
-            @expression.setter
-            def expression(self, v):
-                raise RuntimeError("bad expression")
+        class _UnreadableDim:
+            isDriving = True
 
-        class _BadDim:
-            parameter = _BadParam()
-        s.sketchDimensions.addRadialDimension = lambda c, tp, isDriving=True: _BadDim()
-        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0",
-                                      "value": "oops"}])
-        assert res["isError"] is True and "could not set value" in res["message"]
+            @property
+            def parameter(self):
+                raise RuntimeError("parameter unreadable")
+
+        s.sketchDimensions.addRadialDimension = lambda c, tp, isDriving=True: _UnreadableDim()
+        out = _payload(sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0",
+                                               "value": "oops"}]))
+        assert out["retained"] is None
+        assert "could not be read" in out["note"]
+        assert "left 1 retained effect" not in out["note"]
+        assert "Nothing landed" not in out["note"]
 
     def test_dimension_returning_nothing_is_error(self, monkeypatch):
         s = _install(monkeypatch)

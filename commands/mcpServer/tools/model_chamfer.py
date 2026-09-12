@@ -61,7 +61,8 @@ def handler(body_name: str = "", distance: float = 1.0, units: str = "mm",
 
 
 TOOL_DESCRIPTION = (
-"Bevel (chamfer) edges; model_fillet rounds instead."
+"Bevel edges. Supplied edge handles seed tangent-chain selection, including tangentially "
+"connected edges; model_fillet rounds instead."
 )
 
 tool = (

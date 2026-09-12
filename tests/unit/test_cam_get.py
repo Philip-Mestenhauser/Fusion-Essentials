@@ -8,6 +8,7 @@ delegation is proven by live validation, not by mocking 6 handlers' internals.
 """
 
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +17,11 @@ from conftest import (FakeCAMFolder, FakeCAMParameter, FakeCAMParameters, FakeOp
                       FakeSetup, _NamedCollection, error_message, load_tool, make_cam)
 
 cg = load_tool("cam_get")
+
+
+def test_cam_read_core_is_loaded_with_the_router():
+    assert cg._cr.__name__ == cg.__package__ + '._cam_read'
+    assert sys.modules[cg._cr.__name__] is cg._cr
 
 
 def _payload(result):
@@ -87,6 +93,49 @@ class TestIncludeSlices:
                             lambda cam, setup: (seen.update(setup=setup) or {"operations": []}, None))
         cg.handler(include=["operations"], setup="Setup1")
         assert seen["setup"] == "Setup1"
+
+    def test_setup_filter_scopes_default_orientation(self, monkeypatch, stub_slices):
+        seen = {}
+        monkeypatch.setattr(cg, "_slice_setups",
+                            lambda cam, setup: (seen.update(setup=setup) or {
+                                "setup_count": 1, "setups": [{"name": setup}]}, None))
+        out = _payload(cg.handler(setup="Setup2"))
+        assert seen["setup"] == "Setup2"
+        assert out["setup_count"] == 1 and out["setups"][0]["name"] == "Setup2"
+
+
+class TestSetupSliceScope:
+    def test_unknown_setup_refuses_instead_of_returning_all(self, monkeypatch):
+        cam = make_cam(FakeSetup("Setup1"), FakeSetup("Setup2"))
+        monkeypatch.setattr(cg._cr, "get_cam", lambda: (cam, None))
+        result = cg._cr.get_cam_setups_handler(setup="Missing")
+        assert result["isError"] is True
+        assert "Missing" in error_message(result)
+
+    def test_scoped_setup_beyond_row_cap_is_returned(self, monkeypatch):
+        target = FakeSetup("Setup1000")
+        cam = make_cam(*(FakeSetup(f"Setup{i}") for i in range(1000)), target)
+        monkeypatch.setattr(cg._cr, "get_cam", lambda: (cam, None))
+        result = cg._cr.get_cam_setups_handler(setup="Setup1000")
+        out = _payload(result)
+        assert out["setup_count"] == 1
+        assert out["setups"][0]["name"] == "Setup1000"
+        assert out["truncated"] is False
+
+    def test_unscoped_cap_does_not_read_beyond_cap(self, monkeypatch):
+        first = FakeSetup("Setup0")
+        reads = []
+        def item(index):
+            reads.append(index)
+            if index > 0:
+                raise RuntimeError("uncapped setup read")
+            return first
+        cam = SimpleNamespace(setups=SimpleNamespace(count=3, item=item))
+        monkeypatch.setattr(cg._cr, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(cg._cr, "_MAX_ITEMS", 1)
+        out = _payload(cg._cr.get_cam_setups_handler())
+        assert out["setup_count"] == 1 and out["truncated"] is True
+        assert reads == [0]
 
     def test_multiple_includes(self, stub_slices):
         out = _payload(cg.handler(include=["operations", "time"]))
@@ -580,7 +629,7 @@ class TestGuards:
         # A name in _SLICES that no `if ... in inc` branch reads returns a silent empty ok: the
         # schema offers a slice the router never builds. Each one must put its own key in the payload.
         monkeypatch.setattr(cg, "_slice_parameters",
-                            lambda cam, operation, setup, units: ({"sections": {}}, None))
+                            lambda cam, operation, setup, units, names, unavailable, offset: ({"sections": {}}, None))
         monkeypatch.setattr(cg, "_slice_tool",
                             lambda cam, operation, preset, setup, units: ({"tool": None}, None))
         for name in cg._SLICES:
@@ -1541,6 +1590,242 @@ class TestGatedRowsAreCounted:
                             lambda cam, name, label="operation": (SimpleNamespace(obj=op), None, []))
         out, _err = cg._slice_parameters(object(), "Face1", "")
         assert "hidden_count" not in out and "hidden_count" not in out["note"]
+
+
+class TestParameterDiscovery:
+    """Exact and unavailable parameter reads preserve state, misses and incomplete collection facts."""
+
+    @staticmethod
+    def _operation(monkeypatch, params, name="Deburr1"):
+        op = type("O", (), {"name": name, "strategy": "deburr", "parameters": params})()
+        monkeypatch.setattr(cg, "resolve_operation",
+                            lambda cam, wanted, label="operation":
+                            (SimpleNamespace(obj=op), None, []))
+        return op
+
+    def test_disabled_exact_lookup_returns_the_expanded_operation_row(self, monkeypatch):
+        param = FakeCAMParameter("numberOfStepovers", "1", title="Number of Stepovers",
+                                 enabled=False, editable=False, choices=["1", "3"],
+                                 error="value error", warning="value warning")
+        param.isDeprecated = False
+        self._operation(monkeypatch, _SetupParams([param]))
+        out, err = cg._slice_parameters(
+            object(), "Deburr1", "", parameter_names=["numberOfStepovers"])
+        assert err is None and "sections" not in out
+        assert out["requested_parameter_count"] == 1
+        row = out["requested_parameters"][0]
+        assert row == {"requested_name": "numberOfStepovers", "name": "numberOfStepovers",
+                       "title": "Number of Stepovers", "expression": "1",
+                       "visible": True, "enabled": False, "editable": False,
+                       "deprecated": False, "choices": ["1", "3"],
+                       "error": "value error", "warning": "value warning"}
+        assert "controlling relationships are unknown" in out["note"].lower()
+
+    def test_setup_scope_supports_the_same_exact_internal_name_query(self, monkeypatch):
+        param = FakeCAMParameter("wcs_orientation_axisZ", "0", visible=False)
+        setup = type("S", (), {"name": "Setup1", "parameters": _SetupParams([param])})()
+        monkeypatch.setattr(cg, "find_setup", lambda cam, name: (setup, ["Setup1"], None))
+        out, err = cg._slice_parameters(
+            object(), "", "Setup1", parameter_names=["wcs_orientation_axisZ"])
+        assert err is None
+        assert out["requested_parameters"][0]["name"] == "wcs_orientation_axisZ"
+        assert out["requested_parameters"][0]["visible"] is False
+        assert "sections" not in out and "stock_extents" not in out
+
+    def test_exact_lookup_does_not_walk_or_group_the_collection(self, monkeypatch):
+        param = FakeCAMParameter("numberOfStepovers", "1", enabled=False)
+
+        class ExactOnly:
+            def itemByName(self, name):
+                return param if name == "numberOfStepovers" else None
+
+            @property
+            def count(self):
+                raise AssertionError("exact lookup must not scan the collection")
+
+        self._operation(monkeypatch, ExactOnly())
+        out, err = cg._slice_parameters(
+            object(), "Deburr1", "", parameter_names=["numberOfStepovers"])
+        assert err is None and out["requested_parameter_count"] == 1
+
+    def test_unavailable_scan_expands_only_rows_on_the_returned_page(self, monkeypatch):
+        class Tracked:
+            isVisible = False
+            isEnabled = False
+            isEditable = False
+            isDeprecated = False
+            value = SimpleNamespace(value=None)
+            error = ""
+            warning = ""
+
+            def __init__(self, name):
+                self._name = name
+                self.expanded_reads = 0
+
+            @property
+            def name(self):
+                self.expanded_reads += 1
+                return self._name
+
+            @property
+            def title(self):
+                self.expanded_reads += 1
+                return self._name.title()
+
+            @property
+            def expression(self):
+                self.expanded_reads += 1
+                return "1"
+
+        first, second = Tracked("first"), Tracked("second")
+        coll = SimpleNamespace(count=2, item=lambda index: (first, second)[index])
+        monkeypatch.setattr(cg, "_UNAVAILABLE_PARAMETER_CAP", 1)
+        out = cg._unavailable_parameters(coll)
+        assert out["next_offset"] == 1 and out["truncated"] is True
+        assert first.expanded_reads > 0 and second.expanded_reads == 0
+
+    def test_expanded_flags_stay_separate_and_unread_flags_are_null(self):
+        class PartialFlags:
+            name = "dependent"
+            title = "Dependent"
+            expression = "1"
+            value = SimpleNamespace(value=1)
+            error = ""
+            warning = ""
+            isEnabled = False
+            isEditable = True
+
+            @property
+            def isVisible(self):
+                raise RuntimeError("unread visible")
+
+            @property
+            def isDeprecated(self):
+                raise RuntimeError("unread deprecated")
+
+        row = cg._expanded_parameter(PartialFlags())
+        assert row["visible"] is None and row["enabled"] is False
+        assert row["editable"] is True and row["deprecated"] is None
+
+    def test_missing_name_and_unread_lookup_are_different_refusals(self):
+        miss = SimpleNamespace(itemByName=lambda name: None)
+
+        class Unread:
+            def itemByName(self, name):
+                raise RuntimeError("lookup unread")
+
+        _rows, miss_err = cg._exact_parameters(miss, ["missing"], "operation 'Deburr1'")
+        _rows, unread_err = cg._exact_parameters(Unread(), ["missing"], "operation 'Deburr1'")
+        assert "No parameter with exact internal name 'missing'" in miss_err["message"]
+        assert "failed: lookup unread" in unread_err["message"]
+        assert "include_unavailable=true" in unread_err["message"]
+        assert "No parameter" not in unread_err["message"]
+
+    def test_unavailable_listing_is_bounded_and_default_shape_stays_compact(
+            self, monkeypatch):
+        params = _SetupParams([
+            FakeCAMParameter("visible", "1"),
+            FakeCAMParameter("disabled1", "1", enabled=False),
+            FakeCAMParameter("disabled2", "2", enabled=False),
+            FakeCAMParameter("disabled3", "3", enabled=False),
+        ])
+        self._operation(monkeypatch, params)
+        default, err = cg._slice_parameters(object(), "Deburr1", "")
+        assert err is None
+        assert "requested_parameters" not in default and "unavailable" not in default
+        assert "controlling relationships" not in default["note"]
+
+        monkeypatch.setattr(cg, "_UNAVAILABLE_PARAMETER_CAP", 2)
+        out, err = cg._slice_parameters(
+            object(), "Deburr1", "", include_unavailable=True)
+        assert err is None
+        unavailable = out["unavailable"]
+        assert unavailable == {
+            "parameters": unavailable["parameters"], "offset": 0, "next_offset": 2,
+            "returned_count": 2, "readable_matching_count": 3,
+            "collection_count": 4, "readable_count": 4, "unread_item_count": 0,
+            "collection_complete": True, "truncated": True}
+        assert [row["name"] for row in unavailable["parameters"]] == ["disabled1", "disabled2"]
+
+        continued = cg._unavailable_parameters(params, 2)
+        assert [row["name"] for row in continued["parameters"]] == ["disabled3"]
+        assert continued["offset"] == 2 and continued["next_offset"] is None
+        assert continued["truncated"] is False
+
+        two = _SetupParams([
+            FakeCAMParameter("disabled1", enabled=False),
+            FakeCAMParameter("disabled2", enabled=False),
+        ])
+        boundary = cg._unavailable_parameters(two)
+        assert boundary["returned_count"] == 2 and boundary["truncated"] is False
+        assert boundary["next_offset"] is None
+
+    def test_unavailable_listing_distinguishes_unread_count_from_unread_item(
+            self, monkeypatch):
+        class UnreadCount:
+            @property
+            def count(self):
+                raise RuntimeError("count unread")
+
+        unread_count = cg._unavailable_parameters(UnreadCount())
+        assert unread_count["collection_count"] is None
+        assert unread_count["unread_item_count"] is None
+        assert unread_count["collection_complete"] is False
+        assert unread_count["truncated"] is None
+
+        class UnreadItem:
+            count = 2
+
+            def item(self, index):
+                if index:
+                    raise RuntimeError("item unread")
+                return FakeCAMParameter("disabled", enabled=False)
+
+        unread_item = cg._unavailable_parameters(UnreadItem())
+        assert unread_item["collection_count"] == 2 and unread_item["readable_count"] == 1
+        assert unread_item["unread_item_count"] == 1
+        assert unread_item["readable_matching_count"] == 1
+        assert unread_item["collection_complete"] is False
+        assert unread_item["truncated"] is None
+
+    @pytest.mark.parametrize("names,include_unavailable,offset,fragment", [
+        ((), None, None, "must be an array"),
+        ([], None, None, "cannot be empty"),
+        (["x"] * (cg._PARAMETER_NAME_CAP + 1), None, None, "at most"),
+        ([" x"], None, None, "whitespace"),
+        (["x", "x"], None, None, "repeats"),
+        (None, "yes", None, "true or false"),
+        (None, True, -1, "non-negative integer"),
+        (None, True, True, "non-negative integer"),
+        (None, False, 0, "requires include_unavailable=true"),
+        (None, False, 1, "requires include_unavailable=true"),
+    ])
+    def test_discovery_input_types_and_limits_are_guarded(
+            self, names, include_unavailable, offset, fragment):
+        _names, _include, _offset, err = cg._parameter_options(
+            names, include_unavailable, offset)
+        assert fragment in err
+
+    def test_discovery_inputs_are_refused_when_parameters_was_not_included(
+            self, monkeypatch):
+        monkeypatch.setattr(cg, "get_cam",
+                            lambda: (_ for _ in ()).throw(AssertionError("must not read CAM")))
+        result = cg.handler(include=["operations"], parameter_names=["x"])
+        assert result["isError"] is True and "only with include=['parameters']" in result["message"]
+
+    def test_router_forwards_exact_names_and_unavailable_flag(self, monkeypatch, stub_slices):
+        seen = {}
+        monkeypatch.setattr(cg, "_slice_parameters",
+                            lambda cam, operation, setup, units, names, unavailable, offset: (
+                                seen.update(operation=operation, setup=setup, units=units,
+                                            names=names, unavailable=unavailable, offset=offset)
+                                or {"operation": operation}, None))
+        out = _payload(cg.handler(include=["parameters"], operation="Deburr1",
+                                  parameter_names=["numberOfStepovers"],
+                                  include_unavailable=True))
+        assert out["parameters"]["operation"] == "Deburr1"
+        assert seen == {"operation": "Deburr1", "setup": "", "units": "mm",
+                        "names": ["numberOfStepovers"], "unavailable": True, "offset": 0}
 
 
 class TestParameterChoices:

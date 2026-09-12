@@ -76,13 +76,27 @@ class TestActiveIdentity:
         assert out["active"]["has_data_file"] is True
         assert "saved and unmodified" in out["active"]["save_state"]
 
-    def test_unsaved_doc_has_no_urn(self, _install):
-        d = _Doc("Untitled", saved=False, data_file=None)
+    def test_previously_saved_doc_with_no_datafile_makes_no_historical_claims(self, _install):
+        d = _Doc("Cloud Design", saved=True, modified=True, data_file=None)
         _install(d)
-        out = _payload(dg.handler())
-        assert out["active"]["document_id"] is None
-        assert out["active"]["has_data_file"] is False
-        assert "never saved" in out["active"]["save_state"]
+        out = _payload(dg.handler(include=["default", "versions", "used_in"]))
+        active = out["active"]
+        assert active["document_id"] is None and active["has_data_file"] is False
+        assert active["is_saved"] is False and active["is_modified"] is True
+        assert "current cloud identity unavailable" in active["save_state"]
+        assert "document_handle" in active
+        exception = next(e for e in out["summary"]["exceptions"]
+                         if e["name"] == "Cloud Design")
+        assert exception["unsaved"] == ["data_file_unavailable", "modified"]
+        assert out["versions"]["available"] is False
+        assert "version history could not be read" in out["versions"]["note"]
+        assert out["used_in"]["available"] is False
+        assert "where-used could not be queried" in out["used_in"]["note"]
+        for message in (active["save_state"], out["versions"]["note"], out["used_in"]["note"]):
+            assert "Keep using document_handle" in message and "retry doc_get" in message
+            assert "If this is a new document, use doc_save_as" in message
+        historical_claims = ("never saved", "no version history exists", "cannot be referenced")
+        assert not any(claim in json.dumps(out).lower() for claim in historical_claims)
 
     def test_modified_doc_flags_stale_urn(self, _install):
         d = _Doc("WIP", modified=True, data_file=_DataFile(vnum=5))
@@ -92,16 +106,14 @@ class TestActiveIdentity:
         assert "5" in out["active"]["save_state"]
 
     def test_isSaved_false_but_datafile_present_does_not_contradict(self, _install):
-        # Platform contradiction (observed live): doc.isSaved can read False on a doc that carries a real URN, version 1,
-        # and is unmodified. is_saved must derive from the DataFile (True here), the save_state must
-        # read 'saved and unmodified', and the open-doc list must NOT flag it never_saved.
+        # Platform contradiction (observed live): doc.isSaved can read False on a doc that carries
+        # a real URN, version 1, and is unmodified. The DataFile determines is_saved here.
         d = _Doc("Bracket", saved=False, modified=False, data_file=_DataFile(urn="urn:x", vnum=1))
         _install(d)
         out = _payload(dg.handler())
         assert out["active"]["is_saved"] is True
         assert out["active"]["has_data_file"] is True
         assert "saved and unmodified" in out["active"]["save_state"]
-        # and no 'never_saved' exception on a doc that plainly has a data file
         assert out["summary"]["exceptions"] == []
 
     def test_the_active_block_reads_datafile_once(self, _install):
@@ -203,7 +215,7 @@ class TestOpenList:
         assert s["open_count"] == 4
         names = {e["name"]: e for e in s["exceptions"]}
         assert set(names) == {"Untitled", "WIP"}                 # clean + active(saved) excluded
-        assert names["Untitled"]["unsaved"] == ["never_saved"]
+        assert names["Untitled"]["unsaved"] == ["data_file_unavailable"]
         assert names["WIP"]["unsaved"] == ["modified"]
 
     def test_modified_dependency_doc_keeps_its_flag(self, _install):
@@ -397,11 +409,12 @@ class TestVersions:
         assert rows[3]["is_open_in_session"] is True
         assert rows[5]["date_utc"] is not None    # epoch -> ISO string
 
-    def test_unsaved_document_has_no_history(self, _install):
+    def test_document_without_current_datafile_has_no_available_history(self, _install):
         _install(_Doc("Untitled", saved=False, data_file=None))
         out = dg._slice_versions()
         assert out["available"] is False
-        assert "never saved" in out["note"].lower()
+        assert "version history could not be read" in out["note"]
+        assert "If this is a new document, use doc_save_as" in out["note"]
 
 
 class TestVersionHistoryCompleteness:
@@ -995,11 +1008,12 @@ class TestUsedIn:
         assert out["unreadable_count"] == 1
         assert out["query_complete"] is False
 
-    def test_unsaved_document_has_no_where_used(self, _install):
+    def test_document_without_current_datafile_has_no_available_where_used(self, _install):
         _install(_Doc("Untitled", saved=False, data_file=None))
         out = dg._slice_used_in()
         assert out["available"] is False
-        assert "never saved" in out["note"].lower()
+        assert "where-used could not be queried" in out["note"]
+        assert "relationship is unknown" in out["note"]
 
     def test_query_failure_is_unknown_not_empty(self, _install):
         # parentReferences unreadable -> the relationship is UNKNOWN; must not imply nothing uses this.
@@ -1068,8 +1082,7 @@ class TestSliceRouter:
         assert len(calls) == 1 and out["active"]["name"] == "A"
 
     def test_the_no_active_document_guard_still_fires_on_a_slice_read(self, _install):
-        # the slices each answer for the ACTIVE document, so with none open the read is refused by
-        # name rather than answered with a slice's own "never saved to the cloud".
+        # The slices each answer for the active document, so with none open the read is refused.
         _install(None)
         assert "no active document" in error_message(dg.handler(include=["versions"])).lower()
 

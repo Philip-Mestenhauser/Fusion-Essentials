@@ -237,7 +237,8 @@ def run():
             {"kind": "circle", "points": [[15, 35]], "radius": 5},
             {"kind": "arc", "points": [[0, 45], [10, 50], [20, 45]]},
             {"kind": "ellipse", "points": [[55, 40], [65, 40], [55, 44]]},
-        ]}, lambda p: p.get("curves_landed") == 6, None),
+        ]}, lambda p: (p.get("curves_landed") == 6
+                       and p.get("coordinates_verified") is False), None),
         ("drawing_add_sketch", {"geometry": [{"kind": "hexagon", "points": [[0, 0]]}]},
          "refused", None),
         ("drawing_add_sketch", {"geometry": [{"kind": "circle", "points": [[0, 0]]}]},

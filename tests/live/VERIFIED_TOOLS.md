@@ -29,9 +29,10 @@ recomputes the hash and fails on any difference, so a green suite cannot ride on
 run that never saw the current code or a weakened predicate. Only a run with zero
 FAIL/blocked/pass* steps rewrites this file.
 
-Stamp: source f186ff16274325cf44232e49036ac26b26aa19b45d270c787b6c82b896a56ff2 | Fusion 2705.1.11 | verified 2026-09-09
+Stamp: source d7e76073593575238667edc49461761b6b076a74be27a2407915cced23da1245 | Fusion 2705.1.15 | verified 2026-09-12
+Loaded: implementation 6761bca895872d5204749c9a188f6f382155a0639d66c81ebf57d6cf9e86e1bd | schema ff1c97c1a767b5ef22135388a7880f75ed2a502e6b0f28e129bd04227cddaba1 | load 5709782d548246adb49de1e4befb48cc | session 72411223e7ba4315a9df7d4639b2b27e
 
-180 covered / 0 called / 1 refusals-only / 6 skipped(reason) / 0 pending
+181 covered / 0 called / 1 refusals-only / 5 skipped(reason) / 0 pending
 
 | act | mode |
 |---|---|
@@ -52,6 +53,8 @@ Stamp: source f186ff16274325cf44232e49036ac26b26aa19b45d270c787b6c82b896a56ff2 |
 | ACT 9 - THE SHOWCASE | narrative |
 | ACT 10a - CAM: JOB + GENERATE | narrative |
 | ACT 10b - CAM: DELIVERABLES | narrative |
+| ACT 10b1 - CAM: TEMPLATE MODES | narrative |
+| ACT 10b1b - CAM: TEMPLATE CLEANUP | narrative |
 | ACT 10b2 - CAM: COMPONENT SCOPE | narrative |
 | ACT 10c - CAM: EXTENSION STRATEGIES | narrative |
 | ACT 10c4 - CAM: THE HUB JOB | narrative |
@@ -76,7 +79,9 @@ Stamp: source f186ff16274325cf44232e49036ac26b26aa19b45d270c787b6c82b896a56ff2 |
 | ACT 10f - CAM: THE TREE LEFT BEHIND | narrative |
 | ACT 11a - CLOUD: THE DATA MODEL | narrative |
 | ACT 11b - CLOUD: THE SAVED DOCUMENT | narrative |
+| ACT 11b2 - CLOUD: LINK GUARD REVIEW | skipped(cloud_link_crash_review_authorization not entitled (deferred and unverified; separate owner-approved crash review and code change required)) |
 | ACT 11c - CLOUD: THE DRAWING | narrative |
+| ACT 11d - CLOUD: CAM TEMPLATE PERSISTENCE | narrative |
 | FINALE | narrative |
 
 | tool | status | step (the demo's shot list) |
@@ -157,7 +162,8 @@ Stamp: source f186ff16274325cf44232e49036ac26b26aa19b45d270c787b6c82b896a56ff2 |
 | drawing_dimension | covered | dimension the generated view with the baseline strategy |
 | drawing_edit_sheet | covered | add a named sheet with the count read either side; it comes after every beat needing the generated views, since an add makes the NEW sheet active |
 | drawing_export | covered | write the drawing to PDF and to DXF, each measured by its bytes on disk |
-| drawing_get | covered | the sheet read every write and both exports are taken behind: export_index 1-based and contiguous (the numbering drawing_export's sheet_range takes, obtainable nowhere else) with exactly one sheet active |
+| drawing_get | covered | the complete native sheet collection read every write and both exports are taken behind: collection_index is 1-based and contiguous, export order remains unknown, and exactly one row agrees with active_sheet |
+| drawing_get_status | covered |  |
 | drawing_insert_image | covered | place the run's marker PNG on the sheet, with 'position_bounds_checked' saying the anchor was compared against the sheet BEFORE anything was placed - an image cannot be read back or moved afterwards, so the check having run is the read-back |
 | drawing_update | covered | a drawing generated moments ago reports itself already up to date; then, after the source is edited and saved, the refresh that ran with the count of references stale before it - the number separating it from a no-op |
 | find_geometry | covered | acquire the face/edge/body handles the build consumes |
@@ -237,7 +243,7 @@ Stamp: source f186ff16274325cf44232e49036ac26b26aa19b45d270c787b6c82b896a56ff2 |
 | sketch_get | covered | read the skeleton and the part's own profiles back; then the hub's three PROOFS, each taken before a feature consumes the sketch - is_fully_constrained true with the constraint and dimension counts that closed it, which is the sketch recipes' own bar; and the keyway slot's own census, where WHICH of its three lines is the construction spine is read off the sketch rather than counted on (a solid side line is vertical too and spans the same length, so a dimension addressed at one lands the slot half a width off) |
 | sketch_insert_svg | covered | import the logo art into a fresh sketch, its landed width measured against the 1/96-inch-per-user-unit convention, then a 96-user-unit square at scale 1 whose measured extent pins BOTH halves of that landing - one inch square, and Y-DOWN from the sketch origin (min y -25.4 mm); the missing file refused |
 | sketch_move | covered | shift a line by a known offset and read the new coordinates back, then spin it 180 deg about its own midpoint - the swap only the endpoints show; the negative-scale mirror and the empty transform refused |
-| sketch_project | covered | project the machining boundary; then section the cap on a datum plane with per-source attribution naming the parallel face that contributed nothing, project the cap sketch's line onto the top face reading the reference linkage back, and meet the same-sketch and missing-direction refusals. SKIPPED(rig): the cross-document to_surface beat - a 'source_sketch' in a SECOND document carrying the same entityToken as a local one - needs that second document, and every tool that opens or references one (doc_open, doc_insert_derive, doc_insert_occurrence, doc_copy) is excluded here as cloud tier; this sweep runs one unsaved document |
+| sketch_project | covered | project the machining boundary; then section the cap on a datum plane with per-source attribution naming the parallel face that contributed nothing, project the cap sketch's line onto the top face reading the reference linkage back, and meet the same-sketch and missing-direction refusals. SKIPPED(rig): the cross-document to_surface identity fixture is not scripted |
 | sketch_set_text | covered | engrave the FUSION ESSENTIALS nameplate; then the path layouts - text along a line and wrapped around a closed circle, and fitted to a line - each checked against the created text's own definition objectType; a model edge as the path, the three cross-mode inputs, and a layout input on an edit all refused; then the FONT - named on a create and on an along-path create, read back off the landed text both times, then changed on an edit beside the string; an unknown name and its case variant refused on create with the text count proving nothing landed, the same name refused on an edit with the following read showing the string untouched, and a call with no font_name publishing no font key at all. Then the hub's own label - 'HUB' drawn 3.5 mm high on the flange-top outline sketch, its width measured off the created text's own bounding box; nothing cuts it |
 | surface_create_ruled | covered | rule off a sheet's top rim - tangent, normal, along a direction entity and at an angle read off the feature - then off a SOLID box edge, where only the new sheet is the result; both misuse refusals |
 | surface_delete_face | covered | open a bore by deleting a face |
@@ -252,7 +258,6 @@ Stamp: source f186ff16274325cf44232e49036ac26b26aa19b45d270c787b6c82b896a56ff2 |
 | surface_trim | covered | trim a sheet with a cylinder cutter |
 | surface_untrim | covered | untrim the internal hole loop |
 | sys_capability_map | covered | survey the server's tool families at cold start |
-| sys_execute_script | skipped: gated off by design; the sweep proves the typed surface suffices - and with it the beat for its DRAWING-document error tail (a raise inside a drawing ends with 'Re-read the sheets before assuming this call changed nothing.', a design one does not), which would need this tool driven against two document kinds |  |
 | sys_find_tool | covered | search the surface for the revolve verb - a registry read, so it carries no 'active_document' stamp (design_get's final read is the other half) |
 | sys_get_api_doc | covered | read the RevolveFeatures API doc |
 | sys_get_guidance | covered | read the packaged design guidance as a tool-only client does - the section index, then the assemble section's rule records beside the content hash that versions them |

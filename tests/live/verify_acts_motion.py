@@ -396,6 +396,7 @@ _MOTION += _box("ConA", ox=360, tint="#E5533C") + _box("ConB", ox=360, tint="#1E
     # one pair of discs computes with a WARNING, with and without the offset, and the tool refuses
     # rather than leave a warned constraint in the design.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    _watch(["MateSeat:1", "MateArm:1"]),
     ("assembly_constrain", {"relationships": [
         {"snap_one": "MateArm:1:bottom", "snap_two": "MateSeat:1:top", "flip": True, "offset": 2},
         {"snap_one": "MateArm:1:front", "snap_two": "MateSeat:1:front", "angle_deg": 30},
@@ -413,6 +414,7 @@ _MOTION += _box("ConA", ox=360, tint="#E5533C") + _box("ConB", ox=360, tint="#1E
          and any(_near(m.get("rotation_deg"), 150.0, 0.5)
                  for m in (p.get("moved") or []))), None),
     ("design_recompute", {}, "ok", None),
+    _watch("MateArm:1"),
     # THE TWO ROWS PROVEN BY THEIR EFFECTS, which is the only honest way to tell them apart: no read
     # publishes a per-row TYPE (the dialog's Type column has no counterpart on the wire), so a count
     # of two says two rows landed and nothing about what each one did. The arm's own bounding box

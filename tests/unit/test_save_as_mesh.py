@@ -108,6 +108,45 @@ class TestSaveAsMesh:
         # DIRECT: run_in_base_feature ran the op with NO scope (the base feature was never started)
         assert bf._starts == 0 and bf._finishes == 0
 
+    def test_occurrence_proxy_tessellates_native_body_in_owning_component_space(self):
+        native_tm = _FakeTriangleMesh(
+            1, 3, coords=[0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            node_indices=[0, 1, 2], normals=[0.0, 0.0, 1.0] * 3)
+        proxy_tm = _FakeTriangleMesh(
+            1, 3, coords=[9.0, 9.0, 9.0, 11.0, 9.0, 9.0, 9.0, 10.0, 9.0],
+            node_indices=[0, 1, 2], normals=[1.0, 0.0, 0.0] * 3)
+        mb_coll = _AddingMeshBodies()
+        comp = _comp("PlacedComp", mesh_bodies=mb_coll)
+        native = BRepBody("Body1", parent_component=comp,
+                          mesh_manager=make_mesh_manager(native_tm))
+        proxy = BRepBody("Body1", parent_component=comp,
+                         mesh_manager=make_mesh_manager(proxy_tm))
+        proxy.nativeObject = native
+        proxy.assemblyContext = types.SimpleNamespace(fullPathName="PlacedComp:1")
+        _wire(comp, design_type=0, handles={"H": proxy})
+
+        out = payload(mx.handler(body="H", quality="low"))
+
+        assert out["source_body"] == "Body1" and out["component"] == "PlacedComp"
+        assert mb_coll.add_args == (
+            native_tm.nodeCoordinatesAsDouble, native_tm.nodeIndices,
+            native_tm.normalVectorsAsDouble, [])
+        assert _calculator(native)._quality == 8
+        assert _calculator(proxy)._quality is None
+
+    def test_occurrence_proxy_without_readable_native_body_is_refused(self):
+        mb_coll = _AddingMeshBodies()
+        comp = _comp("PlacedComp", mesh_bodies=mb_coll)
+        proxy = _mesh_source("Body1", parent_comp=comp)
+        proxy.assemblyContext = types.SimpleNamespace(fullPathName="PlacedComp:1")
+        _wire(comp, design_type=0, handles={"H": proxy})
+
+        res = mx.handler(body="H", quality="low")
+
+        assert res["isError"] is True and "no readable nativeObject" in res["message"]
+        assert mb_coll.add_args is None
+        assert _calculator(proxy)._quality is None
+
     def test_parametric_routes_through_base_feature_scope(self):
         mb_coll = _AddingMeshBodies(result=MeshBody("SavedMesh"))
         bf = FakeBaseFeature()

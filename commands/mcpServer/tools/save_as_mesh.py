@@ -111,8 +111,15 @@ def handler(body: str = "", quality: str = "normal", name: str = "") -> dict:
     if comp is None:
         return error("Could not resolve a component to add the mesh body into.")
 
+    # The new mesh belongs to this component, so an occurrence proxy must tessellate through its
+    # component-owned native body; coordinates and normals then come from the same source entity.
+    if safe(lambda: src.assemblyContext) is not None and safe(lambda: src.nativeObject) is None:
+        return error("The occurrence-context 'body' has no readable nativeObject - its required "
+                     "component-owned tessellation source is unavailable.")
+    tessellation_source = _common._native_of(src)
+
     # 1) calculate - READ-ONLY, runs OUTSIDE the base-feature scope.
-    tm, applied_quality, terr = _tessellate(src, qual)
+    tm, applied_quality, terr = _tessellate(tessellation_source, qual)
     if terr:
         return terr
 

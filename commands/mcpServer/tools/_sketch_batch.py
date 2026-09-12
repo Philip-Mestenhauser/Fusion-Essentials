@@ -14,6 +14,7 @@ MAP_BLURB = ("the sketch batch substrate: entries_or_error - the list-shape guar
 
 # Above this an entry list is refused: a call is one turn's work, not a whole drawing.
 _MAX_ENTRIES = 200
+UNKNOWN_RETENTION = object()
 
 
 def entries_or_error(raw, name, allowed):
@@ -34,22 +35,27 @@ def entries_or_error(raw, name, allowed):
 
 
 def run_batch(entries, one, name, verb, sketch_name):
-    """The MCP result of running `one(index, entry) -> (result, error)` over `entries` in order,
-    stopping at the first error: an error when nothing landed, else ok() carrying `verb` (the
-    landed count), 'requested', 'sketch', 'results' (one per landed entry, each with its 'index')
-    and, when a failure stopped the run, 'failed' {index, error} and 'not_attempted'."""
+    """Run one sketch batch and report completed, retained, failed, and unattempted entries."""
     results = []
+    retained = []
+    retention_unknown = False
     failed = None
     for i, entry in enumerate(entries):
         res, err = one(i, entry)
         if err:
             failed = {"index": i, "error": err}
+            if res is UNKNOWN_RETENTION:
+                retention_unknown = True
+            elif res is not None:
+                kept = dict(res)
+                kept["index"] = i
+                retained.append(kept)
             break
         res = dict(res or {})
         res["index"] = i
         results.append(res)
     requested = len(entries)
-    if failed and not results:
+    if failed and not results and not retained and not retention_unknown:
         rest = requested - 1
         tail = (f" {rest} later entr{'y was' if rest == 1 else 'ies were'} not attempted."
                 if rest else "")
@@ -60,7 +66,20 @@ def run_batch(entries, one, name, verb, sketch_name):
     if failed:
         payload["failed"] = failed
         payload["not_attempted"] = requested - failed["index"] - 1
-        note += (f" Stopped at {name}[{failed['index']}]: {failed['error']} The entries before it "
-                 f"are in the sketch; {payload['not_attempted']} after it were not attempted.")
+        if retained:
+            payload["retained"] = retained
+            note = (f"{len(results)} of {requested} {name} completed. Stopped at "
+                    f"{name}[{failed['index']}]: {failed['error']} The failed entry left "
+                    f"{len(retained)} retained effect in the sketch, identified in 'retained'; "
+                    f"{payload['not_attempted']} after it were not attempted.")
+        elif retention_unknown:
+            payload["retained"] = None
+            note = (f"{len(results)} of {requested} {name} completed. Stopped at "
+                    f"{name}[{failed['index']}]: {failed['error']} Whether the failed entry retained "
+                    f"an effect could not be read; 'retained' is null. {payload['not_attempted']} "
+                    "after it were not attempted.")
+        else:
+            note += (f" Stopped at {name}[{failed['index']}]: {failed['error']} The entries before "
+                     f"it are in the sketch; {payload['not_attempted']} after it were not attempted.")
     payload["note"] = note
     return ok(payload)

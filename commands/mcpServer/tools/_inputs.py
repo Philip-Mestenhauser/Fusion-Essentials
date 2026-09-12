@@ -1335,6 +1335,67 @@ class FeatureRefList(FeatureRef):
         return (ents, labels), None
 
 
+# ── section-analysis reference (generated name, outside the timeline) ───────────────────────────
+
+class SectionRef(InputKind):
+    """A reference to one SectionAnalysis by its generated name from view_section cut/list."""
+
+    MAP_HINT = "a Section Analysis by generated name (exact case-insensitive match; refuses ambiguity)"
+
+    def contract_note(self) -> str:
+        return "A generated section name from view_section cut/list."
+
+    def census(self):
+        """(collection, named rows, error) after one complete SectionAnalysis name walk."""
+        des = _common.design()
+        if not des:
+            return None, None, "No active design to resolve the section name against."
+        sections = _common.safe(lambda: des.analyses.sectionAnalyses)
+        if sections is None:
+            return None, None, "The active design's section analyses could not be read."
+        count = _common.counted(lambda: sections.count)
+        if count is None or count < 0:
+            return None, None, "The active design's section analysis count could not be read."
+        rows = []
+        for index in range(count):
+            section = _common.safe(lambda index=index: sections.item(index))
+            if section is None:
+                return None, None, f"Section analysis {index} of {count} could not be read."
+            name = _common.safe(lambda section=section: section.name)
+            if not isinstance(name, str) or not name.strip():
+                return None, None, f"Section analysis {index} of {count} has no readable name."
+            rows.append((section, name))
+        return sections, rows, None
+
+    def resolve(self, raw):
+        if raw is None:
+            if self.required:
+                return None, f"'{self.name}' is required (a generated section name)."
+            return self.default, None
+        if not isinstance(raw, str):
+            return None, (f"'{self.name}': expected a generated section name string, got "
+                          f"{type(raw).__name__}.")
+        want = raw.strip()
+        if not want:
+            return None, (f"'{self.name}' was supplied but blank. Omit it to clear every section, "
+                          "or pass a generated name from view_section cut/list.")
+        _sections, rows, err = self.census()
+        if err:
+            return None, err
+        hits = [(section, name) for section, name in rows if name.casefold() == want.casefold()]
+        names = [name for _section, name in rows]
+        if not hits:
+            available = _common.named_with_remainder(names) if names else "(none)"
+            return None, (f"'{self.name}': no section named '{want}'. Available: {available}. "
+                          "Use view_section(list) for the current generated names.")
+        if len(hits) > 1:
+            matches = _common.named_with_remainder([name for _section, name in hits])
+            return None, (f"'{self.name}': '{want}' matches {len(hits)} sections ({matches}); "
+                          "no section was selected.")
+        [(section, actual_name)] = hits
+        return (section, actual_name, names), None
+
+
 # ── ModeGuard: declare the design mode / base-feature scope an op needs ──────────────────────────
 
 MODE_PARAMETRIC = "parametric"

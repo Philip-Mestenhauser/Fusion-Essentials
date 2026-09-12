@@ -24,6 +24,7 @@ app = adsk.core.Application.get()
 # PlaneRef for a bare-plane cut (origin alias | construction name | planar-face handle) - the shapes
 # it accepts are the kind's own contract note.
 _PLANE = _inputs.PlaneRef("plane")
+_SECTION = _inputs.SectionRef("section")
 
 _ACTIONS = ("cut", "list", "clear")
 _PLANES = {
@@ -74,11 +75,14 @@ def _aim_at_cut(normal, flipped):
 
 
 def handler(action: str = "", plane: str = "", through: str = "", offset: float = 0.0,
-            units: str = "mm", flip: bool = False, show_hatch: bool = True, auto_view: bool = True) -> dict:
+            units: str = "mm", flip: bool = False, show_hatch: bool = True, auto_view: bool = True,
+            section: str = None) -> dict:
     """See TOOL_DESCRIPTION."""
     action = (action or "").strip().lower()
     if action not in _ACTIONS:
         return error(f"Unknown action '{action}'. Valid: {', '.join(_ACTIONS)}.")
+    if section is not None and action != "clear":
+        return error("'section' is only valid with action='clear'.")
     design = _common.design()
     if not design:
         return error("No active design. Open a document with design geometry first.")
@@ -92,6 +96,42 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
         return ok({"action": "list", "count": len(items), "sections": items})
 
     if action == "clear":
+        if section is not None:
+            resolved, section_err = _SECTION.resolve(section)
+            if section_err:
+                return error(section_err)
+            target, actual_name, before_names = resolved
+            before = len(before_names)
+            try:
+                deleted = target.deleteMe()
+            except Exception as exc:
+                return error(f"Deleting section '{actual_name}' raised: {exc}. Its current state is "
+                             "unknown; run view_section(list).")
+            if deleted is not True:
+                return error(f"deleteMe() did not confirm removal of section '{actual_name}'. Its "
+                             "current state is unknown; run view_section(list).")
+            safe(lambda: app.activeViewport.refresh())
+            _remaining_collection, remaining_rows, remaining_err = _SECTION.census()
+            if remaining_err:
+                return error(f"deleteMe() returned true for section '{actual_name}', but the "
+                             f"remaining sections could not be verified: {remaining_err}")
+            remaining_names = [name for _item, name in remaining_rows]
+            expected_names = list(before_names)
+            expected_names.remove(actual_name)
+            target_absent = not any(name.casefold() == actual_name.casefold()
+                                    for name in remaining_names)
+            if (len(remaining_names) != before - 1 or not target_absent
+                    or sorted(remaining_names) != sorted(expected_names)):
+                observed = _common.named_with_remainder(remaining_names) or "(none)"
+                expected = _common.named_with_remainder(expected_names) or "(none)"
+                return error(f"deleteMe() returned true for section '{actual_name}', but verification "
+                             f"read {len(remaining_names)} section(s): {observed}. Expected the other "
+                             f"{before - 1}: {expected}.")
+            return ok({"action": "clear", "section": actual_name, "removed_count": 1,
+                       "removed": [actual_name], "sections_before": before,
+                       "sections_after": len(remaining_names),
+                       "note": f"Removed section '{actual_name}'; {len(remaining_names)} remain."})
+
         # The pre-count is what "all removed" is judged against; an unreadable one leaves nothing to
         # walk and nothing to claim, so it refuses rather than reporting an empty sweep as success.
         before = _common.counted(lambda: sections.count)
@@ -217,7 +257,8 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
         "note": ("Model is now cut" + (" and the camera is aimed at the cut face." if aimed else
                 "; the camera was left where it was (auto_view=false).") +
             " Use view_screenshot to study the interior; flip=true cuts the other half; "
-            "view_section(clear) removes the cut."),
+            "view_section(clear, section='<generated name>') removes one cut; "
+            "view_section(clear) removes all cuts."),
     }
     if centered_on:
         out["centered_on"] = centered_on
@@ -225,14 +266,15 @@ def handler(action: str = "", plane: str = "", through: str = "", offset: float 
 
 
 TOOL_DESCRIPTION = (
-    "Cut the model with a live Section Analysis to see inside - a cutaway view, not a geometry "
-    "edit; 'clear' removes every section in the design."
+    "Cut or list live Section Analyses; 'clear' removes one generated section name, or every "
+    "section when the name is omitted."
 )
 
 tool = (
     Tool.create_simple(name="view_section", description=TOOL_DESCRIPTION)
     .add_input_property("action", {"type": "string", "enum": list(_ACTIONS)})
     .add_required_input("action")
+    .add_input_property(*_SECTION.as_property())
     .add_input_property(*_PLANE.as_property())
     .add_input_property("through", {"type": "string",
             "description": "Occurrence to cut through its center."})
@@ -256,4 +298,3 @@ item = Item.create_tool_item(
 
 def register_tool():
     register(item)
-

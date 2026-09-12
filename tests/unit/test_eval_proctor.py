@@ -242,6 +242,67 @@ class TestWatch:
         proctor.kill_tree(proc)
         assert ran[-1] == "kill"
 
+    def test_launch_records_executor_start_failure(self, tmp_path, monkeypatch):
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        monkeypatch.setattr(proctor.shutil, "which", lambda name: "claude")
+        monkeypatch.setattr(proctor, "CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setattr(proctor, "executor_login", lambda env: {})
+        monkeypatch.setattr(proctor.subprocess, "Popen",
+                            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("quota")))
+        ended, call_times, returncode = proctor.launch("prompt", str(run_dir), "opus")
+        assert ended == "executor launch failed: quota"
+        assert call_times == [] and returncode is None
+        assert (run_dir / "stderr.txt").read_text(encoding="utf-8") == "quota"
+
+    def test_main_records_failed_staged_and_partial_runs_and_returns_nonzero(self, tmp_path, monkeypatch):
+        scenario = tmp_path / "S99_Widget.md"
+        scenario.write_text(_SCENARIO, encoding="utf-8")
+        results = tmp_path / "results"
+        outcomes = iter([
+            ("executor exited 1", [], 1, 0, ""),
+            ("executor exited 1", [1.0], 1, 2, "partial"),
+            ("report", [1.0], 0, 2, "done"),
+        ])
+        monkeypatch.setattr(proctor, "RESULTS", str(results))
+        monkeypatch.setattr(proctor, "INDEX", str(results / "index.md"))
+        monkeypatch.setattr(proctor, "scenario_path", lambda name: str(scenario))
+        monkeypatch.setattr(proctor.cloud_config, "load_config",
+                            lambda: ({"hub": "H", "project": "P", "folder": "F"}, None))
+        monkeypatch.setattr(proctor.harness, "health_gate", lambda: None)
+        monkeypatch.setattr(proctor, "ensure_hub", lambda hub, call: None)
+        monkeypatch.setattr(proctor, "ensure_project", lambda project, hub, call: project)
+        monkeypatch.setattr(proctor, "ensure_folder", lambda project, folder, name, call: name)
+        monkeypatch.setattr(proctor, "stage_empty", lambda call: "staged-doc")
+        monkeypatch.setattr(proctor, "build_prompt", lambda *args, **kwargs: "prompt")
+        monkeypatch.setattr(proctor, "save_result",
+                            lambda name, project, folder, run_dir, call: {
+                                "web_url": None, "document_id": None, "error": "saved-partial"})
+        monkeypatch.setattr(proctor, "launch",
+                            lambda prompt, run_dir, model, deny, tool_search: next(outcomes)[:3])
+        monkeypatch.setattr(proctor, "audit",
+                            lambda transcript: (next_audit.pop(0), 0, ""))
+        next_audit = [0, 2, 2]
+        monkeypatch.setattr(proctor.sys, "argv",
+                            ["proctor.py", "S99_Widget", "--runs", "3"])
+        assert proctor.main() == 1
+        records = [json.loads((path / "run.json").read_text(encoding="utf-8"))
+                   for path in sorted(results.glob("Eval-*/*")) if (path / "run.json").is_file()]
+        assert [record["outcome"] for record in records] == [
+            "executor_failed", "executor_failed", "executor_completed"]
+        assert [record["execution_state"] for record in records] == [
+            "staged_only", "partial_failed", "completed"]
+        assert records[0]["executor_exit"] == 1 and records[0]["calls"] == 0
+        assert records[1]["calls"] == 2 and records[2]["executor_exit"] == 0
+        outcomes = iter([("report", [], 0)])
+        next_audit[:] = [0]
+        monkeypatch.setattr(proctor.sys, "argv",
+                            ["proctor.py", "S99_Widget", "--runs", "1"])
+        assert proctor.main() == 0
+        latest = sorted(results.glob("Eval-*/*"))[-1] / "run.json"
+        assert json.loads(latest.read_text(encoding="utf-8"))["outcome"] == "executor_completed"
+
+
 
 class TestRecord:
     def _transcript(self, tmp_path, lines):
