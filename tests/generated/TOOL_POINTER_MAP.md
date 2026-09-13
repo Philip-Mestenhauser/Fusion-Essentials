@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 190  |  **description breadcrumbs:** 270  |  **note/error breadcrumbs:** 475
+**Tools:** 191  |  **description breadcrumbs:** 271  |  **note/error breadcrumbs:** 479
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -14,8 +14,8 @@ close orphans, factor duplicated guards into shared helpers.
 - none detected in the scanned literals.
 
 ### Orphans (no incoming breadcrumb detected in this map)
-**Read/Acquire (7)** - higher concern, a check-your-work tool nothing points to:
-  `cam_compare_operations`, `cam_find_holes`, `cam_inspect_toolpaths`, `drawing_get_status`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`
+**Read/Acquire (8)** - higher concern, a check-your-work tool nothing points to:
+  `cam_compare_operations`, `cam_find_holes`, `cam_find_pockets`, `cam_inspect_toolpaths`, `drawing_get_status`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`
 
 **Edit (55)** - usually leaf actions, scan for genuine gaps:
   `assembly_edit_contacts`, `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_configure`, `design_remove_feature`, `doc_insert_derive`, `doc_insert_import`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_insert_image`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_generate_face_groups`, `mesh_plane_cut`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_sweep`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
@@ -36,8 +36,8 @@ close orphans, factor duplicated guards into shared helpers.
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
 - `doc_new`  <- 83  (desc 0, note 83)
-- `find_geometry`  <- 39  (desc 13, note 26)
-- `design_get`  <- 38  (desc 10, note 28)
+- `find_geometry`  <- 40  (desc 13, note 27)
+- `design_get`  <- 39  (desc 10, note 29)
 - `design_delete_feature`  <- 37  (desc 16, note 21)
 - `view_screenshot`  <- 34  (desc 5, note 29)
 - `cam_get`  <- 24  (desc 11, note 13)
@@ -557,6 +557,14 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Omitted 'bodies' scans every solid body. Each hole's 'faces' lists handles PER SEGMENT, in the group's 'segments' order - pass handles to cam_select_geometry(selection='holes', handles=[...]), whic...
 - No active design (open or create a document first).
 - No solid body to recognize holes on:
+- unreadable body/bodies were skipped. Name a solid body in 'bodies' (find_geometry / design_get(include=['tree'])).
+- surface_bodies_skipped
+- unreadable_bodies_skipped
+
+### `cam_find_pockets`
+- Omitted 'bodies' scans every solid body. 'faces' holds the pocket's own faces; cam_select_geometry(selection='pocket') takes exactly one of them, the FLOOR; it refuses a wall. include_bosses=true a...
+- No active design (open or create a document first).
+- No solid body to recognize pockets on:
 - unreadable body/bodies were skipped. Name a solid body in 'bodies' (find_geometry / design_get(include=['tree'])).
 - surface_bodies_skipped
 - unreadable_bodies_skipped

@@ -16,11 +16,12 @@ from verify_core import (
     _filleted, _gap_measured, _holes_recognized, _holes_windowed, _home_address, _home_document,
     _interference_measured, _joined,
     _joint_origin_at, _joint_origins_listed, _lofted, _made_component, _made_component_inactive,
-    _material_assigned, _matched, _measured, _metadata_set, _mirrored, _moved, _near,
+    _material_assigned, _matched, _measured, _metadata_set, _mirrored, _moved, _near, _needs,
     _new_document, _offset_faces, _param_added, _param_deleted, _param_read, _param_set_to,
-    _param_traced, _path_count, _patterned, _piped, _prof, _recall, _recognized_cbore_walls,
-    _refused, _relation_measured, _relation_passes, _relation_read, _revolved, _shelled, _swept,
-    _watch)
+    _param_traced, _path_count, _patterned, _piped, _pocket_boss, _pockets_recognized, _prof,
+    _recall, _recognized_cbore_walls, _recognized_pocket_floor, _refused, _relation_measured,
+    _relation_passes, _relation_read, _revolved, _shelled, _swept, _watch)
+from verify_acts_cam import MACHINING_EXTENSION
 from verify_layout import _px, _py
 
 
@@ -1784,6 +1785,19 @@ _DETAILS = [
     # 10.8 mm counterbores stay; kept plus dropped is the unwindowed total, so nothing is lost.
     ("cam_find_holes", {"bodies": ["Bracket:1"], "max_diameter": 11},
      _holes_windowed(12.0, "holes_group_count"), None),
+    # THE POCKET AS THE MACHINE SEES IT, down the same axis a 3-axis setup attacks: PocketDepth is
+    # PartHt * 0.4 = 16 mm, so the floor sits that far under the low top the cut opened, and the
+    # four PocketRad corners round its single boundary loop. The saver takes that pocket's FLOOR
+    # handle - the face whose locator sits lowest along the attack - which drives a 2D pocket of its
+    # own in the CAM act; its count and its loop size are what the two rows after it read back.
+    ("cam_find_pockets", {"bodies": ["Bracket:1"]}, _pockets_recognized(16.0),
+     _recognized_pocket_floor("pocket_floor", 16.0, count_key="pockets_plain_count",
+                              loop_key="pocket_loop_segments")),
+    # ...and the boss, which only the boss-aware route reports: it comes back as a pocket with an
+    # ISLAND and no boundary - the one shape that separates a boss from a recess. The row rides the
+    # extension tier, so a base licence skips it rather than reddening the run.
+    ("cam_find_pockets", {"bodies": ["Bracket:1"], "include_bosses": True},
+     _needs(MACHINING_EXTENSION, _pocket_boss("pockets_plain_count")), None),
     # The rims the part is handled by, each asked for by RADIUS - the one query that keeps naming
     # the same edge after the driver changes. A fillet's own tangent circle is not a corner, and
     # handing one back to model_fillet answers FILLET_NO_EDGE_FOUND, so every beat below picks a

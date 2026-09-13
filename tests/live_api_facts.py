@@ -74,6 +74,13 @@ ENUMS = {
         "JetOperation": 2,
         "AdditiveOperation": 3,
     },
+    "cam.RecognizedPocketBottomType": {
+        "RecognizedPocketBottomTypeFlat": 0,
+        "RecognizedPocketBottomTypeThrough": 1,
+        "RecognizedPocketBottomTypeChamfer": 2,
+        "RecognizedPocketBottomTypeFillet": 3,
+        "RecognizedPocketBottomTypeOther": 4,
+    },
     "cam.SetupSheetFormats": {
         "HTMLFormat": 0,
         "ExcelFormat": 1,

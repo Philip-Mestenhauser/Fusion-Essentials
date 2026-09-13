@@ -4,7 +4,7 @@ _Auto-generated from the live registry by `tests/gen_posture.py`. Do not edit by
 
 Every tool declares a write= kind (read / write / destructive); the MCP readOnlyHint / destructiveHint annotations derive from it. That machine-checked fact decides which tools are safe to auto-run under Claude Code. This file maps every tool to a posture bucket and emits ready-to-paste `settings.json` presets. Rules target the MCP wire name `mcp__fusion-essentials__<tool>`.
 
-**Tools:** 190  |  read: 31  |  write: 140  |  destructive: 18  |  script-hatch: 1
+**Tools:** 191  |  read: 32  |  write: 140  |  destructive: 18  |  script-hatch: 1
 
 ## Posture buckets
 
@@ -37,12 +37,13 @@ A write= kind says the model changes; it does not say WHERE the change lands. Th
 
 ## Every tool by bucket
 
-### read - safe to auto-allow (31)
+### read - safe to auto-allow (32)
 
 - `mcp__fusion-essentials__assembly_get`
 - `mcp__fusion-essentials__assembly_inspect_interference`
 - `mcp__fusion-essentials__cam_compare_operations`
 - `mcp__fusion-essentials__cam_find_holes`
+- `mcp__fusion-essentials__cam_find_pockets`
 - `mcp__fusion-essentials__cam_get`
 - `mcp__fusion-essentials__cam_get_status`
 - `mcp__fusion-essentials__cam_inspect_toolpaths`
@@ -251,6 +252,7 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__assembly_inspect_interference",
       "mcp__fusion-essentials__cam_compare_operations",
       "mcp__fusion-essentials__cam_find_holes",
+      "mcp__fusion-essentials__cam_find_pockets",
       "mcp__fusion-essentials__cam_get",
       "mcp__fusion-essentials__cam_get_status",
       "mcp__fusion-essentials__cam_inspect_toolpaths",
@@ -458,6 +460,7 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__assembly_inspect_interference",
       "mcp__fusion-essentials__cam_compare_operations",
       "mcp__fusion-essentials__cam_find_holes",
+      "mcp__fusion-essentials__cam_find_pockets",
       "mcp__fusion-essentials__cam_get",
       "mcp__fusion-essentials__cam_get_status",
       "mcp__fusion-essentials__cam_inspect_toolpaths",

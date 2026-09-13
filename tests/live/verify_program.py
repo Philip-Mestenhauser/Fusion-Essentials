@@ -510,6 +510,13 @@ STORY = {
                        "window that drops the bore group and keeps the counterbores. Those "
                        "handles drive a drill of their own in the CAM act, selected without a "
                        "radius query and deleted again so the job the post reads is unchanged"),
+    "cam_find_pockets": ("read the bracket's milled pocket the way a machine does - straight down "
+                         "the 3-axis attack, one closed flat-floored pocket 16 mm under the low "
+                         "top, its single boundary loop and a handle for every wall, fillet and "
+                         "floor face; then the same read with include_bosses, which "
+                         "adds the boss as a pocket carrying an island and no boundary. Then the "
+                         "floor handle drives a pocket operation of its own in the CAM act, "
+                         "selected and deleted again"),
     "model_measure_between": ("measure the boss wall to the bore inside it; then each jaw's grip "
                               "face to the billet, which is what says the vise is closed"),
     "model_measure_relation": ("read the boss and its own bore coaxial; then the rest of the vocabulary on "

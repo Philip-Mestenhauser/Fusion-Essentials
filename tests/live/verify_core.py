@@ -690,6 +690,108 @@ def _holes_windowed(excluded_diameter, total_key, tol=0.1):
     return check
 
 
+def _milled_pockets(payload, depth, tol):
+    """The cam_find_pockets rows reading as a MILLED pocket that deep: closed, flat-floored, one
+    boundary loop and a handle per face. A through bore reads as a pocket too, so the flat-floor
+    and depth terms are what separate the milled pocket from the drilled holes. One definition,
+    shared by the predicate below and the saver that takes that pocket's floor."""
+    return [q for q in (payload.get("pockets") or [])
+            if q.get("is_closed") is True and q.get("bottom_type") == "flat"
+            and _near(q.get("depth"), depth, tol)
+            and isinstance(q.get("boundaries"), list) and len(q["boundaries"]) == 1
+            and isinstance(q.get("faces"), list) and len(q["faces"]) >= 1]
+
+
+def _handle_locator(handle):
+    """The (x, y, z) a find_geometry-style handle carries in its '|@<kind>:x,y,z' locator, or None -
+    the geometry a face handle is picked BY, since list position measures nothing."""
+    if not isinstance(handle, str) or "|@" not in handle:
+        return None
+    parts = handle.split("|@", 1)[1].split(";", 1)[0].split(":", 1)[-1].split(",")
+    if len(parts) != 3:
+        return None
+    try:
+        return tuple(float(v) for v in parts)
+    except ValueError:
+        return None
+
+
+def _pockets_recognized(depth, tol=0.1):
+    """cam_find_pockets: the part's own milled pocket, read as measurements - exactly ONE closed
+    pocket that deep on a FLAT floor, carrying a single boundary loop and a handle per face, which
+    is what cam_select_geometry(selection='pocket') consumes."""
+    def check(p):
+        pockets = p.get("pockets") or []
+        return _measured(
+            f"one closed flat pocket {depth} deep, one boundary loop, a handle per face",
+            {"pocket_count": p.get("pocket_count"), "units": p.get("units"),
+             "depths": [q.get("depth") for q in pockets],
+             "closed": [q.get("is_closed") for q in pockets],
+             "bottoms": [q.get("bottom_type") for q in pockets],
+             "loops": [[q.get("boundaries"), q.get("islands")] for q in pockets],
+             "faces": [len(q.get("faces") or []) for q in pockets]},
+            len(_milled_pockets(p, depth, tol)) == 1)
+    return check
+
+
+def _recognized_pocket_floor(key, depth, count_key=None, loop_key=None, tol=0.1):
+    """A save slot holding the milled pocket's FLOOR handle - the face whose locator sits LOWEST
+    along the [0,0,-1] attack, picked by geometry rather than by list position. `count_key` also
+    recalls the plain pocket count the boss-aware row is partitioned against, and `loop_key` that
+    pocket's boundary segment count, which the resolved contour is compared against."""
+    def take(payload):
+        rows = _milled_pockets(payload, depth, tol)
+        if len(rows) != 1:
+            raise AssertionError(
+                f"no single milled pocket {depth} deep to take a floor from: "
+                f"{[q.get('depth') for q in (payload.get('pockets') or [])]}")
+        pocket = rows[0]
+        located = [(spot[2], h) for h in pocket["faces"]
+                   for spot in [_handle_locator(h)] if spot is not None]
+        if not located:
+            raise AssertionError(f"no pocket face handle carries a locator: {pocket['faces'][:2]}")
+        if count_key:
+            _RECALL[count_key] = payload.get("pocket_count")
+        if loop_key:
+            _RECALL[loop_key] = pocket["boundaries"][0]
+        return min(located)[1]
+    return (key, _recall(key, take))
+
+
+def _pocket_selected(loop_key):
+    """cam_select_geometry(selection='pocket'): ONE selection landed, and the contour Fusion
+    RESOLVED off that floor handle carries the SAME segment count the recognizer published for the
+    pocket's boundary loop - the independent check that the handle addressed THAT pocket."""
+    def check(p):
+        want = _RECALL.get(loop_key)
+        resolved = p.get("resolved") or {}
+        return _measured(
+            f"one pocket selection resolving the recognizer's own {want}-segment loop",
+            {"selections": p.get("selections"), "resolved": resolved, "loop_segments": want},
+            p.get("selections") == 1 and _num(want)
+            and resolved.get("curve_segments") == want)
+    return check
+
+
+def _pocket_boss(total_key):
+    """cam_find_pockets(include_bosses=true): the boss-aware route reports MORE pockets than the
+    plain one recalled under `total_key`, and at least one of them reads as a BOSS - an island loop
+    and no boundary of its own, which is the shape only this route returns."""
+    def check(p):
+        pockets = p.get("pockets") or []
+        plain, total = _RECALL.get(total_key), p.get("pocket_count")
+        bosses = [q for q in pockets
+                  if q.get("boundaries") == [] and isinstance(q.get("islands"), list)
+                  and q["islands"]]
+        return _measured(
+            f"more pockets than the {plain} without bosses, one of them island-only",
+            {"pocket_count": total, "without_bosses": plain,
+             "loops": [[q.get("boundaries"), q.get("islands")] for q in pockets],
+             "depths": [q.get("depth") for q in pockets]},
+            _num(plain) and _num(total) and total > plain and len(bosses) >= 1)
+    return check
+
+
 def _selected_saved(key):
     """cam_select_geometry: the operation holds ONE selection per handle saved under `key` - the
     count is the saved list's own, so a save that shrank cannot pass against a literal."""

@@ -12,12 +12,11 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import CM_TO_UNIT, counted, error, measured, ok, read_flag, safe
-from ._cam_common import clamp_rows
+from ._cam_common import _face_handle, clamp_rows, solid_census
 from . import _common
 from . import _geom
 from . import _inputs
 from . import _outputs
-from . import _view_common
 
 RETURNS = [
     _outputs.ReturnsHandle("faces", require="face", in_list=True,
@@ -69,13 +68,6 @@ def _hole_segments(hole):
     if n is None:
         return None
     return [s for s in (safe(lambda i=i: hole.segment(i)) for i in range(n)) if s is not None]
-
-
-def _face_handle(face):
-    """A find_geometry-style handle for one segment face - the address cam_select_geometry takes."""
-    c = safe(lambda: face.centroid)
-    pos = safe(lambda: (c.x, c.y, c.z)) if c is not None else None
-    return _inputs.make_handle(face, "face", pos)
 
 
 def _segment_faces(seg):
@@ -133,29 +125,6 @@ def _out_of_range(top_diameter, min_d, max_d):
             or (max_d is not None and top_diameter > max_d + _DIAMETER_TOL))
 
 
-def _census(design, bodies):
-    """(the solid BRep bodies to recognize over, {skip bucket: count}) - the caller's list, or every
-    body in the design through the shared census."""
-    census = list(bodies) if bodies else _view_common.all_bodies(design)
-    solids = []
-    skipped = {"surface_bodies_skipped": 0, "mesh_bodies_skipped": 0,
-               "unreadable_bodies_skipped": 0}
-    for b in census:
-        if _inputs._is_mesh(b):
-            skipped["mesh_bodies_skipped"] += 1
-        elif not _inputs._is_brep(b):
-            skipped["unreadable_bodies_skipped"] += 1
-        else:
-            solid = read_flag(lambda b=b: b.isSolid)
-            if solid is True:
-                solids.append(b)
-            elif solid is False:
-                skipped["surface_bodies_skipped"] += 1
-            else:
-                skipped["unreadable_bodies_skipped"] += 1
-    return solids, skipped
-
-
 def _recognize_groups(bodies, include_partial):
     """(the RecognizedHoleGroups the recognizer answers for `bodies`, error) - the one adsk.cam
     entry point, so what it returns is read in one place."""
@@ -194,7 +163,7 @@ def handler(bodies=None, include_partial: bool = False, min_diameter: float = No
     min_d = None if values["min_diameter"] is None else values["min_diameter"] * inv_k
     max_d = None if values["max_diameter"] is None else values["max_diameter"] * inv_k
 
-    solids, skipped = _census(design, values["bodies"])
+    solids, skipped = solid_census(design, values["bodies"])
     if not solids:
         return error(f"No solid body to recognize holes on: {skipped['surface_bodies_skipped']} "
                      f"surface, {skipped['mesh_bodies_skipped']} mesh and "

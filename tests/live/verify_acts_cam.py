@@ -22,8 +22,8 @@ import time
 from verify_core import (
     EXPORT_DIR, MACHINE_NAME, NOTE_MAX, Parked, TEMPLATE_NAME, _RECALL, _box, _ctx_get, _dwell,
     _extruded, _face_up_at, _fg, _fgn, _imported, _joint_origin_computed, _made_component,
-    _matched, _measured, _near, _needs, _num, _param_read, _recall, _refused, _selected_saved,
-    _watch, facade)
+    _matched, _measured, _near, _needs, _num, _param_read, _pocket_selected, _recall, _refused,
+    _selected_saved, _watch, facade)
 
 # THE NAMES THE STORY BUILDS UNDER, in one place for the acts that have to agree on them: the
 # modelling acts create the part and the parameter that drives it, the vise act creates the billet
@@ -61,6 +61,7 @@ _FLIP_BACK_OP = "FlipCbores"   # and the contour round the counterbore backsides
 _ENGRAVE_OP = "SketchEngrave"  # the engraving, driven by the scratch sketch
 _PROBE_OP = "ProbeStepTop"     # the Probe WCS cycle that touches off the stepped top
 _RECOGNIZED_OP = "DrillRecognized"   # the drill selected off cam_find_holes' handles, then deleted
+_POCKET_RECOG_OP = "PocketRecognized"   # the 2D pocket selected off cam_find_pockets' floor handle
 
 _FOLDER_INNER = "FolderInner"
 _FOLDER_DEEP = "FolderDeep"
@@ -939,6 +940,22 @@ _CAM_STORY = [
                 "generate": False}, _selected_saved("recognized_cbore_walls"), None),
     # _op_deleted is defined below this list, so the predicate is built when the step RUNS.
     ("cam_delete", {"entity": _RECOGNIZED_OP}, lambda p: _op_deleted(_RECOGNIZED_OP)(p), None),
+    # THE RECOGNIZED POCKET, machined the same way: the FLOOR handle cam_find_pockets minted in the
+    # details act drives a 2D pocket of its own - the recess PocketRough already opens, reached
+    # through the recognizer instead of a measured face query. The selection is judged by the
+    # contour Fusion RESOLVES off that one face: its segment count is the recognizer's own boundary
+    # loop, so a handle that addressed a different pocket cannot pass. Deleted straight after, so
+    # the job the folders, the counts and the post below read is the one the rows above built.
+    ("cam_create_operation", {"setup": CAM_SETUP, "strategy": "pocket2d",
+                              "name": _POCKET_RECOG_OP, "tool_scope": "document",
+                              "tool_index": _FLAT_MILL, "generate": False},
+     _op_named(CAM_SETUP, "pocket2d", _POCKET_RECOG_OP), None),
+    ("cam_select_geometry",
+     lambda c: {"operation": _POCKET_RECOG_OP, "selection": "pocket",
+                "handles": [_ctx_get(c, "pocket_floor", "the recognized pocket floor")],
+                "generate": False}, _pocket_selected("pocket_loop_segments"), None),
+    ("cam_delete", {"entity": _POCKET_RECOG_OP},
+     lambda p: _op_deleted(_POCKET_RECOG_OP)(p), None),
     ("cam_create_operation", {"setup": CAM_SETUP, "strategy": "bore", "name": _BORE_OP,
                               "tool_scope": "document", "tool_index": _FLAT_MILL,
                               "generate": False},

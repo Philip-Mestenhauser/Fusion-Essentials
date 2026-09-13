@@ -15,6 +15,8 @@ import adsk.cam
 from ._common import (counted, measured, named_with_remainder, iter_collection, read_flag, safe,
                       told_apart)
 from ._write_guard import _active_identity, document_key, on_key_renamed
+from . import _inputs
+from . import _view_common
 
 MAP_BLURB = (
     "the CAM substrate every CAM tool starts from: get_cam (the document's CAM product); the ONE "
@@ -122,6 +124,37 @@ def clamp_rows(max_results, default: int, ceiling: int) -> int:
     except (TypeError, ValueError):
         n = default
     return max(1, min(n, ceiling))
+
+
+def _face_handle(face):
+    """A find_geometry-style handle for one recognized face - the address cam_select_geometry
+    takes."""
+    c = safe(lambda: face.centroid)
+    pos = safe(lambda: (c.x, c.y, c.z)) if c is not None else None
+    return _inputs.make_handle(face, "face", pos)
+
+
+def solid_census(design, bodies):
+    """(the solid BRep bodies a CAM recognizer runs over, {skip bucket: count}) - the caller's list,
+    or every body in the design through the shared census."""
+    census = list(bodies) if bodies else _view_common.all_bodies(design)
+    solids = []
+    skipped = {"surface_bodies_skipped": 0, "mesh_bodies_skipped": 0,
+               "unreadable_bodies_skipped": 0}
+    for b in census:
+        if _inputs._is_mesh(b):
+            skipped["mesh_bodies_skipped"] += 1
+        elif not _inputs._is_brep(b):
+            skipped["unreadable_bodies_skipped"] += 1
+        else:
+            solid = read_flag(lambda b=b: b.isSolid)
+            if solid is True:
+                solids.append(b)
+            elif solid is False:
+                skipped["surface_bodies_skipped"] += 1
+            else:
+                skipped["unreadable_bodies_skipped"] += 1
+    return solids, skipped
 
 
 def parse_parameters(parameters):

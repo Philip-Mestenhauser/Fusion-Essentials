@@ -57,6 +57,14 @@ _DENYLIST = {
     # the not-a-number fallback and the 1..ceiling hold cannot be right in one read and stale in the
     # next (each read still passes its OWN default/ceiling pair).
     "clamp_rows": ("_cam_common", "def"),
+    # The ONE body census a CAM recognizer runs over: which bodies are solid BReps, and the three
+    # skip buckets the payload publishes beside them. A second copy is how one recognizer read
+    # counts an unreadable isSolid as a surface body while its sibling calls it unreadable.
+    "solid_census": ("_cam_common", "def"),
+    # The ONE composite handle a recognized face is addressed by (entityToken plus its centroid
+    # locator). A second copy is how one recognizer's handles keep the self-healing locator while
+    # the next hands back a bare token that cannot re-resolve after the model moves.
+    "_face_handle": ("_cam_common", "def"),
     # The ONE compute-failure read (healthState classed error/warning + the condensed one-sentence
     # message before the 'Compute Failed' marker).
     "compute_failure": ("_assert", "def"),

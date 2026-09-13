@@ -2,7 +2,7 @@
 
 _Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails the suite if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
-**Tools:** 190  |  **Input-kinds:** 22  |  write-status: `·` read · `✎` write · `⚠` destructive
+**Tools:** 191  |  **Input-kinds:** 22  |  write-status: `·` read · `✎` write · `⚠` destructive
 
 ## Input kinds — reference EXISTING geometry/structure with these (don't hand-roll a name/index)
 
@@ -167,6 +167,8 @@ Produces: entity_refs -> sketch_constrain/sketch_dimension. |
 | ✎ | `cam_edit_tools` | Read and manage CAM TOOL LIBRARIES and their tools - list, add, remove or edit tools, manage presets, or create a library |
 | · | `cam_find_holes` | Recognize solid bodies' holes as GROUPS of similar geometry - per-hole segments, each with its face handles, for cam_select_geometry(selection='holes').
 Produce... |
+| · | `cam_find_pockets` | Recognize solid bodies' pockets down an attack vector - depth, bottom type, loops, and the face handles cam_select_geometry(selection='pocket') takes.
+Produces:... |
 | ✎ | `cam_generate` | Launch CAM toolpath (re)generation from the MANUFACTURE workspace.
 Produces: handle -> cam_get_status. |
 | ✎ | `cam_generate_setup_sheet` | Generate a machinist SETUP SHEET, named after the DOCUMENT - a second call to the same folder overwrites it.
