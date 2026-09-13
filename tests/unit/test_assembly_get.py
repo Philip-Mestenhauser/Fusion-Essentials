@@ -1632,10 +1632,10 @@ class TestJointMotionAxes:
         # A cylindrical joint SLIDES, so a reader told the key belongs to that kind reads its
         # absence as a failed read; the measured motion carries no such member at all. The scope
         # rides in the heading list itself, where the kinds carrying each heading are named.
-        assert ("slide_direction (SLIDER ONLY - a cylindrical motion exposes no slide direction)"
-                in note)
-        # the clause that gives a MISSING key its meaning. Drop it and the two vectors still cross
-        # the wire, with nothing saying whether a row without one was asked and answered nothing.
+        assert "slide_direction (slider only)" in note
+        # the clause that gives a MISSING key its meaning ON A KIND THAT CARRIES ONE. Drop it and
+        # the two vectors still cross the wire, with nothing saying whether a row without one was
+        # asked and answered nothing.
         assert "an absent key is a read that answered nothing" in note
 
     def test_the_note_states_the_SPACE_the_headings_are_published_in(self, kin_design):
@@ -1647,8 +1647,7 @@ class TestJointMotionAxes:
         kin_design(joints=[_joint("Hinge", _REVOLUTE, "A:1", "B:1", motion_values=dict(self._BOTH))])
         note = _payload(ap.handler())["note"]
         assert "SPACE: rotation_axis read WORLD on a top-level joint (measured)" in note
-        assert ("slide_direction's space is UNMEASURED, as is either heading on a joint reached "
-                "through a nested instance") in note
+        assert "others UNMEASURED" in note
         # the claim and its scope, not the experiment behind it: the two rigs are cited at
         # _assembly_detail._motion_axes, where the code depends on them, and cross no wire.
         assert "turned 90 deg about Z" not in note
@@ -1667,8 +1666,7 @@ class TestJointMotionAxes:
         assert rec["value_now"] == {"angle_deg": 0.0, "slide_primary_mm": 10.0,
                                     "slide_secondary_mm": 20.0}
         assert "rotation_axis" not in rec and "slide_direction" not in rec
-        assert ("a pin_slot / planar / ball row states none because none is read, not because a "
-                "read failed") in out["note"]
+        assert "pin_slot/planar/ball carry none" in out["note"]
 
     def test_no_heading_teaching_when_joints_are_not_emitted(self, kin_design):
         kin_design(occs=[_occ("A:1", "A")],

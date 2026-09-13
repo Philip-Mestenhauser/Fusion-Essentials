@@ -578,6 +578,56 @@ class TestNoteHarvestFollowsOneCallHop:
         assert notes.count("recursive handler note, long enough to count.") == 1
 
 
+_ASSEMBLED_MODULE = '''"""Fake module whose sentences are assembled away from the handler."""
+
+
+_BLOCKED = (
+    "Selection applied; generation was NOT launched - the strategy reads isGenerationAllowed "
+    "false. Check the Machining Extension entitlement, or replace the operation with one whose "
+    "strategy reads as allowed.")
+
+
+def _mismatch_error(n):
+    return (f"Fusion resolved a contour of {n} segment(s) that does not hold the edges this call "
+            "was given - pass chain_groups to say which edges form the contour, or select the "
+            "edges of one loop.")
+
+
+def _apply(n):
+    return _mismatch_error(n)
+
+
+def handler(**kwargs):
+    if kwargs:
+        return {"note": _BLOCKED.format()}
+    return error(_apply(2))
+
+
+tool = Tool.create_simple(name="demo_select", description=D)
+item = Item.create_tool_item(tool=tool, write="write", handler=handler)
+'''
+
+
+class TestLongSentencesAreHarvestedWhereverBuilt:
+    """A sentence the wire pays for escapes a handler-and-one-hop harvest when it is built in a
+    module constant or returned from a helper further down - the tool then reads as having no
+    guidance surface while an agent meets 200 characters of it."""
+
+    def _notes(self, monkeypatch, tmp_path):
+        (tmp_path / "demo_select_mod.py").write_text(_ASSEMBLED_MODULE, encoding="utf-8")
+        monkeypatch.setattr(gen_wiring, "TOOLS_DIR", str(tmp_path))
+        notes, _desc = gen_wiring._attribute("demo_select_mod", "demo_select")
+        return notes
+
+    def test_a_module_constant_the_handler_formats_is_attributed(self, monkeypatch, tmp_path):
+        assert any(s.startswith("Selection applied; generation was NOT launched")
+                   for s in self._notes(monkeypatch, tmp_path))
+
+    def test_a_helper_two_hops_from_the_handler_is_attributed(self, monkeypatch, tmp_path):
+        assert any("pass chain_groups to say which edges form the contour" in s
+                   for s in self._notes(monkeypatch, tmp_path))
+
+
 _TWO_TOOL_MODULE = '''"""Fake module registering two tools out of one file."""
 
 

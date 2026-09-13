@@ -500,14 +500,17 @@ class MakeDesign:
     explicit None installs the member
     ANSWERING null, which is a different state from the absent member and the one a safe() read
     cannot tell from it by accident. `analyses` is the analyses collection a section read reaches
-    sectionAnalyses through, set only when asked: no measurement says what a plain design answers."""
+    sectionAnalyses through, set only when asked: no measurement says what a plain design answers.
+    `configuration_top_table` is the table a CONFIGURED design carries, also set only when asked -
+    an ordinary design answers none, which is how a reader tells the two apart."""
 
     _UNSET = object()
     def __init__(self, comp=None, tokens=None, all_components=None, parent_document=None,
                  design_type=None, active_edit_object=None, timeline=None, user_parameters=None,
                  all_parameters=None, compute_raises=None, active_occurrence=None,
                  root_activate_ok=True, root_activate_lies=False, root_active_reads=None,
-                 snapshots=None, appearances=_UNSET, analyses=None):
+                 snapshots=None, appearances=_UNSET, analyses=None,
+                 configuration_top_table=None):
         self._compute_raises = compute_raises
         self._computes = 0
         self.rootComponent = comp if comp is not None else MakeComp()
@@ -525,6 +528,8 @@ class MakeDesign:
                             if appearances is MakeDesign._UNSET else appearances)
         if analyses is not None:
             self.analyses = analyses
+        if configuration_top_table is not None:
+            self.configurationTopTable = configuration_top_table
         if parent_document is not None:
             self.parentDocument = parent_document
         if design_type is not None:

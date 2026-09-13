@@ -163,12 +163,12 @@ def handler(include_coincident_faces: bool = False) -> dict:
             "occurrences and their total overlap volume; fix positioning/sizing/joints. (A "
             "self-pair means two bodies of the same occurrence overlap.)")
     if candidates_by_label:
-        note += (" A side with '*_candidates' resolved to ONE native body, and each candidate path "
-                 "is an occurrence whose component owns that body - analyzeInterference returns "
-                 "native bodies, so the exact instance cannot be read off the result; the candidate "
-                 "paths are listed (capped: a *_candidates_truncated flag marks an incomplete list, "
-                 "and the side's label carries the true candidate count). Discriminate by position "
-                 "(assembly_get occurrence origins) or move one instance and re-check.")
+        note += (" A side with '*_candidates' resolved to ONE native body, and each candidate "
+                 "path is an occurrence whose component owns that body - analyzeInterference "
+                 "returns native bodies, so the exact instance cannot be read off the result; "
+                 "*_candidates_truncated marks a list the side's label counts more of. "
+                 "Discriminate by position (assembly_get occurrence origins) or move one instance "
+                 "and re-check.")
     if walk.broken:
         note += (f" {len(walk.broken)} occurrence(s) with an unresolved external reference were NOT "
                  "compared - their component could not be read, so they carry no geometry for this "

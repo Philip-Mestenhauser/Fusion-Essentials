@@ -1401,6 +1401,60 @@ class TestToolChange:
         assert "tool already set to '12mm Flat Endmill'" in res["message"]
 
 
+def GeometryLibTool(description, number, **dims):
+    """A library Tool carrying its tool_number plus authored dimensions, each expression a length in
+    Fusion's internal cm."""
+    return FakeTool(description=description,
+                    parameters=FakeParams(dict({"tool_number": str(number)},
+                                               **{k: str(v) for k, v in dims.items()})))
+
+
+class ResizingToolOp(FakeOp):
+    """A store that hands back a tool of its own sizes rather than the object assigned - what the
+    record's dimensions have to be read off, since they are the geometry the operation will cut."""
+
+    @FakeOp.tool.setter
+    def tool(self, value):
+        self._tool = GeometryLibTool(value.description, 7, tool_diameter=1.0,
+                                     tool_shoulderDiameter=1.2)
+
+
+class TestToolChangeDimensions:
+    """What the record publishes for the tool the operation reads BACK: its own cutting geometry.
+    A description names a tool; only these say what size it is."""
+
+    def test_the_landed_tools_dimensions_are_published(self, monkeypatch):
+        op = FakeOp("Bore1", {"tool_stepover": "2."})
+        _install_op(monkeypatch, op, doc_tools=[
+            GeometryLibTool("10mm Flat Endmill", 7, tool_diameter=1.0, tool_fluteLength=3.5,
+                            tool_shoulderDiameter=1.0)])
+        out = _payload(ce.handler(operation="Bore1", tool_scope="document", tool_index=0))
+        assert out["tool_dimensions"]["diameter"] == 10.0
+        assert out["tool_dimensions"]["shoulder_diameter"] == 10.0
+        assert out["tool_dimensions"]["flute_length"] == 35.0
+        assert out["tool_dimensions"]["units"] == "mm"
+        assert "cutting diameter 10.0 mm" in out["note"]
+
+    def test_the_dimensions_come_off_the_tool_READ_BACK_not_the_one_assigned(self, monkeypatch):
+        # two fetches of one tool are different objects, so the record is built from what
+        # Operation.tool answers after the write - never from the object handed to it.
+        op = ResizingToolOp("Bore1", {"tool_stepover": "2."})
+        _install_op(monkeypatch, op, doc_tools=[
+            GeometryLibTool("10mm Flat Endmill", 7, tool_diameter=0.6, tool_shoulderDiameter=0.6)])
+        out = _payload(ce.handler(operation="Bore1", tool_scope="document", tool_index=0))
+        assert out["tool_dimensions"]["diameter"] == 10.0          # the store's sizes, not 6.0
+        assert out["tool_dimensions"]["shoulder_diameter"] == 12.0
+
+    def test_a_tool_carrying_no_dimensions_publishes_nulls_not_zeros(self, monkeypatch):
+        op = FakeOp("Bore1", {"tool_stepover": "2."})
+        _install_op(monkeypatch, op, doc_tools=[FakeLibTool("10mm Flat Endmill", 7)])
+        out = _payload(ce.handler(operation="Bore1", tool_scope="document", tool_index=0))
+        dims = out["tool_dimensions"]
+        assert dims["units"] == "mm"
+        assert all(v is None for k, v in dims.items() if k != "units")
+        assert "cutting diameter" not in out["note"]
+
+
 class StubbornNameOp(FakeOp):
     """Operation.name takes the assignment and keeps the name it holds - a rename the platform
     declined, which an EDIT must report rather than publish the requested name over."""

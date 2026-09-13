@@ -9,10 +9,10 @@ import adsk.core
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import apply_rename, ok, error, safe, read_flag
+from ._common import CM_TO_UNIT, apply_rename, ok, error, safe, read_flag
 from ._cam_common import (get_cam, enumeration_remedy, expression_error, matched_quoting,
                           op_primary_state, op_state_facts, parse_parameters, resolve_cam_node,
-                          unquote_expression, validity_basis)
+                          tool_dimensions, unquote_expression, validity_basis)
 from ._cam_presets import resolve_operation_preset
 from .cam_create_operation import (_NO_INDEX, _doc_tool_at, _names_the_same_tool,
                                    _operation_name_clash, _tool_at, _tool_facts,
@@ -21,6 +21,9 @@ from .cam_create_operation import (_NO_INDEX, _doc_tool_at, _names_the_same_tool
 from .cam_select_geometry import _DIRECT_PARAM, _HOLES
 
 app = adsk.core.Application.get()
+
+# This tool takes no units input, so its tool-dimension read-back is published in mm.
+_MM = CM_TO_UNIT["mm"]
 
 
 def _flag_word(value):
@@ -113,6 +116,9 @@ def _set_tool(cam, op, name, scope, library_url, index):
                       "did not ask for. Re-read it with cam_get(include=['tool'], operation=...).")
     rec = {"tool": desc, "tool_number": number, "library_tool_number": want_number,
            "was_tool": was, "tool_index": index, "was_toolpath_valid": was_valid,
+           # the geometry the operation now cuts at, read off the tool Operation.tool ANSWERS: a
+           # description names a tool, and only these say what size it is.
+           "tool_dimensions": tool_dimensions(now, _MM, "mm"),
            "is_toolpath_valid": read_flag(lambda: op.isToolpathValid)}
     if named is None:
         # absent = both descriptions read and the read-back names the library tool
@@ -146,6 +152,9 @@ def _tool_note(rec, name):
     if number is not None:
         lead += f" (tool number {number})"
     lead += f" on '{name}'"
+    diameter = (rec.get("tool_dimensions") or {}).get("diameter")
+    if diameter is not None:
+        lead += f"; cutting diameter {diameter} mm"
     if rec.get("tool_unchanged"):
         lead += _unchanged_clause(rec)
     was, now = rec["was_toolpath_valid"], rec["is_toolpath_valid"]

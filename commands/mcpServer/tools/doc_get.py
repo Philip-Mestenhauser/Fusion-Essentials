@@ -488,13 +488,10 @@ def _slice_xref_tree(xref_max=_XREF_CAP, max_depth=None):
     complete = state["walk_complete"] and not (state["truncated"] or state["depth_capped"])
     all_current = complete and counters["stale"] == 0 and counters["unreadable"] == 0
     unresolved = [r for r in refs if r.get("kind") == "unresolved"]
-    note = ("Covers three link kinds: kind='xref' (referenced occurrences), kind='derive' (derive "
-            "features) and kind='unresolved' (an occurrence whose referenced component could not be "
-            "loaded). all_current is authoritative ONLY on a complete walk; it is false whenever any "
-            "ref is stale, any ref is unreadable, or walk_complete is false. "
-            "reference_link_count counts LINKS - one per referencing occurrence plus one per derive "
-            "feature - which is a different noun from workspace_orient's "
-            "references.referenced_documents (referenced DOCUMENTS), so the two legitimately differ. "
+    note = ("Covers kind='xref', kind='derive' and kind='unresolved' (that component would not "
+            "load). all_current is authoritative ONLY on a complete walk. reference_link_count "
+            "counts LINKS (one per referencing occurrence, one per derive feature), not DOCUMENTS "
+            "as workspace_orient's references.referenced_documents does. "
             "This walks the in-session assembly; refresh stale refs with doc_update_xref.")
     if unresolved:
         note += (f" {len(unresolved)} UNRESOLVED reference(s) found. Reading such an occurrence's "
@@ -590,9 +587,9 @@ def _slice_used_in(used_in_max=_USED_IN_CAP):
     query_complete = (not truncated) and counters["unreadable"] == 0
     note = ("references = documents that USE this one (drawings made from it, parent assemblies that "
             "insert it); the mirror of include=['xref_tree'] (what this design consumes). "
-            "query_complete is authoritative ONLY on a full read - it is false whenever "
-            "parentReferences is unreadable, the list was capped (truncated), or any parent could not "
-            "be resolved. type is inferred from fileExtension (f3d=design, f2d=drawing).")
+            "query_complete is authoritative ONLY on a full read - false when the list was capped "
+            "or any parent would not read. type is inferred from fileExtension (f3d=design, "
+            "f2d=drawing).")
     if not query_complete:
         note += (" Walk was partial - an empty or short list here does NOT mean nothing references "
                  "this document.")
@@ -638,17 +635,16 @@ def _session_projection(active, max_results):
     """(payload, note) for the DEFAULT projection: the `active` record the handler resolved plus the
     session's open-document list. Read from memory - the include= slices are the cloud reads."""
     rows, summary, truncated = _open_documents(max_results)
-    note = ("active is the focused document; document_id is its cloud lineage URN. "
-            "document_handle addresses the exact open document, saved or unsaved: use it with "
-            "doc_activate, doc_close and expect_document. It survives saves/tab movement but expires "
-            "on close or add-in reload; refresh with doc_get. open_index is positional and can shift. "
-            "open_documents includes loaded dependencies, not just visible tabs. "
-            "For cloud files use data_get. include=['versions'] adds version history; "
-            "include=['xref_tree'] adds reference freshness; include=['used_in'] lists documents using this file.")
+    note = ("document_id is the cloud lineage URN; document_handle addresses the exact open "
+            "document - pass it to doc_activate, doc_close and expect_document. It expires on "
+            "close or add-in reload. open_index is positional and can shift. open_documents lists "
+            "loaded dependencies. include=['versions'] adds version history; "
+            "include=['xref_tree'] reference freshness; include=['used_in'] documents using this "
+            "file.")
     if truncated:
         note += f" open_documents was capped at {max_results} of {summary['open_count']}; raise max_results to see the rest."
-    # A row that answered no document is disclosed as such, since it is the one row the 'open:N'
-    # sentence above does not hold for.
+    # A row that answered no document is disclosed as such, since it is the one row the open_index
+    # sentence above does not hold for - it carries no index at all.
     unreadable_slots = sum(1 for r in rows if r.get("readable") is False)
     if unreadable_slots:
         note += (f" {unreadable_slots} open slot(s) answered NO document (documents.item did not "

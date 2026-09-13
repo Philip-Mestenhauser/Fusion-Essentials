@@ -9,9 +9,10 @@ that gives every other joint motion and assembly verb a rig of its own.
 """
 
 from verify_core import (
-    _RECALL, _as_built, _box, _captured, _constrained, _ctx_get, _datum_plane, _driven_angle,
-    _driven_slide, _dwell, _extruded, _fg, _grounded, _interference_measured, _joint_bench,
-    _joint_is, _joint_limits, _jointed, _jointed_at_geometry, _joints_listed,
+    _RECALL, _as_built, _axis_kept, _axis_landed, _box, _captured, _constrained, _ctx_get,
+    _datum_plane, _driven_angle, _driven_slide, _dwell, _extruded, _fg, _grounded,
+    _interference_measured, _joint_axis_vs, _joint_bench, _joint_heading, _joint_is, _joint_limits,
+    _jointed, _jointed_at_geometry, _joints_listed, _limits_survived, _link_healthy,
     _made_component, _measured, _mod360, _motion_linked, _moved_occurrence, _near, _num, _recall,
     _refused, _revolved, _rigid_grouped, _watch)
 
@@ -178,7 +179,10 @@ _MOTION = (
                                "geometry": "AsbPin:1:top", "joint_type": "revolute", "axis": "z",
                                "name": "AsbNamed"},
      lambda p: p.get("joint_type") == "revolute" and bool(p.get("geometry"))
-     and p.get("joint") == "AsbNamed",
+     and p.get("joint") == "AsbNamed"
+     # the configured-design sentence is gated on THIS design carrying a configuration table, which
+     # a sweep document does not - so it costs an ordinary design nothing.
+     and "CONFIGURED" not in (p.get("note") or ""),
      ("asb_joint", lambda p: p["joint"])),
     # an INDEPENDENT read of the same joint: the tool's own read-back is not the only witness.
     ("assembly_get", {},
@@ -257,6 +261,32 @@ _MOTION = (
                     "slide_axis": "y"}, "refused", None),
     ("joint_edit", {"joint_name": "JRig", "joint_type": "rigid"}, "ok", None),
     ("assembly_get", {}, _joint_is("JRig", "rigid"), None),
+    # THE AXIS THE JOINT ALREADY CARRIES. Rigid motion answers no axis member at all, so a retype
+    # naming none is refused rather than silently aimed at z - the two inputs that supply one are
+    # named in the refusal.
+    ("joint_edit", {"joint_name": "JRig", "joint_type": "revolute"},
+     _refused("no current motion axis", "axis=x|y|z", "world_axis=x|y|z"), None),
+    ("joint_edit", {"joint_name": "JRig", "joint_type": "revolute", "axis": "y"},
+     _axis_landed("JRig", "revolute", "y"), None),
+    # the heading the JOINT holds, parked for the two comparisons below - joint_edit never writes
+    # this vector, so it is the witness the writer cannot be.
+    ("assembly_get", {}, _joint_is("JRig", "revolute"),
+     ("rig_axis", _recall("rig_axis", _joint_heading("JRig")))),
+    # a retype with NO axis KEEPS that heading: the tool reads the joint's own direction instead of
+    # defaulting, and re-aiming a joint nobody asked to re-aim also drops its rotation limits.
+    ("joint_edit", {"joint_name": "JRig", "joint_type": "cylindrical"},
+     _axis_kept("JRig", "y"), None),
+    ("assembly_get", {}, _joint_axis_vs("JRig", "cylindrical", "rig_axis", True), None),
+    # an axis on its OWN re-aims the current motion, the way world_axis already does - and the
+    # heading moves off the one recalled above, which is what says the re-aim landed.
+    ("joint_edit", {"joint_name": "JRig", "axis": "x"},
+     _axis_landed("JRig", "cylindrical", "x"), None),
+    ("assembly_get", {}, _joint_axis_vs("JRig", "cylindrical", "rig_axis", False), None),
+    # rigid takes no axis at all, so one handed to it is refused rather than dropped in silence.
+    ("joint_edit", {"joint_name": "JRig", "joint_type": "rigid", "axis": "z"},
+     _refused("not axis-based"), None),
+    ("joint_edit", {"joint_name": "JRig", "joint_type": "rigid"}, "ok", None),
+    ("assembly_get", {}, _joint_is("JRig", "rigid"), None),
 ] + _box("LnkA", ox=1400, oy=120, tint="#E5533C") + _box(
     "LnkB", ox=1400, oy=120, tint="#1E88E5", shape="disc") + [
     # A LINK PARTNER THAT HAS NEVER BEEN DRIVEN: the bench's own drive pass has already moved every
@@ -272,6 +302,23 @@ _MOTION = (
     ("joint_motion_link", {"joint_one": "JRev", "joint_two": "BenchLink", "ratio": 2},
      _motion_linked("JRev", "BenchLink", False),
      ("bench_link", _recall("bench_link", lambda p: p["motion_link"]))),
+    # A LINKED JOINT MAY NOT BE RE-AIMED. Changing a member's axis leaves the link reading 'Motion
+    # Link joint DOF is wrong type', carrying no motion, and refusing setMotionData - so it cannot
+    # be re-valued back, and the re-aim is refused before anything is written.
+    ("joint_edit", {"joint_name": "JRev", "joint_type": "revolute", "axis": "x"},
+     _refused("motion link", "joint_motion_link", "action='delete'"), None),
+    # world_axis is the SAME change by another route: it swaps the joint's frame direction for a
+    # CUSTOM one carrying a construction axis, which the enum alone cannot tell from a custom
+    # direction the joint already holds - so the ENTITY is what the guard compares.
+    ("joint_edit", {"joint_name": "JRev", "world_axis": "y"},
+     _refused("motion link", "joint_motion_link"), None),
+    # the boundary the refusal turns on: a re-set that KEEPS the axis AND the motion type leaves the
+    # link healthy, so it lands - and the link read below proves the refusals above wrote nothing.
+    ("joint_edit", {"joint_name": "JRev", "joint_type": "revolute", "axis": "z"}, "ok", None),
+    ("assembly_get", {"include": ["relations"]}, _link_healthy("bench_link"), None),
+    # and the OTHER thing a re-aim costs: the limits set on JRev above are still standing, because
+    # this re-set kept the axis. A re-set that changed it would have cleared them.
+    ("assembly_get", {}, _limits_survived("JRev", -45, 45), None),
     # every joint built above, counted off the design-wide walk by an independent read.
     ("assembly_get", {}, _joints_listed(10), None),
     # the relations LIFECYCLE: list, suppress round-trip, re-value the link (was_reversed

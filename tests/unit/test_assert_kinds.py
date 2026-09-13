@@ -837,8 +837,7 @@ class TestChildGeometryMoved:
         assert "did not propagate" in res["message"].lower()
         assert "Wrapper:1" in res["message"]
         # The taught remedy is the multi-level-proven one: LOCK every nested free occurrence
-        # (ground_to_parent), then joint the WRAPPER - jointing the nested occurrence directly
-        # repositions the top-most free ancestor and strands deeper geometry.
+        # (ground_to_parent), then joint the WRAPPER.
         assert "LOCK" in res["message"] and "ground_to_parent" in res["message"]
         assert "joint the WRAPPER" in res["message"]
 

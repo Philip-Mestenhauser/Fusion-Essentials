@@ -38,6 +38,21 @@ _BALL_AXIS_NOTE = "ball motion (pitch Z / yaw X - the API accepts no other pair)
 _POSE_HINT_OTHER = ("joint_drive does not drive this motion type (only revolute/slider/cylindrical "
                     "take a value) - pose the part with assembly_move.")
 
+# Appended only in a CONFIGURED design, where the difference shows: an as-built joint holds the two
+# occurrences' relative POSE, so a configuration that moves the mating face leaves the as-built
+# member behind while the joint keeps reading healthy.
+_CONFIGURED_NOTE = (
+    " This design is CONFIGURED: an as-built joint holds the pair's relative POSE, so a "
+    "configuration that MOVES the mating geometry leaves this member where it stands while the "
+    "joint still reads healthy - a rigid group behaves the same. A joint anchored ON that geometry "
+    "(joint_create with a snap, or joint_at_geometry on the face/edge) follows the switch.")
+
+
+def _configured_clause(design):
+    """The configured-design sentence, or '' when the design carries no configuration table."""
+    return _CONFIGURED_NOTE if safe(lambda: design.configurationTopTable) is not None else ""
+
+
 def handler(occurrence_one: str = "", occurrence_two: str = "", geometry: str = "",
             joint_type: str = "rigid", axis: str = "z",
             slide_axis: str = "", name: str = "") -> dict:
@@ -167,8 +182,9 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", geometry: str = 
            "axis": ax_name if _JOINT_TYPES[jtype][1] else None,
            "slide_axis": _slide_name(slide_idx, ax_name) if jtype == "pin_slot" else None,
            "geometry": geom_label}
+    configured = _configured_clause(design)
     if jtype == "rigid":
-        out["note"] = "Occurrences rigidly joined where they already are."
+        out["note"] = "Occurrences rigidly joined where they already are." + configured
         return ok(out)
 
     if _JOINT_TYPES[jtype][1]:
@@ -179,7 +195,7 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", geometry: str = 
         moved = _BALL_AXIS_NOTE if jtype == "ball" else f"{jtype} motion"
     pose_hint = "Pose it with joint_drive." if jtype in _DRIVES_ANY else _POSE_HINT_OTHER
     out["note"] = (f"Occurrences joined where they already are with {moved} - an as-built joint "
-                   f"moves neither part. {pose_hint}")
+                   f"moves neither part. {pose_hint}" + configured)
     # AsBuiltJoint.geometry reads null when (and only when) the motion is rigid (live-verified across
     # rigid plus the five motion types), so a non-rigid joint with no geometry to read is a signal worth reporting
     # rather than swallowing.

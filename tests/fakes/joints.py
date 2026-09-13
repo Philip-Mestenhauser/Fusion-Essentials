@@ -71,15 +71,18 @@ class RigidJointMotion:
                     "joint-limit-out-of-range-ignored", "joint-revolute-value-stored-verbatim",
                     "joint-revolute-value-tenth-degree-grid"))
 class RevoluteJointMotion:
-    """The revolute motion: rotationValue in RADIANS, its limits, and the axis vector a drive reads
-    its heading off. An assignment beyond an enabled bound is ignored and one that lands is stored
-    on the measured 0.1 deg grid. `stores` False takes every assignment and keeps NONE of them -
-    the swallowed write only a read-back catches, distinct from a value a limit refused."""
-    def __init__(self, value=0.0, limits=None, axis_vector=None, joint_type=None, stores=True):
+    """The revolute motion: rotationValue in RADIANS, its limits, the axis vector a drive reads its
+    heading off, and the JointDirections member it is AIMED by (with the entity a CUSTOM one names),
+    each reading None until given. An assignment beyond an enabled bound is ignored and one that
+    lands is stored on the measured 0.1 deg grid; `stores` False keeps NONE of them."""
+    def __init__(self, value=0.0, limits=None, axis_vector=None, joint_type=None, stores=True,
+                 axis=None, custom_axis_entity=None):
         self._value = value
         self._stores = stores
         self.rotationLimits = _MotionLimits() if limits is None else limits
         self.rotationAxisVector = axis_vector
+        self.rotationAxis = axis
+        self.customRotationAxisEntity = custom_axis_entity
         self.jointType = (_api_facts.ENUMS["fusion.JointTypes"]["RevoluteJointType"]
                           if joint_type is None else joint_type)
 
@@ -97,15 +100,18 @@ class RevoluteJointMotion:
              facts=("shape-dump-assembly-world", "enum-joint-types",
                     "joint-limit-out-of-range-ignored"))
 class SliderJointMotion:
-    """The slider motion: slideValue in CM, its limits, and the direction vector a drive's SIGN
-    follows. An assignment beyond an enabled bound is ignored; no store grid is measured for it, so
-    a value that lands is kept verbatim. `stores` False takes every assignment and keeps NONE of
-    them - the swallowed write only a read-back catches."""
-    def __init__(self, value=0.0, limits=None, direction_vector=None, joint_type=None, stores=True):
+    """The slider motion: slideValue in CM, its limits, the direction vector a drive's SIGN follows,
+    and the JointDirections member it SLIDES along (with the entity a CUSTOM one names), each
+    reading None until given. An assignment beyond an enabled bound is ignored and one that lands is
+    kept verbatim; `stores` False keeps NONE of them."""
+    def __init__(self, value=0.0, limits=None, direction_vector=None, joint_type=None, stores=True,
+                 direction=None, custom_direction_entity=None):
         self._value = value
         self._stores = stores
         self.slideLimits = _MotionLimits() if limits is None else limits
         self.slideDirectionVector = direction_vector
+        self.slideDirection = direction
+        self.customSlideDirectionEntity = custom_direction_entity
         self.jointType = (_api_facts.ENUMS["fusion.JointTypes"]["SliderJointType"]
                           if joint_type is None else joint_type)
 
@@ -132,7 +138,7 @@ class CylindricalJointMotion:
     two-value drive reporting per-DOF from one reporting the pair; each defaults to `stores`."""
     def __init__(self, rotation=0.0, slide=0.0, rotation_limits=None, slide_limits=None,
                  axis_vector=None, joint_type=None, stores=True, rotation_stores=None,
-                 slide_stores=None):
+                 slide_stores=None, axis=None, custom_axis_entity=None):
         self._rotation = rotation
         self._slide = slide
         self._rotation_stores = stores if rotation_stores is None else rotation_stores
@@ -140,6 +146,8 @@ class CylindricalJointMotion:
         self.rotationLimits = _MotionLimits() if rotation_limits is None else rotation_limits
         self.slideLimits = _MotionLimits() if slide_limits is None else slide_limits
         self.rotationAxisVector = axis_vector
+        self.rotationAxis = axis
+        self.customRotationAxisEntity = custom_axis_entity
         self.jointType = (_api_facts.ENUMS["fusion.JointTypes"]["CylindricalJointType"]
                           if joint_type is None else joint_type)
 
@@ -160,6 +168,42 @@ class CylindricalJointMotion:
     def slideValue(self, value):
         if self._slide_stores and _limit_allows(self.slideLimits, value):
             self._slide = value
+
+
+@fusion_fake(live_type="PlanarJointMotion",
+             facts=("shape-dump-joint-motion-planar-pinslot", "enum-joint-types"))
+class PlanarJointMotion:
+    """The planar motion, AIMED by its plane NORMAL: normalDirection with the entity a CUSTOM one
+    names, plus the rotation DOF it carries in that plane. It exposes NO slideDirection - the live
+    type answers primarySlideDirection instead - so a slide-direction read declines here exactly as
+    it declines live. Each direction member reads None until given."""
+    def __init__(self, normal=None, custom_normal_entity=None, rotation=0.0, rotation_limits=None,
+                 joint_type=None):
+        self.normalDirection = normal
+        self.customNormalDirectionEntity = custom_normal_entity
+        self.rotationValue = rotation
+        self.rotationLimits = _MotionLimits() if rotation_limits is None else rotation_limits
+        self.jointType = (_api_facts.ENUMS["fusion.JointTypes"]["PlanarJointType"]
+                          if joint_type is None else joint_type)
+
+
+@fusion_fake(live_type="PinSlotJointMotion",
+             facts=("shape-dump-joint-motion-planar-pinslot", "enum-joint-types"))
+class PinSlotJointMotion:
+    """The pin-slot motion, the one kind aimed by TWO directions: rotationAxis to turn about and
+    slideDirection to slide along, each with the entity a CUSTOM one names, and a limits pair for
+    the two degrees of freedom. Each direction member reads None until given."""
+    def __init__(self, axis=None, custom_axis_entity=None, direction=None,
+                 custom_direction_entity=None, rotation_limits=None, slide_limits=None,
+                 joint_type=None):
+        self.rotationAxis = axis
+        self.customRotationAxisEntity = custom_axis_entity
+        self.slideDirection = direction
+        self.customSlideDirectionEntity = custom_direction_entity
+        self.rotationLimits = _MotionLimits() if rotation_limits is None else rotation_limits
+        self.slideLimits = _MotionLimits() if slide_limits is None else slide_limits
+        self.jointType = (_api_facts.ENUMS["fusion.JointTypes"]["PinSlotJointType"]
+                          if joint_type is None else joint_type)
 
 
 @fusion_fake(live_type="Joint", facts=("shape-dump-assembly-world",))

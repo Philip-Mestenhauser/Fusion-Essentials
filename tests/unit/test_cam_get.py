@@ -1245,13 +1245,31 @@ class TestToolSliceDimensions:
         return _SetupParams([FakeCAMParameter("tool_diameter", value=0.6),
                              FakeCAMParameter("tool_fluteLength", value=2.5),
                              FakeCAMParameter("tool_cornerRadius", value=0.05),
-                             FakeCAMParameter("tool_overallLength", value=5.0)])
+                             FakeCAMParameter("tool_overallLength", value=5.0),
+                             FakeCAMParameter("tool_shoulderLength", value=6.5),
+                             FakeCAMParameter("tool_shoulderDiameter", value=1.2),
+                             FakeCAMParameter("tool_shaftDiameter", value=1.0),
+                             FakeCAMParameter("tool_bodyLength", value=7.0),
+                             FakeCAMParameter("tool_holderGaugeLength", value=6.28396),
+                             FakeCAMParameter("tool_assemblyGaugeLength", value=9.03396),
+                             FakeCAMParameter("tool_numberOfFlutes", value=3)])
 
-    def test_the_four_dimensions_land_scaled_into_the_named_unit(self):
+    def test_cutter_shoulder_shaft_and_gauge_all_land_scaled_into_the_named_unit(self):
+        # measured: an operation's tool carried a 12 mm shoulder on a 10 mm cutter, which a
+        # cutter-only read and a description comparison both read as correct.
         out, err = cg._slice_tool(self._wire(self._full()), "Adaptive1", "")
         assert err is None
         assert out["dimensions"] == {"diameter": 6.0, "flute_length": 25.0, "corner_radius": 0.5,
-                                     "overall_length": 50.0, "units": "mm"}
+                                     "overall_length": 50.0, "shoulder_length": 65.0,
+                                     "shoulder_diameter": 12.0, "shaft_diameter": 10.0,
+                                     "body_length": 70.0, "holder_gauge_length": 62.8396,
+                                     "assembly_gauge_length": 90.3396, "flutes": 3, "units": "mm"}
+
+    def test_the_flute_COUNT_is_not_scaled_with_the_lengths(self):
+        # a 3-flute mill run through the length factor would publish 30 flutes in mm and 1.18 in
+        # inches - the same read answering a different number per unit.
+        out, _err = cg._slice_tool(self._wire(self._full()), "Adaptive1", "", "", "in")
+        assert out["dimensions"]["flutes"] == 3 and out["dimensions"]["units"] == "in"
 
     def test_the_unit_the_caller_asked_for_scales_the_values(self):
         # a handler that reported cm regardless would pass the mm test above and fail this one
@@ -1270,18 +1288,47 @@ class TestToolSliceDimensions:
         assert out["dimensions"]["corner_radius"] is None
         assert out["dimensions"]["flute_length"] is None
         assert out["dimensions"]["overall_length"] is None
+        # the same reading for a shoulder/gauge name the tool does not carry
+        assert out["dimensions"]["shoulder_diameter"] is None
+        assert out["dimensions"]["assembly_gauge_length"] is None
+        assert out["dimensions"]["flutes"] is None
+
+    def test_a_dimension_whose_expression_failed_reads_null_not_a_false_zero(self):
+        # a gauge length whose formula names a parameter the tool lacks is stored verbatim and its
+        # value reads a finite 0.0 - publishing that 0 would read as a measured zero-length gauge.
+        params = _SetupParams([
+            FakeCAMParameter("tool_diameter", value=0.6),
+            FakeCAMParameter("tool_assemblyGaugeLength", "holder_attached?a:b", value=0.0,
+                             error="Failed to evaluate expression.")])
+        out, err = cg._slice_tool(self._wire(params), "Adaptive1", "")
+        assert err is None
+        assert out["dimensions"]["diameter"] == 6.0
+        assert out["dimensions"]["assembly_gauge_length"] is None
+
+    def test_a_flute_count_carrying_an_error_reads_null_not_zero(self):
+        # measured on a bundled probe: tool_numberOfFlutes reads 0 with .error 'Number of Flutes
+        # must be positive and non-zero!', and a published 0 reads as a measured flute-less cutter.
+        params = _SetupParams([
+            FakeCAMParameter("tool_diameter", value=0.6),
+            FakeCAMParameter("tool_numberOfFlutes", "0", value=0,
+                             error="Number of Flutes must be positive and non-zero!")])
+        out, err = cg._slice_tool(self._wire(params), "Adaptive1", "")
+        assert err is None and out["dimensions"]["flutes"] is None
 
     def test_a_tool_exposing_no_parameters_answers_null_rather_than_raising(self):
         out, err = cg._slice_tool(self._wire(None), "Adaptive1", "")
         assert err is None
-        assert out["dimensions"] == {"diameter": None, "flute_length": None, "corner_radius": None,
-                                     "overall_length": None, "units": "mm"}
+        dims = out["dimensions"]
+        assert dims["units"] == "mm"
+        assert all(v is None for k, v in dims.items() if k != "units")
 
-    def test_the_note_says_the_dimensions_are_this_operations_own_copy(self):
-        # MEASURED: an op created before a document-tool edit keeps the values it was made with, so
-        # a caller reading these as the library tool's current geometry would be reading stale ones.
+    def test_the_note_names_the_geometry_the_slice_publishes_and_claims_nothing_else(self):
+        # MEASURED live: a document-library tool edit reads straight through Operation.tool on an
+        # operation created before it, so a note claiming the opposite would teach a wrong model.
         out, _err = cg._slice_tool(self._wire(self._full()), "Adaptive1", "")
-        assert "own copy" in out["note"] and "created before" in out["note"]
+        note = out["note"]
+        assert all(word in note for word in ("cutter", "shoulder", "shaft", "gauge", "units"))
+        assert "created before" not in note and "own copy" not in note
 
     def test_an_unknown_unit_is_refused_before_anything_is_read(self):
         out, err = cg._slice_tool(self._wire(self._full()), "Adaptive1", "", "", "parsecs")
@@ -1297,7 +1344,7 @@ class TestToolSliceDimensions:
         op = type("O", (), {"name": "Adaptive1", "tool": tool, "toolPreset": None})()
         out, err = cg._slice_tool(make_cam(FakeSetup("Setup1", ops=[op])), "Adaptive1", "Alu Rough")
         assert err is None
-        assert "own copy" in out["note"] and "2 presets" in out["note"]
+        assert "shoulder" in out["note"] and "2 presets" in out["note"]
         assert len(out["note"]) <= 400, len(out["note"])   # test_prose_budget.NOTE_BUDGET_CHARS
 
 

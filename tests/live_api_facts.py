@@ -1215,6 +1215,17 @@ SHAPES = {
         "entityToken", "expression", "isDeletable", "isFavorite", "isValid", "name",
         "objectType", "textValue", "thisown", "unit", "value", "valueType",
     ],
+    "PinSlotJointMotion": [
+        "cast", "classType", "customRotationAxisEntity", "customSlideDirectionEntity", "isValid", "jointType",
+        "objectType", "rotationAxis", "rotationAxisVector", "rotationLimits", "rotationValue", "slideDirection",
+        "slideDirectionVector", "slideLimits", "slideValue", "this", "thisown",
+    ],
+    "PlanarJointMotion": [
+        "cast", "classType", "customNormalDirectionEntity", "customPrimarySlideDirectionEntity", "isValid", "jointType",
+        "normalDirection", "normalDirectionVector", "objectType", "primarySlideDirection", "primarySlideDirectionVector", "primarySlideLimits",
+        "primarySlideValue", "rotationLimits", "rotationValue", "secondarySlideDirectionVector", "secondarySlideLimits", "secondarySlideValue",
+        "this", "thisown",
+    ],
     "Plane": [
         "cast", "classType", "copy", "create", "createUsingDirections", "evaluator",
         "intersectWithCurve", "intersectWithLine", "intersectWithPlane", "intersectWithSurface", "isCoPlanarTo", "isParallelToLine",

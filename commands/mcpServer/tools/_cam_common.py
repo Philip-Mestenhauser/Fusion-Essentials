@@ -220,23 +220,49 @@ def tool_holder(t):
     return out or None
 
 
-# key -> the CAM parameter carrying it on an adsk.cam.Tool, each reading a number in cm. All four
-# names are present on a bundled milling tool, tool_cornerRadius reading 0 on a square end
-# (measure_api cam-tool-dimension-parameter-names).
+# key -> the CAM parameter carrying it on an adsk.cam.Tool, each reading a LENGTH in cm. The first
+# four are present on a bundled milling tool, tool_cornerRadius reading 0 on a square end
+# (measure_api cam-tool-dimension-parameter-names); the rest read off a document-library end mill.
 _TOOL_DIMENSION_PARAMS = (("diameter", "tool_diameter"),
                           ("flute_length", "tool_fluteLength"),
                           ("corner_radius", "tool_cornerRadius"),
-                          ("overall_length", "tool_overallLength"))
+                          ("overall_length", "tool_overallLength"),
+                          ("shoulder_length", "tool_shoulderLength"),
+                          ("shoulder_diameter", "tool_shoulderDiameter"),
+                          ("shaft_diameter", "tool_shaftDiameter"),
+                          ("body_length", "tool_bodyLength"),
+                          ("holder_gauge_length", "tool_holderGaugeLength"),
+                          ("assembly_gauge_length", "tool_assemblyGaugeLength"))
+
+# The one COUNT among them: a flute count is not a length, so it is published unscaled.
+_TOOL_FLUTES_PARAM = "tool_numberOfFlutes"
+
+
+def tool_dimension_value(p, factor):
+    """One TOOL dimension parameter's number, or None when it did not read OR its expression failed
+    to evaluate: a failed CAM expression is stored verbatim and its value reads a finite 0.0, so
+    .error is the only channel separating a real zero from an unusable one."""
+    if p is None or expression_error(p)[0]:
+        return None
+    return measured(lambda: p.value.value, factor)
 
 
 def tool_dimensions(t, factor, unit):
-    """A CAM Tool's cutting geometry {diameter, flute_length, corner_radius, overall_length, units},
-    each scaled from cm by 'factor' and null where the parameter is absent or does not read."""
+    """A CAM Tool's own geometry - cutter, shoulder, shaft and both gauge lengths - each length
+    scaled from cm by 'factor', 'flutes' unscaled, and null where the parameter is absent, does not
+    read, or holds an expression that will not evaluate."""
     params = safe(lambda: t.parameters)
-    out = {}
-    for key, pname in _TOOL_DIMENSION_PARAMS:
-        p = safe(lambda pname=pname: params.itemByName(pname)) if params is not None else None
-        out[key] = measured(lambda p=p: p.value.value, factor) if p is not None else None
+
+    def _param(pname):
+        return safe(lambda: params.itemByName(pname)) if params is not None else None
+
+    out = {key: tool_dimension_value(_param(pname), factor)
+           for key, pname in _TOOL_DIMENSION_PARAMS}
+    # the COUNT carries the same false-zero channel as the lengths: a probe's flute count reads 0
+    # with .error 'Number of Flutes must be positive and non-zero!'.
+    flutes = _param(_TOOL_FLUTES_PARAM)
+    out["flutes"] = (counted(lambda: flutes.value.value)
+                     if flutes is not None and not expression_error(flutes)[0] else None)
     out["units"] = unit
     return out
 

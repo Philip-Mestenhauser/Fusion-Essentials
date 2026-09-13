@@ -162,11 +162,11 @@ def _slice_strategies(cam, setup):
 # and does not descend, so the census covers the SELECTED entries alone. The number is stated every
 # time: a 0 that does not say what it counted reads as a verdict on the document.
 _REFERENCE_CENSUS = (
-    "Counted {found} referenced component(s) among the model/fixture/stock entries the {setups} "
-    "setup(s) in scope SELECT DIRECTLY - the top-level setups[] slice names those entries in "
-    "selected_models / fixtures / stock_solids - and only an entry that is ITSELF a referenced "
-    "component counts. A reference nested INSIDE a selected entry is not examined, so 0 here is not "
-    "'this document has no external references'. doc_get(include=['xref_tree']) walks every depth.")
+    "Counted {found} referenced component(s) among the entries the {setups} setup(s) SELECT "
+    "DIRECTLY - named in the top-level setups[] slice as selected_models / fixtures / "
+    "stock_solids - only an entry that is ITSELF a referenced component counts. A reference "
+    "nested INSIDE one is not examined, so a 0 is not 'this document has no external "
+    "references'. doc_get(include=['xref_tree']) walks every depth.")
 
 
 def _slice_references(cam, setup):
@@ -619,8 +619,8 @@ def _slice_parameters(cam, operation, setup, units="mm", parameter_names=None,
 
 
 _TOOL_COPY_NOTE = (
-    "'dimensions' are THIS operation's own copy of the tool - a document-tool edit does not reach "
-    "an operation created before it.")
+    "'dimensions' is what Operation.tool reads now in 'units': cutter, shoulder, shaft and both "
+    "gauge lengths, null where the tool has no such parameter.")
 
 
 _SHARED_PRESET_NAME_NOTE = (

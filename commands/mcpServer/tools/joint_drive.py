@@ -275,15 +275,14 @@ def _partner_limit_cause(link, partner_joint, jtype, jm, rad, cm):
     beyond = _limit_refusal(safe(lambda: getattr(p_jm, p_spec[1])), implied, p_spec[2])
     if not beyond:
         return None
-    return (f"'{link['partner']}' is coupled to it by motion link "
+    return (f"'{link['partner']}' is coupled by motion link "
             f"'{link['link'] or '(unnamed link)'}', whose recorded values are {v_self} : "
-            f"{v_partner} in Fusion's internal units (radians / cm)"
+            f"{v_partner} (radians / cm)"
             f"{', reversed' if rev else ''}. Applying that RATIO to this command implies a value "
-            f"for '{link['partner']}' its own enabled limits exclude - {beyond}. That is "
-            f"arithmetic on the values the link records, not a coupling this receipt observed - "
-            f"what the link did to '{link['partner']}' was not read here. Read "
-            f"'{link['partner']}' back with assembly_get to check it; if that limit is the bound "
-            f"in the way, widen it with joint_edit or command a value the ratio keeps inside it.")
+            f"for '{link['partner']}' its enabled limits exclude - {beyond}. That is "
+            "arithmetic on the link's recorded values, not a coupling this call observed. Read "
+            f"'{link['partner']}' back with assembly_get to check it; if that limit is the bound, "
+            "widen it with joint_edit or command a value the ratio keeps inside it.")
 
 
 def _placement(occ):

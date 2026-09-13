@@ -23,9 +23,10 @@ from types import SimpleNamespace
 
 import adsk.fusion
 
-from conftest import (FakeJoint, FakeModelParameter, FakeTimeline, FakeTimelineObject, MakeComp,
-                      RevoluteJointMotion, SliderJointMotion, _MotionLimits, _NamedCollection,
-                      install, load_tool, make_design)
+from conftest import (FakeJoint, FakeModelParameter, FakeMotionLink, FakeTimeline,
+                      FakeTimelineObject, MakeComp, PinSlotJointMotion, PlanarJointMotion,
+                      RigidJointMotion, RevoluteJointMotion, SliderJointMotion, _MotionLimits,
+                      _NamedCollection, install, load_tool, make_design)
 from conftest import payload as _payload
 
 jt = load_tool("joint_edit")
@@ -64,19 +65,26 @@ def _rolls(joint):
     return joint.timelineObject._rolls
 
 
-def _root(joints=(), as_built=()):
+# The world construction axes as entities carrying an entityToken - what native_identity keys on
+# when one CUSTOM joint direction is compared with another. The plain-string axes below answer no
+# token at all, which is the separate state "the identity did not read".
+_TOKEN_AXES = tuple(SimpleNamespace(entityToken=f"WAXIS_{a}_TOKEN") for a in "XYZ")
+
+
+def _root(joints=(), as_built=(), axes=("WAXIS_X", "WAXIS_Y", "WAXIS_Z")):
     """The root component an edit reads: both joint collections plus the world construction axes.
     asBuiltJoints is a SEPARATE collection from joints - find_joint searches both."""
     return MakeComp(name="Root", joints=list(joints), as_built_joints=list(as_built),
-                    construction_axes=("WAXIS_X", "WAXIS_Y", "WAXIS_Z"))
+                    construction_axes=axes)
 
 
-def _install_joints(joints, timeline_items=None):
+def _install_joints(joints, timeline_items=None, axes=("WAXIS_X", "WAXIS_Y", "WAXIS_Z")):
     """Wire a design holding these joint objects into the tool module."""
     items = timeline_items or [FakeTimelineObject(name="Joint1", index=0),
                                FakeTimelineObject(name="Pattern1", index=1)]
     # marker=1 is mid-history, so the edit's restore to the timeline END is observable.
-    return install(jt, make_design(comp=_root(joints), timeline=FakeTimeline(items, marker=1)))
+    return install(jt, make_design(comp=_root(joints, axes=axes),
+                                   timeline=FakeTimeline(items, marker=1)))
 
 
 def _install(joint_names=("BoomPivot",), motion="revolute", timeline_items=None):
@@ -192,6 +200,215 @@ class TestMotion:
         assert joint._motion_calls == []
         props = jt.tool.input_schema["properties"]
         assert "default" not in props["joint_type"] and "default" not in props["axis"]
+
+
+class TestAxisIsReadOffTheJoint:
+    """An omitted 'axis' KEEPS the direction the joint is aimed at - a frame-axis default would
+    silently re-aim it (and drop the rotation limits that axis carried)."""
+
+    def test_a_retype_with_no_axis_keeps_the_joints_own_x(self):
+        _, joint = _install(["BoomPivot"])
+        joint.jointMotion = RevoluteJointMotion(axis=_JD.XAxisJointDirection)
+        out = _payload(jt.handler(joint_name="BoomPivot", joint_type="revolute"))
+        assert joint._motion_calls == [("revolute", (_JD.XAxisJointDirection,))]
+        assert out["axis"] == "x" and out["axis_kept"] is True
+        assert "kept rather than re-aimed" in out["note"]
+
+    def test_a_slider_retype_keeps_the_direction_it_already_slides_along(self):
+        _, joint = _install(["CableSlide"], motion="slider")
+        joint.jointMotion = SliderJointMotion(direction=_JD.YAxisJointDirection)
+        out = _payload(jt.handler(joint_name="CableSlide", joint_type="slider"))
+        assert joint._motion_calls == [("slider", (_JD.YAxisJointDirection,))]
+        assert out["axis"] == "y"
+
+    def test_an_explicit_axis_still_wins_over_the_joints_own(self):
+        _, joint = _install(["BoomPivot"])
+        joint.jointMotion = RevoluteJointMotion(axis=_JD.XAxisJointDirection)
+        out = _payload(jt.handler(joint_name="BoomPivot", joint_type="revolute", axis="z"))
+        assert joint._motion_calls == [("revolute", (_JD.ZAxisJointDirection,))]
+        assert out["axis"] == "z" and "axis_kept" not in out
+
+    def test_a_custom_direction_is_carried_through_as_the_same_entity(self):
+        # a world_axis leaves the joint on CustomJointDirection + a construction axis; re-setting
+        # the motion with a frame axis would quietly throw that true direction away
+        _, joint = _install(["BoomPivot"])
+        joint.jointMotion = RevoluteJointMotion(axis=_JD.CustomJointDirection,
+                                                custom_axis_entity="WAXIS_Y")
+        out = _payload(jt.handler(joint_name="BoomPivot", joint_type="revolute"))
+        assert joint._motion_calls[-1][1][-1] == "WAXIS_Y"
+        assert out["axis"] == "custom" and out["axis_kept"] is True
+
+    def test_a_motion_with_no_axis_of_its_own_is_refused_rather_than_aimed_at_z(self):
+        # rigid answers no axis member at all, so there is nothing to keep - the tool names the two
+        # inputs that supply one instead of picking z
+        _, joint = _install(["BoomPivot"])
+        joint.jointMotion = RigidJointMotion()
+        res = jt.handler(joint_name="BoomPivot", joint_type="revolute")
+        assert res["isError"] is True
+        assert "no current motion axis" in res["message"]
+        assert "axis=x|y|z" in res["message"] and "world_axis=x|y|z" in res["message"]
+        assert joint._motion_calls == [] and _rolls(joint) == []
+
+    def test_a_pin_slot_retype_keeps_the_direction_the_slot_already_slides_along(self):
+        _, joint = _install(["Slot"])
+        joint.jointMotion = PinSlotJointMotion(axis=_JD.YAxisJointDirection,
+                                               direction=_JD.ZAxisJointDirection)
+        out = _payload(jt.handler(joint_name="Slot", joint_type="pin_slot"))
+        assert joint._motion_calls == [("pin_slot", (_JD.YAxisJointDirection,
+                                                     _JD.ZAxisJointDirection))]
+        assert out["axis"] == "y" and out["slide_axis"] == "z"
+
+    def test_a_slide_direction_that_is_not_a_frame_axis_is_refused_not_defaulted(self):
+        # a CUSTOM slide direction is no frame index, and the next-frame-axis fallback would aim
+        # the slot somewhere the joint never pointed - so it is refused naming slide_axis
+        _, joint = _install(["Slot"])
+        joint.jointMotion = PinSlotJointMotion(axis=_JD.YAxisJointDirection,
+                                               direction=_JD.CustomJointDirection)
+        res = jt.handler(joint_name="Slot", joint_type="pin_slot")
+        assert res["isError"] is True
+        assert f"JointDirections {_JD.CustomJointDirection}" in res["message"]
+        assert "slide_axis=x|y|z" in res["message"]
+        assert joint._motion_calls == [] and _rolls(joint) == []
+
+    def test_a_planar_normal_carries_its_own_custom_entity_through(self):
+        # a planar joint re-aimed by world_axis sits on CustomJointDirection with a construction
+        # axis on customNormalDirectionEntity, so the planar row of the axis walk has to read that
+        # member - dropping it would aim the plane at a frame axis instead
+        _, joint = _install(["Plate"])
+        joint.jointMotion = PlanarJointMotion(normal=_JD.CustomJointDirection,
+                                              custom_normal_entity="WAXIS_X")
+        out = _payload(jt.handler(joint_name="Plate", joint_type="planar"))
+        assert joint._motion_calls[-1][1][-1] == "WAXIS_X"
+        assert out["axis"] == "custom" and out["axis_kept"] is True
+
+    def test_a_planar_normal_that_reads_a_frame_axis_is_kept_by_name(self):
+        _, joint = _install(["Plate"])
+        joint.jointMotion = PlanarJointMotion(normal=_JD.YAxisJointDirection)
+        out = _payload(jt.handler(joint_name="Plate", joint_type="planar"))
+        assert joint._motion_calls == [("planar", (_JD.YAxisJointDirection,))]
+        assert out["axis"] == "y"
+
+
+class TestAxisAloneReAims:
+    """'axis' on its own re-sets the joint's CURRENT motion with that direction, the way
+    'world_axis' already does - Fusion re-aims a joint only through a motion set."""
+
+    def test_axis_alone_re_aims_the_current_motion(self):
+        _, joint = _install(["BoomPivot"])
+        joint.jointMotion = RevoluteJointMotion(axis=_JD.XAxisJointDirection)
+        out = _payload(jt.handler(joint_name="BoomPivot", axis="y"))
+        assert joint._motion_calls == [("revolute", (_JD.YAxisJointDirection,))]
+        assert out["joint_type"] == "revolute" and out["axis"] == "y"
+
+    def test_axis_alone_on_a_motion_with_no_axis_names_that(self):
+        _, joint = _install(["BoomPivot"])
+        joint.jointMotion = RigidJointMotion()
+        res = jt.handler(joint_name="BoomPivot", axis="y")
+        assert res["isError"] is True and "not axis-based" in res["message"]
+        assert _rolls(joint) == []
+
+
+def _linked_joint(name="BoomPivot", axis=_JD.ZAxisJointDirection, link_health=None, entity=None,
+                  cls=FakeJoint):
+    """A revolute aimed at `axis` that belongs to one motion link - the pair a re-aim breaks."""
+    joint = _joint(name=name, cls=cls,
+                   motion=RevoluteJointMotion(axis=axis, custom_axis_entity=entity))
+    joint.motionLinks = _NamedCollection([
+        FakeMotionLink(name="Motion Link 4", joint_one=joint, health=link_health)])
+    return joint
+
+
+class _BlindLinkJoint(FakeJoint):
+    """A joint whose motionLinks membership READ raises - the precondition that gives no answer."""
+    def __getattribute__(self, name):
+        if name == "motionLinks":
+            raise RuntimeError("membership unreadable")
+        return object.__getattribute__(self, name)
+
+
+class TestAxisChangeOnALinkedJoint:
+    """An axis change leaves every motion link the joint belongs to reading 'Motion Link joint DOF
+    is wrong type', carrying no motion, and refusing setMotionData - so it is refused up front."""
+
+    def test_an_axis_change_on_a_linked_joint_is_refused_naming_the_link(self):
+        joint = _linked_joint()
+        _install_joints([joint])
+        res = jt.handler(joint_name="BoomPivot", joint_type="revolute", axis="y")
+        assert res["isError"] is True
+        assert "'Motion Link 4'" in res["message"]
+        assert "joint_motion_link" in res["message"] and "action='delete'" in res["message"]
+        assert joint._motion_calls == [] and _rolls(joint) == []
+
+    def test_the_same_axis_re_set_on_a_linked_joint_is_allowed(self):
+        # the boundary: only a DIFFERENT direction breaks the link, so re-setting the motion at the
+        # axis the joint already carries must still land
+        joint = _linked_joint()
+        _install_joints([joint])
+        out = _payload(jt.handler(joint_name="BoomPivot", joint_type="cylindrical", axis="z"))
+        assert out["joint_type"] == "cylindrical" and out["axis"] == "z"
+        assert joint._motion_calls == [("cylindrical", (_JD.ZAxisJointDirection,))]
+
+    def test_a_link_that_already_reads_compute_failed_does_not_arm_the_refusal(self):
+        # a dead link is what the caller is repairing; blocking the re-aim would strand them
+        joint = _linked_joint(link_health=_HEALTH.ErrorFeatureHealthState)
+        _install_joints([joint])
+        out = _payload(jt.handler(joint_name="BoomPivot", joint_type="revolute", axis="y"))
+        assert out["axis"] == "y"
+        assert joint._motion_calls == [("revolute", (_JD.YAxisJointDirection,))]
+
+    def test_an_unlinked_joint_re_aims_freely(self):
+        _, joint = _install(["BoomPivot"])
+        joint.jointMotion = RevoluteJointMotion(axis=_JD.ZAxisJointDirection)
+        out = _payload(jt.handler(joint_name="BoomPivot", joint_type="revolute", axis="y"))
+        assert out["axis"] == "y" and joint._motion_calls[-1][1] == (_JD.YAxisJointDirection,)
+
+    def test_a_custom_to_custom_re_aim_is_a_change_the_enum_alone_cannot_see(self):
+        # joint_at_geometry on cylinder faces leaves a joint on CustomJointDirection, so a
+        # world_axis re-aim reads current == wanted == Custom while the DIRECTION really moves -
+        # the two ENTITIES are what tell them apart.
+        joint = _linked_joint(axis=_JD.CustomJointDirection,
+                              entity=SimpleNamespace(entityToken="CYL_FACE"))
+        _install_joints([joint], axes=_TOKEN_AXES)
+        res = jt.handler(joint_name="BoomPivot", world_axis="z")
+        assert res["isError"] is True and "'Motion Link 4'" in res["message"]
+        assert joint._motion_calls == [] and _rolls(joint) == []
+
+    def test_re_applying_the_SAME_custom_entity_is_not_a_change(self):
+        # the boundary on the custom side: the same enum AND the same physical entity is the
+        # direction the joint already holds, so the link is not at risk and the re-set lands
+        joint = _linked_joint(axis=_JD.CustomJointDirection, entity=_TOKEN_AXES[2])
+        _install_joints([joint], axes=_TOKEN_AXES)
+        out = _payload(jt.handler(joint_name="BoomPivot", world_axis="z"))
+        assert out["world_axis"] == "z"
+        assert joint._motion_calls[-1][1][-1] is _TOKEN_AXES[2]
+
+    def test_a_custom_entity_whose_identity_does_not_read_is_treated_as_a_change(self):
+        # the plain-string axes answer no entityToken, so native_identity is None on both sides -
+        # an unprovable match must not license breaking the link
+        joint = _linked_joint(axis=_JD.CustomJointDirection, entity="WAXIS_Z")
+        _install_joints([joint])
+        res = jt.handler(joint_name="BoomPivot", world_axis="z")
+        assert res["isError"] is True and "'Motion Link 4'" in res["message"]
+
+    def test_an_unreadable_Custom_enum_refuses_instead_of_reading_as_no_change(self, monkeypatch):
+        # CUSTOM_DIRECTION not reading leaves the WANTED direction unknown; the same call lands
+        # when it does read (the test above), so this pins the degrade direction and nothing else
+        joint = _linked_joint(axis=_JD.CustomJointDirection, entity=_TOKEN_AXES[2])
+        _install_joints([joint], axes=_TOKEN_AXES)
+        monkeypatch.setattr(jt, "_CUSTOM_DIRECTION", None)
+        res = jt.handler(joint_name="BoomPivot", world_axis="z")
+        assert res["isError"] is True and "'Motion Link 4'" in res["message"]
+        assert joint._motion_calls == []
+
+    def test_an_unreadable_link_membership_refuses_rather_than_landing(self):
+        # the guard's precondition gave no answer, and a link an axis change breaks cannot be
+        # re-valued back - so it degrades CLOSED, naming the read that failed
+        joint = _linked_joint(cls=_BlindLinkJoint)
+        _install_joints([joint])
+        res = jt.handler(joint_name="BoomPivot", joint_type="revolute", axis="y")
+        assert res["isError"] is True
+        assert "did not read" in res["message"] and "assembly_get" in res["message"]
+        assert joint._motion_calls == [] and _rolls(joint) == []
 
 
 # ── offset / angle (parameter inputs — full parity with the create joint tool) ──
@@ -601,7 +818,10 @@ class TestAutoRecompute:
         out = _payload(jt.handler(joint_name="BoomPivot", offset=5, units="mm"))
         assert out["recomputed"] is True
         assert out["timeline_errors_after"] == ["Pattern1"]
-        assert "over-constrain" in out["note"]
+        # the errored feature is NAMED and no cause is claimed for it: this handler reads the
+        # timeline's health flags, never any feature's own message
+        assert "no cause is read here" in out["note"]
+        assert "over-constrain" not in out["note"]
 
 
 class TestEditIsNotPendingGuarded:
@@ -736,13 +956,16 @@ class TestEditGuards:
         res = jt.handler(joint_name="J", flip=True)
         assert res["isError"] is True and "No active design" in res["message"]
 
-    def test_world_axis_on_a_joint_with_no_axis_based_motion_is_refused(self, monkeypatch):
-        # world_axis re-applies the CURRENT motion type; rigid/ball (and an unreadable motion)
-        # have no single axis to re-point, so there is nothing to re-apply.
+    def test_world_axis_on_a_joint_whose_motion_does_not_read_is_refused(self, monkeypatch):
+        # world_axis re-applies the CURRENT motion type, so a joint whose jointMotion is absent (or
+        # of a class the type map does not carry) leaves nothing to re-apply. rigid and ball DO
+        # resolve here and are refused one guard later, on not being axis-based.
         j = _edit_joint()
         _edit_rig(monkeypatch, j)
         res = jt.handler(joint_name="J", world_axis="z")
-        assert res["isError"] is True and "not axis-based" in res["message"]
+        assert res["isError"] is True
+        assert "does not read as one this tool can re-apply" in res["message"]
+        assert "Pass joint_type" in res["message"]
         assert _rolls(j) == []                          # refused before the timeline moved
 
     def test_an_unknown_axis_is_refused_before_the_timeline_moves(self, monkeypatch):

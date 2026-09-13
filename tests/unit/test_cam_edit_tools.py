@@ -74,6 +74,31 @@ def _evaluate(expr):
     return float(m.group(1)) * 25.4 if m else None
 
 
+def _NumParam(name, expr):
+    """A numeric DIMENSION parameter, whose .value reads a number from the start the way live does -
+    _Param seeds .value with the expression TEXT, which a dimension read cannot use."""
+    p = _Param(name, expr)
+    p.value = _val(_evaluate(expr))
+    return p
+
+
+class _TrackingParam(_Param):
+    """A dimension whose expression IS another parameter's name: its value FOLLOWS that parameter,
+    the way a formula-derived tool parameter does live."""
+
+    def __init__(self, name, source):
+        self._source = source
+        super().__init__(name, source.name)
+
+    @property
+    def value(self):
+        return _val(self._source.value.value)
+
+    @value.setter
+    def value(self, v):
+        pass
+
+
 def _Params(d):
     """A tool's or preset's parameters from {name: expression}."""
     return FakeCAMParameters([_Param(k, v) for k, v in d.items()])
@@ -458,6 +483,97 @@ class TestAddRich:
                          add_tools=[{"from_type": "drill", "diameter": 8}])
         assert res["isError"] is True and "tool_diameter" in res["message"]
         assert len(tgt.tools) == 2          # nothing was added
+
+    def test_a_plain_shank_sample_carries_its_shoulder_to_the_new_diameter(self, monkeypatch):
+        # MEASURED: the flat-end-mill sample is a 12 mm cutter on a 12 mm shoulder, and overriding
+        # the cutter alone left a 10 mm cutter standing on that 12 mm shoulder.
+        tgt = _install(monkeypatch)
+
+        def _from_json(js):
+            t = _Tool(json.loads(js).get("description", "built"))
+            t.parameters = FakeCAMParameters([_NumParam("tool_diameter", "1.2"),
+                                              _NumParam("tool_shoulderDiameter", "1.2"),
+                                              _Param("tool_number", "0")])
+            return t
+
+        monkeypatch.setattr(ct, "_tool_from_json", _from_json)
+        out = _payload(ct.handler(action="add", scope="cloud", library="L",
+                                  add_tools=[{"from_type": "flat end mill", "diameter": "1.0"}]))
+        built = tgt.tools[-1]
+        assert built.parameters.itemByName("tool_shoulderDiameter").expression == "1.0"
+        assert out["sized"] == [{"entry": 0, "diameter_mm": 10.0, "shoulder_diameter_mm": 10.0}]
+        assert "stepped shoulder" not in out["note"]
+
+    def test_a_stepped_sample_keeps_its_own_shoulder_and_the_note_says_so(self, monkeypatch):
+        # a sample whose shoulder is already a DIFFERENT size is a real stepped tool - carrying the
+        # override onto it would silently reshape the tool the caller asked to copy.
+        tgt = _install(monkeypatch)
+
+        def _from_json(js):
+            t = _Tool(json.loads(js).get("description", "built"))
+            t.parameters = FakeCAMParameters([_NumParam("tool_diameter", "0.6"),
+                                              _NumParam("tool_shoulderDiameter", "1.2"),
+                                              _Param("tool_number", "0")])
+            return t
+
+        monkeypatch.setattr(ct, "_tool_from_json", _from_json)
+        out = _payload(ct.handler(action="add", scope="cloud", library="L",
+                                  add_tools=[{"from_type": "flat end mill", "diameter": "1.0"}]))
+        built = tgt.tools[-1]
+        assert built.parameters.itemByName("tool_shoulderDiameter").expression == "1.2"
+        assert out["sized"] == [{"entry": 0, "diameter_mm": 10.0, "shoulder_diameter_mm": 12.0}]
+        assert "stepped shoulder" in out["note"]
+
+    def test_a_shoulder_that_FOLLOWS_the_cutter_is_left_as_the_formula_it_holds(self, monkeypatch):
+        # measured: tool_shaftDiameter's expression IS 'tool_diameter' on the bundled mills, so a
+        # shoulder authored that way already tracks the write - setting a literal over it would cut
+        # the relationship the sample carries.
+        tgt = _install(monkeypatch)
+
+        def _from_json(js):
+            t = _Tool(json.loads(js).get("description", "built"))
+            dia = _NumParam("tool_diameter", "1.2")
+            t.parameters = FakeCAMParameters([dia,
+                                              _TrackingParam("tool_shoulderDiameter", dia),
+                                              _Param("tool_number", "0")])
+            return t
+
+        monkeypatch.setattr(ct, "_tool_from_json", _from_json)
+        out = _payload(ct.handler(action="add", scope="cloud", library="L",
+                                  add_tools=[{"from_type": "flat end mill", "diameter": "1.0"}]))
+        built = tgt.tools[-1]
+        assert built.parameters.itemByName("tool_shoulderDiameter").expression == "tool_diameter"
+        assert out["sized"] == [{"entry": 0, "diameter_mm": 10.0, "shoulder_diameter_mm": 10.0}]
+
+    def test_a_diameter_that_failed_to_evaluate_is_not_read_as_a_stepped_sample(self, monkeypatch):
+        # a cutter whose expression will not evaluate reads a finite 0.0; taken as a number it
+        # would make every shoulder look 'stepped' and silently skip the carry.
+        tgt = _install(monkeypatch)
+
+        def _from_json(js):
+            t = _Tool(json.loads(js).get("description", "built"))
+            broken = _NumParam("tool_diameter", "1.2")
+            broken._error = "Failed to evaluate expression."
+            t.parameters = FakeCAMParameters([broken,
+                                              _NumParam("tool_shoulderDiameter", "1.2"),
+                                              _Param("tool_number", "0")])
+            return t
+
+        monkeypatch.setattr(ct, "_tool_from_json", _from_json)
+        out = _payload(ct.handler(action="add", scope="cloud", library="L",
+                                  add_tools=[{"from_type": "flat end mill", "diameter": "1.0"}]))
+        # the unreadable cutter publishes null, never the 0 its value holds
+        assert out["sized"] == [{"entry": 0, "diameter_mm": None, "shoulder_diameter_mm": 12.0}]
+        assert len(tgt.tools) == 3          # the add still landed; only the carry was withheld
+        # a null beside a number is a read that did not answer - calling it a stepped sample would
+        # hand back a remedy for a shoulder nothing established.
+        assert "stepped shoulder" not in out["note"]
+
+    def test_an_add_with_no_diameter_publishes_no_sized_rows(self, monkeypatch):
+        _install(monkeypatch)
+        out = _payload(ct.handler(action="add", scope="cloud", library="L",
+                                  add_tools=[{"from_type": "drill"}]))
+        assert "sized" not in out and "stepped shoulder" not in out["note"]
 
     def test_diameter_setter_raise_propagates(self, monkeypatch):
         # A diameter-override setter failure must propagate out of the handler - swallowing it

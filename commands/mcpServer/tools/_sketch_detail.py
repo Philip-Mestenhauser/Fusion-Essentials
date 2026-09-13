@@ -976,14 +976,11 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
         sketch, f, unit)
     note = (lead + "Full X-ray, lengths in 'units'. Entity coordinates are sketch-LOCAL; "
                  + frame_space_note(out.get("frame"))
-                 + " Entity ids ('line:0', 'arc:1', ...) match sketch_constrain "
-                 "/ extrude refs. A point OFF the sketch plane (a 3D line's endpoint) carries a 'z' (local "
-                 "height along the plane normal); on-plane 2D points omit it. The point flagged origin:true "
-                 "is the sketch ORIGIN (anchor origin-pinned constraints to it). is_fully_constrained=false "
-                 "means free DOF remain; a dimension driving=true locks geometry, driving=false only measures. "
-                 "A 'text:<i>' entity carries the sketch text's string, height, font and sketch-space "
-                 "bounding_box; that same id is what sketch_set_text(index=<i>) edits and "
-                 "sketch_delete_entity(target='text:<i>') removes.")
+                 + " Entity ids ('line:0', ...) match sketch_constrain "
+                 "/ extrude refs. A point off the sketch plane carries a 'z'; origin:true is the "
+                 "sketch ORIGIN. is_fully_constrained=false means free DOF remain; a dimension "
+                 "driving=false only measures. A 'text:<i>' id is what "
+                 "sketch_set_text(index=<i>) edits and sketch_delete_entity removes.")
     if any(e.get("reference") for e in entities):
         note += (" reference:true marks a curve PROJECTED in from model geometry, not drawn here.")
     if any("?" in c.get("entities", []) for c in constraints):

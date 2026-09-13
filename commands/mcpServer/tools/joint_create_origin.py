@@ -96,11 +96,10 @@ def _world_space_refusal(anchor, occ, verdict):
            "is not the identity - it is moved or rotated in the assembly")
     return (f"'component': anchor='{anchor}' places the frame from WORLD coordinates, but a joint "
             f"origin inside a component is positioned in THAT component's own space, and the "
-            f"placement transform of '{where}' {why}. Refusing rather than landing the frame "
-            "somewhere else. Anchor on geometry inside the component instead "
+            f"placement transform of '{where}' {why}. Anchor on geometry inside it "
             "(anchor='geometry'/'face_center'/'sketch_line'), use anchor='coordinates' with "
             "target='origin' to sit at the component's own origin, or omit 'component' to land on "
-            "the root, where the coordinates ARE world coordinates.")
+            "the root.")
 
 
 def _bbox_center_cm(entity):

@@ -1545,9 +1545,12 @@ class TestNoTakeCauseElection:
         msg = jd.handler(joint_name="Rack", distance=10, units="mm")["message"]
         assert "whose recorded values are 1.0 : " in msg
         assert "Applying that RATIO to this command implies a value" in msg
-        assert "arithmetic on the values the link records, not a coupling this receipt observed" in msg
-        assert "what the link did to 'Pinion' was not read here" in msg
+        assert "arithmetic on the link's recorded values, not a coupling this call observed" in msg
         assert "Read 'Pinion' back with assembly_get to check it" in msg
+        # the remedy stays CONDITIONAL on a bound this call only predicted, and keeps the
+        # non-mutating alternative beside the edit.
+        assert "if that limit is the bound, widen it with joint_edit" in msg
+        assert "command a value the ratio keeps inside it" in msg
 
     def test_the_partner_observation_carries_its_value_and_enabled_limits(self, monkeypatch):
         self._rack_and_pinion(monkeypatch, math.radians(200.0), pinion_at_deg=15.0)

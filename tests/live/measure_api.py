@@ -2121,6 +2121,44 @@ ROWS = [
 """,
     },
     {
+        "id": "shape-dump-joint-motion-planar-pinslot",
+        "claim": "A planar joint and a pin-slot joint between fresh components yield PlanarJointMotion and PinSlotJointMotion off joint.jointMotion. Both dumps are non-empty and answer the type their label names, which is what says which member each motion is AIMED by: a planar joint's normalDirection and a pin-slot joint's rotationAxis plus slideDirection, and whether either carries a CUSTOM entity partner for those",
+        "encoded_in": "tests/live_api_facts.py SHAPES - the surface joint_edit's axis read-through (_joints._AXIS_MEMBERS) selects the direction member from, swept by tests/lints/test_fake_shapes_exist.py",
+        "body": """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        root = d.rootComponent
+        occs = [root.occurrences.addNewComponent(adsk.core.Matrix3D.create()) for _ in range(3)]
+
+        def joint(one, two, setter):
+            geo = [adsk.fusion.JointGeometry.createByPoint(
+                o.component.originConstructionPoint.createForAssemblyContext(o)) for o in (one, two)]
+            jin = root.joints.createInput(geo[0], geo[1])
+            setter(jin)
+            return root.joints.add(jin)
+
+        JD = adsk.fusion.JointDirections
+        pla = joint(occs[0], occs[1], lambda i: i.setAsPlanarJointMotion(JD.ZAxisJointDirection))
+        pin = joint(occs[0], occs[2], lambda i: i.setAsPinSlotJointMotion(
+            JD.ZAxisJointDirection, JD.XAxisJointDirection))
+        live = [("PlanarJointMotion", pla.jointMotion),
+                ("PinSlotJointMotion", pin.jointMotion)]
+        wrong = [lbl + "=" + type(o).__name__ for lbl, o in live if type(o).__name__ != lbl]
+        counts = [dump_shape(lbl, o) for lbl, o in live]
+        aimed = [a for a in ("normalDirection", "customNormalDirectionEntity")
+                 if hasattr(pla.jointMotion, a)]
+        aimed += [a for a in ("rotationAxis", "customRotationAxisEntity", "slideDirection",
+                              "customSlideDirectionEntity") if hasattr(pin.jointMotion, a)]
+        emit(len(counts) == 2 and all(c > 0 for c in counts) and not wrong,
+             "shape-dump-joint-motion-planar-pinslot: " + str(len(counts)) + " types, min attrs "
+             + str(min(counts)) + ", direction members present " + ", ".join(aimed)
+             + ", mislabelled " + (", ".join(wrong) or "none"))
+    finally:
+        tmp.close(False)
+""",
+    },
+    {
         "id": "shape-dump-assembly-world",
         "claim": "Six new components in a scratch document yield an Occurrences; three joints from the first to the next three - one revolute, one slider, one cylindrical, each on the Z axis through the components' origin construction points - yield Joints, Joint and the three motion types RevoluteJointMotion, SliderJointMotion and CylindricalJointMotion off joint.jointMotion; a motion link over the revolute and the slider yields MotionLinks and MotionLink; and a rigid group over the two un-jointed occurrences yields RigidGroups and RigidGroup. Every one of the ten dumps is non-empty and answers the type its label names",
         "encoded_in": ("tests/fakes/joints.py - the joint, motion, link and rigid-group fakes; "
@@ -2379,7 +2417,7 @@ ROWS = [
     },
     {
         "id": "shape-dump-drawing-world",
-        "claim": "The row makes and removes its OWN source, so nothing it measures depends on what a project happens to hold: it adds a scratch design carrying one placed box, saves it into the configured cloud project (named by the tests/live cloud config) as MeasureDrawingSource, takes that document's DataFile as the createDrawingInput source, and in a finally closes the document and deletes the file. Right after saveAs the DataFile's id is the LOCAL cache path - the cloud urn: id lands asynchronously, about two seconds - so the row pumps doEvents under a 20 second clock bound until the urn: form answers and FAILS naming the timeout if it never does. Before saving, ONE listing of that folder's own dataFiles (never recursive) deletes any MeasureDrawingSource a previous run left behind; that listing LAGS its own deletes, so an entry it names can already be gone and the row reports the entries seen and the deletes that took rather than inferring a leftover from the difference. The same lag makes deleteMe RAISE InternalValidationError while a just-closed file is still settling, so the removal pumps doEvents and retries under a clock bound - measured taking two or three attempts. DrawingManager.get() answers a DrawingManager and createDrawingInput answers a CreateDrawingInput whose customSize hands out a CustomSheetSize already carrying a positive width and height and at least two zones each way, so 'a DEFAULT CustomSheetSize' is read rather than assumed. The deleting of the source is reported but does NOT gate the row: a False leaves the file for the next run's sweep and the detail names it. The eleven document-side types (DrawingDocument, Drawing, Sheets, Sheet, Views, View, DrawingSketches, DrawingSketch, Images, DrawingExportManager, DocumentSettings) come off their CLASS objects: adsk.core.DocumentTypes carries no drawing member at all, so documents.add cannot make one, and DrawingManager.createDrawing would mint a SECOND cloud file, which this row does not call. The class dump rests on the class-dir-equals-instance-dir-minus-'this' reading, re-measured here on CreateDrawingInput, which the row holds both of. The collection types are named Views/Images, NOT DrawingViews/DrawingImages, and the settings type is DocumentSettings - the labels are what the fake-shape lint maps a fake onto, so each live one is read back rather than assumed",
+        "claim": "The row makes and removes its OWN source, so nothing it measures depends on what a project happens to hold: it adds a scratch design carrying one placed box, saves it into the configured cloud project (named by the tests/live cloud config) under the MeasureDrawingSource stem plus its own clock, takes that document's DataFile as the createDrawingInput source, and in a finally closes the document and deletes the file BY THE CLOUD ID that save settled under - never by name, so a file this run did not create is never the one deleted. Right after saveAs the DataFile's id is the LOCAL cache path - the cloud urn: id lands asynchronously, about two seconds - so the row pumps doEvents under a 20 second clock bound until the urn: form answers and FAILS naming the timeout if it never does. Before saving, ONE listing of that folder's own dataFiles (never recursive) COUNTS the entries standing under that stem and deletes none of them - they are another run's or the operator's - and with no settled id the removal deletes nothing at all. That listing LAGS its own writes and deletes, which also makes deleteMe RAISE InternalValidationError while a just-closed file is still settling, so the removal pumps doEvents and retries under a clock bound - measured taking two or three attempts. DrawingManager.get() answers a DrawingManager and createDrawingInput answers a CreateDrawingInput whose customSize hands out a CustomSheetSize already carrying a positive width and height and at least two zones each way, so 'a DEFAULT CustomSheetSize' is read rather than assumed. The deleting of the source is reported but does NOT gate the row: a False leaves the file standing and the detail names it. The eleven document-side types (DrawingDocument, Drawing, Sheets, Sheet, Views, View, DrawingSketches, DrawingSketch, Images, DrawingExportManager, DocumentSettings) come off their CLASS objects: adsk.core.DocumentTypes carries no drawing member at all, so documents.add cannot make one, and DrawingManager.createDrawing would mint a SECOND cloud file, which this row does not call. The class dump rests on the class-dir-equals-instance-dir-minus-'this' reading, re-measured here on CreateDrawingInput, which the row holds both of. The collection types are named Views/Images, NOT DrawingViews/DrawingImages, and the settings type is DocumentSettings - the labels are what the fake-shape lint maps a fake onto, so each live one is read back rather than assumed",
         "encoded_in": ("tests/fakes/drawing.py's drawing world - FakeDrawingDocument, FakeDrawing, "
                        "FakeSheets/FakeSheet, FakeViews/FakeView, FakeDrawingSketches/"
                        "FakeDrawingSketch, FakeImages, FakeDrawingExportManager, "
@@ -2388,7 +2426,10 @@ ROWS = [
                        "_drawing_common.sheet_facts read these types live"),
         "body": """
     import time as _clock
-    SOURCE_NAME = "MeasureDrawingSource"
+    SOURCE_STEM = "MeasureDrawingSource"
+    # The name this run saves under carries its own clock, so no entry another run (or the
+    # operator) left in the project answers to it.
+    SOURCE_NAME = SOURCE_STEM + "-" + str(int(_clock.time()))
     projects = app.data.dataProjects
     project = None
     for i in range(projects.count):
@@ -2397,32 +2438,29 @@ ROWS = [
             break
     folder = None if project is None else project.rootFolder
 
-    def source_file():
-        \"\"\"The row's own saved source in the target folder, or None - ONE flat listing.\"\"\"
+    def file_by_id(file_id):
+        \"\"\"The file THIS run saved, by the id it settled under, or None - ONE flat listing.\"\"\"
         # dataFiles hands back a FRESH snapshot per property access, so the count and the item
         # must come off ONE bound collection - indexing a later access with an earlier count
         # raises 'invalid argument index' while the folder is still settling after a save.
         files = folder.dataFiles
         for i in range(files.count):
-            if files.item(i).name == SOURCE_NAME:
+            try:
+                got = files.item(i).id
+            except Exception:
+                continue
+            if got == file_id:
                 return files.item(i)
         return None
 
-    # ONE flat listing, every delete raise-safe. The listing LAGS its own deletes, so an entry it
-    # names here can already be gone - the row reports both counts and infers nothing from a
-    # delete that did not take.
+    # ONE flat listing, READ-ONLY: an entry under this stem was saved by something other than this
+    # run, no id from this run addresses it, and it is counted rather than deleted.
     seen = 0
-    swept = 0
     if folder is not None:
         listing = folder.dataFiles
         for i in range(listing.count):
-            if listing.item(i).name != SOURCE_NAME:
-                continue
-            seen += 1
-            try:
-                swept += 1 if listing.item(i).deleteMe() else 0
-            except Exception:
-                pass
+            if listing.item(i).name.startswith(SOURCE_STEM):
+                seen += 1
     dm = adsk.drawing.DrawingManager.get()
     di = None
     cs = None
@@ -2462,10 +2500,12 @@ ROWS = [
             tmp.close(False)
             # deleteMe RAISES InternalValidationError while the just-closed file is still
             # settling, and the folder listing lags its own deletes - so the retry pumps
-            # doEvents, treats a raise as one more not-yet, and stops on the first True.
+            # doEvents, treats a raise as one more not-yet, and stops on the first True. Only the
+            # id this run's own save settled under is addressed: with no settled id nothing is
+            # deleted, since a by-name match would address a file this run never created.
             stop = _clock.time() + 25.0
-            while _clock.time() < stop:
-                leftover = source_file()
+            while urn is not None and _clock.time() < stop:
+                leftover = file_by_id(urn)
                 if leftover is None:
                     break
                 tries += 1
@@ -2515,9 +2555,12 @@ ROWS = [
          + "; the source was "
          + ("removed after " + str(tries) + " delete attempt(s)" if deleted is True
             else ("scratch file left: " + SOURCE_NAME + " after " + str(tries) + " attempt(s)")
-            if deleted is False else "not found to delete")
-         + "; the opening sweep saw " + str(seen) + " listing entr(ies) under that name and "
-         + str(swept) + " deleted"
+            if deleted is False
+            else ("not found to delete" if urn is not None else
+                  "left in place: no settled id addressed it, so " + SOURCE_NAME
+                  + " was deleted by nothing here"))
+         + "; the opening listing saw " + str(seen) + " entr(ies) under the " + SOURCE_STEM
+         + " stem and deleted none - only this run's own id is addressed"
          + "; DocumentTypes names no drawing document "
          "(it carries " + ",".join(doc_types) + ") so the eleven document-side types come off "
          "the class (class dir == instance dir minus 'this' on CreateDrawingInput: "
@@ -3466,8 +3509,11 @@ ROWS = [
         big = max(abs(v) for v in coords) if coords else 0.0
         return big, len(raw), coords
 
+    written = []
+
     def leg(label, unit_member):
         p = os.path.join(tempfile.gettempdir(), "measure_sticky_" + label + ".stl")
+        written.append(p)
         o = em.createSTLExportOptions(body, p)
         try:
             r = o.unitType
@@ -3486,27 +3532,40 @@ ROWS = [
             return "unreadable(" + type(exc).__name__ + ")"
 
     U = adsk.fusion.DistanceUnits
-    r1, set_mm, size_mm, coords_mm = leg("set-mm", U.MillimeterDistanceUnits)
-    r2, after_mm, _s2, _c2 = leg("untouched-after-mm", None)
-    r3, set_in, size_in, coords_in = leg("set-inch", U.InchDistanceUnits)
-    r4, after_in, _s4, _c4 = leg("untouched-after-inch", None)
-    # A BRAND-NEW document, exported UNTOUCHED: nothing in it has ever seen a unitType assignment,
-    # so what it writes is what the SESSION carries - the inch leg above.
-    doc2 = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
     try:
-        d2 = adsk.fusion.Design.cast(doc2.products.itemByProductType("DesignProductType"))
-        b2 = make_box(d2, "StickyCarry")
-        p2 = os.path.join(tempfile.gettempdir(), "measure_sticky_new_document.stl")
-        o2 = d2.exportManager.createSTLExportOptions(b2, p2)
-        r5 = safe_read(o2)
-        wrote = d2.exportManager.execute(o2)
-        carried, _s5, _c5 = read_stl(p2) if wrote else (0.0, 0, [])
+        r1, set_mm, size_mm, coords_mm = leg("set-mm", U.MillimeterDistanceUnits)
+        r2, after_mm, _s2, _c2 = leg("untouched-after-mm", None)
+        r3, set_in, size_in, coords_in = leg("set-inch", U.InchDistanceUnits)
+        r4, after_in, _s4, _c4 = leg("untouched-after-inch", None)
+        # A BRAND-NEW document, exported UNTOUCHED: nothing in it has ever seen a unitType
+        # assignment, so what it writes is what the SESSION carries - the inch leg above.
+        doc2 = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+        try:
+            d2 = adsk.fusion.Design.cast(doc2.products.itemByProductType("DesignProductType"))
+            b2 = make_box(d2, "StickyCarry")
+            p2 = os.path.join(tempfile.gettempdir(), "measure_sticky_new_document.stl")
+            written.append(p2)
+            o2 = d2.exportManager.createSTLExportOptions(b2, p2)
+            r5 = safe_read(o2)
+            wrote = d2.exportManager.execute(o2)
+            carried, _s5, _c5 = read_stl(p2) if wrote else (0.0, 0, [])
+        finally:
+            doc2.close(False)
+        r6, set_cm, _s6, _c6 = leg("set-cm", U.CentimeterDistanceUnits)
     finally:
-        doc2.close(False)
-    r6, set_cm, _s6, _c6 = leg("set-cm", U.CentimeterDistanceUnits)
-    # Left at mm deliberately: this row MUTATES session state every other STL export inherits, so
-    # it restores the post-restart default rather than leaving the session on another unit.
-    leg("restore-mm", U.MillimeterDistanceUnits)
+        # mm is the post-restart default, and this row MUTATES the session unit every LATER STL
+        # export in this Fusion session inherits - so the restore runs whether the legs above
+        # finished or raised, and the files they wrote go with it.
+        try:
+            leg("restore-mm", U.MillimeterDistanceUnits)
+            restored = True
+        except Exception:
+            restored = False
+        for p in written:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
 
     follows = abs(after_mm - mm) < 1e-3 and abs(after_in - inch) < 1e-3
     assigns = abs(set_mm - mm) < 1e-3 and abs(set_in - inch) < 1e-3
@@ -3524,8 +3583,9 @@ ROWS = [
     inch_back = [got for lbl, _w, got in backreads if lbl == "set-inch"]
     cm_back = [got for lbl, _w, got in backreads if lbl == "set-cm"]
     emit(follows and assigns and assigns_cm and carries and reads_zero and backs_match
-         and per_coord and size_mm == size_in,
-         "stl-export-unittype-is-sticky-session-state: follows=" + str(follows)
+         and per_coord and size_mm == size_in and restored,
+         "stl-export-unittype-is-sticky-session-state: session_unit_restored="
+         + str(restored) + " follows=" + str(follows)
          + " assigns=" + str(assigns) + " cm=" + str(assigns_cm)
          + " carries_into_a_new_document=" + str(carries)
          + " reads0=" + str(reads_zero) + " backs_match=" + str(backs_match)
@@ -5512,15 +5572,23 @@ ROWS = [
     },
     {
         "id": "cam-tool-dimension-parameter-names",
-        "claim": ("A milling tool's cutting geometry is carried by four CAMParameters reachable "
-                  "through Tool.parameters.itemByName under exactly these names - tool_diameter, "
-                  "tool_fluteLength, tool_cornerRadius, tool_overallLength - each answering a "
-                  ".value.value that is a number in Fusion's internal cm. A square-ended tool "
-                  "still CARRIES tool_cornerRadius, reading 0, so an absent parameter and a zero "
-                  "radius are different answers"),
-        "encoded_in": ("_cam_common.tool_dimensions - the four names cam_get(include=['tool']) "
-                       "publishes as 'dimensions'; tests/unit/test_cam_get.py "
-                       "TestToolSliceDimensions"),
+        "claim": ("A milling tool's geometry is carried by CAMParameters reachable through "
+                  "Tool.parameters.itemByName under exactly these names - tool_diameter, "
+                  "tool_fluteLength, tool_cornerRadius, tool_overallLength, tool_shoulderLength, "
+                  "tool_shoulderDiameter, tool_shaftDiameter, tool_bodyLength - each answering a "
+                  ".value.value that is a number in Fusion's internal cm, plus "
+                  "tool_numberOfFlutes, which answers an INT count and not a length. A "
+                  "square-ended tool still CARRIES tool_cornerRadius, reading 0, so an absent "
+                  "parameter and a zero radius are different answers. A parameter whose "
+                  "expression names a parameter the tool lacks reads a finite 0.0 with a "
+                  "non-empty .error, so a value read alone cannot tell that 0 from a real one. "
+                  "The two gauge lengths depend on a holder being attached and are REPORTED, not "
+                  "asserted: whether this sample carries them is a property of the sample"),
+        "encoded_in": ("_cam_common.tool_dimensions - the names cam_get(include=['tool']) "
+                       "publishes as 'dimensions', with tool_dimension_value returning None for a row "
+                       "whose expression_error is set; tests/unit/test_cam_get.py "
+                       "TestToolSliceDimensions, tests/unit/test__cam_common.py "
+                       "TestDimensionValue"),
         "needs": "cam",
         "body": """
     tool = cam_sample_tool()
@@ -5528,16 +5596,40 @@ ROWS = [
         emit(False, "cam-tool-dimension-parameter-names: no bundled sample milling library"
              " - inconclusive")
         return
-    names = ["tool_diameter", "tool_fluteLength", "tool_cornerRadius", "tool_overallLength"]
+    # the holder-INDEPENDENT names, which every cutting tool carries
+    names = ["tool_diameter", "tool_fluteLength", "tool_cornerRadius", "tool_overallLength",
+             "tool_shoulderLength", "tool_shoulderDiameter", "tool_shaftDiameter",
+             "tool_bodyLength"]
     exprs = {}
     numeric = {}
+    errors = {}
     for n in names:
         p = tool.parameters.itemByName(n)
         exprs[n] = None if p is None else p.expression
         v = None if p is None else p.value.value
         numeric[n] = isinstance(v, float) and not isinstance(v, bool)
-    emit(all(exprs[n] is not None for n in names) and all(numeric[n] for n in names),
+        errors[n] = None if p is None else (p.error or "")
+    # the COUNT beside them: a flute count is not a length and must not be scaled with one.
+    fp = tool.parameters.itemByName("tool_numberOfFlutes")
+    flutes = None if fp is None else fp.value.value
+    flutes_int = isinstance(flutes, int) and not isinstance(flutes, bool)
+    # The two GAUGE lengths are reported, never asserted: they depend on a holder being attached,
+    # and a tool with none carries no tool_holderGaugeLength while its assembly gauge - an
+    # expression over holder_attached - reads a finite 0.0 with .error set.
+    gauge = {}
+    for n in ["tool_holderGaugeLength", "tool_assemblyGaugeLength"]:
+        p = tool.parameters.itemByName(n)
+        gauge[n] = (None if p is None else
+                    {"expression": p.expression, "value": p.value.value, "error": p.error or ""})
+    ha = tool.parameters.itemByName("holder_attached")
+    broken = {n: errors[n] for n in names if errors[n]}
+    emit(all(exprs[n] is not None for n in names) and all(numeric[n] for n in names)
+         and flutes_int and not broken,
          "cam-tool-dimension-parameter-names: " + repr(exprs) + " numeric=" + repr(numeric)
+         + " tool_numberOfFlutes=" + repr(flutes) + " int=" + repr(flutes_int)
+         + " unevaluable=" + repr(broken)
+         + "; holder_attached=" + ("ABSENT" if ha is None else repr(ha.value.value))
+         + " gauge(reported)=" + repr(gauge)
          + " of " + str(tool.parameters.count) + " parameters on the tool")
 """,
     },

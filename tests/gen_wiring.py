@@ -15,8 +15,9 @@ It is the pointer-map counterpart to TOOL_MANIFEST (what tools exist):
 
 The reference edges are read from CODE (AST), attributed by registered handler, and split by
 SURFACE (description = manual, note/error = situational tip). Static literals from handlers and one
-level of local helper calls. Imported or deeper helpers and assembled messages are not exhaustively
-covered. sys_capability_map is excluded from the "workflow" view - it is a catalog, not a breadcrumb.
+level of local helper calls, plus every sentence of _prose_sites.PROSE_MIN_CHARS+ the module ships
+wherever it is built. Imported helpers are not covered. sys_capability_map is excluded from the
+"workflow" view - it is a catalog, not a breadcrumb.
 """
 
 import argparse
@@ -27,6 +28,7 @@ import sys
 from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _prose_sites  # noqa: E402
 import conftest  # noqa: E402
 conftest.install_mock_adsk()
 from conftest import load_tool, TOOLS_DIR, COMMANDS_DIR  # noqa: E402
@@ -103,7 +105,8 @@ _parsed = {}
 
 
 def _parse_module(mod_name):
-    """(functions, top-level non-docstring strings, tool -> handler map) for one tool module."""
+    """(functions, top-level non-docstring strings, tool -> handler map, agent-facing sentences)
+    for one tool module."""
     path = os.path.join(TOOLS_DIR, mod_name + ".py")
     st = os.stat(path)
     key = (path, st.st_mtime_ns, st.st_size)
@@ -116,12 +119,13 @@ def _parse_module(mod_name):
         top_desc = [s for node in tree.body
                     if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
                     for s in _non_doc_strings(node)]
-        hit = _parsed[key] = (fns, top_desc, _tool_handler_map(tree))
+        prose = [text for _node, text in _prose_sites.wire_prose(tree)]
+        hit = _parsed[key] = (fns, top_desc, _tool_handler_map(tree), prose)
     return hit
 
 
 def _module_functions(mod_name):
-    fns, top_desc, _handlers = _parse_module(mod_name)
+    fns, top_desc, _handlers, _prose = _parse_module(mod_name)
     return fns, top_desc
 
 
@@ -176,9 +180,10 @@ def _called_local_names(node, fns):
 
 def _attribute(mod_name, tool_name):
     """(note_string_LIST, extra_desc_strings) belonging to a tool - its REGISTERED handler's
-    notes (resolved by call-site, see _tool_handler_map) plus module-level DESC constants.
+    notes (resolved by call-site, see _tool_handler_map), every long sentence the module ships,
+    plus module-level DESC constants.
     Falls back to whole-stem name matching for an unusual registration shape."""
-    fns, top_desc, handlers = _parse_module(mod_name)
+    fns, top_desc, handlers, prose = _parse_module(mod_name)
     handler = handlers.get(tool_name)
     note = []
     if handler and handler in fns:
@@ -196,6 +201,10 @@ def _attribute(mod_name, tool_name):
         for fn_name, node in fns.items():
             if stem in fn_name.lower():
                 note += _note_error_strings(node)
+    # A long sentence reaches the agent from wherever it is built - a module constant the handler
+    # formats, a helper further away than the one hop above - and one tool per file makes the
+    # module the right owner of it.
+    note += [s for s in prose if s not in note]
     return note, "\n".join(top_desc)
 
 
@@ -376,8 +385,8 @@ def render(data):
     smell_total = 0
     audit = ["", "## The detected guidance surface", "",
              "Static runtime **note/warning** literals per tool, attributed from each registered handler and one",
-             "level of local helper calls. Imported or deeper helpers and assembled messages are not",
-             "exhaustively covered. Use this surface to judge consistency and best-practice guidance.",
+             "level of local helper calls, plus every sentence of 120+ characters the module ships wherever it",
+             "is built. Imported helpers are not covered. Use this surface to judge consistency and guidance.",
              "Smells are auto-tagged: `war-story` (narrates history), `cause-guess` (asserts an",
              "unverified cause), `hedge` (waffles). (Pure error-validation strings - 'must be a number' -",
              "are omitted; this is the GUIDANCE layer, not input validation.)", ""]

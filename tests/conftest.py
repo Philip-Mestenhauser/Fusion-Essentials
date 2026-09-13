@@ -147,7 +147,8 @@ from tests.fakes.joints import CylindricalJointMotion, FakeAsBuiltJoint  # noqa:
 from tests.fakes.joints import FakeContactSet, FakeJoint, FakeJointInput  # noqa: E402
 from tests.fakes.joints import FakeJointOrigin, FakeJointOriginInput, FakeJoints  # noqa: E402
 from tests.fakes.joints import FakeMotionLink, FakeMotionLinks, FakeRigidGroup  # noqa: E402
-from tests.fakes.joints import FakeRigidGroups, FakeSnapshot, RevoluteJointMotion  # noqa: E402
+from tests.fakes.joints import FakeRigidGroups, FakeSnapshot, PinSlotJointMotion  # noqa: E402
+from tests.fakes.joints import PlanarJointMotion, RevoluteJointMotion  # noqa: E402
 from tests.fakes.joints import RigidJointMotion, SliderJointMotion, _MotionLimits  # noqa: E402
 from tests.fakes.joints import make_joint  # noqa: E402
 from tests.fakes.drawing import FakeCreateDrawingInput, FakeCustomSheetSize  # noqa: E402
@@ -586,11 +587,13 @@ def bbox():
 def make_design(bodies=(), occurrences=(), tokens=None, comp=None, all_components=None,
                 sketches=(), mesh_bodies=None, design_type=None, active_edit_object=None,
                 timeline=None, user_parameters=None, all_parameters=None, compute_raises=None,
-                snapshots=None, joints=None, as_built_joints=None, all_occurrences=None):
+                snapshots=None, joints=None, as_built_joints=None, all_occurrences=None,
+                configuration_top_table=None):
     """Build a standard FakeDesign. Use `comp=` to supply a tool-specific component (one carrying a
     fake `features`/`exportManager`/… surface); otherwise a plain MakeComp(bodies, occurrences).
-    `timeline`/`user_parameters`/`all_parameters`/`compute_raises`/`snapshots` pass through to
-    MakeDesign; `joints`/`as_built_joints`/`all_occurrences` to the component it builds."""
+    `timeline`/`user_parameters`/`all_parameters`/`compute_raises`/`snapshots`/
+    `configuration_top_table` pass through to MakeDesign; `joints`/`as_built_joints`/
+    `all_occurrences` to the component it builds."""
     if comp is None:
         comp = MakeComp(bodies=bodies, occurrences=occurrences, sketches=sketches,
                         mesh_bodies=mesh_bodies, joints=joints, as_built_joints=as_built_joints,
@@ -599,7 +602,7 @@ def make_design(bodies=(), occurrences=(), tokens=None, comp=None, all_component
                       design_type=design_type, active_edit_object=active_edit_object,
                       timeline=timeline, user_parameters=user_parameters,
                       all_parameters=all_parameters, compute_raises=compute_raises,
-                      snapshots=snapshots)
+                      snapshots=snapshots, configuration_top_table=configuration_top_table)
 
 
 def go_stale(*entities, attrs=("name", "parentComponent")):

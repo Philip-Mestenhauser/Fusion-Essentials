@@ -1573,6 +1573,86 @@ def _joint_is(name, kind):
     return check
 
 
+def _link_healthy(link_key):
+    """assembly_get(include=['relations']): the motion link recalled under `link_key` still computes.
+    An axis change on a member leaves it reading 'Motion Link joint DOF is wrong type' and carrying
+    no motion, so a healthy read here is what says nothing broke the coupling."""
+    def check(p):
+        rows = (p.get("relations") or {}).get("motion_links") or []
+        row = next((m for m in rows if m.get("name") == _RECALL.get(link_key)), None)
+        return _measured("the bench's motion link still computes", {"link": row},
+                         bool(row) and row.get("healthy") is True and not row.get("error"))
+    return check
+
+
+def _limits_survived(name, min_deg, max_deg):
+    """assembly_get: the joint's enabled rotation limits after a motion re-set, off the design's
+    own joint walk. A re-set that CHANGES the axis clears them; one that keeps it leaves them
+    standing, so this is the reading that tells the two apart."""
+    def check(p):
+        row = next((j for j in (p.get("joints") or []) if j.get("name") == name), None)
+        lim = (row or {}).get("rotation_limits_deg") or {}
+        return _measured(f"'{name}' kept its {min_deg}/{max_deg} deg limits across the re-set",
+                         {"joint": row and {"name": row.get("name"), "type": row.get("type"),
+                                            "rotation_limits_deg": row.get("rotation_limits_deg")}},
+                         _near(lim.get("min"), min_deg, 1e-3) and _near(lim.get("max"), max_deg, 1e-3))
+    return check
+
+
+def _joint_heading(name):
+    """A save-slot pick: one joint's own rotationAxisVector off assembly_get, parked for the
+    comparison below. The vector is the heading the JOINT holds, not the axis keyword joint_edit
+    resolved - which is what makes it a second witness to a re-aim."""
+    def take(p):
+        row = next((j for j in (p.get("joints") or []) if j.get("name") == name), None)
+        return (row or {}).get("rotation_axis")
+    return take
+
+
+def _joint_axis_vs(name, kind, key, same):
+    """assembly_get: whether a joint's own heading still equals the one recalled under `key`.
+
+    An omitted 'axis' must KEEP the direction the joint is aimed at, and an 'axis' given on its own
+    must re-aim it - both are claims about a vector this tool never writes, so the design's joint
+    walk is asked for it rather than the writer that just set it."""
+    def check(p):
+        row = next((j for j in (p.get("joints") or []) if j.get("name") == name), None)
+        got, was = (row or {}).get("rotation_axis"), _RECALL.get(key)
+        agrees = (isinstance(got, list) and isinstance(was, list) and len(got) == len(was)
+                  and all(_near(a, b, 1e-4) for a, b in zip(got, was)))
+        return _measured(f"{name} heading {'kept' if same else 'changed'} across the re-set",
+                         {"joint": row and {"name": row.get("name"), "type": row.get("type"),
+                                            "rotation_axis": got},
+                          "recalled": was},
+                         bool(row) and row.get("type") == kind and isinstance(got, list)
+                         and isinstance(was, list) and agrees is same)
+    return check
+
+
+def _axis_kept(name, axis):
+    """joint_edit with NO axis: 'axis' is the direction READ off the joint (not the tool's own
+    default) and 'axis_kept' says so - a re-aim nobody asked for also drops the joint's limits."""
+    def check(p):
+        return _measured(f"'{name}' kept its own {axis} axis across the re-set",
+                         {"edited": p.get("edited"), "changes": p.get("changes"),
+                          "axis": p.get("axis"), "axis_kept": p.get("axis_kept")},
+                         p.get("edited") is True and p.get("axis") == axis
+                         and p.get("axis_kept") is True)
+    return check
+
+
+def _axis_landed(name, kind, axis):
+    """joint_edit with an explicit axis (or an axis alone): the motion type it resolved and the
+    direction it set, with no 'axis_kept' marker - the axis was GIVEN, not read off the joint."""
+    def check(p):
+        return _measured(f"'{name}' re-aimed to {axis} as a {kind}",
+                         {"edited": p.get("edited"), "joint_type": p.get("joint_type"),
+                          "axis": p.get("axis"), "axis_kept": p.get("axis_kept")},
+                         p.get("edited") is True and p.get("joint_type") == kind
+                         and p.get("axis") == axis and "axis_kept" not in p)
+    return check
+
+
 def _joints_listed(minimum, poses=None):
     """assembly_get (default read): 'joint_count' is the design-wide joint walk's own total, and a
     named joint's 'value_now.angle_deg' is its jointMotion's current driven value read straight off

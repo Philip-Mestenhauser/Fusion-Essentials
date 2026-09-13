@@ -375,22 +375,12 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     "the joint health likely LAGS an uncommitted edit. Run design_recompute, then "
     "re-probe; the timeline (design_get) is authoritative.")
     if include_joints and joints_out:
-        out["note"] += (" Each joint row carries value_now - the joint's CURRENT driven value read "
-                        "off its motion (angle_deg / slide_mm), so it never has to be derived from "
-                        "the parts' basis vectors - and frame, that joint's frame in WORLD "
-                        "coordinates, whose z_axis is the direction a joint OFFSET drives along "
-                        "(param_set on the joint's offset parameter, or joint_edit offset). Where "
-                        "the joint's DOF has a heading, the row adds the vector its MOTION "
-                        "reports - rotation_axis (revolute/cylindrical), the axis that DOF turns "
-                        "about, and slide_direction (SLIDER ONLY - a cylindrical motion exposes no "
-                        "slide direction), the direction it slides along - a separate read from "
-                        "frame.z_axis. SPACE: rotation_axis read "
-                        "WORLD on a top-level joint (measured); slide_direction's space is "
-                        "UNMEASURED, as is either heading on a joint reached through a nested "
-                        "instance. No OTHER joint kind carries a heading here: a pin_slot / "
-                        "planar / ball row states none because none is read, not because a read "
-                        "failed. On the kinds that do, an absent key is a read that answered "
-                        "nothing.")
+        out["note"] += (" Joint rows: value_now, and frame (WORLD) whose z_axis is the direction "
+                        "a joint OFFSET drives along (param_set it, or joint_edit). Headings: "
+                        "rotation_axis (revolute/cylindrical), slide_direction (slider only); "
+                        "pin_slot/planar/ball carry none; where one is carried, an absent key is "
+                        "a read that answered nothing. SPACE: rotation_axis read WORLD on a "
+                        "top-level joint (measured), others UNMEASURED.")
     if root_bodies:
         out["note"] += (" NOTE: root_bodies lists geometry directly in the root component - these are "
                         "NOT occurrences and can't be jointed/grounded; promote one to a component "

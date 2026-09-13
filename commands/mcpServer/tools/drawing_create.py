@@ -538,12 +538,11 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
         return error("createDrawing returned a drawing DataFile but no file_id could be read from it, "
                      "so the created drawing cannot be located for export. Treating this as a failure.")
 
-    note = ("Drawing created as a CLOUD file (NOT opened). To reach it: doc_open(file_id, "
-            "force_api_open=true), then drawing_export for the PDF - measured on 2705.0.87, a "
-            "drawing never reviewed in the Fusion UI opens and drives that way, so no manual step "
-            "is needed up front. If that open instead fails or hangs, opening the document once in "
-            "the Fusion UI is the known workaround from earlier builds. settings_requested were "
-            "applied best-effort to the input (they configure creation and are not read back).")
+    note = ("Created as a CLOUD file (NOT opened). Reach it: doc_open(file_id, "
+            "force_api_open=true), then drawing_export for the PDF - a drawing never reviewed in "
+            "the Fusion UI opens and drives that way, so no manual step is needed up front. If "
+            "that open instead fails or hangs, opening the document once in the Fusion UI is the "
+            "known workaround. settings_requested were applied best-effort, never read back.")
     if mode_v == "automatic":
         note += (" Manual dimensions/annotations and custom title blocks beyond the automatic "
                  "layout are not placed by this tool.")
@@ -553,12 +552,10 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
         note += (f" Custom sheet size: {custom_size['width_applied']} x "
                  f"{custom_size['height_applied']} {custom_size['unit']} (the document unit), "
                  f"{custom_size['horizontal_zones_applied']} x "
-                 f"{custom_size['vertical_zones_applied']} zones - every one of those four numbers "
-                 "read back off the input before the create, and a zone count the input already "
-                 f"carried at or above the {custom_size['zone_minimum']} the API takes was kept. "
-                 "The created SHEET's own width/height are not readable from here (this call does "
-                 "not open the drawing), so open it and read them with drawing_edit_sheet to "
-                 "confirm the sheet Fusion built.")
+                 f"{custom_size['vertical_zones_applied']} zones - all four read back off the input "
+                 "before the create. The created SHEET's own width/height are not readable from "
+                 "here, so open it and read them with drawing_edit_sheet to confirm the sheet "
+                 "Fusion built.")
     note += " " + _TIMEOUT_IS_NOT_A_VERDICT
     return ok({
         "created": True,

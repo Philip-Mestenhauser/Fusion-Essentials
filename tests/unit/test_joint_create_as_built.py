@@ -129,7 +129,8 @@ def as_built(monkeypatch):
     and stub the shared '<occ>:<snap>'/handle resolver so 'geometry' yields an opaque JointGeometry
     (a real one needs a live session). snapshots=False is the design that exposes none at all.
     Returns the asBuiltJoints fake."""
-    def _make(occ_paths=("A:1", "B:1"), pending=False, snapshots=True, **abj_kwargs):
+    def _make(occ_paths=("A:1", "B:1"), pending=False, snapshots=True, configured=False,
+              **abj_kwargs):
         import adsk.fusion
         abj = FakeAsBuiltJoints(**abj_kwargs)
         occs = [make_occurrence(path=p, component=MakeComp(name=p.split("+")[-1].split(":")[0]))
@@ -137,7 +138,8 @@ def as_built(monkeypatch):
         comp = MakeComp(occurrences=occs)
         comp.asBuiltJoints = abj
         install(ja, make_design(comp=comp,
-                                snapshots=FakeSnapshots(pending=pending) if snapshots else None))
+                                snapshots=FakeSnapshots(pending=pending) if snapshots else None,
+                                configuration_top_table="ConfigTable" if configured else None))
         # real classes, so is_as_built_joint / is_joint_origin are genuine isinstance checks rather
         # than the degrade-to-False path a Mock type takes
         monkeypatch.setattr(adsk.fusion, "AsBuiltJoint", type("AsBuiltJoint", (), {}))
@@ -371,6 +373,29 @@ class TestAsBuiltResultNote:
         as_built()
         out = payload(ja.handler(occurrence_one="A:1", occurrence_two="B:1"))
         assert out["note"] == "Occurrences rigidly joined where they already are."
+
+
+class TestConfiguredDesignNote:
+    """In a CONFIGURED design the sentence is worth its bytes: a configuration that moved the mating
+    face left the as-built member behind while the joint still read healthy, and a joint anchored ON
+    that geometry followed it. An ordinary design pays nothing for that."""
+
+    def test_a_configured_design_gets_the_pose_sentence(self, as_built):
+        as_built(configured=True)
+        out = payload(ja.handler(occurrence_one="A:1", occurrence_two="B:1"))
+        assert "This design is CONFIGURED" in out["note"]
+        assert "relative POSE" in out["note"] and "joint_at_geometry" in out["note"]
+
+    def test_a_plain_design_carries_no_configuration_sentence(self, as_built):
+        as_built()
+        out = payload(ja.handler(occurrence_one="A:1", occurrence_two="B:1"))
+        assert "CONFIGURED" not in out["note"]
+
+    def test_a_motion_as_built_in_a_configured_design_gets_it_too(self, as_built):
+        as_built(configured=True)
+        out = payload(ja.handler(occurrence_one="A:1", occurrence_two="B:1",
+                                 geometry="A:1:cylinder", joint_type="revolute"))
+        assert "This design is CONFIGURED" in out["note"]
 
 
 class TestAsBuiltName:

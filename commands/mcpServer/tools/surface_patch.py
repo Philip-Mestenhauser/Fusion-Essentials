@@ -100,14 +100,12 @@ def _patch_one_loop(comp, boundary, op, cont, cont_key, rails=()):
         # are one single-seed auto-complete failure with two causes the string cannot tell apart,
         # so the error names both and points at the probe that does.
         if any(s in msg for s in ("chainoptions", "non_man", "non-man", "toolbody")):
-            return None, (f"Patch failed: {e}. This failure has two known causes: (1) a degenerate "
-                "TANGENT saddle opening - a radial hole tangent to a flat face splits the rim into "
-                "two half-edges; pass the opening's two half-edges as an explicit boundary list. "
-                "(2) an edge loop SPLIT by a later feature (e.g. a fillet reaching the opening) into "
-                "more than two segments; pass ALL of the loop's edges as an explicit boundary list, "
-                "or patch this opening before adding the feature that splits it. Count the opening's "
-                "edges with find_geometry to tell them apart: exactly 2 means case (1), more means "
-                "case (2).")
+            return None, (f"Patch failed: {e} - two known causes: (1) a degenerate TANGENT saddle "
+                "opening whose rim is two half-edges - pass both as the boundary list; (2) an "
+                "edge loop SPLIT by a later feature (a fillet, say) into 3+ segments - pass ALL "
+                "of the loop's edges, or patch the opening before the feature that splits it. "
+                "Count the opening's edges with find_geometry: exactly 2 means case (1), more "
+                "means case (2).")
         if rails:
             return None, (f"Patch failed: {e}. With interior_rails there are two candidate causes and "
                 "this message asserts neither: the boundary does not form a CLOSED loop, or a rail "

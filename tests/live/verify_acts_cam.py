@@ -623,6 +623,21 @@ def _setup_snapshot_unchanged(setup, before_key):
     return check
 
 
+def _shoulder_follows_diameter(name):
+    """cam_edit_tools(action='parameters'): the cutter and the shoulder of one library tool read the
+    SAME size. Measured before this was carried: the add's 'diameter' override reached tool_diameter
+    and left the sample's own tool_shoulderDiameter standing - a 10 mm cutter on a 12 mm shank."""
+    def check(p):
+        rows = {r.get("name"): r.get("value") for r in (p.get("parameters") or [])}
+        dia, shoulder = rows.get("tool_diameter"), rows.get("tool_shoulderDiameter")
+        return _measured(f"the {name}'s shoulder reads the same size as its cutter",
+                         {"tool": p.get("tool"), "description": p.get("description"),
+                          "tool_diameter": dia, "tool_shoulderDiameter": shoulder},
+                         bool(_num(dia)) and bool(_num(shoulder)) and dia > 0
+                         and abs(dia - shoulder) < 1e-6)
+    return check
+
+
 def _tool_param_landed(name, fragment):
     """cam_edit_tools(action='edit'): the tool parameter's own read-back - 'after' is the expression
     the TOOL holds once the write is committed, never the expression that was sent."""
@@ -672,6 +687,11 @@ _CAM_STORY = [
     # sample clones keep the sample's tool number; two clones can collide and the post refuses
     # ("Different tools have the same tool number") - assign distinct numbers explicitly. Every
     # tool an operation below cuts with gets one, read back off the tool it was written to.
+    # THE SHANK THE OVERRIDE CARRIED: the flat mill was cloned from a 12 mm sample and asked for
+    # 10 mm, so its shoulder has to read 10 mm too - a cutter override that stops at tool_diameter
+    # leaves the bore cutting past a shank wider than the hole it is finishing.
+    ("cam_edit_tools", {"action": "parameters", "scope": "document", "tool": _FLAT_MILL},
+     _shoulder_follows_diameter("flat mill"), None),
     ("cam_edit_tools", {"action": "edit", "scope": "document", "tool": _FACE_MILL,
                         "parameters": {"tool_number": "1"}},
      _tool_param_landed("tool_number", "1"), None),
@@ -1347,6 +1367,57 @@ def _tool_assigned(index, cycle):
     return check
 
 
+# The geometry rows an operation's tool publishes beside the cutter, and the ones a REAL tool
+# cannot read as zero. The two gauge lengths are NOT here: measured, a tool with no holder attached
+# carries no tool_holderGaugeLength at all and its assembly gauge will not evaluate, so both
+# publish null - which is the honest answer, not a missing row.
+_TOOL_GEOMETRY_KEYS = ("diameter", "flute_length", "shoulder_length", "shoulder_diameter",
+                       "shaft_diameter", "body_length")
+_TOOL_POSITIVE_KEYS = ("diameter", "shoulder_length", "shoulder_diameter", "body_length")
+
+
+def _op_tool_geometry(cycle, diameter, shoulder_diameter):
+    """cam_get(include=['tool']): the cutting geometry Operation.tool reads on the operation the
+    apply filed under that cycle. Every length has to read a NUMBER and the shank ones a positive
+    one - a parameter whose expression will not evaluate reads a finite 0, so a slice publishing
+    that 0 instead of null would pass a bare presence check."""
+    def check(p):
+        want = (_RECALL.get("tmpl_ops") or {}).get(cycle) or {}
+        tool = p.get("tool") or {}
+        dims = tool.get("dimensions") or {}
+        return _measured(f"the {cycle} cycle's tool reads a {diameter} mm cutter on a "
+                         f"{shoulder_diameter} mm shoulder",
+                         {"operation": tool.get("operation"), "tool": tool.get("tool"),
+                          "dimensions": dims, "expected": want},
+                         bool(want) and tool.get("operation") == want.get("name")
+                         and dims.get("diameter") == diameter
+                         and dims.get("shoulder_diameter") == shoulder_diameter
+                         and dims.get("units") == "mm"
+                         and all(_num(dims.get(k)) for k in _TOOL_GEOMETRY_KEYS)
+                         and all(dims.get(k) > 0 for k in _TOOL_POSITIVE_KEYS)
+                         and type(dims.get("flutes")) is int and dims["flutes"] > 0)
+    return check
+
+
+def _tool_reassigned(index, cycle, diameter):
+    """cam_edit_operation(tool_scope='document', tool_index=...) onto an operation that ALREADY
+    carries a tool: was_tool names what it left, and tool_dimensions is read off the tool
+    Operation.tool ANSWERS - the cutter this act stocked that library tool with, which a
+    description naming a tool does not establish."""
+    def check(p):
+        want = (_RECALL.get("tmpl_ops") or {}).get(cycle) or {}
+        dims = p.get("tool_dimensions") or {}
+        return _measured(f"document tool {index} reassigned onto the {cycle} cycle, "
+                         f"Operation.tool reading a {diameter} mm cutter",
+                         {"operation": p.get("operation"), "tool": p.get("tool"),
+                          "was_tool": p.get("was_tool"), "tool_index": p.get("tool_index"),
+                          "tool_dimensions": dims, "expected": want},
+                         bool(want) and p.get("operation") == want.get("name")
+                         and p.get("tool_index") == index and bool(p.get("was_tool"))
+                         and dims.get("diameter") == diameter and dims.get("units") == "mm")
+    return check
+
+
 def _all_cut(setup, minimum, names=None):
     """cam_get(include=['time']) over a setup: every operation carries its own getMachiningTime
     figure above zero - or, with 'names', every operation NAMED does, which is the same reading
@@ -1535,6 +1606,24 @@ _CAM_DELIVER = [
      lambda c: {"operation": _ctx_get(c, "tmpl_ops", _TOOL_LESS)["Counterbore"]["name"],
                 "tool_scope": "document", "tool_index": _FLAT_MILL},
      _tool_assigned(_FLAT_MILL, "Counterbore"), None),
+    # WHAT THE OPERATION NOW CUTS WITH, in full: the 10 mm cutter the act stocked the flat mill
+    # with, on the 10 mm shank the add's diameter override now carries with it - the pair a
+    # cutter-only read cannot show, and the pair that decides what the bore actually clears.
+    ("cam_get",
+     lambda c: {"include": ["tool"],
+                "operation": _ctx_get(c, "tmpl_ops", _TOOL_LESS)["Counterbore"]["name"]},
+     _op_tool_geometry("Counterbore", 10.0, 10.0), None),
+    # THE REASSIGNMENT, on an operation that already carries a tool: the 6 mm ball pointed at it and
+    # its size read off what Operation.tool answers, then the mill that fits the counterbore put
+    # straight back - so the selection below, and every later read, meet the tool these rows left.
+    ("cam_edit_operation",
+     lambda c: {"operation": _ctx_get(c, "tmpl_ops", _TOOL_LESS)["Counterbore"]["name"],
+                "tool_scope": "document", "tool_index": _BALL_MILL},
+     _tool_reassigned(_BALL_MILL, "Counterbore", 6.0), None),
+    ("cam_edit_operation",
+     lambda c: {"operation": _ctx_get(c, "tmpl_ops", _TOOL_LESS)["Counterbore"]["name"],
+                "tool_scope": "document", "tool_index": _FLAT_MILL},
+     _tool_reassigned(_FLAT_MILL, "Counterbore", 10.0), None),
     # A template carries no geometry, so the three cycles are aimed at the part's own bores here.
     # The radius-3 query finds the four mounting bores AND the EdgeBreak fillet on the step
     # (measured: five faces), so the bores are picked by their Z axis. MountDia * 1.8 is 10.8 mm.

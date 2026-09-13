@@ -739,12 +739,11 @@ def handler() -> dict:
                     "healthy and is_healthy makes no claim about them. ")
     if unresolved:
         verdict += (
-            "An UNRESOLVED reference means reading that occurrence's component RAISES, so the source "
-            "component is not loaded. Its source file, project and hub are NOT readable through the "
-            "API (component and documentReference both raise, and the reference is absent from the "
-            "document's documentReferences) - open the browser tree in Fusion and hover the flagged "
-            "node for the reason. Such an occurrence also has no readable placement, bodies or "
-            "children, so it is excluded from geometry searches and interference checks. ")
+            "An UNRESOLVED reference means reading that occurrence's component RAISES: the source "
+            "component is not loaded, and its file, project and hub are NOT readable through the "
+            "API - open the browser tree in Fusion and hover the flagged node for the reason. Such "
+            "an occurrence carries no readable placement, bodies or children either, so it is "
+            "excluded from geometry searches and interference checks. ")
     if occ_total is None:
         verdict += ("total_occurrences is null: NEITHER occurrence walk enumerated, so the design's "
                     "occurrence count is unknown rather than zero. ")

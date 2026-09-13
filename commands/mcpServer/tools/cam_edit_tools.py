@@ -12,8 +12,9 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import iter_collection, named_with_remainder, ok, error, safe
-from ._cam_common import get_cam, expression_error, library_assets, quote_expression
+from ._common import CM_TO_UNIT, iter_collection, named_with_remainder, ok, error, safe
+from ._cam_common import (get_cam, expression_error, library_assets, quote_expression,
+                          tool_dimension_value)
 from ._cam_presets import (_apply_preset_values, _persist_preset_change, _persisted_preset_names,
                            _preset_names, _preset_spec_error, _preset_tool, _presets_named)
 
@@ -492,6 +493,55 @@ def _do_list_types():
                "note": "Pass one of these as add_tools[].from_type to clone a sample of that type."})
 
 
+# The shank a 'diameter' override has to carry with it. MEASURED: a sample whose shoulder diameter
+# equals its own cutter diameter is a plain cylindrical shank, and overriding the cutter alone left
+# a 10 mm cutter standing on the sample's 12 mm shoulder.
+_P_SHOULDER_DIAMETER = "tool_shoulderDiameter"
+_P_DIAMETER = "tool_diameter"
+_SHANK_EPSILON_CM = 1e-6
+
+
+def _dia_value(tool, pname):
+    """One dimension parameter's evaluated NUMBER in cm off a tool, or None - through the shared
+    dimension read, so an expression that failed to evaluate is null and never its false 0."""
+    p = safe(lambda: tool.parameters.itemByName(pname))
+    return tool_dimension_value(p, 1.0)
+
+
+def _apply_diameter(tool, diameter):
+    """Set tool_diameter, then make tool_shoulderDiameter follow it - but only where the sample
+    sized its shoulder to its own cutter AND the shoulder did not move with the write. A shoulder
+    holding a FORMULA over tool_diameter follows on its own, and a literal set over it would cut
+    that relationship."""
+    p = safe(lambda: tool.parameters.itemByName(_P_DIAMETER))
+    if p is None:
+        return ("The tool has no 'tool_diameter' parameter - the requested diameter override "
+                "cannot apply.")
+    was_d, was_s = _dia_value(tool, _P_DIAMETER), _dia_value(tool, _P_SHOULDER_DIAMETER)
+    p.expression = str(diameter)
+    now_d = _dia_value(tool, _P_DIAMETER)
+    if (was_d is None or was_s is None or now_d is None
+            or abs(was_s - was_d) > _SHANK_EPSILON_CM):
+        return None                       # a stepped sample, or a size that would not read
+    if _followed(_dia_value(tool, _P_SHOULDER_DIAMETER), now_d):
+        return None                       # the shoulder tracked the write by itself
+    sp = safe(lambda: tool.parameters.itemByName(_P_SHOULDER_DIAMETER))
+    try:
+        sp.expression = str(diameter)
+    except Exception as e:
+        return f"Set tool_diameter to {diameter} but the shoulder would not follow it: {e}."
+    if not _followed(_dia_value(tool, _P_SHOULDER_DIAMETER), now_d):
+        return (f"Set tool_diameter to {diameter} on a plain-shank sample but its shoulder "
+                f"diameter read back {_dia_value(tool, _P_SHOULDER_DIAMETER)!r} against a cutter "
+                f"of {now_d!r} (cm) - the shoulder did not follow, and the tool was not added.")
+    return None
+
+
+def _followed(shoulder, diameter):
+    """Whether the shoulder reads the cutter's size - an unread shoulder followed nothing."""
+    return shoulder is not None and abs(shoulder - diameter) <= _SHANK_EPSILON_CM
+
+
 def _build_entry(ref):
     """(tool, None) or (None, error) for one add entry - {from_type} clones a sample of that
     geometry type, {library_url, index} copies an existing tool, and description / diameter /
@@ -535,10 +585,9 @@ def _build_entry(ref):
     # diameter override (after creation, on the param). A missing parameter means the requested
     # override cannot apply - error instead of adding the tool without it.
     if ref.get("diameter") is not None:
-        p = safe(lambda: tool.parameters.itemByName("tool_diameter"))
-        if p is None:
-            return None, "The tool has no 'tool_diameter' parameter - the requested diameter override cannot apply."
-        p.expression = str(ref["diameter"])
+        derr = _apply_diameter(tool, ref["diameter"])
+        if derr:
+            return None, derr
 
     # 3b) product_id / vendor are real tool parameters but NOT part of createFromJson's schema,
     # which drops those keys silently - so they are applied as quoted-string expressions after
@@ -575,6 +624,38 @@ def _build_entry(ref):
         if perr:
             return None, perr
     return tool, None
+
+
+# Said only where a sized row's shoulder does NOT match its cutter: that sample is a stepped tool
+# whose shoulder is its own size, and the override left it there.
+_STEPPED_SAMPLE_NOTE = (
+    " A 'sized' row whose shoulder_diameter_mm differs from its diameter_mm kept the sample's own "
+    "stepped shoulder - set tool_shoulderDiameter with action='edit' to change it.")
+
+
+def _mm(value):
+    """A tool dimension read in Fusion's internal cm, published in mm - None stays None."""
+    return None if value is None else round(value * CM_TO_UNIT["mm"], 4)
+
+
+def _stepped(row):
+    """Whether a sized row shows a shoulder of its OWN size - BOTH values have to read, since a
+    null beside a number is a read that did not answer and not a stepped tool."""
+    dia, shoulder = row.get("diameter_mm"), row.get("shoulder_diameter_mm")
+    return dia is not None and shoulder is not None and dia != shoulder
+
+
+def _sized_rows(add_tools, built):
+    """One row per entry that asked for a 'diameter', carrying what the built tool READS BACK for
+    its cutter and its shoulder - the pair that says whether the shank followed the override."""
+    rows = []
+    for i, (ref, tool) in enumerate(zip(add_tools, built)):
+        if not isinstance(ref, dict) or ref.get("diameter") is None:
+            continue
+        rows.append({"entry": i,
+                     "diameter_mm": _mm(_dia_value(tool, _P_DIAMETER)),
+                     "shoulder_diameter_mm": _mm(_dia_value(tool, _P_SHOULDER_DIAMETER))})
+    return rows
 
 
 def _do_add(target, add_tools):
@@ -630,14 +711,20 @@ def _do_add(target, add_tools):
                 return error(f"Auto-assigned tool number(s) {missing} but the library re-read from "
                              f"its url holds numbers {stored_numbers} - the assignment did not "
                              "reach the stored library.")
-    return ok({"added": len(built), "tool_count": len(target.tools),
-               "assigned_tool_numbers": assigned,
-               # the honest basis of the numbers above: the stored library agreed, or nothing but the
-               # in-memory tools was checked (always the case for a document target)
-               "verified_in_memory_only": in_memory_only,
-               "note": (_persist_note(target, "Tools added", in_memory_only)
-                        + f" Auto-assigned free tool number(s) {assigned} (next free per tool, so "
-                        "multiple adds do not collide - cam_post refuses duplicate tool numbers).")})
+    sized = _sized_rows(add_tools, built)
+    out = {"added": len(built), "tool_count": len(target.tools),
+           "assigned_tool_numbers": assigned,
+           # the honest basis of the numbers above: the stored library agreed, or nothing but the
+           # in-memory tools was checked (always the case for a document target)
+           "verified_in_memory_only": in_memory_only,
+           "note": (_persist_note(target, "Tools added", in_memory_only)
+                    + f" Auto-assigned free tool number(s) {assigned} (next free per tool, so "
+                    "multiple adds do not collide - cam_post refuses duplicate tool numbers).")}
+    if sized:
+        out["sized"] = sized
+        if any(_stepped(r) for r in sized):
+            out["note"] += _STEPPED_SAMPLE_NOTE
+    return ok(out)
 
 
 def _do_remove(target, indices):

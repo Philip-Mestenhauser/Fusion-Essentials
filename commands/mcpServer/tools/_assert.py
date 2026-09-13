@@ -539,14 +539,9 @@ class ChildGeometryMoved(Postcondition):
                 return (f"the joint reported success and repositioned '{nm}' by "
                         f"{round(parent_moved * 10.0, 3)} mm (its transform moved) but its nested body "
                         "geometry did NOT move - the reposition did not propagate into the nested "
-                        "occurrence (trigger: a nested occurrence left FREE/unconstrained inside the "
-                        "referenced design does not ride the wrapper's move; a timeline-locked one "
-                        "does). The transform is a CLAIM; the child body point is the EVIDENCE. The "
-                        "joint REMAINS in the timeline - delete it, then LOCK every nested free "
-                        "occurrence first (assembly_ground each ground_to_parent=true, deepest "
-                        "included), joint the WRAPPER, and recompute. Jointing the nested occurrence "
-                        "directly does not work - joint_create repositions the top-most free "
-                        "ancestor, stranding deeper geometry."), {}
+                        "occurrence. The joint REMAINS in the timeline: delete it, LOCK every "
+                        "nested free occurrence (assembly_ground each ground_to_parent=true, "
+                        "deepest included), joint the WRAPPER, then recompute."), {}
         if unverified:
             # The flag reports whether the CHECK ran, not whether a part moved.
             return "", {"child_geometry_move_verified": False,

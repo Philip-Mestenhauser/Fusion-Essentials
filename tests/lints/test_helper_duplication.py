@@ -20,6 +20,10 @@ _DENYLIST = {
     # landed assignment into a false refusal on one of them.
     "_tool_facts": ("cam_create_operation", "def"),
     "_names_the_same_tool": ("cam_create_operation", "def"),
+    # The ONE tool-dimension read, shared by cam_get's tool slice and cam_edit_tools' diameter
+    # override: a CAM expression that will not evaluate reads a finite 0.0, and a second copy
+    # without that .error guard is how one of them publishes or writes that 0 as a real size.
+    "tool_dimension_value": ("_cam_common", "def"),
     "find_setup": ("_cam_common", "def"),
     "find_operation": ("_cam_common", "def"),
     "walk_operations": ("_cam_common", "def"),

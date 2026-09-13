@@ -66,12 +66,11 @@ _DIRECT_GUARD = _inputs.ModeGuard(
     fix_hint="Switch to direct mode (Design settings / design_set_mode), or build the datum parametrically.")
 
 _PARAMETRIC_COORD_MSG = (
-"kind={k} at a raw coordinate needs DIRECT-modeling mode - the parametric construction API has "
-"no way to place a {k} at a bare x/y/z (setByPoint/setByLine are direct-edit-only and fail in "
-"parametric). This design is PARAMETRIC. Options: (1) sketch_create a sketch and add a sketch "
-"point at the location, then build the datum from THAT geometry; (2) for an axis, pass an edge "
+"kind={k} at a raw coordinate needs DIRECT-modeling mode and this design is PARAMETRIC "
+"(setByPoint/setByLine are direct-only). Options: (1) sketch_create a sketch, add a sketch "
+"point there, and build the datum from THAT geometry; (2) for an axis, pass an edge "
 "handle from find_geometry (axis='<handle>') - that IS parametric-legal; or (3) switch the "
-"design to Direct modeling (Design settings) if you truly want a coordinate datum."
+"design to Direct modeling (Design settings)."
 )
 
 

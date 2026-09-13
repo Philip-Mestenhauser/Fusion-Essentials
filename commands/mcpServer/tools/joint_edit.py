@@ -12,9 +12,14 @@ from . import _common
 from . import _inputs
 from ._joints import (
     AXES as _AXES,
+    AXIS_NAMES as _AXIS_NAMES,
+    CUSTOM_DIRECTION as _CUSTOM_DIRECTION,
     OFFSET_PARAM_NOTE as _OFFSET_PARAM_NOTE,
     apply_motion as _apply_motion,
+    coupling_links as _coupling_links,
+    current_axis as _current_axis,
     current_joint_type as _current_joint_type,
+    current_slide_index as _current_slide_index,
     find_joint as _find_joint,
     is_as_built_joint as _is_as_built_joint,
     is_joint_origin as _is_joint_origin,
@@ -51,6 +56,41 @@ def _applied_so_far(changed):
     """The edits recorded before a failing one, for the partial-success disclosure a bare error
     would hide."""
     return ", ".join(f"{k}={v}" for k, v in changed.items()) if changed else "none"
+
+
+def _same_direction(current, entity, wanted_dir, wanted_entity):
+    """Whether the joint is PROVABLY aimed the way this edit would aim it. Two CUSTOM directions
+    agree only when they name the same physical entity, and an identity that does not read is not
+    a match - so anything unprovable reads as a change."""
+    if wanted_dir is None or current != wanted_dir:
+        return False
+    if current != _CUSTOM_DIRECTION:
+        return True
+    got = _common.native_identity(entity)
+    return got is not None and got == _common.native_identity(wanted_entity)
+
+
+def _link_axis_refusal(joint, joint_name, wanted_dir, wanted_entity):
+    """The refusal a motion-link member gets unless this edit is PROVEN to leave its direction
+    where it is, or None when the joint is in no live link. Membership that did not read is
+    refused too: an unread precondition is not a licence to break a link that cannot be repaired."""
+    links = _coupling_links(joint)
+    if links is None:
+        return (f"Refused: whether '{joint_name}' belongs to a motion link did not read, so "
+                "whether this re-aim would leave one compute-failed is not known here - and a "
+                "link an axis change breaks cannot be re-valued back. Read the design's relations "
+                "with assembly_get(include=['relations']) and retry.")
+    if not links:
+        return None
+    current, entity = _current_axis(joint)
+    if current is not None and _same_direction(current, entity, wanted_dir, wanted_entity):
+        return None
+    named = ", ".join(f"'{n}'" for n in links[:4])
+    return (f"Refused: re-aiming '{joint_name}' leaves motion link {named} compute-failed - "
+            "the link then reads 'Motion Link joint DOF is wrong type', carries no motion, and "
+            "setMotionData raises on it, so it cannot be re-valued back. Delete it "
+            "(assembly_edit_relations kind='motion_link' action='delete'), re-aim, then re-link "
+            "with joint_motion_link. Keeping the axis leaves the link healthy, a retype included.")
 
 
 def _set_flip(joint, wanted):
@@ -118,38 +158,87 @@ def handler(joint_name: str = "", input_one: str = "", input_two: str = "",
         return error(f"Unknown units '{units}'. Valid: mm, cm, in.")
 
     # Decide what's being changed; refuse a no-op so we never roll the timeline for nothing.
+    # An axis on its own re-aims the CURRENT motion, exactly as world_axis does - Fusion re-aims a
+    # joint only through a motion set, so an axis with nothing to set would change nothing.
+    given_axis = (axis or "").strip().lower()
     want_inputs = bool((input_one or "").strip() or (input_two or "").strip())
-    want_motion = bool((joint_type or "").strip()) or bool(wa_name)
+    want_motion = bool((joint_type or "").strip()) or bool(wa_name) or bool(given_axis)
     want_flip = flip is not None
     want_offset = offset is not None
     want_angle = angle is not None
     want_limits = any(v is not None for v in
                       (min_deg, max_deg, rest_deg, min_mm, max_mm, rest_mm))
     if not (want_inputs or want_motion or want_flip or want_offset or want_angle or want_limits):
-        return error("Nothing to change. Provide at least one of: input_one/input_two, joint_type "
-                      "(+axis), world_axis, flip, offset (+units), angle, "
+        return error("Nothing to change. Provide at least one of: input_one/input_two, joint_type, "
+                      "axis, world_axis, flip, offset (+units), angle, "
                       "min_deg/max_deg/rest_deg (rotation), min_mm/max_mm/rest_mm (linear).")
 
-    # Validate motion type up front (before touching the timeline). If only world_axis is given,
-    # re-apply the joint's CURRENT motion type with the world axis.
+    # Validate motion type up front (before touching the timeline). With only a direction given,
+    # the joint's CURRENT motion type is what gets re-applied at it.
     jtype = (joint_type or "").strip().lower()
     if (joint_type or "").strip() and jtype not in _JOINT_TYPES:
         return error(f"Unknown joint_type '{joint_type}'. Valid: {', '.join(_JOINT_TYPES)}.")
     if want_motion and not jtype:
         jtype = _current_joint_type(joint)
         if jtype not in _JOINT_TYPES:
-            return error("world_axis given but the joint's current motion type is not "
-    "axis-based (rigid/ball have no single axis to re-point).")
-    ax_name = (axis or "z").strip().lower()
-    if want_motion and not wa_name and _JOINT_TYPES[jtype][1] and ax_name not in _AXES:
+            return error("A direction was given with no joint_type, and this joint's own motion "
+    "does not read as one this tool can re-apply (its jointMotion is absent, or its class is none "
+    f"of: {', '.join(_JOINT_TYPES)}). Pass joint_type to say what to set.")
+    if given_axis and given_axis not in _AXES:
         return error(f"Unknown axis '{axis}'. Valid: x, y, z.")
+    if (given_axis or wa_name) and not _JOINT_TYPES[jtype][1]:
+        return error(f"'{jtype}' motion is not axis-based - it has no single axis to re-point, so "
+                     "the direction given here would be dropped rather than set. Drop axis/"
+                     "world_axis, or name an axis-based joint_type (revolute, slider, cylindrical, "
+                     "planar, pin_slot).")
 
-    # pin_slot slide direction (validated up front, before touching the timeline).
+    # An omitted axis KEEPS the direction the joint is already aimed at, read off its own motion -
+    # re-aiming a joint nobody asked to re-aim also drops the rotation limits it carried.
+    ax_name, kept_custom, axis_kept = given_axis or "z", None, False
+    if want_motion and not wa_name and not given_axis and _JOINT_TYPES[jtype][1]:
+        cur_dir, cur_entity = _current_axis(joint)
+        cur_name = (_AXIS_NAMES[cur_dir]
+                    if isinstance(cur_dir, int) and 0 <= cur_dir < len(_AXIS_NAMES) else None)
+        if cur_name is None and cur_entity is None:
+            return error(
+                f"'{joint_name}' answers no current motion axis, so setting '{jtype}' motion has "
+                "no direction to keep and this tool will not pick one. Name it: axis=x|y|z "
+                "(FRAME-relative, the joint's own frame) or world_axis=x|y|z (a TRUE world "
+                "direction).")
+        axis_kept = True
+        if cur_name is not None:
+            ax_name = cur_name
+        else:
+            kept_custom = cur_entity
+
+    # pin_slot slide direction (validated up front, before touching the timeline). An omitted one
+    # keeps the direction the joint already slides along, for the same reason the rotation axis is
+    # kept - the next-frame-axis default would silently re-aim the slot.
     slide_idx = None
     if jtype == "pin_slot":
         slide_idx, slide_err = _slide_index(slide_axis, ax_name if ax_name in _AXES else "z")
         if slide_err:
             return error(slide_err)
+        if slide_idx is None:
+            kept_slide = _current_slide_index(joint)
+            if kept_slide is not None and kept_slide not in _AXES.values():
+                return error(
+                    f"'{joint_name}' reads its slide direction as JointDirections {kept_slide}, "
+                    "which is not a frame x/y/z this tool can re-apply, and 'slide_axis' was not "
+                    "given - re-setting pin_slot motion would aim the slot at a frame axis "
+                    "instead. Name it: slide_axis=x|y|z (FRAME-relative).")
+            if kept_slide is not None and kept_slide != _AXES.get(ax_name):
+                slide_idx = kept_slide
+
+    # An axis CHANGE leaves every motion link this joint belongs to compute-failed and cannot be
+    # re-valued back, so it is refused before anything is written. world_axis resolves HERE: its
+    # ENTITY is what tells one Custom direction from another.
+    wa_entity = _world_axis_entity(design, _AXES[wa_name]) if wa_name else kept_custom
+    if want_motion and _JOINT_TYPES[jtype][1] and not axis_kept:
+        link_err = _link_axis_refusal(
+            joint, joint_name, _CUSTOM_DIRECTION if wa_name else _AXES.get(ax_name), wa_entity)
+        if link_err:
+            return error(link_err)
 
     # Resolve new snap inputs (before rolling, so a bad input fails cleanly).
     new1 = new2 = None
@@ -195,7 +284,6 @@ def handler(joint_name: str = "", input_one: str = "", input_two: str = "",
             changed["input_two"] = label2
 
         if want_motion:
-            wa_entity = _world_axis_entity(design, _AXES[wa_name]) if wa_name else None
             did, err = _apply_motion(joint, jtype, _AXES.get(ax_name, 2), wa_entity,
                                      slide_axis_idx=slide_idx)
             if not did:
@@ -204,7 +292,7 @@ def handler(joint_name: str = "", input_one: str = "", input_two: str = "",
             if wa_name:
                 changed["world_axis"] = wa_name
             elif _JOINT_TYPES[jtype][1]:
-                changed["axis"] = ax_name
+                changed["axis"] = "custom" if kept_custom is not None else ax_name
             if jtype == "pin_slot":
                 changed["slide_axis"] = _slide_name(slide_idx, ax_name if ax_name in _AXES else "z")
 
@@ -324,7 +412,9 @@ def handler(joint_name: str = "", input_one: str = "", input_two: str = "",
     if recompute_errors:
         out["timeline_errors_after"] = recompute_errors
         out["note"] = ("Joint edited + recomputed, but the timeline still has errored feature(s) "
-                       f"({', '.join(recompute_errors)}) - the edit may over-constrain something.")
+                       f"({', '.join(recompute_errors)}) - no cause is read here. Each one's own "
+                       "message is in design_get(include=['timeline']), and a relation's in "
+                       "assembly_get(include=['relations']).")
     elif recomputed:
         out["note"] = ("Joint edited in place + full recompute (downstream features settled). "
                        "view_screenshot to view.")
@@ -332,6 +422,10 @@ def handler(joint_name: str = "", input_one: str = "", input_two: str = "",
         out["note"] = ("Joint edited in place, but the full recompute RAISED - downstream features "
                        "may be unsettled and their health unread. Run design_recompute and check "
                        "workspace_orient before trusting the model state.")
+    if axis_kept:
+        out["axis_kept"] = True
+        out["note"] += (" 'axis' was not given, so the direction the joint was already aimed at "
+                        "was kept rather than re-aimed.")
     # A limit whose read-back could not be taken is published NULL in 'changes' (and at top level),
     # never the request echoed back, and named here so the null is not read as a confirmed write.
     if limits_unverified:
@@ -370,12 +464,14 @@ tool = (
     .add_input_property("input_one", {"type": "string",
             "description": "A Joint Origin name or '<occurrence>:<snap>'."})
     .add_input_property("input_two", {"type": "string"})
-    # No schema default on either: an omitted joint_type leaves the motion alone, and 'axis' is read
-    # only when a joint_type/world_axis re-sets it.
+    # No schema default on either: sending a value a client materialized from one would RE-TYPE or
+    # RE-AIM the joint, and omitting each is exactly what leaves its motion and direction alone.
     .add_input_property(*_inputs.joint_motion(default="", options=_MOTIONS,
             description="").as_property())
     .add_input_property(*_inputs.frame_axis("axis", default="",
-            description="FRAME-relative, not world; for pin_slot the rotation axis.").as_property())
+            description="FRAME-relative, not world; on its own it re-aims the current motion, and "
+                        "omitted it KEEPS the joint's own direction. pin_slot: the rotation axis."
+            ).as_property())
     .add_input_property(*_inputs.frame_axis("slide_axis", default="",
             description="pin_slot only.").as_property())
     .add_input_property(*_inputs.frame_axis("world_axis", default="",

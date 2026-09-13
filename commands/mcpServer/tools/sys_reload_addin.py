@@ -183,11 +183,11 @@ def handler() -> dict:
             "type": "text",
         "text": (
                 "Reload scheduled. Wait ~3 seconds, verify /health identifies Fusion-Essentials, "
-                "then reconnect or refresh this server's tool list before further calls. Call "
-                "sys_capability_map and compare its schema_fingerprint with the value read before "
-                "reload. That identifies the server schema, but only exercising a changed input "
-                "proves the client consumed it. A stale client schema can comma-mangle a json-array "
-                "argument whose property it lacks while a scalar still passes."
+                "then reconnect or refresh the tool list. Compare sys_capability_map's "
+                "schema_fingerprint with the value read beforehand; that names the server schema, "
+                "while only exercising a changed input proves the client consumed it. A stale "
+                "client schema comma-mangles a json-array argument whose property it lacks; a "
+                "scalar passes."
             ),
         }],
     "isError": False,

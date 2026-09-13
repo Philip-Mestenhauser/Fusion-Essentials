@@ -136,9 +136,11 @@ def pending_move_guard(design):
     # joint back to 0 clears the flag, so a sequence that restores its drives never meets this.
     return _common.error(PENDING_MOVE_REFUSAL) if pending_position(design) is True else None
 
-# axis keyword -> JointDirections axis index (Custom=3 is not indexed here - it is selected by
-# passing a custom_entity to apply_motion instead).
+# axis keyword -> JointDirections axis index (Custom is not indexed here - it is selected by
+# passing a custom_entity to apply_motion instead), beside the Custom value itself: what a
+# direction set from an ENTITY reads back as, which no frame axis equals.
 AXES = {"x": 0, "y": 1, "z": 2}
+CUSTOM_DIRECTION = safe(lambda: adsk.fusion.JointDirections.CustomJointDirection)
 
 
 def _non_planar_face_geometry(entity, keypoint):
@@ -242,11 +244,11 @@ def _torus_keypoint_error(g, entity):
     if max(abs(a - b) for a, b in zip(kp, centre)) <= _KEYPOINT_TOL_CM:
         return None
     return (f"This torus face's joint keypoint came back as {_fmt_point(kp)} cm in WORLD space, but "
-            f"the torus face is centred at {_fmt_point(centre)} cm in WORLD space - the keypoint "
-            "does not describe the face. A torus face inside a BASE FEATURE returns its owning "
-            "COMPONENT'S ORIGIN from this call with no error, so the joint would be anchored there "
-            "instead. Pick a circular EDGE or a planar face on this body, or rebuild the torus "
-            "parametrically (model_revolve).")
+            f"the face is centred at {_fmt_point(centre)} cm in WORLD space - the keypoint does "
+            "not describe the face. A torus face inside a BASE FEATURE returns its owning "
+            "COMPONENT'S ORIGIN with no error, so the joint would be anchored there instead. Pick "
+            "a circular EDGE or a planar face on this body, or rebuild the torus parametrically "
+            "(model_revolve).")
 
 
 def build_joint_geometry(entity, edge_keypoint=None):
@@ -380,6 +382,56 @@ def current_joint_type(joint):
     motion is absent or unrecognized)."""
     jm = safe(lambda: joint.jointMotion)
     return _MOTION_CLASS_TO_TYPE.get(type(jm).__name__, "") if jm else ""
+
+
+# The JointMotion member each motion is AIMED by, beside the entity member its CUSTOM form carries.
+# Each pair is measured: a planar joint re-aimed to a world axis reads normalDirection 3 with a
+# ConstructionAxis on customNormalDirectionEntity, and pin_slot carries the rotation pair.
+_AXIS_MEMBERS = (("rotationAxis", "customRotationAxisEntity"),
+                 ("slideDirection", "customSlideDirectionEntity"),
+                 ("normalDirection", "customNormalDirectionEntity"))
+
+AXIS_NAMES = ("x", "y", "z")
+
+
+def current_axis(joint):
+    """The direction the joint's CURRENT motion is aimed by, as (a JointDirections value, the
+    entity a CUSTOM one names) - the first of the axis members that answers. (None, None) when
+    none does, so a motion carrying no axis is never read as one aimed at x."""
+    jm = safe(lambda: joint.jointMotion)
+    if jm is None:
+        return None, None
+    for member, custom_member in _AXIS_MEMBERS:
+        value = safe(lambda m=member: getattr(jm, m))
+        if isinstance(value, int) and not isinstance(value, bool):
+            entity = safe(lambda m=custom_member: getattr(jm, m)) if custom_member else None
+            return value, entity
+    return None, None
+
+
+def current_slide_index(joint):
+    """The JointDirections value the joint's current motion SLIDES along, or None when none reads -
+    the direction a pin_slot re-set keeps when 'slide_axis' was not given. A value that is not a
+    frame index comes back AS IT READS, so a caller refuses rather than falling back to one."""
+    jm = safe(lambda: joint.jointMotion)
+    value = safe(lambda: jm.slideDirection) if jm is not None else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def coupling_links(joint):
+    """The name of every MotionLink `joint` belongs to that does not ALREADY read compute-failed,
+    or None when the membership itself did not read - not evidence of no link, so a caller gating
+    an edit on it refuses rather than proceeding."""
+    links = safe(lambda: list(joint.motionLinks))
+    if links is None:
+        return None
+    out = []
+    for ml in links:
+        if ml is None:
+            continue
+        if _assert.compute_state(ml)[0] != "broken":
+            out.append(safe(lambda ml=ml: ml.name) or "(unnamed link)")
+    return out
 
 
 # Joint KIND -> the drivable degree of freedom it carries, the ONE pairing every consumer of a

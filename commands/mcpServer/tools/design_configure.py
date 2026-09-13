@@ -609,12 +609,9 @@ def _do_add_material(design, table, body, materials):
         applied[rname] = got
 
     unset = [c for c in _row_names(table) if c not in applied]
-    note = ("Material column added for this body and each listed configuration linked to its own "
-            "theme row (calling this again for the same body updates that column rather than adding "
-            "a second one). The names above are read back off the table cells. Fusion applies a "
-            "configuration's material to the geometry after that configuration is activated, and the "
-            "application trails the switch - a body material read right after "
-            "design_configure(action='activate', name=...) can still report the other "
+    note = ("Material column added for this body, each listed configuration linked to its own "
+            "theme row; the names above are read back off the table cells. A body material read "
+            "right after design_configure(action='activate', name=...) can still report the other "
             "configuration's material, so read the table, not the body, to confirm what is configured.")
     out = {"body": body, "themes": len(applied), "materials": applied,
            "column_id": safe(lambda: col.id), "column_title": safe(lambda: col.title)}

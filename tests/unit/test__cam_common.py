@@ -1249,6 +1249,52 @@ class TestToolHolder:
         assert cc.tool_holder(_HolderTool("{not json")) is None
 
 
+# ── tool_dimension_value: the ONE tool-dimension read behind cam_get's tool slice, ──
+# ── cam_edit_operation's record and cam_edit_tools' diameter override. A false 0 reaches all three. ──
+
+def _DimTool(**dims):
+    """A CAM tool carrying the named dimension parameters, each value in Fusion's internal cm."""
+    return FakeTool(parameters=FakeCAMParameters(
+        [FakeCAMParameter(name, value=value) for name, value in dims.items()]))
+
+
+class TestDimensionValue:
+    def test_a_readable_length_is_scaled_by_the_factor(self):
+        p = FakeCAMParameter("tool_diameter", "12.", value=1.2)
+        assert cc.tool_dimension_value(p, 10.0) == 12.0
+
+    def test_an_expression_that_failed_to_evaluate_reads_null_not_its_zero(self):
+        # a CAM expression naming a parameter the tool lacks is stored verbatim and its value reads
+        # a finite 0.0 - only .error separates that from a real zero (cam-parameter-bad-reference).
+        # MEASURED on a turning insert with no holder_attached parameter.
+        p = FakeCAMParameter("tool_assemblyGaugeLength",
+                             "holder_attached?tool_bodyLength + tool_holderGaugeLength:"
+                             "tool_bodyLength", value=0.0,
+                             error="Failed to evaluate expression.")
+        assert cc.tool_dimension_value(p, 10.0) is None
+
+    def test_a_real_zero_with_no_error_still_reads_zero(self):
+        # a square-ended tool CARRIES tool_cornerRadius reading 0 - an absent parameter and a zero
+        # radius are different answers, and the .error guard must not collapse them.
+        p = FakeCAMParameter("tool_cornerRadius", "0.0", value=0.0)
+        assert cc.tool_dimension_value(p, 10.0) == 0.0
+
+    def test_an_absent_parameter_reads_null(self):
+        assert cc.tool_dimension_value(None, 10.0) is None
+
+    def test_the_flute_count_carrying_an_error_reads_null(self):
+        # measured on a bundled probe: tool_numberOfFlutes reads 0 with .error 'Number of Flutes
+        # must be positive and non-zero!'.
+        tool = FakeTool(parameters=FakeCAMParameters(
+            [FakeCAMParameter("tool_numberOfFlutes", "0", value=0,
+                              error="Number of Flutes must be positive and non-zero!")]))
+        assert cc.tool_dimensions(tool, 10.0, "mm")["flutes"] is None
+
+    def test_a_readable_flute_count_survives_unscaled(self):
+        tool = _DimTool(tool_numberOfFlutes=3)
+        assert cc.tool_dimensions(tool, 10.0, "mm")["flutes"] == 3
+
+
 # ── find_setup (setup, available_names, error) / find_operation (obj, available_names) / setup_names ──
 
 

@@ -745,11 +745,16 @@ STORY = {
                 "addresses the asset. And the turning setup's own two reads: the setups slice, "
                 "where its operation_type and its blocked_by are read off the Setup on both sides "
                 "of the machine assignment, and the parameters slice for the stock mode and the "
-                "turning WCS origin it turns from"),
+                "turning WCS origin it turns from. And the TOOL slice on the counterbore cycle: "
+                "the cutter, shoulder, shaft and gauge rows Operation.tool reads, every length a "
+                "number and the shank ones positive, where the 10 mm cutter stands on a 10 mm "
+                "shoulder - the pair a cutter-only read cannot show"),
     "cam_edit_tools": ("stock the document library with the shop set this part is cut with - a "
                        "50 mm face mill, a 10 mm flat mill (10, not 12, because it has to fit "
                        "inside the 12 mm bore it finishes), a 6 mm ball, a 6 mm drill and a "
-                       "chamfer mill, each given its own tool number because two sample clones "
+                       "chamfer mill, with the flat mill's SHOULDER read back at the size its "
+                       "diameter override asked for (a 12 mm sample asked for 10 mm), each given "
+                       "its own tool number because two sample clones "
                        "that share one make the post refuse - then the turning and center-drill "
                        "pair the from_type census stands on; preset add/remove round-trip "
                        "with unit, refusal, and rollback gates; the summary census and the same "
@@ -853,7 +858,10 @@ STORY = {
                            "run leaves holds nothing suppressed. And on the hub's lathe job, the "
                            "stock-to-leave switch and its two allowance rows in ONE call on the "
                            "roughing cycle, and doLeadOut off on the finishing cycle it feeds - "
-                           "what the no-warning read of that setup stands on"),
+                           "what the no-warning read of that setup stands on. The counterbore "
+                           "cycle is then re-pointed at the 6 mm ball and put straight back on the "
+                           "mill that fits it - a REASSIGNMENT onto an operation already carrying "
+                           "a tool, each one read back on the dimensions Operation.tool answers"),
     "cam_create_machine": ("build a run-stamped 3-axis machine into the Local library, find it in "
                            "the catalog, assign it to the setup, and refuse the duplicate name; "
                            "then a run-stamped generic_4_axis for the hub's rotary setup, which is "

@@ -44,7 +44,7 @@ def _flag(obj, prop):
 _SET_OCCURRENCES_REFUSAL = (
     "action='set_occurrences' is refused: this Fusion build (2705.0.87) will not edit a rigid "
     "group's members after it is created - setOccurrences raises '3 : Cannot be edited before "
-    "rolling back' and the members read back unchanged. To change the members: "
+    "rolling back' and the members read back unchanged. To change them: "
     "assembly_edit_relations(kind='rigid_group', name=..., action='delete'), then "
     "assembly_rigid_group with the occurrences you want. Nothing was changed."
 )

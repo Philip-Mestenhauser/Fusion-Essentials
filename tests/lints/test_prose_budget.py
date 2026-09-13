@@ -16,6 +16,7 @@ import tokenize
 import pytest
 
 import _corpus
+import _prose_sites
 from conftest import TOOLS_DIR, register_all_tools
 
 NOTE_BUDGET_CHARS = 400
@@ -47,16 +48,9 @@ def _tool_files():
 
 
 def _static_len(node):
-    """The characters of STATIC literal text one expression contributes: an f-string's constant
-    pieces summed with its interpolations ignored, a `+` chain's two sides summed (so a
-    produces_block() call appended to a description contributes nothing), 0 for anything else."""
-    if isinstance(node, ast.Constant):
-        return len(node.value) if isinstance(node.value, str) else 0
-    if isinstance(node, ast.JoinedStr):
-        return sum(_static_len(v) for v in node.values)
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        return _static_len(node.left) + _static_len(node.right)
-    return 0
+    """The characters of STATIC literal text one expression contributes - the shared measurement,
+    so what this scores and what gen_wiring harvests cannot drift apart."""
+    return len(_prose_sites.static_text(node))
 
 
 def _literals(node):
@@ -96,8 +90,10 @@ def _keyed_values(node, key):
 
 def _note_sites(tree):
     """(lineno, size) for every note/error sentence: error()'s first argument, a 'note' dict value,
-    a module-level NOTE constant, and an assignment to a ['note'] subscript."""
-    out = []
+    a module-level NOTE constant, an assignment to a ['note'] subscript - and every other sentence
+    the module ships (_prose_sites.wire_prose), which is what reaches one built in a constant or
+    returned from a helper."""
+    out = [(node.lineno, len(text)) for node, text in _prose_sites.wire_prose(tree)]
     for name, value in _module_assignments(tree):
         if "NOTE" in name.id:
             out += _literals(value)
@@ -324,6 +320,80 @@ def test_the_character_caps_bite_one_character_over(tmp_path):
         assert not _probe(tmp_path, f"_{rule}{cap}at.py", template % ("x" * cap), rule)
         over = _probe(tmp_path, f"_{rule}{cap}over.py", template % ("x" * (cap + 1)), rule)
         assert len(over) == 1 and f"{cap + 1}" in over[0], over
+
+
+def _sentence(n):
+    """A filler sentence of exactly n characters - prose carries whitespace (see _prose_sites)."""
+    return ("word " * (n // 5 + 1))[:n]
+
+
+def test_a_sentence_built_away_from_its_site_is_still_scored(tmp_path):
+    # The wire pays for the sentence wherever it is assembled: a helper's return and a module
+    # constant a handler formats reach the agent exactly as a literal at the error() site does.
+    over = _sentence(NOTE_BUDGET_CHARS + 1)
+    for name, src in (("_helper_return.py", 'def _thing_error():\n    return "%s"\n' % over),
+                      ("_module_const.py",
+                       '_MSG = "%s"\ndef h():\n    return error(_MSG.format())\n' % over)):
+        found = _probe(tmp_path, name, src, "wire_notes")
+        assert len(found) == 1 and f"{NOTE_BUDGET_CHARS + 1}" in found[0], found
+
+
+def test_the_prose_floor_bites_one_character_over():
+    floor = _prose_sites.PROSE_MIN_CHARS
+    below, at = _sentence(floor - 1), _sentence(floor)
+    assert not _prose_sites.wire_prose(ast.parse('def _tail():\n    return "%s"\n' % below))
+    assert [t for _n, t in
+            _prose_sites.wire_prose(ast.parse('def _tail():\n    return "%s"\n' % at))] == [at]
+
+
+def test_a_whitespace_free_run_is_not_prose():
+    # The one shape excluded: a pytest node id (an evidence_test reference) is long and is no
+    # sentence, so it is not measured against a prose budget.
+    node_id = "tests/unit/test_x.py::TestThing::" + "test_a_thing_that_is_named_at_length" * 3
+    assert len(node_id) > _prose_sites.PROSE_MIN_CHARS
+    assert not _prose_sites.wire_prose(ast.parse('E = "%s"\n' % node_id))
+
+
+_SCRIPT_MODULE = '''
+PRELUDE = (
+    "import sys as _fe_sys\\n"
+    "_fe_out = _fe_sys.stdout\\n"
+    "while type(_fe_out).__name__ == '_NsSanitizedWriter':\\n"
+    "    _fe_out = _fe_out._original\\n"
+    "_fe_out._written = 0\\n"
+)
+LOADER = ("def run(_context):\\n"
+          "    path = " + repr(run_path) + "\\n"
+          "    with open(path, encoding='utf-8') as fh:\\n"
+          "        exec(fh.read(), {'__name__': '__main__'})\\n")
+NOTE = ("A contour of " + str(n) + " segment(s) does not hold the edges this call was given - "
+        "pass chain_groups to say which edges form the contour, or select edges of one loop.")
+'''
+
+
+def test_an_embedded_python_script_is_not_prose():
+    # A prelude and a loader are EXECUTED inside Fusion and reach an interpreter, not an agent.
+    # The loader carries an interpolated path, so the shape is judged with the holes filled - and
+    # the note beside them, built the same way out of pieces, is still prose.
+    harvested = [t for _n, t in _prose_sites.wire_prose(ast.parse(_SCRIPT_MODULE))]
+    assert len(harvested) == 1 and harvested[0].startswith("A contour of "), harvested
+
+
+def test_a_description_keeps_its_own_budget(tmp_path):
+    # Over the note cap, under its own: a description scored as a note would read as over-budget
+    # while the budget it actually answers to is the description one.
+    desc = _sentence(NOTE_BUDGET_CHARS + 1)
+    assert not _probe(tmp_path, "_desc_note.py", 'TOOL_DESCRIPTION = "%s"\n' % desc, "wire_notes")
+    assert not _probe(tmp_path, "_input_note.py",
+                      't.add_input_property("a", {"description": "%s"})\n' % desc, "wire_notes")
+
+
+def test_one_sentence_is_measured_once():
+    # A `+` chain is ONE sentence: measuring the chain AND each half would report a size nothing
+    # ships, and the same offender twice.
+    half = _sentence(NOTE_BUDGET_CHARS)
+    pairs = _prose_sites.wire_prose(ast.parse('M = ("%s"\n     + "%s")\n' % (half, half)))
+    assert [len(t) for _n, t in pairs] == [2 * NOTE_BUDGET_CHARS]
 
 
 def test_only_static_literal_text_counts(tmp_path):
