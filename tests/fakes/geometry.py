@@ -367,6 +367,18 @@ class Circle3D:
         self.curveType = _api_facts.ENUMS["core.Curve3DTypes"]["Circle3DCurveType"]
 
 
+@fusion_fake(live_type="Ellipse3D", facts=("shape-dump-ellipse3d", "enum-curve3d-types"))
+class Ellipse3D:
+    """curveType is intrinsic - see Plane. The two radii are majorRadius/minorRadius: an ellipse
+    carries no 'radius', so a reader that reaches for one gets nothing."""
+    def __init__(self, normal, center=None, major_radius=None, minor_radius=None):
+        self.normal = normal
+        self.center = center
+        self.majorRadius = major_radius
+        self.minorRadius = minor_radius
+        self.curveType = _api_facts.ENUMS["core.Curve3DTypes"]["Ellipse3DCurveType"]
+
+
 # -- viewport / camera fakes -----------------------------------------------
 
 def camera_state(cam):

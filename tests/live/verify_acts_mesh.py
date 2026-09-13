@@ -270,6 +270,11 @@ _MACHINING = [
     ("view_set", {"action": "snapshot"}, "ok", None),
     ("view_set", {"action": "isolate", "target": ["SHole:1"]},
      lambda p: p.get("action") == "isolate" and p.get("affected") == ["SHole:1"], None),
+    # REFUSED: a second occurrence alongside it. Fusion holds one isolation at a time, so the pair
+    # cannot both be isolated and the refusal hands over the two ways round it. Nothing is written -
+    # the isolation above is still the one in force for the trim beats below.
+    ("view_set", {"action": "isolate", "target": ["SHole:1", "SDel:1"]},
+     _refused("one isolation at a time", "PARENT occurrence", "snapshot"), None),
     ("view_set", lambda c: {"action": "hide",
                             "target": [_ctx_get(c, "sh_cutter", "cylinder cutter")]},
      lambda p: p.get("action") == "hide" and bool(p.get("bodies"))

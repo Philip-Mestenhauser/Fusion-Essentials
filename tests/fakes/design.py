@@ -310,7 +310,7 @@ class BRepEdge:
 
     def __init__(self, curve, start=None, end=None, point_on_edge=None, entity_token=None,
                  tangent=None, co_edges=None, param_reversed=False, body=None,
-                 assembly_proxy=_UNSET, faces=None):
+                 assembly_proxy=_UNSET, faces=None, start_token=None, end_token=None):
         self.geometry = curve
         # `faces` are the BRepFaces the edge bounds - one on a surface's open boundary, two on a
         # sealed edge; left None the edge answers no face count at all.
@@ -318,8 +318,10 @@ class BRepEdge:
             self.faces = _NamedCollection(list(faces))
         if assembly_proxy is not BRepEdge._UNSET:
             self.createForAssemblyContext = lambda _occ, _p=assembly_proxy: _p
-        self.startVertex = _Vertex(start) if start else None
-        self.endVertex = _Vertex(end) if end else None
+        # `start_token`/`end_token` are the vertex entityTokens a connectivity check compares: two
+        # edges meeting at a corner carry the same one there.
+        self.startVertex = _Vertex(start, start_token) if (start or start_token) else None
+        self.endVertex = _Vertex(end, end_token) if (end or end_token) else None
         self.pointOnEdge = point_on_edge
         self.entityToken = entity_token
         if body is not None:

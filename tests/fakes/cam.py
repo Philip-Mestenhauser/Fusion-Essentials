@@ -234,6 +234,14 @@ class _InspPoint:
         return self._deviation
 
 
+@fusion_fake(factory_for="_NamedCollection")
+def resolved_path(curves):
+    """A Curve3DPath - the connected run a CurveSelection's outputGeometry holds, count/item(i) over
+    shared Line3D / Circle3D fakes. Named without a Fake prefix: Curve3DPath has no live SHAPES dump
+    to sweep against (test_fake_shapes_exist)."""
+    return _NamedCollection(list(curves))
+
+
 class _InspPath:
     """InspectionPathResult: pointResults is its only member (a counted collection; the shared
     _NamedCollection's itemByName goes unused - the live one carries only count/item)."""

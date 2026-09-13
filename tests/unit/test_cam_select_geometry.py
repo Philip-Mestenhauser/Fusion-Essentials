@@ -33,8 +33,9 @@ import types
 import pytest
 
 from conftest import (load_tool, make_cam, install, make_sketch, MakeComp, MakeDesign, BRepBody,
-                      BRepEdge, BRepFace, Cylinder, FakeCAMParameter, FakeCAMParameters,
-                      body_proxy, _NamedCollection)
+                      BRepEdge, BRepFace, Circle3D, Cylinder, Ellipse3D, FakeCAMParameter,
+                      FakeCAMParameters, FakePoint, Line3D, body_proxy, resolved_path,
+                      _NamedCollection)
 from conftest import FakeSetup as SharedSetup, FakeOperation as SharedOp
 
 cg = load_tool("cam_select_geometry")
@@ -84,9 +85,38 @@ def _Face(radius_cm=None):
     return BRepFace(_Cyl(radius_cm) if radius_cm is not None else object())
 
 
-def _Edge():
-    """A BRep edge - the geometry a chain/contour selection takes."""
-    return BRepEdge(None)
+def _Edge(start=None, end=None, start_token=None, end_token=None, geometry=None):
+    """A BRep edge - the geometry a chain/contour selection takes. A point given for a vertex sets
+    BOTH its position and its entityToken, so the connectivity read and the resolved-contour read
+    agree; a bare token models a vertex whose position does not read."""
+    return BRepEdge(geometry,
+                    start=FakePoint(*start) if start else None,
+                    end=FakePoint(*end) if end else None,
+                    start_token=start_token or (str(start) if start else None),
+                    end_token=end_token or (str(end) if end else None))
+
+
+def _chain(*corners):
+    """The edges of one open chain through `corners` (each an (x, y, z) point) - every edge sharing
+    its start vertex with the one before it, the way two edges meeting at a corner read alike."""
+    return [_Edge(start=a, end=b) for a, b in zip(corners, corners[1:])]
+
+
+def _resolves_to(*segments):
+    """A _CurveParamValue `resolve` hook: whatever was selected, every selection resolves to ONE
+    path of these (start, end) line segments - the shape Fusion answered with when three edges
+    meeting at a corner resolved onto the bottom rim instead."""
+    def hook(_sel):
+        return [resolved_path([Line3D(FakePoint(*a), FakePoint(*b)) for a, b in segments])]
+    return hook
+
+
+def _resolves_to_circle(centre, radius):
+    """A `resolve` hook answering ONE full circle - what a closed single-vertex edge is matched
+    against, since a resolved Circle3D carries no endpoints to match."""
+    def hook(_sel):
+        return [resolved_path([Circle3D(None, FakePoint(*centre), radius)])]
+    return hook
 
 
 def _Body(name="Body1"):
@@ -94,10 +124,10 @@ def _Body(name="Body1"):
     return BRepBody(name)
 
 
-class _Path:
-    """A Curve3DPath: a counted collection of connected Curve3D objects."""
-    def __init__(self, count):
-        self.count = count
+def _segments(count):
+    """A resolved Curve3DPath of `count` curves whose endpoints do not read - for the reads that
+    are about the COUNT arithmetic alone."""
+    return resolved_path([Line3D(None, None) for _ in range(count)])
 
 
 class _CurveSelection:
@@ -197,31 +227,59 @@ class _InertLoopType(_CurveSelection):
 
 class _CurveSelections(_NamedCollection):
     """A CurveSelections collection: the shared counted walk plus the per-kind createNew* factories
-    and the clear() an applier runs first."""
-    def __init__(self):
+    and the clear() an applier runs first. `_make` only BUILDS a selection and the collection
+    appends it, so a stand-in factory works on whichever copy is being built into."""
+    def __init__(self, origin=None):
         super().__init__()
+        self._origin = origin
         self.cleared = 0
+    def copy(self):
+        """The DETACHED collection a read hands back: its own item list, the origin's stand-in
+        factory, and a clear that counts on both."""
+        clone = _CurveSelections(origin=self._origin or self)
+        clone._items = list(self._items)
+        make = self.__dict__.get("_make")
+        if make is not None:
+            clone._make = make
+        return clone
     def clear(self):
         self.cleared += 1
+        if self._origin is not None:
+            self._origin.cleared += 1
         self._items = []
     def _make(self, kind):
-        s = _CurveSelection(kind); self._items.append(s); return s
-    def createNewChainSelection(self):       return self._make("chain")
-    def createNewPocketSelection(self):      return self._make("pocket")
-    def createNewFaceContourSelection(self): return self._make("face")
-    def createNewSilhouetteSelection(self):  return self._make("silhouette")
-    def createNewSketchSelection(self):      return self._make("sketch")
-    def createNewPocketRecognitionSelection(self): return self._make("pocket_recognition")
+        return _CurveSelection(kind)
+    def _add(self, kind):
+        s = self._make(kind); self._items.append(s); return s
+    def createNewChainSelection(self):       return self._add("chain")
+    def createNewPocketSelection(self):      return self._add("pocket")
+    def createNewFaceContourSelection(self): return self._add("face")
+    def createNewSilhouetteSelection(self):  return self._add("silhouette")
+    def createNewSketchSelection(self):      return self._add("sketch")
+    def createNewPocketRecognitionSelection(self): return self._add("pocket_recognition")
 
 
 class _CurveParamValue:
-    def __init__(self):
+    """`resolve` is what Fusion answers for a selection AFTER applyCurveSelections - a callable
+    taking the selection and returning its outputGeometry paths. Left None nothing resolves, which
+    is the read every test not about the resolved contour makes."""
+    def __init__(self, resolve=None):
         self._cs = _CurveSelections()
         self.applied = 0
+        self._resolve = resolve
     def getCurveSelections(self):
-        return self._cs
+        # Live getCurveSelections hands back a DETACHED collection per call - which is what lets one
+        # captured before the clear be re-applied to put the operation back.
+        return self._cs.copy()
     def applyCurveSelections(self, cs):
+        # MEASURED: an EMPTY collection raises here, so an operation that held no selection cannot
+        # be put back to holding none.
+        if cs.count == 0:
+            raise RuntimeError("3 : Do not have valid curve selections.")
         self.applied += 1
+        if self._resolve is not None:
+            for i in range(cs.count):
+                object.__setattr__(cs.item(i), "outputGeometry", self._resolve(cs.item(i)))
         self._cs = cs
 
 
@@ -302,8 +360,8 @@ def _CAM(setups, future=None):
     return cam
 
 
-def _curve_op(name="2D Contour1", **kw):
-    return _Op(name, {"contours": _Param(_CurveParamValue()),
+def _curve_op(name="2D Contour1", resolve=None, **kw):
+    return _Op(name, {"contours": _Param(_CurveParamValue(resolve)),
                       "topHeight_mode": _Param(None), "topHeight_offset": _Param(None),
                       "bottomHeight_mode": _Param(None), "bottomHeight_offset": _Param(None)}, **kw)
 
@@ -685,7 +743,10 @@ class TestPocketFilter:
         # write a value the API will not keep.
         op, res = self._run(monkeypatch, {"min_hole_diameter": 2.5})
         assert res["isError"] is True and "holes=true" in res["message"]
-        assert _selection_of(op).minimumHoleDiameter is None
+        # The refusal lands while the collection is still detached, so the operation never took a
+        # selection at all - no bound to keep, and nothing to put back.
+        pv = op.parameters.itemByName("contours").value
+        assert pv.applied == 0 and pv.getCurveSelections().count == 0
 
     def test_holes_is_set_before_the_hole_diameter(self, monkeypatch):
         # areHolesIncluded GATES minimumHoleDiameter, so the flag has to be written first or the
@@ -731,11 +792,7 @@ class TestPocketFilter:
         cam = _CAM([_Setup([op])])
         _install_bodies(monkeypatch, cam, [_Body("Carrier")])
         pv = op.parameters.itemByName("contours").value
-        def _deaf(kind):
-            sel = _DeafHoleDiameter(kind)
-            pv._cs._items.append(sel)
-            return sel
-        pv._cs._make = _deaf
+        pv._cs._make = _DeafHoleDiameter
         res = cg.handler(operation="Adaptive1", selection="pocket_recognition", bodies=["Carrier"],
                          pocket_filter={"holes": True, "min_hole_diameter": 2.5},
                          allow_pocket_recognition=True, generate=False)
@@ -749,11 +806,7 @@ class TestPocketFilter:
         cam = _CAM([_Setup([op])])
         _install_bodies(monkeypatch, cam, [_Body("Carrier")])
         pv = op.parameters.itemByName("contours").value
-        def _clamping(kind):
-            sel = _ClampingDepth(kind)
-            pv._cs._items.append(sel)
-            return sel
-        pv._cs._make = _clamping
+        pv._cs._make = _ClampingDepth
         res = cg.handler(operation="Adaptive1", selection="pocket_recognition", bodies=["Carrier"],
                          pocket_filter={"min_depth": 1.0}, units="in",
                          allow_pocket_recognition=True, generate=False)
@@ -1072,11 +1125,7 @@ class TestKnobs:
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Face()])
         pv = op.parameters.itemByName("contours").value
-        def _inert(kind):
-            sel = _InertLoopType(kind)
-            pv._cs._items.append(sel)
-            return sel
-        pv._cs._make = _inert
+        pv._cs._make = _InertLoopType
         res = cg.handler(operation="Face1", selection="face", handles=["f"],
                          loop_type="outside", generate=False)
         assert res["isError"] is True and "loop_type" in res["message"]
@@ -1101,7 +1150,7 @@ class TestReadBack:
 
     def test_reports_what_fusion_resolved(self, monkeypatch):
         def prep(sel):
-            sel.outputGeometry = [_Path(3), _Path(5)]
+            sel.outputGeometry = [_segments(3), _segments(5)]
             sel._value = [object()] * 7        # value can EXCEED the input (same-plane expansion)
         out = _payload(self._apply(monkeypatch, prep))
         assert out["resolved"] == {"curve_paths": 2, "curve_segments": 8, "entities": 7}
@@ -2486,7 +2535,7 @@ class TestSwarfRailPair:
         def _swap_in_closed_rails(cs):
             swapped = _CurveSelections()
             for i in range(cs.count):
-                clone = swapped._make(cs.item(i).kind)
+                clone = swapped._add(cs.item(i).kind)
                 clone.inputGeometry = cs.item(i).inputGeometry
                 clone.isOpen = False
             pv._cs = swapped
@@ -2529,7 +2578,7 @@ class TestSwarfRailPair:
         def _swap_in_mixed_rails(cs):
             swapped = _CurveSelections()
             for i in range(cs.count):
-                clone = swapped._make(cs.item(i).kind)
+                clone = swapped._add(cs.item(i).kind)
                 clone.inputGeometry = cs.item(i).inputGeometry
                 clone.isOpen = (i == 0)
             pv._cs = swapped
@@ -2627,7 +2676,7 @@ class TestRailReadBack:
 
     def test_the_resolved_counts_sum_over_every_rail(self, monkeypatch):
         def prep(i, sel):
-            sel.outputGeometry = [_Path(2 + i)]
+            sel.outputGeometry = [_segments(2 + i)]
             sel._value = [object()] * (3 + i)
         out = _payload(self._rails(monkeypatch, prep))
         assert out["resolved"] == {"curve_paths": 2, "curve_segments": 5, "entities": 7}
@@ -2979,9 +3028,10 @@ class TestExplicitChainGroups:
         assert applied == [edges[:2], edges[2:]]
         assert out["chain_groups_read"] == 2
 
-    def test_flat_multiple_edges_refuse_before_height_or_selection_changes(self, monkeypatch):
+    def test_flat_disconnected_edges_refuse_before_height_or_selection_changes(self, monkeypatch):
         op = _curve_op()
-        _install(monkeypatch, _CAM([_Setup([op])]), [_Edge(), _Edge()])
+        _install(monkeypatch, _CAM([_Setup([op])]),
+                 _chain((0, 0, 1), (6, 0, 1)) + _chain((0, 9, 1), (6, 9, 1)))
         def forbidden(*_args):
             raise AssertionError("height mutation")
         monkeypatch.setattr(cg, "_set_height", forbidden)
@@ -3007,3 +3057,225 @@ class TestExplicitChainGroups:
     def test_invalid_groups_refuse(self, groups):
         res = cg.handler(operation="X", selection="chain", chain_groups=groups)
         assert res["isError"] is True and "chain_groups" in res["message"]
+
+
+# The top rim of a 60 x 40 x 10 mm block in Fusion's cm, the loop it resolves to, and the run on
+# the bottom rim under it that a corner-spanning selection was measured resolving onto instead.
+_TOP = [(0, 0, 1), (6, 0, 1), (6, 4, 1), (0, 4, 1)]
+_TOP_LOOP = [(_TOP[i], _TOP[(i + 1) % 4]) for i in range(4)]
+_BOTTOM_RUN = [((0, 0, 0), (6, 0, 0)), ((6, 0, 0), (6, 4, 0))]
+
+
+class TestFlatChainHandles:
+    """A flat handle list is ONE contour, taken only where the edges meet at shared vertices."""
+
+    def _applied(self, monkeypatch, op):
+        """What reached applyCurveSelections, one inputGeometry list per selection built."""
+        pv = op.parameters.itemByName("contours").value
+        seen = []
+        original = pv.applyCurveSelections
+        def apply(cs):
+            seen.extend([list(cs.item(i).inputGeometry) for i in range(cs.count)])
+            original(cs)
+        monkeypatch.setattr(pv, "applyCurveSelections", apply)
+        return seen
+
+    def test_one_connected_chain_reaches_apply_as_a_single_selection(self, monkeypatch):
+        op = _curve_op(resolve=_resolves_to(*_TOP_LOOP))
+        edges = _chain(*_TOP)
+        _install(monkeypatch, _CAM([_Setup([op])]), edges)
+        applied = self._applied(monkeypatch, op)
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain",
+                                  handles=["a", "b", "c"], generate=False))
+        assert applied == [edges]
+        assert out["chain_groups_read"] == 1
+        # the walked loop: Fusion resolved MORE curves than were selected, and every selected edge
+        # is among them - which is the accepted shape, not a mismatch.
+        assert out["resolved_contains_selected"] == [True]
+
+    def test_two_chains_sharing_no_vertex_are_refused_naming_the_split(self, monkeypatch):
+        op = _curve_op()
+        _install(monkeypatch, _CAM([_Setup([op])]),
+                 _chain((0, 0, 1), (6, 0, 1), (6, 4, 1)) + _chain((0, 9, 1), (6, 9, 1)))
+        res = cg.handler(operation="2D Contour1", selection="chain",
+                         handles=["a", "b", "c"], generate=False)
+        assert res["isError"] is True
+        assert "2 chains that share no vertex (2 edges, 1 edge)" in res["message"]
+        assert "chain_groups" in res["message"]
+        assert op.parameters.itemByName("contours").value.applied == 0
+
+    def test_edges_whose_vertices_do_not_read_are_refused_not_guessed(self, monkeypatch):
+        op = _curve_op()
+        _install(monkeypatch, _CAM([_Setup([op])]), [_Edge(), _Edge()])
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["a", "b"],
+                         generate=False)
+        assert res["isError"] is True
+        assert "vertices did not read" in res["message"]
+        assert op.parameters.itemByName("contours").value.applied == 0
+
+    @pytest.mark.parametrize("edges", [
+        [_Edge(start_token="v1"), _Edge(start_token="v9")],             # both half-read
+        [_Edge(start=(0, 0, 1), end=(6, 0, 1)), _Edge(start_token="v9")],   # one of the two
+    ])
+    def test_one_unread_vertex_of_a_pair_is_enough_to_refuse(self, monkeypatch, edges):
+        # an edge answering ONE of its two vertices cannot be placed on a chain either - the guard
+        # is over EITHER end, and over ANY edge of the list.
+        op = _curve_op()
+        _install(monkeypatch, _CAM([_Setup([op])]), edges)
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["a", "b"],
+                         generate=False)
+        assert res["isError"] is True
+        assert "vertices did not read" in res["message"]
+        assert op.parameters.itemByName("contours").value.applied == 0
+
+    def test_a_contour_resolved_onto_other_geometry_is_refused_and_put_back(self, monkeypatch):
+        # MEASURED: three edges meeting at one corner pass the connectivity read, and Fusion
+        # resolves the BOTTOM rim - a contour holding none of them, which generates valid.
+        op = _curve_op(resolve=_resolves_to(*_BOTTOM_RUN))
+        corner = _chain((0, 0, 1), (6, 0, 1), (6, 4, 1)) + [_Edge(start=(6, 0, 0), end=(6, 0, 1))]
+        _install(monkeypatch, _CAM([_Setup([op])]), corner)
+        pv = op.parameters.itemByName("contours").value
+        held = pv._cs._add("chain")             # the selection the operation already carries
+        res = cg.handler(operation="2D Contour1", selection="chain",
+                         handles=["a", "b", "c"], generate=False)
+        assert res["isError"] is True
+        assert "contour of 2 segment(s) at z 0 mm" in res["message"]
+        assert "missing 3 of the 3 selected edge(s)" in res["message"]
+        assert "put back to the selection it held" in res["message"]
+        back = pv.getCurveSelections()
+        assert back.count == 1 and back.item(0) is held
+
+    def test_a_mismatch_on_an_operation_that_held_nothing_says_what_it_left(self, monkeypatch):
+        # There is no empty selection to put back - applyCurveSelections refuses one - so the
+        # refusal names the selection it left on the operation instead of claiming a restore.
+        op = _curve_op(resolve=_resolves_to(*_BOTTOM_RUN))
+        _install(monkeypatch, _CAM([_Setup([op])]), _chain((0, 0, 1), (6, 0, 1), (6, 4, 1)))
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["a", "b"],
+                         generate=False)
+        assert res["isError"] is True
+        assert "held no selection before this call" in res["message"]
+        assert "now holds this rejected selection" in res["message"]
+        assert op.parameters.itemByName("contours").value.getCurveSelections().count == 1
+
+    def test_selected_edges_at_another_height_are_refused(self, monkeypatch):
+        # MEASURED case B: a top edge plus the vertical under its corner resolves to the z=0 line
+        # traced out and back - two segments, neither holding the selected top edge.
+        op = _curve_op(resolve=_resolves_to(((0, 0, 0), (6, 0, 0)), ((6, 0, 0), (0, 0, 0))))
+        _install(monkeypatch, _CAM([_Setup([op])]),
+                 [_Edge(start=(0, 0, 1), end=(6, 0, 1)), _Edge(start=(6, 0, 0), end=(6, 0, 1))])
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["a", "b"],
+                         generate=False)
+        assert res["isError"] is True
+        assert "at z 0 mm" in res["message"] and "missing 2 of the 2" in res["message"]
+
+    def test_explicit_groups_publish_the_mismatch_instead_of_refusing(self, monkeypatch):
+        # chain_groups is the caller saying where one contour ends, so a group Fusion resolves
+        # elsewhere is reported, not refused - they made that grouping.
+        op = _curve_op(resolve=_resolves_to(*_BOTTOM_RUN))
+        edges = _chain((0, 0, 1), (6, 0, 1), (6, 4, 1))
+        _install(monkeypatch, _CAM([_Setup([op])]), edges)
+        applied = self._applied(monkeypatch, op)
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain",
+                                  chain_groups=[["a", "b"]], generate=False))
+        assert applied == [edges]
+        assert out["chain_groups_read"] == 1
+        assert out["resolved_contains_selected"] == [False]
+        assert "over 1 group(s): 1 did not hold its edges" in out["note"]
+
+    def test_a_restore_that_raises_does_not_claim_the_operation_went_back(self, monkeypatch):
+        op = _curve_op(resolve=_resolves_to(*_BOTTOM_RUN))
+        _install(monkeypatch, _CAM([_Setup([op])]), _chain((0, 0, 1), (6, 0, 1), (6, 4, 1)))
+        pv = op.parameters.itemByName("contours").value
+        pv._cs._add("chain")                       # something for the restore to put back
+        original, calls = pv.applyCurveSelections, []
+        def apply(cs):
+            calls.append(cs)
+            if len(calls) > 1:
+                raise RuntimeError("3 : Do not have valid curve selections.")
+            original(cs)
+        monkeypatch.setattr(pv, "applyCurveSelections", apply)
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["a", "b"],
+                         generate=False)
+        assert res["isError"] is True
+        assert "did not read back as restored" in res["message"]
+        assert "put back to the selection it held" not in res["message"]
+
+    def test_a_restore_whose_count_disagrees_is_not_reported_as_restored(self, monkeypatch):
+        # the re-apply RAISES nothing and still leaves the operation holding something else - the
+        # count read back is the only thing that separates that from a restore.
+        op = _curve_op(resolve=_resolves_to(*_BOTTOM_RUN))
+        _install(monkeypatch, _CAM([_Setup([op])]), _chain((0, 0, 1), (6, 0, 1), (6, 4, 1)))
+        pv = op.parameters.itemByName("contours").value
+        pv._cs._add("chain")
+        original, calls = pv.applyCurveSelections, []
+        def apply(cs):
+            calls.append(cs)
+            original(cs)
+            if len(calls) > 1:
+                pv._cs._add("chain")               # one selection too many came back
+        monkeypatch.setattr(pv, "applyCurveSelections", apply)
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["a", "b"],
+                         generate=False)
+        assert res["isError"] is True
+        assert "did not read back as restored" in res["message"]
+        assert "put back to the selection it held" not in res["message"]
+
+    def test_a_contour_that_cannot_be_checked_is_refused_not_published(self, monkeypatch):
+        # the edges connect by token but their vertex points do not read, so this call cannot say
+        # the contour is the one asked for - the flat list is refused, not reported applied.
+        op = _curve_op(resolve=_resolves_to(*_BOTTOM_RUN))
+        _install(monkeypatch, _CAM([_Setup([op])]),
+                 [_Edge(start_token="v1", end_token="v2"), _Edge(start_token="v2", end_token="v3")])
+        pv = op.parameters.itemByName("contours").value
+        held = pv._cs._add("chain")
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["a", "b"],
+                         generate=False)
+        assert res["isError"] is True
+        assert "could not check against the 2 selected edge(s)" in res["message"]
+        assert "put back to the selection it held" in res["message"]
+        back = pv.getCurveSelections()
+        assert back.count == 1 and back.item(0) is held
+
+    def test_an_unreadable_group_is_named_in_the_note(self, monkeypatch):
+        # a closed NON-circular edge reads a centre and no radius, so whether the contour holds it
+        # cannot be decided - the flag is null and the note says so instead of leaving it silent.
+        op = _curve_op(resolve=_resolves_to(*_BOTTOM_RUN))
+        ellipse = _Edge(start=(1, 1, 0), end=(1, 1, 0),
+                        geometry=Ellipse3D(None, FakePoint(1, 2, 0), 2.0, 1.0))
+        _install(monkeypatch, _CAM([_Setup([op])]), [ellipse])
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain",
+                                  chain_groups=[["a"]], generate=False))
+        assert out["resolved_contains_selected"] == [None]
+        assert "over 1 group(s): 1 unread" in out["note"]
+
+    def test_a_circle_at_another_centre_is_not_the_selected_bore(self, monkeypatch):
+        # same radius, different centre: another bore on the part must not read as this one.
+        op = _curve_op(resolve=_resolves_to_circle((9, 9, 1), 0.6))
+        bore = _Edge(start=(2.4, 2, 1), end=(2.4, 2, 1),
+                     geometry=Circle3D(None, FakePoint(3, 2, 1), 0.6))
+        _install(monkeypatch, _CAM([_Setup([op])]), [bore])
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["a"],
+                                  generate=False))
+        assert out["resolved_contains_selected"] == [False]
+
+    def test_a_full_circle_is_matched_by_centre_and_radius(self, monkeypatch):
+        # A closed edge's two ends are ONE vertex and the resolved Circle3D carries no endpoints,
+        # so the circle it runs on is what says the contour holds it.
+        op = _curve_op(resolve=_resolves_to_circle((3, 2, 1), 0.6))
+        bore = _Edge(start=(2.4, 2, 1), end=(2.4, 2, 1),
+                     geometry=Circle3D(None, FakePoint(3, 2, 1), 0.6))
+        _install(monkeypatch, _CAM([_Setup([op])]), [bore])
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["a"],
+                                  generate=False))
+        assert out["resolved_contains_selected"] == [True]
+        assert out["chain_groups_read"] == 1
+
+    def test_a_single_handle_reports_its_one_group(self, monkeypatch):
+        op = _curve_op()
+        _install(monkeypatch, _CAM([_Setup([op])]), [_Edge()])
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["a"],
+                                  generate=False))
+        # the group count is published for every chain, a single handle included, and the resolved
+        # read is null where outputGeometry answered nothing to compare against.
+        assert out["selections"] == 1 and out["chain_groups_read"] == 1
+        assert out["resolved_contains_selected"] == [None]

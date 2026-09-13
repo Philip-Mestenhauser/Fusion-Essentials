@@ -696,7 +696,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No cylinder faces left after the diameter filter.
 - ' already separates each reference; use handles here.
 - chain_groups did not resolve one edge per handle; refresh the handles.
-- Multiple chain handles need chain_groups: one list per contour. Wrap connected edges in one group; separate disconnected contours. No heights or selections were changed.
+- 'handles' cannot be checked for one chain - an edge's vertices did not read. Pass chain_groups, one list per contour. No heights or selections were changed.
+- chains that share no vertex (
+- ) - a flat list is taken as ONE connected chain. Pass chain_groups, one list per contour, to group them yourself. No heights or selections were changed.
 
 ### `cam_set_nc_comment`
 - Provide a non-empty 'comment' (and/or 'set_name') - the value(s) to write. Refusing: an empty comment with no name would blank the comment on every matched NC program.
@@ -3225,7 +3227,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - PARTIAL: only the first
 - occurrences were checked - an isolation past the cap is still set.
 - isolate needs exactly one occurrence;
-- targets resolved. For several, use snapshot, clear_isolation, then hide unwanted occurrences and show selected occurrence lists. restore reapplies saved occurrence visibility.
+- targets resolved. Fusion holds one isolation at a time - isolating a second occurrence clears the first. For a sub-assembly, isolate its PARENT occurrence: its children stay visible. For any other ...
 - ' but isLightBulbOn reads back
 - - the change did not take.
 - ' but isIsolated reads back

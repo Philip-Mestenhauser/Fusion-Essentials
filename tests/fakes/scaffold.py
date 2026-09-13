@@ -146,8 +146,13 @@ def _absent_member(name):
 
 
 class _Vertex:
-    def __init__(self, point):
+    """A BRepVertex. `entity_token` is the identity two edges meeting here answer alike; left None
+    the vertex carries no token at all, which is how one whose identity will not read reads."""
+
+    def __init__(self, point, entity_token=None):
         self.geometry = point
+        if entity_token is not None:
+            self.entityToken = entity_token
 
 
 class _SimpleNamed:

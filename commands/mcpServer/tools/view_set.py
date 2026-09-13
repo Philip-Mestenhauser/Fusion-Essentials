@@ -726,8 +726,10 @@ def _do_visibility(design, action, target):
             return error(target_err)
         if len(matches) > 1:
             return error(f"isolate needs exactly one occurrence; {len(matches)} targets resolved. "
-                         "For several, use snapshot, clear_isolation, then hide unwanted occurrences "
-                         "and show selected occurrence lists. restore reapplies saved occurrence visibility.")
+                         "Fusion holds one isolation at a time - isolating a second occurrence "
+                         "clears the first. For a sub-assembly, isolate its PARENT occurrence: its "
+                         "children stay visible. For any other set, snapshot, clear_isolation, then "
+                         "hide what you do not want; restore puts the saved visibility back.")
         pairs = [(o, "occurrence") for o in matches]
     else:
         # hide/show also reach single BODIES - the only lever for a ROOT-level body or one body of a

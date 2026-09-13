@@ -396,7 +396,11 @@ class TestVisibility:
         assert res["isError"] is True
         assert "needs exactly one" in res["message"] and "12 targets resolved" in res["message"]
         assert "fuller" not in res["message"]
-        assert "hide unwanted occurrences" in res["message"] and "show selected" in res["message"]
+        # The refusal carries the platform fact that makes one target the right shape, and both
+        # ways out of it: the parent occurrence, or snapshot + hide.
+        assert "holds one isolation at a time" in res["message"]
+        assert "isolating a second occurrence clears the first" in res["message"]
+        assert "PARENT occurrence" in res["message"] and "snapshot" in res["message"]
         assert [(occ.isLightBulbOn, occ.isIsolated) for occ in occs] == before
 
     def test_ambiguous_substring_refused_not_first_match(self, monkeypatch):

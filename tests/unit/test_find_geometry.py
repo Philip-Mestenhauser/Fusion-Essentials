@@ -15,7 +15,8 @@ import sys
 
 import adsk.core
 
-from conftest import Circle3D, MakeDesign, MeshBody, load_tool, _NamedCollection, _Vertex
+from conftest import (Circle3D, Ellipse3D, MakeDesign, MeshBody, load_tool, _NamedCollection,
+                      _Vertex)
 
 fg = load_tool("find_geometry")
 
@@ -71,13 +72,10 @@ class _LineGeo:
         self.endPoint = _Pt(*end)
 
 
-class _EllipseGeo:
-    """An ellipse edge's curve. Ellipse3D has no live shape dump, so this is a local double."""
+class _EllipseGeo(Ellipse3D):
+    """An ellipse edge's curve, in the (major, minor, center) order this file's edges take."""
     def __init__(self, major, minor, center):
-        self.curveType = _CURVES.Ellipse3DCurveType
-        self.majorRadius = major
-        self.minorRadius = minor
-        self.center = _Pt(*center)
+        super().__init__(None, _Pt(*center), major, minor)
 
 
 class _EllipticalArcGeo:

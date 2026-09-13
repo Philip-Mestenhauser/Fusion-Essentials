@@ -238,6 +238,41 @@ def _knob_guard(selection, knobs):
     return None
 
 
+def _vertex_tokens(edge):
+    """The entityTokens of one edge's two vertices, or None when either will not read. A BRepVertex
+    hands back a FRESH PROXY per read, so object identity never matches even for the same vertex
+    read twice; the token is what two edges meeting at a corner answer alike."""
+    ends = (safe(lambda: edge.startVertex), safe(lambda: edge.endVertex))
+    pair = tuple(safe(lambda v=v: v.entityToken) for v in ends)
+    return None if any(t is None for t in pair) else pair
+
+
+def _chain_runs(edges):
+    """The edges grouped into vertex-connected runs, each in the order passed - ONE run when they
+    form a single chain - or None when a vertex token did not read."""
+    tokens = [_vertex_tokens(e) for e in edges]
+    if any(t is None for t in tokens):
+        return None
+    root = list(range(len(edges)))
+
+    def find(i):
+        while root[i] != i:
+            root[i] = root[root[i]]
+            i = root[i]
+        return i
+
+    seen = {}
+    for i, pair in enumerate(tokens):
+        for token in pair:
+            a, b = find(i), find(seen.setdefault(token, i))
+            if a != b:
+                root[a] = b
+    runs = {}
+    for i, edge in enumerate(edges):
+        runs.setdefault(find(i), []).append(edge)
+    return list(runs.values())
+
+
 def _resolve_geometry(selection, handles, bodies, sketches, component):
     """(entities, error) - the live objects this selection kind's inputGeometry takes, resolved
     through the input the kind uses. A body kind with no bodies resolves to an empty list: that is
@@ -353,6 +388,149 @@ def _apply_knobs(sel, selection, entities, knobs, factor, units, extra):
     return None
 
 
+# How close a selected edge's vertex must land on a resolved curve endpoint to be the same point.
+# Both sides come off the same BRep, so a real match is exact to read-back noise.
+_RESOLVED_TOLERANCE_CM = 1e-4
+
+
+def _point_xyz(point):
+    """(x, y, z) of a readable point, else None."""
+    return safe(lambda: (float(point.x), float(point.y), float(point.z)))
+
+
+def _same_point(one, other):
+    """Whether two read points are the same within _RESOLVED_TOLERANCE_CM."""
+    return one is not None and other is not None and all(
+        abs(a - b) <= _RESOLVED_TOLERANCE_CM for a, b in zip(one, other))
+
+
+def _resolved_anchors(sel):
+    """(curve endpoints, (centre, radius) per resolved circle) of ONE selection's resolved contour -
+    the two shapes a selected edge is looked for in - or None when outputGeometry will not read."""
+    paths = safe(lambda: list(sel.outputGeometry))
+    if paths is None:
+        return None
+    points, circles = [], []
+    for path in paths:
+        for i in range(safe(lambda path=path: path.count, 0) or 0):
+            curve = safe(lambda path=path, i=i: path.item(i))
+            if curve is None:
+                continue
+            for attr in ("startPoint", "endPoint"):
+                pt = _point_xyz(safe(lambda curve=curve, attr=attr: getattr(curve, attr)))
+                if pt is not None:
+                    points.append(pt)
+            centre = _point_xyz(safe(lambda curve=curve: curve.center))
+            radius = safe(lambda curve=curve: float(curve.radius))
+            if centre is not None and radius is not None:
+                circles.append((centre, radius))
+    return points, circles
+
+
+def _edge_in_resolved(edge, points, circles):
+    """Whether ONE selected edge is in the resolved contour: both its vertex points on resolved
+    curve endpoints, or - for a closed edge whose two ends are one vertex - its circle matched by
+    centre and radius. None when the edge's own geometry will not read."""
+    start = _point_xyz(safe(lambda: edge.startVertex.geometry))
+    end = _point_xyz(safe(lambda: edge.endVertex.geometry))
+    if start is None or end is None:
+        return None
+    if _same_point(start, end):
+        geom = safe(lambda: edge.geometry)
+        centre = _point_xyz(safe(lambda: geom.center))
+        radius = safe(lambda: float(geom.radius))
+        if centre is None or radius is None:
+            return None
+        return any(_same_point(centre, c) and abs(radius - r) <= _RESOLVED_TOLERANCE_CM
+                   for c, r in circles)
+    return (any(_same_point(start, pt) for pt in points)
+            and any(_same_point(end, pt) for pt in points))
+
+
+def _group_resolved(sel, group):
+    """True when the resolved contour holds every edge of `group`, False when it holds fewer, None
+    when the resolved geometry or an edge's own points would not read."""
+    anchors = _resolved_anchors(sel)
+    if anchors is None:
+        return None
+    verdicts = [_edge_in_resolved(edge, *anchors) for edge in group]
+    if any(v is None for v in verdicts):
+        return None
+    return all(verdicts)
+
+
+def _z_clause(points, factor, units):
+    """' at z <v> <units>' when every point shares one z, else '' - the number that separates a
+    contour resolved onto another loop from the edges that were selected."""
+    heights = {round(pt[2] / factor, 6) for pt in points}
+    return f" at z {heights.pop():g} {units}" if len(heights) == 1 else ""
+
+
+_RESTORED = " The operation was put back to the selection it held before this call."
+_NOT_RESTORED = (" The operation now holds this rejected selection - the previous one did not read "
+                 "back as restored; select its geometry again.")
+# applyCurveSelections on an EMPTY collection raises 'Do not have valid curve selections', so an
+# operation that held nothing cannot be put back to holding nothing.
+_NONE_TO_RESTORE = (" The operation held no selection before this call and Fusion refuses an empty "
+                    "one, so it now holds this rejected selection; select its geometry again.")
+
+
+def _restore_selection(pv, previous):
+    """The clause for putting a refused selection back: re-apply the collection captured before the
+    clear, then read the count back - a restore that did not take has to be named, not assumed."""
+    if previous is None:
+        return _NOT_RESTORED
+    want = safe(lambda: previous.count, 0) or 0
+    if not want:
+        return _NONE_TO_RESTORE
+    try:
+        pv.applyCurveSelections(previous)      # MUTATION
+    except Exception:
+        return _NOT_RESTORED
+    back = safe(lambda: pv.getCurveSelections())
+    return _RESTORED if safe(lambda: back.count) == want else _NOT_RESTORED
+
+
+def _mismatch_error(sel, group, factor, units, restored):
+    """The refusal for a flat handle list Fusion resolved onto other geometry - what it resolved,
+    against what was selected, and whether the operation went back."""
+    points, circles = _resolved_anchors(sel) or ([], [])
+    selected = [pt for edge in group for pt in (
+        _point_xyz(safe(lambda edge=edge: edge.startVertex.geometry)),
+        _point_xyz(safe(lambda edge=edge: edge.endVertex.geometry))) if pt is not None]
+    segments = sum((safe(lambda p=p: p.count, 0) or 0)
+                   for p in (safe(lambda: list(sel.outputGeometry)) or []))
+    missing = sum(1 for edge in group if _edge_in_resolved(edge, points, circles) is not True)
+    return (f"Fusion resolved a contour of {segments} segment(s)"
+            f"{_z_clause(points, factor, units)} missing {missing} of the {len(group)} selected "
+            f"edge(s){_z_clause(selected, factor, units)}. Pass chain_groups to say which edges "
+            "form the contour, or select edges of one loop." + restored)
+
+
+def _unverified_error(group, restored):
+    """The refusal for a flat handle list whose resolved contour could not be CHECKED - a closed
+    non-circular edge reads a centre and no radius, and an unreadable curve answers nothing - so
+    this call cannot say the contour is the one asked for."""
+    return (f"Fusion resolved a contour this call could not check against the {len(group)} "
+            "selected edge(s) - the resolved curves or an edge's own vertex points did not read. "
+            "Pass chain_groups to take the grouping yourself, or select edges of one loop."
+            + restored)
+
+
+def _contour_tail(result) -> str:
+    """The note clause for chain groups whose resolved contour does not hold the edges they were
+    given, or could not be read at all - the caller made that grouping, so it is published."""
+    flags = result.get("resolved_contains_selected")
+    if not isinstance(flags, list) or not (False in flags or None in flags):
+        return ""
+    parts = []
+    if False in flags:
+        parts.append(f"{flags.count(False)} did not hold its edges")
+    if None in flags:
+        parts.append(f"{flags.count(None)} unread")
+    return f" resolved_contains_selected over {len(flags)} group(s): " + ", ".join(parts) + "."
+
+
 def _read_back(cs, selection):
     """(record, fusion_error_or_None) - what the operation holds AFTER applyCurveSelections: the
     collection count, what Fusion RESOLVED off it, and the error/warning channel, summed and read
@@ -461,7 +639,8 @@ def _rail_groups(name, entities, knobs):
     return [[e] for e in entities], rail_knobs
 
 
-def _apply_curve(op, selection, entities, knobs, factor, units, extra, explicit_groups=None):
+def _apply_curve(op, selection, entities, knobs, factor, units, extra, explicit_groups=None,
+                 require_resolved=False):
     """(record, None) or (None, error) - build the CurveSelection(s) of this kind from `entities`,
     apply them, read them back, and engage the drive parameter's mode in the same call."""
     name, p = _curve_param(op)
@@ -490,6 +669,9 @@ def _apply_curve(op, selection, entities, knobs, factor, units, extra, explicit_
     cs = safe(lambda: pv.getCurveSelections())
     if cs is None:
         return None, "Could not read the operation's curve selections."
+    # The collection as the operation holds it NOW, captured before the clear below: re-applying it
+    # was measured to put the operation back, which is what a refused selection is undone with.
+    previous = safe(lambda: pv.getCurveSelections())
     groups, knobs = (_rail_groups(name, entities, knobs) if explicit_groups is None
                      else (explicit_groups, knobs))
     # Ahead of every line below: getCurveSelections() hands back a DETACHED collection, so nothing
@@ -524,8 +706,23 @@ def _apply_curve(op, selection, entities, knobs, factor, units, extra, explicit_
         return record, (f"Requested {len(explicit_groups)} chain groups but read back "
                         f"{record.get('selections')} selections. Selection changes remain; inspect "
                         "the operation before retrying.")
-    if explicit_groups is not None:
+    # The EFFECT, not the adjacency: a chain selection can resolve onto a different loop entirely
+    # (three edges meeting at a corner resolved onto the bottom rim), and nothing downstream reads
+    # it - the toolpath generates valid off the contour Fusion chose.
+    if selection == _CHAIN and name not in _PER_REFERENCE_PARAMS:
         extra["chain_groups_read"] = record["selections"]
+        sels = [safe(lambda i=i: applied.item(i)) for i in range(record["selections"])]
+        verdicts = [None if sel is None else _group_resolved(sel, group)
+                    for sel, group in zip(sels, groups)]
+        extra["resolved_contains_selected"] = verdicts
+        # A verdict that could not be READ is refused here too: the flat list is this tool's own
+        # grouping, so an unchecked contour is not something to hand back as applied.
+        if require_resolved and not all(v is True for v in verdicts):
+            missed = next(i for i, v in enumerate(verdicts) if v is not True)
+            restored = _restore_selection(pv, previous)
+            if verdicts[missed] is False:
+                return None, _mismatch_error(sels[missed], groups[missed], factor, units, restored)
+            return None, _unverified_error(groups[missed], restored)
     if name in _RAIL_PAIR_PARAMS:
         # The order the selections were built in is the order the references arrived in, and it is
         # published because getting it wrong fails SILENTLY - an upper-first pair generates valid and
@@ -857,6 +1054,7 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
         return error(herr)
 
     explicit_groups = None
+    flat_chain = False
     if selection == _CHAIN:
         curve_name, _parameter = _curve_param(op)
         if chain_groups is not None:
@@ -869,9 +1067,21 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
                 explicit_groups.append(entities[offset:offset + len(group)])
                 offset += len(group)
         elif len(entities) > 1 and curve_name not in _PER_REFERENCE_PARAMS:
-            return error("Multiple chain handles need chain_groups: one list per contour. "
-                         "Wrap connected edges in one group; separate disconnected contours. "
-                         "No heights or selections were changed.")
+            # A flat list is ONE contour, so it is taken only where the edges actually meet;
+            # chain_groups stays the way to say where one contour ends and the next begins.
+            runs = _chain_runs(entities)
+            if runs is None:
+                return error("'handles' cannot be checked for one chain - an edge's vertices did "
+                             "not read. Pass chain_groups, one list per contour. No heights or "
+                             "selections were changed.")
+            if len(runs) > 1:
+                sizes = ", ".join(f"{len(r)} edge{'' if len(r) == 1 else 's'}" for r in runs)
+                return error(f"'handles' holds {len(runs)} chains that share no vertex ({sizes}) - "
+                             "a flat list is taken as ONE connected chain. Pass chain_groups, one "
+                             "list per contour, to group them yourself. No heights or selections "
+                             "were changed.")
+            explicit_groups = [entities]
+            flat_chain = True
     result = {"operation": safe(lambda: op.name), "selection": selection}
 
     # ── every refusal that can be decided WITHOUT touching the operation runs here ──
@@ -915,7 +1125,8 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
         record = None if aerr else {"selections": count}
     else:
         record, aerr = _apply_curve(op, selection, entities, knobs, factor, units_key, extra,
-                                    explicit_groups=explicit_groups)
+                                    explicit_groups=explicit_groups,
+                                    require_resolved=flat_chain)
     if aerr:
         return error(_retained(applied, aerr))
     if not record.get("selections"):
@@ -935,8 +1146,10 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
         result["diameter_filter"] = diam_note
 
     # ── generate: LAUNCH async and return - generation runs in the background on its own ──
+    contour = _contour_tail(result)
     if not generate:
-        result["note"] = "Selection applied; pass generate=true (or cam_generate) to compute the toolpath."
+        result["note"] = ("Selection applied; pass generate=true (or cam_generate) to compute the "
+                          "toolpath.") + contour
         return ok(result)
 
     op_name = result["operation"] or operation
@@ -947,21 +1160,23 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
     if allowed is False:
         result["launched"] = False
         result["entitlement_blocked"] = {"operation": op_name, "strategy": strategy}
-        result["note"] = _BLOCKED_GENERATE.format(strategy=strategy)
+        result["note"] = _BLOCKED_GENERATE.format(strategy=strategy) + contour
         return ok(result)
 
     handle, gerr = _launch_generation(cam, op, op_name)
     if gerr:
         result["generate_error"] = gerr
         result["note"] = (f"Selection applied but generation failed to launch: {gerr}. The selection "
-                          f"is saved - fix the cause, then run cam_generate(target='{op_name}').")
+                          f"is saved - fix the cause, then run "
+                          f"cam_generate(target='{op_name}').") + contour
         return ok(_unread_entitlement(result, allowed))
     result["launched"] = True
     result["handle"] = handle
     result["note"] = (f"Selection applied; generation is launched - check "
                       f"cam_get_status(target='{op_name}') until completed=true. has_toolpath False "
                       "on completion means no path was produced, and the warning channel can be "
-                      "silent there - check the heights and the selection.") + _rail_tail(result)
+                      "silent there - check the heights and the selection."
+                      + _rail_tail(result) + contour)
     return ok(_unread_entitlement(result, allowed))
 
 

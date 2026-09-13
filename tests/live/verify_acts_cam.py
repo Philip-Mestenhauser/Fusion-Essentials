@@ -541,6 +541,37 @@ def _selected(count, on=None):
     return check
 
 
+def _line_edge(length, tol=0.5):
+    """find_geometry(kind='line_edge'): the one edge nearest the point, MEASURED. Length is what
+    says the nearest_to landed on the edge the row means rather than a neighbour a similar distance
+    away - one rim edge against the next, the frustum's base rail against its shorter top rail."""
+    def check(p):
+        matches = p.get("matches") or []
+        m = matches[0] if matches else None
+        return _measured(f"a {length} mm line edge (+/-{tol})",
+                         {"matches": len(matches), "match": m},
+                         bool(m) and m.get("kind") == "line_edge"
+                         and _near(m.get("length"), length, tol))
+    return check
+
+
+def _flat_chain_applied(paths):
+    """cam_select_geometry(chain) handed a FLAT handle list: ONE group read back off the operation,
+    the curve paths Fusion resolved off it, and - the read that says the contour is the one asked
+    for - every selected edge present in it. A chain can resolve onto another loop entirely and
+    still generate, so the count alone is not the evidence."""
+    def check(p):
+        resolved = p.get("resolved") or {}
+        return _measured(f"one chain group resolving {paths} curve path(s) holding its own edges",
+                         {"selections": p.get("selections"),
+                          "chain_groups_read": p.get("chain_groups_read"), "resolved": resolved,
+                          "resolved_contains_selected": p.get("resolved_contains_selected")},
+                         p.get("selections") == 1 and p.get("chain_groups_read") == 1
+                         and resolved.get("curve_paths") == paths
+                         and p.get("resolved_contains_selected") == [True])
+    return check
+
+
 def _setup_bodies(**counts):
     """cam_edit_setup(stock=/fixtures=/models=): each '<arg>_set' is that collection's own count
     RE-READ off the Setup after the assignment - the tool errors when the re-read disagrees with
@@ -960,6 +991,29 @@ _CAM_STORY = [
                                        "selection": "pocket",
                                        "handles": [_ctx_get(c, "part_edge", "a part edge")],
                                        "generate": False}, "refused", None),
+    # THE FLAT HANDLE LIST: the block's bottom rim, whose four line edges meet at its corners. Two
+    # adjacent ones handed over flat are taken as ONE contour - chain_groups is for saying where one
+    # contour ends and the next begins, not for wrapping every chain.
+    ("find_geometry", {"target": PART_COMP, "kind": "line_edge", "nearest_to": [0, -40, 0],
+                       "max_results": 1}, _line_edge(120.0), _fg("bk_rim_near")),
+    ("find_geometry", {"target": PART_COMP, "kind": "line_edge", "nearest_to": [60, 0, 0],
+                       "max_results": 1}, _line_edge(80.0), _fg("bk_rim_side")),
+    ("cam_select_geometry", lambda c: {"operation": _ctx_get(c, "contour_op", "the contour op"),
+                                       "selection": "chain",
+                                       "handles": [_ctx_get(c, "bk_rim_near", "the -y rim edge"),
+                                                   _ctx_get(c, "bk_rim_side", "the +x rim edge")],
+                                       "generate": False}, _flat_chain_applied(1), None),
+    # REFUSED: the opposite rim edge instead of the adjacent one - it shares no vertex with the
+    # first, so the flat list is two chains and the refusal names the split and hands over
+    # chain_groups. Nothing is written.
+    ("find_geometry", {"target": PART_COMP, "kind": "line_edge", "nearest_to": [0, 40, 0],
+                       "max_results": 1}, _line_edge(120.0), _fg("bk_rim_far")),
+    ("cam_select_geometry", lambda c: {"operation": _ctx_get(c, "contour_op", "the contour op"),
+                                       "selection": "chain",
+                                       "handles": [_ctx_get(c, "bk_rim_near", "the -y rim edge"),
+                                                   _ctx_get(c, "bk_rim_far", "the +y rim edge")],
+                                       "generate": False},
+     _refused("share no vertex", "chain_groups"), None),
     # and back to the silhouette this contour is generated from, now through NAMED bodies - the
     # branch that does NOT ride the setup's own models, and the last selection the generate acts on.
     ("cam_select_geometry", lambda c: {"operation": _ctx_get(c, "contour_op", "the contour op"),
@@ -2388,20 +2442,6 @@ def _frustum_measured(p):
                      {"x": p.get("x"), "y": p.get("y"), "z": p.get("z"), "units": p.get("units")},
                      _near(p.get("x"), _SW_BASE_X, 0.5) and _near(p.get("y"), _SW_BASE_Y, 0.5)
                      and _near(p.get("z"), _SW_H, 0.5))
-
-
-def _line_edge(length, tol=0.5):
-    """find_geometry(kind='line_edge'): the one edge nearest the point, MEASURED. Length is what
-    separates the frustum's full-width base rail from the shorter top rail the draft leans in to -
-    a nearest_to that landed on the wrong one of the two reads a different number here."""
-    def check(p):
-        matches = p.get("matches") or []
-        m = matches[0] if matches else None
-        return _measured(f"a {length} mm line edge (+/-{tol})",
-                         {"matches": len(matches), "match": m},
-                         bool(m) and m.get("kind") == "line_edge"
-                         and _near(m.get("length"), length, tol))
-    return check
 
 
 def _planar_faces(count):

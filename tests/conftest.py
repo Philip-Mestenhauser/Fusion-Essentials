@@ -108,6 +108,7 @@ from tests.fakes.scaffold import _FakeObjectCollection, _NamedCollection  # noqa
 from tests.fakes.scaffold import _SimpleNamed, _StrictEnum, _Vertex  # noqa: E402
 from tests.fakes.scaffold import _make_object_collection, entity_proxy, fusion_fake  # noqa: E402
 from tests.fakes.geometry import Camera, Circle3D, Cone, Cylinder, FakeBoundingBox3D  # noqa: E402
+from tests.fakes.geometry import Ellipse3D  # noqa: E402
 from tests.fakes.geometry import FakeInfiniteLine3D, FakeMatrix3D, FakePoint  # noqa: E402
 from tests.fakes.geometry import FakeValueInput, FakeVector3D, Line3D, Plane  # noqa: E402
 from tests.fakes.geometry import Sphere, Torus, Viewport  # noqa: E402
@@ -141,7 +142,7 @@ from tests.fakes.cam import FakeMachine, FakeOperation, FakeSetup, FakeSetupInpu
 from tests.fakes.cam import FakeSetups, FakeTool, _InspMeasure, _InspPath  # noqa: E402
 from tests.fakes.cam import _InspPoint, _Strategy, make_cam, make_cam_parameters  # noqa: E402
 from tests.fakes.cam import make_gated_cam, make_inspection_cam, strategy_factory  # noqa: E402
-from tests.fakes.cam import wcs_params  # noqa: E402
+from tests.fakes.cam import resolved_path, wcs_params  # noqa: E402
 from tests.fakes.joints import CylindricalJointMotion, FakeAsBuiltJoint  # noqa: E402
 from tests.fakes.joints import FakeContactSet, FakeJoint, FakeJointInput  # noqa: E402
 from tests.fakes.joints import FakeJointOrigin, FakeJointOriginInput, FakeJoints  # noqa: E402
