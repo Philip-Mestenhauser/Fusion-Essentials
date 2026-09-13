@@ -26,16 +26,14 @@ class OutputKind:
         return f"{self.key}: {self.label}{who}{when}".rstrip()
 
     def _present_in(self, obj) -> bool:
-        """True if self.key appears at obj's top level, or - when in_list - inside any list item."""
-        if isinstance(obj, dict):
-            if self.key in obj and obj[self.key] is not None:
-                return True
-            if self.in_list:
-                for v in obj.values():
-                    if isinstance(v, list) and any(
-                            isinstance(it, dict) and it.get(self.key) is not None for it in v):
-                        return True
-        return False
+        """True if self.key appears at obj's top level, or - when in_list - inside a list row at any
+        depth: a row's own list rows are walked too, since a payload nests (groups -> holes)."""
+        if not isinstance(obj, dict):
+            return False
+        if obj.get(self.key) is not None:
+            return True
+        return self.in_list and any(self._present_in(row) for value in obj.values()
+                                    if isinstance(value, list) for row in value)
 
     def assert_present(self, payload) -> str:
         """An error string if the decoded ok() payload doesn't carry self.key, else ''."""

@@ -11,14 +11,16 @@ re-driven so every feature follows it.
 import math
 
 from verify_core import (
-    _RECALL, _box, _chamfered, _ctx_get, _datum, _datum_plane, _document_closed,
-    _drafted, _drilled, _extent_measured, _extruded, _face_up_at, _fg, _fgn, _filleted,
-    _gap_measured, _home_address, _home_document, _interference_measured, _joined,
+    _RECALL, _box, _chamfered, _component_metadata, _ctx_get, _datum, _datum_plane,
+    _document_closed, _drafted, _drilled, _extent_measured, _extruded, _face_up_at, _fg, _fgn,
+    _filleted, _gap_measured, _holes_recognized, _holes_windowed, _home_address, _home_document,
+    _interference_measured, _joined,
     _joint_origin_at, _joint_origins_listed, _lofted, _made_component, _made_component_inactive,
-    _material_assigned, _matched, _measured, _mirrored, _moved, _near, _new_document,
-    _offset_faces, _param_added, _param_deleted, _param_read, _param_set_to, _path_count,
-    _patterned, _piped, _prof, _recall, _refused, _relation_measured, _relation_passes,
-    _relation_read, _revolved, _shelled, _swept, _watch)
+    _material_assigned, _matched, _measured, _metadata_set, _mirrored, _moved, _near,
+    _new_document, _offset_faces, _param_added, _param_deleted, _param_read, _param_set_to,
+    _param_traced, _path_count, _patterned, _piped, _prof, _recall, _recognized_cbore_walls,
+    _refused, _relation_measured, _relation_passes, _relation_read, _revolved, _shelled, _swept,
+    _watch)
 from verify_layout import _px, _py
 
 
@@ -1057,6 +1059,12 @@ _SOLIDS = [
                        "operation": "join"}, _extruded, None),
     ("model_extrude", {"sketch_name": "BracketBoss", "profile_index": 0, "distance": "PartHt / 8",
                        "operation": "join"}, _extruded, None),
+    # WHAT A PARAMETER CHANGE TOUCHES, read instead of simulated: PartHt drives StepDrop and BoreDia
+    # directly, reaches the boss diameter's own sketch dimension a hop further out, and the trace
+    # names the extrudes that consume those sketches - the recompute an agent would otherwise have
+    # to drive to find out. trace_depth=3 asks for the deep rows the default summarizes.
+    ("param_get", {"name": "PartHt", "trace": True, "trace_depth": 3},
+     _param_traced("PartHt", direct=("StepDrop", "BoreDia")), None),
     # THE POCKET, cut UP from its own floor and out through the step top - the direction with a
     # body in it. It runs one edge break PAST that face so the cut opens the pocket instead of
     # ending coincident with it.
@@ -1189,6 +1197,16 @@ _SOLIDS = [
                                           "entity_b": _ctx_get(c, "bore_wall", "the bore wall")},
      _relation_measured("coaxial"), None),
     ("model_inspect", {"target": "Bracket:1"}, _extent_measured, None),
+    # THE PART'S ENGINEERING IDENTITY: Fusion mints a part number of its own for every component, so
+    # the read comes first and shows what is there; the set then replaces it with the shop's, and
+    # the second read is the independent confirmation that the value is the component's own.
+    ("design_get", {"include": ["metadata"]}, _component_metadata("Bracket"), None),
+    ("design_set_metadata", {"target": "Bracket", "part_number": "FE-BRACKET-001",
+                             "description": "Sweep bracket"},
+     _metadata_set("Bracket", "FE-BRACKET-001", "Sweep bracket"), None),
+    ("design_get", {"include": ["metadata"], "name_filter": "Bracket"},
+     _component_metadata("Bracket", part_number="FE-BRACKET-001", description="Sweep bracket"),
+     None),
     # PMI authoring is entitled on this build, so the four rows assert the created/edited/deleted
     # values read back off the annotations - on the real geometry a note would carry: the pocket
     # floor and a mounting bore.
@@ -1755,6 +1773,17 @@ _SOLIDS = [
 
 
 _DETAILS = [
+    # THE HOLES AS THE MACHINE SEES THEM, read FIRST: the chamfers below break two of these rims,
+    # and a broken rim is a hole of a different shape, so the recognizer's grouping is read while
+    # the drilled pattern is still as model_hole left it. The saved handles drive the CAM act's
+    # recognized-hole drill; BoreDia is PartHt * 0.3 = 12 mm.
+    ("cam_find_holes", {"bodies": ["Bracket:1"]}, _holes_recognized(2, 4, 12.0),
+     _recognized_cbore_walls("recognized_cbore_walls", count_key="holes_group_count")),
+    # The window, on the same part: at 11 mm every BoreDia group falls out (the step bore and the
+    # longer boss bore are separate groups - the recognizer groups by identical length) and the
+    # 10.8 mm counterbores stay; kept plus dropped is the unwindowed total, so nothing is lost.
+    ("cam_find_holes", {"bodies": ["Bracket:1"], "max_diameter": 11},
+     _holes_windowed(12.0, "holes_group_count"), None),
     # The rims the part is handled by, each asked for by RADIUS - the one query that keeps naming
     # the same edge after the driver changes. A fillet's own tangent circle is not a corner, and
     # handing one back to model_fillet answers FILLET_NO_EDGE_FOUND, so every beat below picks a

@@ -25,7 +25,8 @@ from . import _materials
 app = adsk.core.Application.get()
 
 # The deeper slices an agent can opt into (the default returns NONE of these in full - only summaries).
-_SLICES = ("mode", "tree", "timeline", "configurations", "materials", "appearances", "attributes")
+_SLICES = ("mode", "tree", "timeline", "configurations", "materials", "appearances", "attributes",
+           "metadata")
 
 # The orientation slice's name in include=: any deep include omits that slice unless 'default' rides
 # beside it, so a deep read carries what was asked for and not the default again.
@@ -231,8 +232,8 @@ def _walk_occurrence(occ, depth, max_depth, counter, with_bodies=False, with_han
 
 
 def _matches_filter(occ, wanted):
-    """True when `wanted` (already lower-cased and non-empty) is contained in the occurrence's own
-    name or in the name of the component it places."""
+    """True when `wanted` (already lower-cased and non-empty) is contained in the entity's own name
+    or in the name of the component it places."""
     for value in (safe(lambda: occ.name), safe(lambda: occ.component.name)):
         if isinstance(value, str) and wanted in value.lower():
             return True
@@ -736,6 +737,58 @@ def _slice_attributes(design, group, key):
     return out, None
 
 
+# ── component engineering metadata (part number, description, identity) ───────────────────────────
+_METADATA_MAX_ROWS = 100
+
+_METADATA_NOTE = ("part_number and description are writable with design_set_metadata; id and "
+                  "revision_id are reads only - no tool here writes them.")
+
+_METADATA_KEYS = ("name", "part_number", "description", "id", "revision_id")
+
+
+def _metadata_row(comp):
+    """One component's engineering identity - each key omitted when its read declined."""
+    reads = (lambda: comp.name, lambda: comp.partNumber, lambda: comp.description,
+             lambda: comp.id, lambda: comp.revisionId)
+    row = {}
+    for key, read in zip(_METADATA_KEYS, reads):
+        value = safe(read)
+        if value is not None:
+            row[key] = value
+    return row
+
+
+def _slice_metadata(design, name_filter, max_results):
+    """Per-component engineering identity, the ROOT first: part number, description, id, revision.
+    name_filter keeps the components whose name carries it; the list is capped."""
+    root = safe(lambda: design.rootComponent)
+    if root is None:
+        return None, error("No root component.")
+    try:
+        cap = max(1, int(max_results)) if max_results else _METADATA_MAX_ROWS
+    except Exception:
+        cap = _METADATA_MAX_ROWS
+    wanted = (name_filter or "").strip().lower()
+    # same_component, never `is`: allComponents holds the root too, and a component wrapper is
+    # never identity-stable, so an unproven match leaves the row in rather than dropping it.
+    others = [c for c in _common.iter_collection(safe(lambda: design.allComponents))
+              if _common.same_component(c, root) is not True]
+    rows, matched = [], 0
+    for comp in [root] + others:
+        if wanted and not _matches_filter(comp, wanted):
+            continue
+        matched += 1
+        if len(rows) < cap:
+            rows.append(_metadata_row(comp))
+    out = {"component_count": matched, "returned": len(rows), "components": rows,
+           "note": _METADATA_NOTE}
+    if matched > len(rows):
+        out["truncated"] = True
+    if wanted:
+        out["name_filter"] = name_filter.strip()
+    return out, None
+
+
 # ── material / appearance catalog (both slices, one walk in _materials) ────────────────────────────
 
 def _slice_materials(design, library, name_filter, max_results):
@@ -897,6 +950,10 @@ def handler(include=None, max_depth: int = 3, component: str = "", tree_bodies: 
         out["attributes"], atterr = _slice_attributes(design, attribute_group, attribute_key)
         if atterr:
             return atterr
+    if "metadata" in inc:
+        out["metadata"], mderr = _slice_metadata(design, name_filter, max_results)
+        if mderr:
+            return mderr
 
     # advertise the slices NOT yet pulled (load-bearing: an un-named flag is invisible to the agent).
     remaining = [s for s in _SLICES if s not in inc]
@@ -906,7 +963,8 @@ def handler(include=None, max_depth: int = 3, component: str = "", tree_bodies: 
                        "'tree_handles' scope the tree; "
                        "'group'/'include_suppressed'/'timeline_params' the timeline; "
                        "'library'/'name_filter'/'max_results' the catalog; 'attribute_group' "
-                       "(required)/'attribute_key' the attributes.")
+                       "(required)/'attribute_key' the attributes; 'name_filter'/'max_results' "
+                       "the metadata rows.")
     # A census nothing could be read from leaves 'occurrences' out of contents entirely, which reads
     # exactly like a design holding no placed instance. The marker beside it is what tells the two
     # apart, so the unreadable one is stated in words as well.
@@ -955,7 +1013,8 @@ tool = (
             "description": "Catalog entries or tree TOP-LEVEL nodes containing this."})
     .add_input_property("max_results", {"type": "integer",
             "description": f"Catalog 50 (max 200); tree children per level "
-                           f"{_TREE_CHILDREN_DEFAULT}; timeline {_TIMELINE_MAX_ITEMS}."})
+                           f"{_TREE_CHILDREN_DEFAULT}; timeline {_TIMELINE_MAX_ITEMS}; "
+                           f"metadata {_METADATA_MAX_ROWS}."})
     .add_input_property("attribute_group", {"type": "string"})
     .add_input_property("attribute_key", {"type": "string"})
     .strict_schema()

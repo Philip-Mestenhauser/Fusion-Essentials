@@ -2,7 +2,7 @@
 
 _Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails the suite if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
-**Tools:** 188  |  **Input-kinds:** 22  |  write-status: `·` read · `✎` write · `⚠` destructive
+**Tools:** 190  |  **Input-kinds:** 22  |  write-status: `·` read · `✎` write · `⚠` destructive
 
 ## Input kinds — reference EXISTING geometry/structure with these (don't hand-roll a name/index)
 
@@ -39,7 +39,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 
 | | Tool | Summary |
 |---|---|---|
-| ✎ | `model_arrange` | Nest component occurrences inside a 2D boundary taken from a sketch profile. |
+| ✎ | `model_arrange` | Nest occurrences into a sketch-profile or plane envelope, 2D true-shape/rectangular or 3D packing. |
 | ✎ | `model_base_feature` | Open or close a base-feature direct-edit scope; the mesh_* tools open and finish one per call. |
 | ✎ | `model_chamfer` | Bevel edges |
 | ✎ | `model_combine` | Boolean-combine solid bodies: join, cut or intersect 'tools' into 'target', the body that survives. |
@@ -104,7 +104,7 @@ Produces: feature -> design_delete_feature. |
 Produces: feature, reversed_confirmed. |
 | ✎ | `surface_revolve` | Revolve an open profile into a sheet body; model_revolve makes a solid. |
 | ✎ | `surface_thicken` | Thicken faces into a solid wall. |
-| ✎ | `surface_trim` | Trim one visible open surface body; hide other surface bodies with view_set first. |
+| ✎ | `surface_trim` | Trim an open surface body against a tool that intersects it; only the target's cells are removed. |
 | ✎ | `surface_untrim` | Restore trimmed faces to their natural extent, or remove an internal hole loop.
 Produces: feature, area_after. |
 
@@ -165,6 +165,8 @@ Produces: entity_refs -> sketch_constrain/sketch_dimension. |
 | ✎ | `cam_edit_operation` | Edit a CAM operation: its parameters (the feeds/speeds/depths no other CAM tool reaches), its cutting tool, preset, name or suppression |
 | ✎ | `cam_edit_setup` | Edit a CAM SETUP: its machine, its model/fixture/stock selections (bodies or occurrence names, each REPLACED), its WCS, any other setup parameter, or its name |
 | ✎ | `cam_edit_tools` | Read and manage CAM TOOL LIBRARIES and their tools - list, add, remove or edit tools, manage presets, or create a library |
+| · | `cam_find_holes` | Recognize solid bodies' holes as GROUPS of similar geometry - per-hole segments, each with its face handles, for cam_select_geometry(selection='holes').
+Produce... |
 | ✎ | `cam_generate` | Launch CAM toolpath (re)generation from the MANUFACTURE workspace.
 Produces: handle -> cam_get_status. |
 | ✎ | `cam_generate_setup_sheet` | Generate a machinist SETUP SHEET, named after the DOCUMENT - a second call to the same folder overwrites it.
@@ -223,6 +225,7 @@ Produces: full... |
 Produces: full_path -> joint_create/assembly_move. |
 | ✎ | `design_recompute` | Force a full recompute so downstream features rebuild against current values |
 | ✎ | `design_remove_feature` | Remove ONE body or occurrence as a timeline Remove FEATURE. |
+| ✎ | `design_set_metadata` | Set a component's part number and/or description; an occurrence sets its COMPONENT's |
 | ⚠ | `design_set_mode` | Convert the active design between parametric and direct modeling; going direct destroys the timeline and all design history. |
 | ✎ | `design_set_name` | Rename a body or component; an occurrence renames its COMPONENT.
 Produces: name -> find_geometry/design_get. |

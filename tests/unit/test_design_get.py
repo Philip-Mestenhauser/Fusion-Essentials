@@ -10,12 +10,18 @@ is proven by live validation, not re-mocked here.
 """
 
 import json
+import os
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 from conftest import (FakeOccurrence, FakeTimeline, FakeUserParameters, MakeComp, MakeDesign,
                       _NamedCollection, error_message, load_tool, make_design)
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "live"))
+import verify_core  # noqa: E402  the live sweep's predicate over the metadata slice
 
 dg = load_tool("design_get")
 
@@ -60,6 +66,9 @@ def stub_slices(monkeypatch):
     monkeypatch.setattr(dg, "_slice_configurations", lambda d: ({"table_name": "Configs"}, None))
     monkeypatch.setattr(dg, "_slice_attributes", lambda d, group, key: (
         {"group": group, "key": key, "attributes": []}, None))
+    monkeypatch.setattr(dg, "_slice_metadata", lambda d, name_filter, max_results: (
+        {"component_count": 1, "returned": 1, "components": [], "name_filter": name_filter,
+         "max_results": max_results}, None))
     monkeypatch.setattr(dg, "_slice_materials", lambda d, library, name_filter, max_results: (
         {"kind": "materials", "library": library, "name_filter": name_filter,
          "max_results": max_results, "document": {"count": 1}, "libraries": []}, None))
@@ -148,6 +157,7 @@ class TestIncludeSlices:
         ("materials", "materials"),
         ("appearances", "appearances"),
         ("attributes", "attributes"),
+        ("metadata", "metadata"),
     ])
     def test_include_adds_the_slice(self, stub_slices, slice_name, key):
         out = _payload(dg.handler(include=[slice_name]))
@@ -1754,6 +1764,85 @@ class TestSliceAttributes:
 
         out, err = dg._slice_attributes(_Raises(), "shop", "")
         assert out is None and "shop" in error_message(err)
+
+
+# ── the metadata slice: the engineering identity a component carries ───────────────────────────────
+
+
+def _metadata_design(root, *subs):
+    """A design whose allComponents holds the root beside its sub-components, as live does."""
+    return MakeDesign(comp=root, all_components=[root, *subs])
+
+
+class TestSliceMetadata:
+    def test_the_root_leads_and_every_component_carries_its_identity(self):
+        root = MakeComp(name="Assembly", entity_token="T:root", part_number="ASM-1",
+                        description="the whole thing", component_id="id-root", revision_id="r1")
+        bracket = MakeComp(name="Bracket", entity_token="T:bracket", part_number="FE-BRACKET-001",
+                           description="Sweep bracket", component_id="id-b", revision_id="r2")
+        out, err = dg._slice_metadata(_metadata_design(root, bracket), "", 0)
+        assert err is None
+        assert [r["name"] for r in out["components"]] == ["Assembly", "Bracket"]
+        assert out["components"][1] == {"name": "Bracket", "part_number": "FE-BRACKET-001",
+                                        "description": "Sweep bracket", "id": "id-b",
+                                        "revision_id": "r2"}
+        assert out["component_count"] == 2 and out["returned"] == 2
+
+    def test_the_root_is_listed_once_though_allcomponents_holds_it_too(self):
+        # design.allComponents includes the root, so a walk that just appended it would publish the
+        # root twice - and an agent reading two rows for one component cannot tell which to write.
+        root = MakeComp(name="Assembly", entity_token="T:root", part_number="ASM-1")
+        out, _ = dg._slice_metadata(_metadata_design(root), "", 0)
+        assert [r["name"] for r in out["components"]] == ["Assembly"]
+
+    def test_a_key_that_does_not_read_is_absent_rather_than_null(self):
+        # a component that was never given a part number reads '' live; one whose read DECLINES has
+        # no answer at all, and a null row key would read as "it is empty".
+        root = MakeComp(name="Assembly", entity_token="T:root", description="", component_id="id-1")
+        out, _ = dg._slice_metadata(_metadata_design(root), "", 0)
+        row = out["components"][0]
+        assert "part_number" not in row and "revision_id" not in row
+        assert row["description"] == "" and row["id"] == "id-1"
+
+    def test_the_name_filter_narrows_to_the_components_that_carry_it(self):
+        root = MakeComp(name="Assembly", entity_token="T:root")
+        bracket = MakeComp(name="Bracket", entity_token="T:b")
+        vise = MakeComp(name="Vise", entity_token="T:v")
+        out, _ = dg._slice_metadata(_metadata_design(root, bracket, vise), "brack", 0)
+        assert [r["name"] for r in out["components"]] == ["Bracket"]
+        assert out["component_count"] == 1 and out["name_filter"] == "brack"
+
+    def test_the_cap_truncates_and_still_counts_the_rest(self):
+        root = MakeComp(name="Assembly", entity_token="T:root")
+        subs = [MakeComp(name=f"Sub{i}", entity_token=f"T:{i}") for i in range(3)]
+        out, _ = dg._slice_metadata(_metadata_design(root, *subs), "", 2)
+        assert out["returned"] == 2 and out["component_count"] == 4 and out["truncated"] is True
+
+    def test_a_page_exactly_at_the_cap_is_not_flagged(self):
+        root = MakeComp(name="Assembly", entity_token="T:root")
+        sub = MakeComp(name="Sub", entity_token="T:1")
+        out, _ = dg._slice_metadata(_metadata_design(root, sub), "", 2)
+        assert out["returned"] == 2 and "truncated" not in out
+
+    def test_no_root_component_is_an_error(self):
+        out, err = dg._slice_metadata(SimpleNamespace(rootComponent=None), "", 0)
+        assert out is None and "root component" in error_message(err)
+
+    def test_the_note_points_at_the_tool_that_writes_the_two_writable_fields(self):
+        root = MakeComp(name="Assembly", entity_token="T:root")
+        out, _ = dg._slice_metadata(_metadata_design(root), "", 0)
+        assert "design_set_metadata" in out["note"]
+
+    def test_the_live_sweep_predicate_reads_this_slice(self, monkeypatch):
+        # the seam no offline gate sees: the sweep row asserts on THESE keys, so a key renamed here
+        # reaches the live run as a red on a working read.
+        root = MakeComp(name="Assembly", entity_token="T:root")
+        bracket = MakeComp(name="Bracket", entity_token="T:b", part_number="FE-BRACKET-001",
+                           description="Sweep bracket", component_id="id-b", revision_id="r2")
+        monkeypatch.setattr(dg._common, "design", lambda: _metadata_design(root, bracket))
+        out = _payload(dg.handler(include=["metadata"]))
+        assert verify_core._component_metadata(
+            "Bracket", part_number="FE-BRACKET-001", description="Sweep bracket")(out) is True
 
 
 # ── router error propagation + _unwrap ─────────────────────────────────────────────────────────────

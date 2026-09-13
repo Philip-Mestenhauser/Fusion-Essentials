@@ -1022,6 +1022,19 @@ def ptxyz(p, f):
     return {"x": round(scaled[0], 6), "y": round(scaled[1], 6), "z": round(scaled[2], 6)}
 
 
+def box_extent(box, f):
+    """{x, y[, z]} - a bounding box's own SIZE per axis, scaled by ``f``, an axis that will not read
+    left OUT (a BoundingBox2D carries Point2Ds, whose .z raises). None when no axis reads."""
+    out = {}
+    for axis in ("x", "y", "z"):
+        lo = safe(lambda a=axis: getattr(box.minPoint, a))
+        hi = safe(lambda a=axis: getattr(box.maxPoint, a))
+        if all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+               for v in (lo, hi)) and math.isfinite((hi - lo) * f):
+            out[axis] = round((hi - lo) * f, 6)
+    return out or None
+
+
 # ── measurement (the one measureMinimumDistance core both measure tools share) ────────────────────
 
 def min_distance(entity_a, entity_b):

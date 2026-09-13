@@ -504,6 +504,12 @@ STORY = {
                        "that body is the occurrence's only one, refused naming it"),
     "model_set_material": "assign the bracket a physical steel material",
     "find_geometry": "acquire the face/edge/body handles the build consumes",
+    "cam_find_holes": ("read the bracket's drilled pattern the way a machine does - the "
+                       "recognizer's own groups, the counterbored pattern's segment shapes, and "
+                       "each hole's handles per segment; then the same read through a diameter "
+                       "window that drops the bore group and keeps the counterbores. Those "
+                       "handles drive a drill of their own in the CAM act, selected without a "
+                       "radius query and deleted again so the job the post reads is unchanged"),
     "model_measure_between": ("measure the boss wall to the bore inside it; then each jaw's grip "
                               "face to the billet, which is what says the vise is closed"),
     "model_measure_relation": ("read the boss and its own bore coaxial; then the rest of the vocabulary on "
@@ -654,7 +660,9 @@ STORY = {
                       "continuity and again through one interior RAIL whose landed count is read "
                       "off the input; rails paired with the multi-loop form refused"),
     "sketch_project": ("project the machining boundary; then section the cap on a datum plane with per-source attribution naming the parallel face that contributed nothing, project the cap sketch's line onto the top face reading the reference linkage back, and meet the same-sketch and missing-direction refusals. SKIPPED(rig): the cross-document to_surface identity fixture is not scripted"),
-    "surface_trim": "trim a sheet with a cylinder cutter",
+    "surface_trim": ("trim a sheet with a cylinder cutter while a COPLANAR decoy sheet the same "
+                     "cutter crosses stays visible - the decoy's cells named as another body's, "
+                     "left unselected, and its area re-read unchanged after the commit"),
     "surface_untrim": "untrim the internal hole loop",
     "surface_create_ruled": ("rule off a sheet's top rim - tangent, normal, along a direction "
                              "entity and at an angle read off the feature - then off a SOLID box "
@@ -666,7 +674,9 @@ STORY = {
     "model_arrange": ("nest a square pad, a bar, a disc and a second pad inside a HEXAGON boundary, "
                       "then scale the boundary and solve again - the same four parts re-nest, which "
                       "is the arrangement being a function of the boundary rather than a one-time "
-                      "placement"),
+                      "placement; then the sketchless envelopes - a sized rectangle on a plane and "
+                      "a 3D box - each judged on the feature's own statistics, arranged and "
+                      "unarranged"),
     "model_compute_holder": "compute a CAM tool holder (read)",
     "save_as_mesh": ("mesh a scratch solid (one per destructive op); then the same solid reached "
                      "through the qualified '<occurrence>:<body>' address, with the bare 'Body1' "
@@ -950,6 +960,10 @@ STORY = {
                         "rename a MESH body - the kind reads 'mesh' and a fresh read of the "
                         "component's meshes carries the new name; the empty target and the root "
                         "component refused"),
+    "design_set_metadata": ("stamp the bracket with the shop's part number and a description, the "
+                            "pair read back off the component - with the metadata slice either "
+                            "side of it: Fusion's own minted part number before, the shop's "
+                            "after"),
     "design_get": ("the timeline read once the hub's last feature has landed - nothing in the "
                    "design computed into an error or a warning; then the final design read: the "
                    "whole cast, stamped with the DOCUMENT it was read from "

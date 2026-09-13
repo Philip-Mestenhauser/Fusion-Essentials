@@ -22,7 +22,8 @@ import time
 from verify_core import (
     EXPORT_DIR, MACHINE_NAME, NOTE_MAX, Parked, TEMPLATE_NAME, _RECALL, _box, _ctx_get, _dwell,
     _extruded, _face_up_at, _fg, _fgn, _imported, _joint_origin_computed, _made_component,
-    _matched, _measured, _near, _needs, _num, _param_read, _recall, _refused, _watch, facade)
+    _matched, _measured, _near, _needs, _num, _param_read, _recall, _refused, _selected_saved,
+    _watch, facade)
 
 # THE NAMES THE STORY BUILDS UNDER, in one place for the acts that have to agree on them: the
 # modelling acts create the part and the parameter that drives it, the vise act creates the billet
@@ -59,6 +60,7 @@ _FLIP_FACE_OP = "FlipFace"     # the second setup: facing the underside
 _FLIP_BACK_OP = "FlipCbores"   # and the contour round the counterbore backsides
 _ENGRAVE_OP = "SketchEngrave"  # the engraving, driven by the scratch sketch
 _PROBE_OP = "ProbeStepTop"     # the Probe WCS cycle that touches off the stepped top
+_RECOGNIZED_OP = "DrillRecognized"   # the drill selected off cam_find_holes' handles, then deleted
 
 _FOLDER_INNER = "FolderInner"
 _FOLDER_DEEP = "FolderDeep"
@@ -893,6 +895,19 @@ _CAM_STORY = [
                                        "handles": _ctx_get(c, "mount_bores", "the mounting bores"),
                                        "min_diameter": 5.9, "max_diameter": 6.1,
                                        "generate": False}, _selected(4), None),
+    # THE RECOGNIZED HOLES, machined: the counterbore walls cam_find_holes minted handles for in the
+    # details act drive a drill of their own - the same four holes, reached through the recognizer
+    # rather than through a radius query. It is deleted immediately after, so the job the folders,
+    # the counts and the post below read is the one the rows above built.
+    ("cam_create_operation", {"setup": CAM_SETUP, "strategy": "drill", "name": _RECOGNIZED_OP,
+                              "tool_scope": "document", "tool_index": _DRILL, "generate": False},
+     _op_named(CAM_SETUP, "drill", _RECOGNIZED_OP), None),
+    ("cam_select_geometry",
+     lambda c: {"operation": _RECOGNIZED_OP, "selection": "holes",
+                "handles": _ctx_get(c, "recognized_cbore_walls", "the recognized counterbore walls"),
+                "generate": False}, _selected_saved("recognized_cbore_walls"), None),
+    # _op_deleted is defined below this list, so the predicate is built when the step RUNS.
+    ("cam_delete", {"entity": _RECOGNIZED_OP}, lambda p: _op_deleted(_RECOGNIZED_OP)(p), None),
     ("cam_create_operation", {"setup": CAM_SETUP, "strategy": "bore", "name": _BORE_OP,
                               "tool_scope": "document", "tool_index": _FLAT_MILL,
                               "generate": False},

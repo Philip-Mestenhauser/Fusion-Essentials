@@ -70,6 +70,11 @@ _ENUM_FAMILY_RE = re.compile(r"adsk\.(core|fusion|cam|drawing)\.([A-Za-z]*(?:Typ
 # a literal adsk.drawing.<Family> in tool source, so the textual scan above cannot see it - the
 # STRING argument is the real reference. enum_value resolves exclusively against adsk.drawing.
 _ENUM_BY_NAME_RE = re.compile(r"""enum_value\(\s*["']([A-Za-z]+)["']""")
+# The same string-is-the-reference case one namespace wider: a family a tool reaches through
+# getattr(adsk.<ns>, "<Family>", None) - the form that answers None on a build carrying no such
+# family - names its namespace itself, so it is scraped as that namespace's family.
+_ENUM_BY_GETATTR_RE = re.compile(
+    r"""getattr\(\s*adsk\.(core|fusion|cam|drawing)\s*,\s*["']([A-Za-z]+)["']""")
 
 
 def referenced_enum_families():
@@ -84,6 +89,8 @@ def referenced_enum_families():
                     fams.add(ns + "." + cls)
                 for cls in _ENUM_BY_NAME_RE.findall(code):
                     fams.add("drawing." + cls)
+                for ns, cls in _ENUM_BY_GETATTR_RE.findall(code):
+                    fams.add(ns + "." + cls)
     return sorted(fams)
 
 

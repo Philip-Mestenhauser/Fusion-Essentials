@@ -5,7 +5,7 @@ from these values, so the mocks carry measured data, not hand-typed claims. Each
 owned by the measurement row of the same name in tests/live/VERIFIED_API_FACTS.md."""
 
 FUSION_VERSION = "2705.1.15"
-VERIFIED_ON = "2026-09-11"
+VERIFIED_ON = "2026-09-13"
 
 # '<adsk namespace>.<Class>' -> {member: int} - seeded onto the mock adsk modules.
 ENUMS = {
@@ -22,6 +22,12 @@ ENUMS = {
     "cam.ExtensionTypes": {
         "BoundaryExtensionType": 0,
         "DistanceExtensionType": 1,
+    },
+    "cam.HoleSegmentType": {
+        "HoleSegmentTypeCylinder": 0,
+        "HoleSegmentTypeCone": 1,
+        "HoleSegmentTypeFlat": 2,
+        "HoleSegmentTypeTorus": 3,
     },
     "cam.InspectionPointState": {
         "WithinTolerance": 0,
@@ -188,6 +194,13 @@ ENUMS = {
         "AuxiliaryViewType": 4,
         "FlatPatternViewType": 5,
         "UnknownViewType": 6,
+    },
+    "fusion.ArrangeRotationTypes": {
+        "GlobalArrangeRotationType": 0,
+        "AllRotationsArrangeRotationType": 1,
+        "NoneArrangeRotationType": 2,
+        "Only180ArrangeRotationType": 3,
+        "Only90And270ArrangeRotationType": 4,
     },
     "fusion.ArrangeSolverTypes": {
         "Arrange2DTrueShapeSolverType": 0,

@@ -11,8 +11,10 @@ nesting last, because it restructures what it nests.
 from verify_core import (
     EXPORT_DIR, _RECALL, _activated, _arranged, _base_feature_open, _box, _captured, _ctx_get,
     _datum_plane, _document_closed, _document_read, _drilled, _dwell, _extent_measured, _extruded,
-    _fg, _fgn, _holder_computed, _made_component, _measured, _mesh_round_trip, _new_document, _num,
-    _rebuilt, _recall, _refused, _repair_no_op, _split_bodies, _stitched, _unstitched, _watch)
+    _fg, _fgn, _holder_computed, _made_component, _matched, _measured, _mesh_round_trip,
+    _needs, _new_document, _num, _packed, _rebuilt, _recall, _refused, _repair_no_op,
+    _same_face_area, _split_bodies, _stitched, _trim_scoped_to_target, _unstitched, _watch)
+from verify_acts_cam import MACHINING_EXTENSION
 from verify_layout import _px, _py
 
 
@@ -237,8 +239,9 @@ _MACHINING = [
     ("sketch_create", {"plane": "xy", "name": "Proj"}, "ok", None),
     ("find_geometry", {"target": "SDel", "kind": "planar_face", "nearest_to": [310, 210, 0], "max_results": 1}, "ok", _fg("proj_face")),
     ("sketch_project", lambda c: {"entities": [_ctx_get(c, "proj_face", "project face")], "sketch_name": "Proj"}, "ok", None),
-    # surface_trim + surface_untrim on intersecting sheets in clear space. The trim precondition
-    # requires the target sheet to be the only visible surface; the hidden cutter still divides it.
+    # surface_trim + surface_untrim on intersecting sheets in clear space, with a COPLANAR decoy
+    # sheet the same cutter crosses: its cells enter the same compute, so the trim below is only
+    # correct if it removes the cells its target owns and leaves the decoy's alone.
     ("model_create_component", {"name": "SHole", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "SH1"}, "ok", None),
     ("sketch_add_geometry", {"geometry": [{"kind": "line", "x1": 600, "y1": 0,
@@ -251,6 +254,19 @@ _MACHINING = [
     ("surface_extrude", {"sketch_name": "SH2", "distance": 10, "symmetric": True}, "ok", None),
     ("find_geometry", {"target": "SHole", "kind": "planar_face", "nearest_to": [620, 0, 20], "max_results": 1}, "ok", _fg("sh_sheet")),
     ("find_geometry", {"target": "SHole", "kind": "cylinder_face", "nearest_to": [620, 0, 20], "max_results": 1}, "ok", _fg("sh_cutter")),
+    # the decoy: a second sheet in the same plane, starting ON the cutter's axis so the cylinder
+    # cuts a half-disc out of it too. It stays VISIBLE through the trim.
+    ("sketch_create", {"plane": "xy", "name": "SH3"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "line", "x1": 620, "y1": 0,
+                                           "x2": 660, "y2": 0}],
+                             "sketch_name": "SH3"}, "ok", None),
+    ("surface_extrude", {"sketch_name": "SH3", "distance": 40},
+     lambda p: p["is_solid"] is False and len(p["result_bodies"]) == 1,
+     ("sh_decoy_body", _recall("sh_decoy_body", lambda p: p["result_bodies"][0]))),
+    # the decoy's area BEFORE the trim - the number the read after it is compared against.
+    ("find_geometry", {"target": "SHole", "kind": "planar_face", "nearest_to": [650, 0, 20],
+                       "max_results": 1}, _matched(1, "planar_face"),
+     ("sh_decoy_area", _recall("sh_decoy_area", lambda p: p["matches"][0]["area"]))),
     ("view_set", {"action": "snapshot"}, "ok", None),
     ("view_set", {"action": "isolate", "target": ["SHole:1"]},
      lambda p: p.get("action") == "isolate" and p.get("affected") == ["SHole:1"], None),
@@ -259,10 +275,13 @@ _MACHINING = [
      lambda p: p.get("action") == "hide" and bool(p.get("bodies"))
      and all(row.get("visible") is False for row in p["bodies"]), None),
     # the cell bookkeeping is the read-back: at least one cell REMOVED (a trim that removed none
-    # kept the whole sheet) and a kept area the phantom-cell gate could measure.
+    # kept the whole sheet), a kept area the phantom-cell gate could measure, and the decoy's cells
+    # named as another body's and left unselected.
     ("surface_trim", lambda c: {"surface": _ctx_get(c, "sh_sheet", "sheet face"), "trim_tool": _ctx_get(c, "sh_cutter", "cylinder cutter")},
-     lambda p: len(p.get("cells_removed") or []) >= 1 and (p.get("kept_area") or 0) > 0
-     and bool(p.get("result_bodies")), None),
+     _trim_scoped_to_target("sh_decoy_body"), None),
+    # the decoy measured again, INDEPENDENTLY of the trim's own foreign_bodies_unchanged read.
+    ("find_geometry", {"target": "SHole", "kind": "planar_face", "nearest_to": [650, 0, 20],
+                       "max_results": 1}, _same_face_area("sh_decoy_area"), None),
     ("find_geometry", {"target": "SHole", "kind": "planar_face", "nearest_to": [620, 0, 20], "max_results": 1}, "ok", _fg("sh_trimmed")),
     # removing the hole loop FILLS it, so the created faces' area sum is the read-back that the
     # extent grew; an untrim that created nothing leaves area_after at or below area_before.
@@ -555,6 +574,27 @@ _NESTING = _box("ArrP1", ox=200, oy=350) + [
                          {"y_before": _RECALL.get("nest_y0"),
                           "y_now": p.get("center", {}).get("y")},
                          abs(p["center"]["y"] - _RECALL["nest_y0"]) > 1.0), None),
+    _dwell(2.0),
+    # The envelope forms that need NO sketch: a sized rectangle on a plane, then the 3D packer on a
+    # box. Both are judged on the feature's own arrangeStatistics - what the solver placed and what
+    # it left out - which the profile nest above cannot show. A sized envelope is anchored on its
+    # plane's origin, so both are offset into clear ground rather than onto the vise and the CAM
+    # stock, and each nest is deleted again: these rows are about the solver, not about the field.
+    ("model_arrange", {"shapes": ["ArrP1:1", "ArrP2:1", "ArrP3:1"], "solver": "rectangular",
+                       "envelope_plane": "xy", "envelope_length": 300, "envelope_width": 200,
+                       "envelope_origin": [600, 400], "rotation": "none", "quantity": 1,
+                       "spacing": 5},
+     _packed(3, extent=(300, 200)), ("arr_sheet", lambda p: p["feature"])),
+    ("design_delete_feature",
+     lambda c: {"feature": _ctx_get(c, "arr_sheet", "the plane-envelope nest")}, "ok", None),
+    ("model_arrange", {"shapes": ["ArrP1:1", "ArrP2:1", "ArrP3:1"], "solver": "3d",
+                       "envelope_plane": "xy", "envelope_length": 200, "envelope_width": 200,
+                       "envelope_height": 100, "envelope_origin": [600, 400], "spacing": 5},
+     _needs(MACHINING_EXTENSION, _packed(3, extent=(200, 200, 100))),
+     ("arr_box", lambda p: p["feature"])),
+    ("design_delete_feature",
+     lambda c: {"feature": _ctx_get(c, "arr_box", "the 3D nest")},
+     _needs(MACHINING_EXTENSION, "ok"), None),
     _dwell(2.0),
 ]
 

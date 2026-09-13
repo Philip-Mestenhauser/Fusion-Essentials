@@ -606,6 +606,101 @@ def _face_up_at(x, y, z, tol=0.5):
     return check
 
 
+# A counterbore's segment shapes as a SET: two cylinders and the flat between them. Matched sorted
+# because nothing measured which order RecognizedHole.segment(i) reports them in.
+_CBORE_SHAPE = ("cylinder", "cylinder", "flat")
+
+
+def _counterbore_group(payload):
+    """cam_find_holes: the recognized group whose segments read as a counterbore, or None."""
+    for group in payload.get("groups") or []:
+        if sorted(s.get("type") for s in (group.get("segments") or [])) == list(_CBORE_SHAPE):
+            return group
+    return None
+
+
+def _faces_per_segment(group, hole):
+    """Whether a hole's 'faces' holds one NON-EMPTY handle list per segment of its group - the
+    alignment a caller maps a handle back to a segment through."""
+    faces, segments = hole.get("faces"), group.get("segments")
+    if not isinstance(faces, list) or not isinstance(segments, list):
+        return False
+    return len(faces) == len(segments) and all(isinstance(f, list) and f for f in faces)
+
+
+def _holes_recognized(groups_at_least, cbore_holes, wide_diameter, tol=0.1):
+    """cam_find_holes: the recognizer's OWN grouping, read as measurements - a counterbored group at
+    its own hole count, a group at the bore diameter, and every hole's faces holding one NON-EMPTY
+    handle list per segment, which is what cam_select_geometry(selection='holes') consumes."""
+    def check(p):
+        groups = p.get("groups") or []
+        cbore = _counterbore_group(p)
+        holes = [(g, h) for g in groups for h in (g.get("holes") or [])]
+        aligned = [h for g, h in holes if _faces_per_segment(g, h)]
+        return _measured(
+            f"{groups_at_least}+ hole groups, one of {cbore_holes} counterbores, one at diameter "
+            f"{wide_diameter}, a non-empty handle list per segment on every hole",
+            {"group_count": p.get("group_count"),
+             "shapes": [[s.get("type") for s in (g.get("segments") or [])] for g in groups],
+             "diameters": [g.get("top_diameter") for g in groups],
+             "counterbore_holes": cbore.get("hole_count") if cbore else None,
+             "faces": [[len(f or []) for f in (h.get("faces") or [])] for _g, h in holes[:6]],
+             "aligned": f"{len(aligned)}/{len(holes)}"},
+            (p.get("group_count") or 0) >= groups_at_least
+            and cbore is not None and cbore.get("hole_count") == cbore_holes
+            and any(_near(g.get("top_diameter"), wide_diameter, tol) for g in groups)
+            and bool(holes) and len(aligned) == len(holes))
+    return check
+
+
+def _recognized_cbore_walls(key, count_key=None):
+    """A save slot holding the COUNTERBORE WALL handles of that group - the widest cylinder
+    SEGMENT's own face list, taken across every hole, picked by diameter rather than by an assumed
+    segment order. Those are the faces a drilling operation is selected on. `count_key` also
+    recalls the UNWINDOWED group count, the total a later windowed read is partitioned against."""
+    def take(payload):
+        group = _counterbore_group(payload)
+        segments = (group or {}).get("segments") or []
+        cylinders = [(s.get("top_diameter"), i) for i, s in enumerate(segments)
+                     if s.get("type") == "cylinder" and _num(s.get("top_diameter"))]
+        if not cylinders:
+            raise AssertionError(f"no counterbored group carrying a measured cylinder: {segments}")
+        if count_key:
+            _RECALL[count_key] = payload.get("group_count")
+        wall = max(cylinders)[1]
+        return [f for h in group["holes"] for f in h["faces"][wall]]
+    return (key, _recall(key, take))
+
+
+def _holes_windowed(excluded_diameter, total_key, tol=0.1):
+    """cam_find_holes with a diameter window: the groups it dropped are COUNTED - kept plus dropped
+    is the unwindowed total recalled under `total_key`, so the window loses nothing - and no group
+    it published sits at the diameter the window excludes."""
+    def check(p):
+        groups = p.get("groups") or []
+        kept, dropped, total = p.get("group_count"), p.get("groups_out_of_range"), _RECALL.get(total_key)
+        return _measured(
+            f"kept + dropped = the {total} unwindowed groups, none left at diameter "
+            f"{excluded_diameter}",
+            {"groups_out_of_range": dropped, "group_count": kept, "unwindowed": total,
+             "diameters": [g.get("top_diameter") for g in groups]},
+            _num(kept) and _num(dropped) and _num(total) and kept >= 1 and dropped >= 1
+            and kept + dropped == total
+            and not any(_near(g.get("top_diameter"), excluded_diameter, tol) for g in groups))
+    return check
+
+
+def _selected_saved(key):
+    """cam_select_geometry: the operation holds ONE selection per handle saved under `key` - the
+    count is the saved list's own, so a save that shrank cannot pass against a literal."""
+    def check(p):
+        want = _RECALL.get(key) or []
+        return _measured(f"one selection per handle saved as {key!r}",
+                         {"selections": p.get("selections"), "saved": len(want)},
+                         bool(want) and p.get("selections") == len(want))
+    return check
+
+
 # build_path's published label - "N edge(s) from 1 seed handle" / "N edge(s) from K handles, used
 # exactly". N is read off the BUILT adsk Path, so it is the only witness to what was actually swept.
 _PATH_LABEL = re.compile(r"^(\d+) edge\(s\) from (\d+) (?:seed handle|handles, used exactly)$")
@@ -976,6 +1071,43 @@ def _stitched(p):
                      isinstance(p.get("became_solid"), bool) and bool(p.get("result_bodies")))
 
 
+def _trim_scoped_to_target(decoy_key):
+    """surface_trim: the trim removed cells the TARGET owns and left every cell owned by another
+    body in place - among them the decoy sheet whose body name is recalled under `decoy_key`.
+
+    The tool's cell compute spans other surfaces the tool crosses, so a pick over ALL the cells can
+    keep a neighbour's cell and remove the target outright; 'foreign_cells' plus the body-area
+    read-back is what says which surface this trim actually touched."""
+    def check(p):
+        owners = [row.get("owner") for row in (p.get("foreign_cells") or [])]
+        decoy = _RECALL[decoy_key]
+        return _measured(
+            f"trim scoped to the target, the decoy body '{decoy}' left in place",
+            {"cells_total": p.get("cells_total"), "cells_kept": p.get("cells_kept"),
+             "cells_removed": p.get("cells_removed"), "kept_area": p.get("kept_area"),
+             "foreign_cells": p.get("foreign_cells"), "surface": p.get("surface"),
+             "foreign_bodies_unchanged": p.get("foreign_bodies_unchanged")},
+            len(p.get("cells_removed") or []) >= 1 and bool(p.get("result_bodies"))
+            and _num(p.get("kept_area")) and p["kept_area"] > 0
+            and any(str(o).endswith(":" + str(decoy)) for o in owners)
+            and p.get("foreign_bodies_unchanged") is True)
+    return check
+
+
+def _same_face_area(key):
+    """find_geometry: the ONE face found still measures the area recalled under `key` - the read
+    that is INDEPENDENT of the write's own report that it left this body alone."""
+    def check(p):
+        ms = p.get("matches") or []
+        area = ms[0].get("area") if ms else None
+        before = _RECALL[key]
+        return _measured(f"face area still {before}",
+                         {"count": len(ms), "area": area, "before": before},
+                         len(ms) == 1 and _num(area) and _num(before)
+                         and abs(area - before) < 0.01)
+    return check
+
+
 def _base_feature_open(p):
     """model_base_feature(start): the scope reports itself open and registered."""
     return _measured("base-feature scope opened",
@@ -1002,6 +1134,33 @@ def _arranged(count):
                          {"arranged_count": p.get("arranged_count"), "moved": p.get("moved"),
                           "new_occurrence_count": p.get("new_occurrence_count")},
                          p.get("arranged_count") == count
+                         and bool(p.get("moved") or p.get("new_occurrences")))
+    return check
+
+
+def _packed(count, envelopes=1, extent=None):
+    """model_arrange into a PLANE/3D envelope: the feature's own arrangeStatistics read back - how
+    many components the solver placed, and no shortfall reported - beside the result envelope's own
+    SIZE (`extent`, the sides asked for, in mm) and the occurrences the feature added. A null
+    unarranged count is a statistics object that reported none, which the tool never reads as zero."""
+    def check(p):
+        rows = p.get("result_envelopes") or []
+        size = (rows[0].get("extent") or {}) if rows else {}
+        sized = extent is None or (len(size) == len(extent)
+                                   and all(_near(size.get(axis), want, 0.1)
+                                           for axis, want in zip("xyz", extent)))
+        return _measured(f"arrange packing (want {count} arranged, {envelopes} envelope(s), "
+                         f"extent {extent})",
+                         {"envelopes": p.get("envelopes"),
+                          "components_arranged": p.get("components_arranged"),
+                          "components_unarranged": p.get("components_unarranged"),
+                          "extent": size or None,
+                          "moved": p.get("moved"),
+                          "new_occurrence_count": p.get("new_occurrence_count")},
+                         p.get("envelopes") == envelopes
+                         and p.get("components_arranged") == count
+                         and p.get("components_unarranged") in (0, None)
+                         and sized
                          and bool(p.get("moved") or p.get("new_occurrences")))
     return check
 
@@ -1457,6 +1616,76 @@ def _param_favorited(name, favorite=True):
         return _measured(f"favorite read-back '{name}' (want {favorite})",
                          {"name": p.get("name"), "favorite": p.get("favorite")},
                          p.get("name") == name and p.get("favorite") is favorite)
+    return check
+
+
+def _param_traced(name, direct=()):
+    """param_get(trace=true): what a change to this parameter touches, read off the design's own
+    dependency lists - every named parameter ONE hop out, a parameter TWO hops out (the walk went
+    past the first ring), a row grouped under a maker carrying its slot and timeline index, the
+    features whose sketch the trace reached, and the 'reach' summary of the whole walk."""
+    def check(p):
+        rows = p.get("dependents") or []
+        reach = p.get("reach") or {}
+        # A row is either a MAKER carrying the parameters it owns, or one user parameter.
+        entries = [e for r in rows for e in (r.get("parameters") or [])]
+        entries += [r for r in rows if not r.get("parameters")]
+        hops = {e.get("name"): e.get("hops") for e in entries}
+        owned = [r for r in rows if r.get("owner_type")
+                 and any(e.get("role") for e in (r.get("parameters") or []))]
+        consumers = p.get("sketch_consumers") or []
+        features = [f.get("name") for c in consumers for f in (c.get("features") or [])]
+        keys = ("owner", "owner_type", "owner_timeline_index", "parameters")
+        return _measured(f"param trace '{name}' (want {list(direct)} at one hop)",
+                         {"parameter": (p.get("parameter") or {}).get("name"),
+                          "rows": len(rows), "parameters": len(entries),
+                          "hops": {k: v for k, v in hops.items() if k in direct},
+                          "reach": reach,
+                          "owner_rows": len(owned),
+                          "owner_sample": {k: owned[0].get(k) for k in keys} if owned else None,
+                          "sketches": [c.get("sketch") for c in consumers],
+                          "features": features[:4]},
+                         (p.get("parameter") or {}).get("name") == name
+                         and all(hops.get(d) == 1 for d in direct)
+                         # a parameter past the first ring is the TRANSITIVE walk landing: the rig
+                         # chains the driver -> a derived parameter -> that one's own dimension.
+                         and any((e.get("hops") or 0) >= 2 for e in entries)
+                         and bool(owned)
+                         and isinstance(owned[0].get("owner_timeline_index"), int)
+                         and bool(features)
+                         # the summary is the whole walk, however few rows were paged back
+                         and isinstance(reach.get("max_hops"), int) and reach["max_hops"] >= 2)
+    return check
+
+
+def _component_metadata(component, part_number=None, description=None):
+    """design_get(include=['metadata']): one component's engineering identity as the design holds
+    it - a part number and a persistent id that both read non-empty, plus the values a set landed
+    when this row is the one confirming it."""
+    def check(p):
+        rows = (p.get("metadata") or {}).get("components") or []
+        row = next((r for r in rows if r.get("name") == component), None)
+        return _measured(f"component metadata '{component}'",
+                         {"rows": len(rows), "row": row},
+                         bool(row) and bool(row.get("part_number")) and bool(row.get("id"))
+                         and (part_number is None or row.get("part_number") == part_number)
+                         and (description is None or row.get("description") == description))
+    return check
+
+
+def _metadata_set(component, part_number, description):
+    """design_set_metadata: 'part_number'/'description' are the two values READ BACK off the
+    component after the set - the tool errors when either landed different from the request - so
+    they are what the component holds, never the request echoed."""
+    def check(p):
+        return _measured(f"metadata set read-back '{component}' (want '{part_number}')",
+                         {"set": p.get("set"), "component": p.get("component"),
+                          "part_number": p.get("part_number"),
+                          "description": p.get("description"),
+                          "previous_part_number": p.get("previous_part_number")},
+                         p.get("set") is True and p.get("component") == component
+                         and p.get("part_number") == part_number
+                         and p.get("description") == description)
     return check
 
 

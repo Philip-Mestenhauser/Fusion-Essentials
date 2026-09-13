@@ -350,6 +350,9 @@ class MakeComp:
     entities a world-axis or revolve read picks from, and the three planes a plane alias resolves to.
     Each is set only when given, so a component whose origin geometry does not read stays a testable
     state; live every component carries all seven.
+
+    `part_number`, `description`, `component_id` and `revision_id` are the engineering-metadata
+    members (partNumber / description / id / revisionId), each set only when given.
     """
 
     _UNSET = object()
@@ -358,8 +361,19 @@ class MakeComp:
                  parent_design=None, mesh_bodies=None, all_occurrences=None, joints=None,
                  as_built_joints=None, joint_origins=None, rigid_groups=None, motion_links=None,
                  assembly_constraints=None, occurrences_by_component=None,
-                 origin_construction_point=_UNSET, construction_axes=None, origin_planes=None):
+                 origin_construction_point=_UNSET, construction_axes=None, origin_planes=None,
+                 part_number=None, description=None, component_id=None, revision_id=None):
         self.name = name
+        # The engineering-metadata four, each set only when asked: a component whose part number or
+        # description does not read is its own tested state.
+        if part_number is not None:
+            self.partNumber = part_number
+        if description is not None:
+            self.description = description
+        if component_id is not None:
+            self.id = component_id
+        if revision_id is not None:
+            self.revisionId = revision_id
         norm = [BRepBody(b) if isinstance(b, str) else b for b in bodies]
         for body in norm:
             # Renaming it into BRepBody(<that object>) makes `name` the object itself: every
@@ -997,8 +1011,12 @@ class FakeFeature:
     feature read through the base members - name, the health pair, the bodies/faces a result read
     walks, its timelineObject, and deleteMe answering the bool its caller gates on."""
     def __init__(self, name="Extrude1", health=None, message="", bodies=(), faces=(),
-                 suppressed=False, timeline_object=None, entity_token=None, delete_ok=True):
+                 suppressed=False, timeline_object=None, entity_token=None, delete_ok=True,
+                 parent_component=None):
         self.name = name
+        # Set only when asked: a feature whose owning component does not read is its own state.
+        if parent_component is not None:
+            self.parentComponent = parent_component
         self.healthState = (_api_facts.ENUMS["fusion.FeatureHealthStates"][
             "HealthyFeatureHealthState"] if health is None else health)
         self.errorOrWarningMessage = message
@@ -1132,15 +1150,21 @@ class FakeUserParameter:
     `text_value` given makes this a TEXT parameter: `value` then RAISES the way the live read does
     (BEHAVIOR["text_parameter_value_raises"]) and textValue carries the string, which is the pair a
     caller falling back from one to the other is judged on. Both flags are read through an `in` gate
-    so the module imports while the generated facts file is one republish behind the row."""
+    so the module imports while the generated facts file is one republish behind the row.
+
+    `dependents` and `dependencies` are the two ParameterLists every parameter carries. MEASURED:
+    each is the whole TRANSITIVE CLOSURE, not the direct edges - a chain A -> B -> C answers
+    A.dependentParameters [B, C] - so a caller wanting hops reads the expressions."""
 
     if _USER_PARAM_NO_CREATED_BY:
         createdBy = _absent_member("createdBy")
 
     def __init__(self, name="d1", expression="10 mm", value=1.0, unit="mm", comment="",
-                 favorite=False, delete_ok=True, text_value=None):
+                 favorite=False, delete_ok=True, text_value=None, dependents=(), dependencies=()):
         self.name = name
         self.expression = expression
+        self.dependentParameters = _NamedCollection(list(dependents))
+        self.dependencyParameters = _NamedCollection(list(dependencies))
         self._value = value
         self._text = text_value
         self.unit = unit
@@ -1218,15 +1242,21 @@ class FakeModelParameter:
     `tracks_expression` makes an `expression` ASSIGNMENT recompute `value` in Fusion's DATABASE
     units (cm for a length, radians for an angle) the way a live parameter re-evaluates - the pair a
     caller writing an expression and re-reading the value is judged on. Without it `expression` is a
-    plain attribute and `value` stays where it was put, which is the swallowed write."""
+    plain attribute and `value` stays where it was put, which is the swallowed write.
+
+    `dependents`/`dependencies` are the two ParameterLists a model parameter carries as well, each
+    the whole transitive CLOSURE (see FakeUserParameter) rather than the direct edges."""
 
     _DATABASE_UNITS = {"mm": 0.1, "cm": 1.0, "in": 2.54, "deg": math.pi / 180.0}
 
     def __init__(self, name="d195", owner=None, role="Distance", expression="5 mm",
-                 value=0.5, unit="mm", comment="", favorite=False, tracks_expression=False):
+                 value=0.5, unit="mm", comment="", favorite=False, tracks_expression=False,
+                 dependents=(), dependencies=()):
         self.name = name
         self._tracks = tracks_expression
         self._expression = expression
+        self.dependentParameters = _NamedCollection(list(dependents))
+        self.dependencyParameters = _NamedCollection(list(dependencies))
         self.value = value
         self.unit = unit
         self.comment = comment

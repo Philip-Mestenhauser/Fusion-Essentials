@@ -16,6 +16,7 @@ from . import _common
 from . import _inputs
 from . import _assert
 from ._surface_common import _body_names_and_solid
+from ._view_common import same_body
 
 app = adsk.core.Application.get()
 
@@ -58,36 +59,116 @@ def _parse_keep_indices(keep, total):
     return out, ""
 
 
-def _select_cells(trim_input, keep):
-    """(kept_indices, kept_area, total, err) for 'keep': omitted / "larger" keeps the single largest
-    cell by cellBody.area, "smaller" the smallest, an int/str index or list of indices keeps those,
-    and anything else is REFUSED naming the value."""
+def _placement_label(occs, i):
+    """One placement's assembly path, its name, or '?' - read POSITIONALLY, so a row that will not
+    read still stands in the count the refusal names."""
+    return (safe(lambda: occs.item(i).fullPathName) or safe(lambda: occs.item(i).name) or "?")
+
+
+def _placements_refusal(design, target):
+    """The refusal for a target whose component is placed more than once, or whose placement count
+    did not read at all - and '' for a component placed once or not at all."""
+    # MEASURED: a trim is a feature of the COMPONENT, so both placements changed - and the call
+    # reported keeping a 0.478 cm2 cell while 0.785 cm2 landed, read the same through either
+    # placement. The cells of such a compute describe neither placement nor the geometry that lands.
+    comp = safe(lambda: target.parentComponent)
+    root = safe(lambda: design.rootComponent)
+    occs = safe(lambda: root.allOccurrencesByComponent(comp)) if comp is not None else None
+    n = _common.counted(lambda: occs.count)
+    unread = ("the target's own component" if comp is None else
+              "the design root" if root is None else
+              "the placement census" if occs is None else
+              "the placement count" if n is None else "")
+    if unread:
+        # An unread count is NOT the answer "placed once": the area gates do not catch a
+        # multi-placement trim, so this is the only read standing between it and a committed feature.
+        return (f"Trim refused: {unread} did not read, so how many times the target's component is "
+                "placed is unknown - and a trim of a component placed twice trims every placement. "
+                "Re-read the design with assembly_get and retry.")
+    if n < 2:
+        return ""
+    where = _common.named_with_remainder([f"'{_placement_label(occs, i)}'" for i in range(n)])
+    return (f"Trim refused: the target's component is placed {n} times ({where}). A trim is a "
+            "feature of the COMPONENT, so every placement is trimmed, and the cells the call "
+            "reports then describe neither placement nor the geometry that lands. Trim a component "
+            "placed once: make this instance unique, or trim before the copies are placed.")
+
+
+def _hidden_target_refusal(target):
+    """The refusal for a target that does not read VISIBLE, or ''."""
+    # MEASURED: a body whose bulb is off contributes no cells to createInput at all (a hidden sheet
+    # dropped a 5-cell compute to 3), while a hidden TOOL still drives the trim. So a hidden target
+    # computes nothing of its own, and the cells that do arrive belong to other bodies.
+    if safe(lambda: target.isVisible) is True:
+        return ""
+    return (f"Trim refused: the target surface '{_inputs.qualified_body_name(target)}' does not "
+            "read as visible, and a hidden body contributes no cells for a trim to keep. Show it "
+            "with view_set action='show' and retry.")
+
+
+def _cell_owner(cell):
+    """The BRepBody a cell was cut from - BRepCell.sourceTools holds it beside the tool face - or
+    None when that read does not answer one, an ownership this trim cannot scope on."""
+    tools = safe(lambda: cell.sourceTools) if cell is not None else None
+    for t in (_common.iter_collection(tools) if tools is not None else ()):
+        if _inputs._is_brep(t):
+            return t
+    return None
+
+
+def _select_cells(trim_input, keep, target):
+    """(cell facts, the foreign owner bodies, err): every cell is classified by the body its
+    sourceTools names, 'larger'/'smaller'/an index picks among the TARGET's cells only, and a cell
+    owned by another body or of unread ownership is left unselected - never removed."""
     # For a Trim feature a SELECTED cell is REMOVED, so a kept cell keeps isSelected=False.
-    # createInput does a partial compute to populate bRepCells, and with zero cells selected add()
-    # raises "No cells are selected".
+    # createInput partial-computes cells over other surfaces the tool crosses too, and with zero
+    # cells selected add() raises "No cells are selected".
     cells = trim_input.bRepCells
     total = int(safe(lambda: cells.count, 0) or 0)
     if total == 0:
-        return None, None, 0, ("Trim failed: the trim tool does not divide the surface (no cells). "
-                               "(The trim tool must INTERSECT the surface and divide it.)")
+        return None, [], (_hidden_target_refusal(target)
+                          or "Trim failed: the trim tool does not divide the surface (no cells). "
+                             "(The trim tool must INTERSECT the surface and divide it.)")
 
     areas = [float(safe(lambda i=i: cells.item(i).cellBody.area, 0.0) or 0.0) for i in range(total)]
-    # A cell's INDEX is its address ('keep' takes an int index, 'areas' is indexed by it, and the
-    # kept indices are published), so this walk and the selection walk below stay positional:
+    # A cell's INDEX is its address ('keep' takes an int index, 'areas' and the owner list are
+    # indexed by it, and the kept indices are published), so these walks stay positional:
     # iter_collection drops an unreadable cell, sliding every later cell onto the wrong index.
+    owners = [_cell_owner(safe(lambda i=i: cells.item(i))) for i in range(total)]
+    mine, foreign, unread = [], [], []
+    for i, owner in enumerate(owners):
+        (unread if owner is None else mine if same_body(owner, target) else foreign).append(i)
+    labels = {i: _inputs.qualified_body_name(owners[i]) for i in foreign}
+    if len(unread) == total:
+        return None, [], (f"Trim refused: none of the {total} cell(s) named an owning body, so this "
+                          "trim cannot be scoped to the target. Re-read the surface with "
+                          "find_geometry and retry.")
+    if not mine:
+        whose = _common.named_with_remainder(sorted({f"'{labels[i]}'" for i in foreign}))
+        return None, [], (_hidden_target_refusal(target)
+                          or f"Trim failed: none of the {total} cell(s) computed belong to the "
+                             f"target surface - they belong to {whose}. (The trim tool must "
+                             "INTERSECT the TARGET and divide it.)")
 
     named = keep.strip().lower() if isinstance(keep, str) else keep
     if named in (None, "", [], "larger"):
-        # DEFAULT: keep the single largest cell by area
-        keep_set = {max(range(total), key=lambda i: areas[i])}
+        # DEFAULT: keep the target's single largest cell by area
+        keep_set = {max(mine, key=lambda i: areas[i])}
     elif named == "smaller":
-        keep_set = {min(range(total), key=lambda i: areas[i])}
+        keep_set = {min(mine, key=lambda i: areas[i])}
     else:
         keep_set, kerr = _parse_keep_indices(named, total)
         if kerr:
-            return None, None, total, kerr
+            return None, [], kerr
+        outside = sorted(set(keep_set) - set(mine))
+        if outside:
+            owner = labels.get(outside[0])
+            whose = f"belongs to '{owner}'" if owner else "named no owning body"
+            return None, [], (f"'keep' cell {outside[0]} {whose}, not the target - only the "
+                              f"target's own cells can be kept, and they are {mine}.")
 
     kept_area = 0.0
+    mine_set = set(mine)
     for i in range(total):
         cell = safe(lambda i=i: cells.item(i))
         if cell is None:
@@ -96,47 +177,38 @@ def _select_cells(trim_input, keep):
             cell.isSelected = False        # KEEP this cell
             kept_area += areas[i]
         else:
-            cell.isSelected = True         # REMOVE (select) this cell
-    return sorted(keep_set), round(kept_area, 6), total, None
+            cell.isSelected = i in mine_set   # REMOVE (select) only a cell the target owns
+    info = {"cells_total": total, "cells_kept": sorted(keep_set),
+            "cells_removed": [i for i in mine if i not in keep_set],
+            "kept_area": round(kept_area, 6),
+            "foreign_cells": [{"index": i, "owner": labels[i]} for i in foreign]}
+    if unread:
+        info["cells_unread"] = len(unread)
+    # One body owning several cells is ONE body to read back, keyed on its physical identity - the
+    # qualified name alone would merge two same-named bodies out of two same-named components.
+    owners_out, seen = [], set()
+    for i in foreign:
+        key = _common.native_identity(owners[i]) or labels[i]
+        if key not in seen:
+            seen.add(key)
+            owners_out.append(owners[i])
+    return info, owners_out, None
 
 
-def _visible_surface_scope(design, surface):
-    """Refuse a trim when another visible surface can enter its global cell computation."""
-    from ._view_common import same_body
-
-    def complete(collection):
-        count = collection.count
-        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-            raise ValueError("invalid collection count")
-        values = list(_common.iter_collection(collection))
-        if len(values) != count:
-            raise ValueError("incomplete collection")
-        return values
-
-    try:
-        if surface.isVisible is not True:
-            return "The target surface must be visible; use view_set action='show' first."
-        found = False
-        for component in complete(design.allComponents):
-            for body in complete(component.bRepBodies):
-                if same_body(body, surface):
-                    found = True
-                    continue
-                visible = body.isVisible
-                if visible is False:
-                    continue
-                solid = body.isSolid
-                if visible is not True or (solid is not True and solid is not False):
-                    raise ValueError("unreadable body visibility or solid state")
-                if solid is False:
-                    name = _inputs.qualified_body_name(body)
-                    return (f"Other visible surface '{name}' can enter this trim. "
-                            "Use view_set action='hide' for other surface bodies, then retry.")
-        if not found:
-            raise ValueError("target missing from body census")
-    except Exception as exc:
-        return f"Cannot establish trim surface scope: {exc}. Refresh the design and retry."
-    return None
+def _foreign_effect(rows):
+    """(verdict, the bodies whose area moved) over (label, body, area-before) rows: True when every
+    foreign body still reads its pre-add area, False when one moved, None when no pair read."""
+    changed, read = [], False
+    for label, body, before in rows:
+        after = safe(lambda body=body: body.area)
+        if before is None or after is None:
+            continue
+        read = True
+        if abs(after - before) > abs(before) * 1e-6:
+            changed.append(f"'{label}' {round(before, 4)} -> {round(after, 4)} cm2")
+    if changed:
+        return False, changed
+    return (True if read else None), []
 
 
 def handler(surface=None, trim_tool=None, keep=None) -> dict:
@@ -152,9 +224,9 @@ def handler(surface=None, trim_tool=None, keep=None) -> dict:
     tool, terr = _TRIM_TOOL.resolve(trim_tool)
     if terr:
         return error(terr)
-    scope_error = _visible_surface_scope(design, surf)
-    if scope_error:
-        return error(scope_error)
+    placements = _placements_refusal(design, surf)
+    if placements:
+        return error(placements)
     area_before = safe(lambda: surf.area)
 
     # createInput opens a transaction: commit via add or abort via cancel, explicitly and NOT under
@@ -163,23 +235,24 @@ def handler(surface=None, trim_tool=None, keep=None) -> dict:
     cell_info = None
     try:
         trim_input = comp.features.trimFeatures.createInput(tool)
-        kept, kept_area, total, cerr = _select_cells(trim_input, keep)
+        cell_info, foreign_owners, cerr = _select_cells(trim_input, keep, surf)
         if cerr:
-            # no intersection, or a 'keep' naming no real cell - either way the open transaction
-            # must be aborted before returning, and nothing is trimmed on a guessed cell.
+            # no intersection, or a 'keep' naming no cell the target owns - either way the open
+            # transaction must be aborted before returning, and nothing is trimmed on a guessed cell.
             return error(cerr + _abort(trim_input))
-        cell_info = {"cells_total": total, "cells_kept": kept,
-    "cells_removed": [i for i in range(total) if i not in set(kept)],
-    "kept_area": kept_area}
-        # PHANTOM-CELL GATE, before the add. createInput takes only the tool, so its cells span
-        # every VISIBLE surface the tool crosses; a kept area LARGER than the target's own proves a
-        # cell from another surface got in. One-sided: a smaller foreign cell sails through.
+        kept_area = cell_info["kept_area"]
+        foreign_before = [(_inputs.qualified_body_name(b), b, safe(lambda b=b: b.area))
+                          for b in foreign_owners]
+        # PHANTOM-CELL GATE, independent of ownership: a kept area LARGER than the target's own is
+        # a cell that cannot be a piece of the target. One-sided - a smaller cell sails through.
         if kept_area is not None and area_before and kept_area > area_before * (1 + 1e-6):
             aborted = _abort(trim_input)
+            owners = _common.named_with_remainder(
+                sorted({f"'{label}'" for label, _b, _a in foreign_before}) or ["none"])
             return error(
-                f"Trim aborted: kept area {round(kept_area * 100.0, 1)} mm2 is larger than "
-                f"target area {round(area_before * 100.0, 1)} mm2. HIDE other surfaces with "
-                "view_set, re-read the target and retry. The transaction was cancelled." + aborted)
+                f"Trim aborted: the kept cells measure {round(kept_area * 100.0, 1)} mm2, more "
+                f"than the target's own {round(area_before * 100.0, 1)} mm2. Other cell owners "
+                f"read: {owners}. The transaction was cancelled." + aborted)
         feature = comp.features.trimFeatures.add(trim_input)
     except Exception as e:
         # abort the open partial-compute transaction so Fusion isn't left in a bad state
@@ -202,6 +275,11 @@ def handler(surface=None, trim_tool=None, keep=None) -> dict:
             and area_after >= area_before * (1 - 1e-6)):
         return error(f"Trim committed but the surface area did not decrease "
                      f"({round(area_before, 4)} cm2 before and after) - no cell was actually removed.")
+    unchanged, moved = _foreign_effect(foreign_before)
+    if unchanged is False:
+        return error("Trim committed but a body the target does not own changed area: "
+                     f"{_common.named_with_remainder(moved)}. Undo in Fusion before continuing.")
+    owned = len(cell_info["cells_kept"]) + len(cell_info["cells_removed"])
     payload = {
     "trimmed": True,
     "feature": safe(lambda: feature.name),
@@ -209,19 +287,27 @@ def handler(surface=None, trim_tool=None, keep=None) -> dict:
     "result_body": names[0] if names else None,
     "result_bodies": names,
     "is_solid": any_solid,
-    "note": "Surface trimmed. Selected cells removed; the open transaction was committed via add().",
+    "foreign_bodies_unchanged": unchanged,
+    "note": f"Surface trimmed: the target owned {owned} of {cell_info['cells_total']} computed "
+            f"cell(s), and {len(cell_info['foreign_cells'])} cell(s) owned by another body were "
+            "left in place.",
     }
-    if cell_info is not None:
-        payload.update(cell_info)
-    payload["surface_scope"] = "no_other_visible_surfaces"
+    payload.update(cell_info)
+    unverified = []
     if any_solid is None:
-        payload["unverified"] = ["is_solid"]
+        unverified.append("is_solid")
         payload["note"] += " Not read back off the feature: is_solid."
+    if cell_info["foreign_cells"] and unchanged is None:
+        unverified.append("foreign_bodies_unchanged")
+        payload["note"] += (" No foreign body's area read on both sides of the add, so whether "
+                            "this trim left them alone is UNVERIFIED.")
+    if unverified:
+        payload["unverified"] = unverified
     return ok(payload)
 
 
 TOOL_DESCRIPTION = (
-"Trim one visible open surface body; hide other surface bodies with view_set first."
+"Trim an open surface body against a tool that intersects it; only the target's cells are removed."
 )
 tool = (
     Tool.create_simple(name="surface_trim", description=TOOL_DESCRIPTION)

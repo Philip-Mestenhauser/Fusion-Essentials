@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 188  |  **description breadcrumbs:** 268  |  **note/error breadcrumbs:** 469
+**Tools:** 190  |  **description breadcrumbs:** 270  |  **note/error breadcrumbs:** 475
   |  **guidance smells flagged:** 4
 ## Blindspots to engineer
 
@@ -14,8 +14,8 @@ close orphans, factor duplicated guards into shared helpers.
 - none detected in the scanned literals.
 
 ### Orphans (no incoming breadcrumb detected in this map)
-**Read/Acquire (6)** - higher concern, a check-your-work tool nothing points to:
-  `cam_compare_operations`, `cam_inspect_toolpaths`, `drawing_get_status`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`
+**Read/Acquire (7)** - higher concern, a check-your-work tool nothing points to:
+  `cam_compare_operations`, `cam_find_holes`, `cam_inspect_toolpaths`, `drawing_get_status`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`
 
 **Edit (55)** - usually leaf actions, scan for genuine gaps:
   `assembly_edit_contacts`, `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_configure`, `design_remove_feature`, `doc_insert_derive`, `doc_insert_import`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_insert_image`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_generate_face_groups`, `mesh_plane_cut`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_sweep`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `sketch_project`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
@@ -35,14 +35,14 @@ close orphans, factor duplicated guards into shared helpers.
 - **4x** across 1 module(s): "setMotionData reported success on '"
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
-- `doc_new`  <- 82  (desc 0, note 82)
-- `find_geometry`  <- 38  (desc 13, note 25)
+- `doc_new`  <- 83  (desc 0, note 83)
+- `find_geometry`  <- 39  (desc 13, note 26)
+- `design_get`  <- 38  (desc 10, note 28)
 - `design_delete_feature`  <- 37  (desc 16, note 21)
-- `design_get`  <- 35  (desc 9, note 26)
 - `view_screenshot`  <- 34  (desc 5, note 29)
 - `cam_get`  <- 24  (desc 11, note 13)
 - `data_get`  <- 23  (desc 10, note 13)
-- `doc_open`  <- 22  (desc 5, note 17)
+- `doc_open`  <- 23  (desc 5, note 18)
 - `sketch_get`  <- 22  (desc 5, note 17)
 - `sketch_create`  <- 21  (desc 7, note 14)
 - `model_inspect`  <- 18  (desc 3, note 15)
@@ -552,6 +552,14 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Operations that use this tool.
 - This tool is not used by any operation.
 - Every parameter's name/expression/value (value is null where unreadable). 'formula_source' marks a parameter tracking another (editing it overwrites that relationship). Set one with action='edit'.
+
+### `cam_find_holes`
+- Omitted 'bodies' scans every solid body. Each hole's 'faces' lists handles PER SEGMENT, in the group's 'segments' order - pass handles to cam_select_geometry(selection='holes', handles=[...]), whic...
+- No active design (open or create a document first).
+- No solid body to recognize holes on:
+- unreadable body/bodies were skipped. Name a solid body in 'bodies' (find_geometry / design_get(include=['tree'])).
+- surface_bodies_skipped
+- unreadable_bodies_skipped
 
 ### `cam_generate`
 - Generation launch returned no future (nothing to generate?).
@@ -1190,6 +1198,18 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' is still present in '
 - after) - treat the removal as failed.
 - Remove failed (removeFeatures.add raised):
+
+### `design_set_metadata`
+- ' - read back after the set.
+- Nothing to set - pass 'part_number', 'description', or both.
+- An empty 'part_number' is ignored by Fusion - the component keeps the number it already has. Pass the number to set.
+- No active design. Open a document first (see doc_open / doc_new).
+- Could not reach the component behind occurrence '
+- ' to set its metadata.
+- Could not set metadata on
+- ', but the value could not be read back, so the set is unverified. Read it with design_get(include=['metadata']).
+- ' after it was set to '
+- ' - the value that LANDED is not the one requested.
 
 ### `design_set_mode`
 - The design mode does not read back after the assignment, so the conversion is UNCONFIRMED - 'converted' and 'history_discarded' are null. Re-read with design_get(include=['mode']) to see what the d...
@@ -1980,21 +2000,37 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - . A common cause is a non-watertight or very dense mesh.
 
 ### `model_arrange`
-- Shapes arranged within the boundary. Pair with view_screenshot (top) to view the nest.
+- Shapes arranged within the envelope. Pair with view_screenshot (top) to view the nest.
 - '. Use mm, cm, or in.
-- Unknown solver '%s'. Use 'true_shape' or 'rectangular'.
+- Unknown solver '%s'. Use 'true_shape', 'rectangular' or '3d'.
 - No active design. Create or open a document first (see doc_new).
-- ' for the boundary. Use sketch_get.
-- ' has no closed profile to use as the envelope. Draw a closed boundary shape first.
+- 'quantity' must be a whole number of 1 or more, got
+- Pass exactly ONE envelope: 'boundary_sketch' (a sketch profile), or 'envelope_plane' with 'envelope_length' and 'envelope_width'. Given boundary_sketch='
+- solver='3d' packs into a 3D envelope: pass 'envelope_plane' with 'envelope_length', 'envelope_width' and 'envelope_height' instead of 'boundary_sketch' ('
+- 'boundary_component' scopes 'boundary_sketch', which this call does not use.
+- belong to solver='3d'; this call is solver='
+- '. Drop them, or pass solver='3d'.
+- 'envelope_origin' offsets a SIZED envelope from its plane's origin, and the profile envelope this call takes from sketch '
+- ' carries no origin offsets. Drop it, or pass 'envelope_plane' with its sizes.
+- belong to the 2D solvers; this call is solver='3d'. Drop them, or pass solver='true_shape' / 'rectangular'.
+- 'part_in_part' belongs to solver='true_shape'; this call is solver='
 - Provide 'shapes' - the occurrence name(s) to arrange (comma-separated).
 - Provide 'shapes' - at least one occurrence to arrange.
 - This design does not expose Arrange features.
-- Check the boundary profile holds the shapes at this spacing.
 - Arrange reported success but NOTHING happened - no input occurrence moved and no occurrence was added.
+- holds the shapes at this spacing.
 - The empty arrange feature was rolled back.
 - The empty arrange feature could not be rolled back - remove it with design_delete_feature.
+- component(s) UNPLACED - its statistics read arranged
+- ' IS in the model with the rest placed: enlarge the envelope, lower 'spacing', or pass partial=true, then retry - design_delete_feature removes this one.
+- 'envelope_plane': that handle is a planar FACE - this envelope takes a CONSTRUCTION plane. Pass xy/xz/yz or a construction-plane name.
+- 'envelope_plane' needs
+- ' for the boundary. Use sketch_get.
+- ' has no closed profile to use as the envelope. Draw a closed boundary shape first.
+- ' is not available on this Fusion version (ArrangeSolverTypes.
 - Could not create the arrange input (solver may be unavailable).
-- Could not set the boundary envelope from the sketch profile.
+- Could not set the arrange envelope from the inputs given.
+- The arrange input exposes no 'definition' on this Fusion version, so move_originals, rotation, quantity and part_in_part cannot be set.
 - ) appears to need a Fusion extension on this account:
 - . Try solver='rectangular', or enable the extension.
 
@@ -2542,11 +2578,14 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 
 ### `param_get`
 - No active design (open a document with design geometry).
+- 'trace' traces ONE parameter, so it needs 'name' - pass the parameter to trace, or drop 'trace' to list the table.
 - Parameter not found: '
 - Could not read user parameters:
 - Could not read model parameters:
 - Could not read a parameter name while classifying model parameters.
 - Could not classify parameter '
+- The parameters following '
+- ' could not be read, so this trace would publish an empty list as the answer 'nothing follows it'. The plain read without trace still answers.
 
 ### `param_set`
 - Provide 'name' - the parameter to set.
@@ -3002,15 +3041,20 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Thicken reported success but no CREATED body reads isSolid=true - the wall did not close into a solid. The feature remains in the timeline; inspect it with model_inspect or remove it with design_de...
 
 ### `surface_trim`
-- Surface trimmed. Selected cells removed; the open transaction was committed via add().
+- Surface trimmed: the target owned
+- computed cell(s), and
+- cell(s) owned by another body were left in place.
 - No active design. Create or open a document first (see doc_new).
 - (The tool may not intersect the surface.)
 - The open transaction was cancelled.
 - Trim committed but the surface area did not decrease (
 - cm2 before and after) - no cell was actually removed.
-- Trim aborted: kept area
-- mm2 is larger than target area
-- mm2. HIDE other surfaces with view_set, re-read the target and retry. The transaction was cancelled.
+- Trim committed but a body the target does not own changed area:
+- . Undo in Fusion before continuing.
+- Trim aborted: the kept cells measure
+- mm2, more than the target's own
+- mm2. Other cell owners read:
+- . The transaction was cancelled.
 - . (The trim tool must INTERSECT the surface and divide it.)
 
 ### `surface_untrim`

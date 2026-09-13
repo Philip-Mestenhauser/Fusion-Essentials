@@ -1,12 +1,14 @@
-"""Unit tests for ``arrange.py`` — pack shapes within a sketch-profile boundary (Arrange feature).
+"""Unit tests for ``model_arrange.py`` — pack shapes into an envelope (Arrange feature).
 
-The Arrange feature nests component occurrences inside a 2D envelope (a sketch profile / planar
-face). Pinned here without a live Fusion: solver-type resolution (true_shape/rectangular), boundary
-resolution (a named sketch -> its profile), shape resolution (occurrence names -> occurrences and
-into ArrangeComponents.add), spacing -> cm, and the orchestration (createInput -> setProfileOrFace
-Envelope -> add each component -> add feature). The actual solve is a live side-effect.
+The Arrange feature nests component occurrences into a 2D envelope (a sketch profile / planar face,
+or a plane sized in 'units') or a 3D box envelope. Pinned here without a live Fusion: solver-type
+resolution (true_shape/rectangular/3d), envelope resolution and the one-form-per-call refusals,
+shape resolution (occurrence names -> ArrangeComponents.add), the sizes and settings written onto
+the envelope/definition inputs in cm, and the read-backs the payload publishes (result envelopes,
+arrangeStatistics). The actual solve is a live side-effect.
 """
 
+import json
 from types import SimpleNamespace
 
 import adsk.core
@@ -14,8 +16,8 @@ import adsk.fusion
 import pytest
 
 from conftest import (
-    MakeComp, assert_no_active_design, install, load_tool, make_design, make_occurrence,
-    make_sketch, payload as _payload,
+    BRepFace, MakeComp, _NamedCollection, assert_no_active_design, install, load_tool, make_design,
+    make_occurrence, make_sketch, payload as _payload,
 )
 
 ar = load_tool("model_arrange")
@@ -23,6 +25,7 @@ ar = load_tool("model_arrange")
 # Measured solver enum (seeded from live_api_facts) - fakes and assertions speak these.
 _TRUE = adsk.fusion.ArrangeSolverTypes.Arrange2DTrueShapeSolverType
 _RECT = adsk.fusion.ArrangeSolverTypes.Arrange2DRectangularSolverType
+_3D = adsk.fusion.ArrangeSolverTypes.Arrange3DSolverType
 
 
 # ── fakes ───────────────────────────────────────────────────────────────────
@@ -35,6 +38,44 @@ def _sketch(name, tag="profile", profile_count=1, compute_deferred=False):
 
 def _vec(x=0.0, y=0.0, z=0.0):
     return SimpleNamespace(x=x, y=y, z=z)
+
+
+def _rv(value):
+    """What the patched ValueInput.createByReal hands back - the tool reads .realValue off it."""
+    return SimpleNamespace(realValue=value)
+
+
+def _stats_json(arranged, unarranged):
+    """arrangeStatistics in the measured 3D shape: {name, statistics: {label: {value}}}, cm units."""
+    return json.dumps({"name": "Arrange1", "statistics": {
+        "Components Arranged": {"localizedName": "Components Arranged", "value": arranged},
+        "Components Unarranged": {"localizedName": "Components Unarranged", "value": unarranged},
+        "Components Volume": {"localizedName": "Components Volume", "value": 16},
+    }})
+
+
+def _both_stats_json(total_arranged, unarranged, *per_envelope):
+    """Both measured shapes at once: the top-level TOTAL map plus its per-envelope breakdown."""
+    data = json.loads(_sheet_stats_json(*per_envelope))
+    data["name"] = "Arrange1"
+    data["statistics"] = {
+        "Components Arranged": {"localizedName": "Components Arranged", "value": total_arranged},
+        "Components Unarranged": {"localizedName": "Components Unarranged", "value": unarranged},
+        "Envelopes Used": {"localizedName": "Envelopes Used", "value": len(per_envelope)},
+    }
+    return json.dumps(data)
+
+
+def _sheet_stats_json(*per_envelope):
+    """arrangeStatistics in the measured 2D PLANE shape: one statistics object per envelope, and no
+    'Components Unarranged' among them."""
+    return json.dumps({"envelopes": [
+        {"name": f"Envelope{i}", "statistics": {
+            "Actual Efficiency": {"localizedName": "Actual Efficiency", "value": 0.0467},
+            "Components Arranged": {"localizedName": "Components Arranged", "value": arranged},
+            "Envelope Area": {"localizedName": "Envelope Area", "value": 600},
+            "Envelopes Quantity": {"localizedName": "Envelopes Quantity", "value": 1},
+        }} for i, arranged in enumerate(per_envelope, start=1)]})
 
 
 def _occ(path):
@@ -50,45 +91,116 @@ class FakeArrangeComponents:
         return ("ac", occ_or_face)
 
 
+class FakeArrangeDefinition:
+    """ArrangeFeatureInput.definition - no live shape dump for this type, so it is a local double.
+    Its four members start on the platform's own measured defaults."""
+    def __init__(self):
+        self.isCreateCopies = True
+        self.globalRotation = adsk.fusion.ArrangeRotationTypes.AllRotationsArrangeRotationType
+        self.globalQuantity = _rv(1.0)
+        self.isPartInPartAllowed = True
+
+
 class FakeEnvelope:
-    def __init__(self, profiles):
+    """The envelope input a set*Envelope call returns - a local double; no live shape dump. The
+    PROFILE form carries every member but the two origin offsets."""
+    def __init__(self, kind, profiles=(), plane=None, sizes=()):
+        self.kind = kind
         self.profiles = list(profiles)
+        self.plane = plane
+        self.sizes = tuple(sizes)
         self.objectSpacing = None
+        self.frameWidth = None
+        self.placementClearance = None
+        self.isPartialArrangeAllowed = False
+        if kind == "3d":
+            self.ceilingClearance = None
+        if kind != "profile":
+            self.originXOffset = None
+            self.originYOffset = None
+
+
+class FakeResultEnvelope:
+    """One ArrangeFeature.resultEnvelopes row - a local double; no live shape dump. Its box is the
+    envelope's own SIZE, and it comes in the three measured shapes: a BoundingBox2D of Point2Ds
+    (reading .z raises) for a plane envelope, a BoundingBox3D for a 3D one, and NO box at all for a
+    profile envelope."""
+    _BOXES = {"plane": (SimpleNamespace(x=0.0, y=0.0), SimpleNamespace(x=30.0, y=20.0)),
+              "3d": (_vec(), _vec(20.0, 20.0, 10.0))}
+
+    def __init__(self, name, occurrence_count, kind="3d"):
+        self.name = name
+        self.occurrences = _NamedCollection([None] * occurrence_count)
+        box = self._BOXES.get(kind)
+        if box is not None:
+            self.boundingBox = SimpleNamespace(minPoint=box[0], maxPoint=box[1])
+
+
+class FakeArrangeFeature:
+    """The feature add() hands back - a local double; no live shape dump. An empty
+    `statistics` models the '' the API returns when the statistics are unavailable."""
+    def __init__(self, statistics="", envelopes=(), kind="3d"):
+        self.name = "Arrange1"
+        self.arrangeStatistics = statistics
+        self.resultEnvelopes = _NamedCollection(
+            [FakeResultEnvelope(n, c, kind) for n, c in envelopes])
+        self.deleted = 0
+    def deleteMe(self):
+        self.deleted += 1
+        return True
 
 
 class FakeArrangeInput:
     def __init__(self, solver):
         self.solver = solver
-        self.envelope = None          # the FakeEnvelope returned by setProfileOrFaceEnvelope
+        self.envelope = None          # the FakeEnvelope the envelope setter returned
+        self.definition = FakeArrangeDefinition()
         self.arrangeComponents = FakeArrangeComponents()
     def setProfileOrFaceEnvelope(self, profiles_or_faces):
-        self.envelope = FakeEnvelope(profiles_or_faces)
+        self.envelope = FakeEnvelope("profile", profiles=profiles_or_faces)
+        return self.envelope
+    def setPlaneEnvelope(self, plane, length, width):
+        self.envelope = FakeEnvelope("plane", plane=plane, sizes=(length, width))
+        return self.envelope
+    def set3DEnvelope(self, plane, length, width, height):
+        self.envelope = FakeEnvelope("3d", plane=plane, sizes=(length, width, height))
         return self.envelope
 
 
 class FakeArrangeFeatures:
     """add() imitates the measured solver behavior: the named occurrences stay where they are and
-    envelope COPIES land as new occurrences - the effect read the handler verifies against."""
+    envelope COPIES land as new occurrences - the effect read the handler verifies against.
+    `unarranged` leaves that many of the added components out, as the statistics report it."""
     def __init__(self):
         self.last_input = None
         self.added = False
         self.design = None
+        self.unarranged = 0
+        self.statistics = None        # None = built from the input; "" = the empty read
+        self.envelope_rows = None     # None = one envelope holding everything placed
     def createInput(self, solver):
         self.last_input = FakeArrangeInput(solver)
         return self.last_input
     def add(self, inp):
         self.added = True
+        placed = len(inp.arrangeComponents.added) - self.unarranged
         if self.design is not None:
-            for shape in inp.arrangeComponents.added:
+            for shape in inp.arrangeComponents.added[:placed]:
                 nm = getattr(shape, "name", "X")
                 self.design.rootComponent.allOccurrences.append(
                     _occ(f"Arrange1:1+Envelope1(Qty: 1):1+{nm}"))
-        return type("F", (), {"name": "Arrange1", "deleteMe": lambda self: True})()
+        stats = _stats_json(placed, self.unarranged) if self.statistics is None else self.statistics
+        rows = [("Envelope1", placed)] if self.envelope_rows is None else self.envelope_rows
+        kind = inp.envelope.kind if inp.envelope is not None else "3d"
+        return FakeArrangeFeature(statistics=stats, envelopes=rows, kind=kind)
 
 
 def _component(name, sketches, occurrences=(), af=None):
-    """A component holding `sketches`, and the arrangeFeatures collection when it is the root."""
-    comp = MakeComp(name=name, sketches=list(sketches), occurrences=list(occurrences))
+    """A component holding `sketches`, its three origin planes, and the arrangeFeatures collection
+    when it is the root."""
+    comp = MakeComp(name=name, sketches=list(sketches), occurrences=list(occurrences),
+                    origin_planes=(SimpleNamespace(name="XY"), SimpleNamespace(name="XZ"),
+                                   SimpleNamespace(name="YZ")))
     if af is not None:
         comp.features = SimpleNamespace(arrangeFeatures=af)
     return comp
@@ -98,15 +210,31 @@ def _wire(design, af):
     """Point the tool at `design` (both seams) and model the ValueInput factories it calls."""
     af.design = design
     install(ar, design)
-    adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
+    adsk.core.ValueInput.createByReal = staticmethod(_rv)
     adsk.core.ValueInput.createByString = staticmethod(lambda s: ("str", s))
     return design, af
 
 
-def _install(sketches=(), occ_names=()):
+def _install(sketches=(), occ_names=(), tokens=None):
     af = FakeArrangeFeatures()
     root = _component("Root", sketches, [_occ(n) for n in occ_names], af)
-    return _wire(make_design(comp=root), af)
+    return _wire(make_design(comp=root, tokens=tokens), af)
+
+
+@pytest.fixture(autouse=True)
+def _fusion_types(monkeypatch):
+    """The adsk.fusion type identity the envelope-plane guard branches on - a Mock is not a type."""
+    monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace, raising=False)
+
+
+def _envelope_input(envelope_cls):
+    """A createInput building its profile envelope from `envelope_cls` - the seam a test models an
+    envelope property that refuses the write, or the read back, with."""
+    class _Input(FakeArrangeInput):
+        def setProfileOrFaceEnvelope(self, profiles_or_faces):
+            self.envelope = envelope_cls("profile", profiles=profiles_or_faces)
+            return self.envelope
+    return lambda solver: _Input(solver)
 
 
 # ── solver type ──────────────────────────────────────────────────────────────
@@ -305,17 +433,59 @@ class TestShapes:
 class TestSpacing:
     def test_spacing_scaled_to_cm(self):
         _, af = _install([_sketch("B")], ["A:1"])
-        _payload(ar.handler(boundary_sketch="B", shapes="A:1", spacing=5, units="mm"))
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1", spacing=5, units="mm"))
         # objectSpacing set on the ENVELOPE input as a cm ValueInput (5mm -> 0.5cm)
-        assert af.last_input.envelope.objectSpacing == ("real", 0.5)
+        assert af.last_input.envelope.objectSpacing == _rv(0.5)
+        # and PUBLISHED from the read-back off that input, in the caller's units
+        assert out["settings"]["spacing"] == 5.0
 
     def test_spacing_inches_scaled_to_cm(self):
         _, af = _install([_sketch("B")], ["A:1"])
         out = _payload(ar.handler(boundary_sketch="B", shapes="A:1", spacing=2, units="in"))
         # 2in -> 5.08cm
-        assert af.last_input.envelope.objectSpacing == ("real", 5.08)
+        assert af.last_input.envelope.objectSpacing == _rv(5.08)
         assert out["spacing"] == 2.0
         assert out["units"] == "in"
+        assert out["settings"]["spacing"] == 2.0
+
+    def test_a_spacing_that_does_not_read_back_is_an_error(self):
+        # A dropped set is silent and leaves the platform default in place, so an ok whose
+        # 'settings' cannot show the number would report a spacing that never landed.
+        _, af = _install([_sketch("B")], ["A:1"])
+
+        class _WriteOnlyEnvelope(FakeEnvelope):
+            """An envelope whose objectSpacing cannot be read back after the write."""
+            @property
+            def objectSpacing(self):
+                raise AttributeError("objectSpacing is write-only on this API version")
+            @objectSpacing.setter
+            def objectSpacing(self, v):
+                self._written = v
+
+        af.createInput = _envelope_input(_WriteOnlyEnvelope)
+        res = ar.handler(boundary_sketch="B", shapes="A:1", spacing=5)
+        assert res["isError"] is True
+        assert "'spacing' did not take" in res["message"]
+        assert "reads back nothing, not 5.0 mm" in res["message"]
+
+    def test_a_spacing_the_platform_keeps_at_its_default_is_an_error(self):
+        # The harder case: the write is ACCEPTED and the property answers its own default, which is
+        # what a silently dropped set looks like from here.
+        _, af = _install([_sketch("B")], ["A:1"])
+
+        class _StubbornEnvelope(FakeEnvelope):
+            """An envelope whose objectSpacing keeps its default whatever is written."""
+            @property
+            def objectSpacing(self):
+                return _rv(0.3)
+            @objectSpacing.setter
+            def objectSpacing(self, v):
+                self._written = v
+
+        af.createInput = _envelope_input(_StubbornEnvelope)
+        res = ar.handler(boundary_sketch="B", shapes="A:1", spacing=5)
+        assert res["isError"] is True
+        assert "reads back 3.0 mm, not 5.0 mm" in res["message"]
 
     def test_zero_spacing_not_set_and_reported_zero(self):
         _, af = _install([_sketch("B")], ["A:1"])
@@ -333,23 +503,269 @@ class TestSpacing:
         # An objectSpacing setter failure must propagate out of the handler (as Arrange failed: ...)
         # - swallowing it would report the spacing as applied when it wasn't.
         class _ReadOnlyEnvelope(FakeEnvelope):
+            """An envelope whose objectSpacing refuses the tool's write (its own build still sets
+            the default, as a live input arrives carrying one)."""
+            def __init__(self, *a, **kw):
+                self._refuse = False
+                super().__init__(*a, **kw)
+                self._refuse = True
             @property
             def objectSpacing(self):
-                return None
+                return self._spacing
             @objectSpacing.setter
             def objectSpacing(self, v):
-                raise AttributeError("objectSpacing is read-only on this API version")
-
-        class _RaisingInput(FakeArrangeInput):
-            def setProfileOrFaceEnvelope(self, profiles_or_faces):
-                self.envelope = _ReadOnlyEnvelope(profiles_or_faces)
-                return self.envelope
+                if self._refuse:
+                    raise AttributeError("objectSpacing is read-only on this API version")
+                self._spacing = v
 
         _, af = _install([_sketch("B")], ["A:1"])
-        af.createInput = lambda solver: _RaisingInput(solver)
+        af.createInput = _envelope_input(_ReadOnlyEnvelope)
         res = ar.handler(boundary_sketch="B", shapes="A:1", spacing=5)
         assert res["isError"] is True
         assert "Arrange failed: objectSpacing is read-only" in res["message"]
+
+
+# ── the envelope FORMS: exactly one per call ─────────────────────────────────
+
+class TestEnvelopeForms:
+    def test_both_envelope_forms_at_once_are_refused(self):
+        # Two envelopes is not a merge: one of them would be silently dropped.
+        _, af = _install([_sketch("B")], ["A:1"])
+        res = ar.handler(boundary_sketch="B", shapes="A:1", envelope_plane="xy",
+                         envelope_length=300, envelope_width=200)
+        assert res["isError"] is True and "exactly ONE envelope" in res["message"]
+        assert "boundary_sketch='B'" in res["message"]
+        assert "envelope_plane='xy'" in res["message"]
+        assert af.last_input is None and af.added is False
+
+    def test_no_envelope_at_all_is_refused(self):
+        _, af = _install([_sketch("B")], ["A:1"])
+        res = ar.handler(shapes="A:1")
+        assert res["isError"] is True and "exactly ONE envelope" in res["message"]
+        assert af.last_input is None and af.added is False
+
+    def test_the_3d_solver_refuses_a_boundary_sketch(self):
+        # The 3D solver takes a 3D envelope; a sketch profile cannot be one.
+        _, af = _install([_sketch("B")], ["A:1"])
+        res = ar.handler(boundary_sketch="B", shapes="A:1", solver="3d")
+        assert res["isError"] is True
+        assert "solver='3d'" in res["message"] and "'envelope_plane'" in res["message"]
+        assert af.last_input is None and af.added is False
+
+    def test_a_height_without_the_3d_solver_is_refused(self):
+        _, af = _install([_sketch("B")], ["A:1"])
+        res = ar.handler(boundary_sketch="B", shapes="A:1", envelope_height=50)
+        assert res["isError"] is True
+        assert "envelope_height" in res["message"] and "solver='3d'" in res["message"]
+        assert af.last_input is None and af.added is False
+
+    def test_a_plane_envelope_missing_a_side_is_refused(self):
+        _, af = _install([], ["A:1"])
+        res = ar.handler(shapes="A:1", envelope_plane="xy", envelope_length=300)
+        assert res["isError"] is True
+        assert "envelope_width" in res["message"] and "envelope_length" not in res["message"]
+        assert af.last_input is None
+
+    def test_the_3d_solver_needs_a_height(self):
+        _, af = _install([], ["A:1"])
+        res = ar.handler(shapes="A:1", solver="3d", envelope_plane="xy",
+                         envelope_length=200, envelope_width=200)
+        assert res["isError"] is True and "envelope_height" in res["message"]
+        assert af.last_input is None
+
+    def test_a_planar_face_handle_is_refused_as_the_envelope_plane(self):
+        # PlaneRef resolves a planar FACE too; set3DEnvelope/setPlaneEnvelope take a construction
+        # plane, so the face is refused by name rather than handed over.
+        face = BRepFace(SimpleNamespace(surfaceType=adsk.core.SurfaceTypes.PlaneSurfaceType))
+        _, af = _install([], ["A:1"], tokens={"FACE": face})
+        res = ar.handler(shapes="A:1", envelope_plane="FACE", envelope_length=300,
+                         envelope_width=200)
+        assert res["isError"] is True
+        assert "planar FACE" in res["message"] and "'envelope_plane'" in res["message"]
+        assert af.last_input is None and af.added is False
+
+    def test_boundary_component_with_a_plane_envelope_is_refused(self):
+        # It scopes the boundary SKETCH; accepted silently here it would say nothing about the call.
+        _, af = _install([_sketch("B")], ["A:1"])
+        res = ar.handler(shapes="A:1", envelope_plane="xy", envelope_length=300,
+                         envelope_width=200, boundary_component="Root")
+        assert res["isError"] is True and "'boundary_component'" in res["message"]
+        assert af.last_input is None
+
+
+# ── the plane and 3D envelopes ───────────────────────────────────────────────
+
+class TestPlaneEnvelope:
+    def test_the_2d_plane_envelope_is_sized_in_cm(self):
+        _, af = _install([], ["A:1"])
+        out = _payload(ar.handler(shapes="A:1", solver="rectangular", envelope_plane="xy",
+                                  envelope_length=300, envelope_width=200))
+        assert af.last_input.solver == _RECT
+        assert af.last_input.envelope.sizes == (_rv(30.0), _rv(20.0))
+        assert af.last_input.envelope.plane is not None
+        assert out["envelope_plane"] == "XY" and out["boundary_sketch"] is None
+
+    def test_the_3d_envelope_carries_the_height(self):
+        _, af = _install([], ["A:1"])
+        out = _payload(ar.handler(shapes="A:1", solver="3d", envelope_plane="xy",
+                                  envelope_length=200, envelope_width=200, envelope_height=100))
+        assert af.last_input.solver == _3D
+        assert af.last_input.envelope.sizes == (_rv(20.0), _rv(20.0), _rv(10.0))
+        assert out["solver"] == "3d"
+
+    def test_the_3d_clearances_are_written_in_cm_and_read_back(self):
+        _, af = _install([], ["A:1"])
+        out = _payload(ar.handler(shapes="A:1", solver="3d", envelope_plane="xy",
+                                  envelope_length=200, envelope_width=200, envelope_height=100,
+                                  frame_width=5, placement_clearance=2, ceiling_clearance=10))
+        env = af.last_input.envelope
+        assert (env.frameWidth, env.placementClearance, env.ceilingClearance) == (
+            _rv(0.5), _rv(0.2), _rv(1.0))
+        assert out["settings"]["frame_width"] == 5.0
+        assert out["settings"]["placement_clearance"] == 2.0
+        assert out["settings"]["ceiling_clearance"] == 10.0
+
+    def test_partial_is_set_on_the_envelope_input(self):
+        _, af = _install([], ["A:1"])
+        out = _payload(ar.handler(shapes="A:1", solver="3d", envelope_plane="xy",
+                                  envelope_length=200, envelope_width=200, envelope_height=100,
+                                  partial=True))
+        assert af.last_input.envelope.isPartialArrangeAllowed is True
+        assert out["settings"]["partial"] is True
+
+    def test_the_2d_plane_envelope_takes_the_frame_and_clearance_knobs_too(self):
+        # frameWidth, placementClearance and isPartialArrangeAllowed are members of the 2D PLANE
+        # envelope input as well as the 3D one; only ceilingClearance is 3D-only.
+        _, af = _install([], ["A:1"])
+        out = _payload(ar.handler(shapes="A:1", solver="rectangular", envelope_plane="xy",
+                                  envelope_length=300, envelope_width=200, frame_width=5,
+                                  placement_clearance=2, partial=True))
+        env = af.last_input.envelope
+        assert (env.frameWidth, env.placementClearance) == (_rv(0.5), _rv(0.2))
+        assert env.isPartialArrangeAllowed is True
+        assert out["settings"]["partial"] is True
+
+    def test_a_ceiling_clearance_stays_3d_only(self):
+        _, af = _install([], ["A:1"])
+        res = ar.handler(shapes="A:1", solver="rectangular", envelope_plane="xy",
+                         envelope_length=300, envelope_width=200, ceiling_clearance=10)
+        assert res["isError"] is True
+        assert "ceiling_clearance" in res["message"] and "solver='3d'" in res["message"]
+        assert af.last_input is None
+
+    def test_the_profile_envelope_takes_the_frame_and_clearance_knobs_too(self):
+        # frameWidth, placementClearance and isPartialArrangeAllowed are members of the PROFILE
+        # envelope input as well; only the two origin offsets are absent there.
+        _, af = _install([_sketch("B")], ["A:1"])
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1", frame_width=5,
+                                  placement_clearance=2, partial=True))
+        env = af.last_input.envelope
+        assert (env.frameWidth, env.placementClearance) == (_rv(0.5), _rv(0.2))
+        assert env.isPartialArrangeAllowed is True
+        assert out["settings"]["frame_width"] == 5.0
+
+    def test_an_envelope_origin_is_refused_with_a_profile_envelope(self):
+        # The profile envelope input carries no originXOffset/originYOffset at all.
+        _, af = _install([_sketch("B")], ["A:1"])
+        res = ar.handler(boundary_sketch="B", shapes="A:1", envelope_origin=[600, 400])
+        assert res["isError"] is True
+        assert "'envelope_origin'" in res["message"] and "no origin offsets" in res["message"]
+        assert af.last_input is None and af.added is False
+
+    def test_the_envelope_origin_offsets_are_written_in_cm_and_read_back(self):
+        _, af = _install([], ["A:1"])
+        out = _payload(ar.handler(shapes="A:1", solver="rectangular", envelope_plane="xy",
+                                  envelope_length=300, envelope_width=200,
+                                  envelope_origin=[600, 400]))
+        env = af.last_input.envelope
+        assert (env.originXOffset, env.originYOffset) == (_rv(60.0), _rv(40.0))
+        assert out["settings"]["envelope_origin"] == [600.0, 400.0]
+
+    def test_a_malformed_envelope_origin_is_refused(self):
+        _, af = _install([], ["A:1"])
+        res = ar.handler(shapes="A:1", solver="rectangular", envelope_plane="xy",
+                         envelope_length=300, envelope_width=200, envelope_origin=[600])
+        assert res["isError"] is True and "'envelope_origin'" in res["message"]
+        assert af.last_input is None
+
+
+# ── the arrangement settings on the definition ───────────────────────────────
+
+class TestSettings:
+    def test_move_originals_clears_create_copies(self):
+        _, af = _install([_sketch("B")], ["A:1"])
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1", move_originals=True))
+        assert af.last_input.definition.isCreateCopies is False
+        assert out["settings"]["create_copies"] is False
+
+    def test_copies_are_left_alone_by_default_and_the_read_is_published(self):
+        _, af = _install([_sketch("B")], ["A:1"])
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1"))
+        assert af.last_input.definition.isCreateCopies is True
+        assert out["settings"]["create_copies"] is True
+
+    def test_rotation_maps_to_its_measured_member(self):
+        _, af = _install([_sketch("B")], ["A:1"])
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1", rotation="none"))
+        assert (af.last_input.definition.globalRotation
+                is adsk.fusion.ArrangeRotationTypes.NoneArrangeRotationType)
+        assert out["settings"]["rotation"] == "none"
+
+    def test_rotation_with_the_3d_solver_is_refused(self):
+        _, af = _install([], ["A:1"])
+        res = ar.handler(shapes="A:1", solver="3d", envelope_plane="xy", envelope_length=200,
+                         envelope_width=200, envelope_height=100, rotation="all")
+        assert res["isError"] is True
+        assert "rotation" in res["message"] and "solver='3d'" in res["message"]
+        assert af.last_input is None and af.added is False
+
+    def test_quantity_is_written_as_a_whole_number(self):
+        _, af = _install([_sketch("B")], ["A:1"])
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1", quantity=3))
+        assert af.last_input.definition.globalQuantity == _rv(3.0)
+        assert out["settings"]["quantity"] == 3.0
+
+    def test_one_is_the_smallest_quantity_the_guard_admits(self):
+        # The boundary of the whole-number guard: 1 is a quantity, 0 means the input was omitted.
+        _, af = _install([_sketch("B")], ["A:1"])
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1", quantity=1))
+        assert af.last_input.definition.globalQuantity == _rv(1.0)
+        assert out["settings"]["quantity"] == 1.0
+
+    def test_a_fractional_quantity_is_refused(self):
+        _, af = _install([_sketch("B")], ["A:1"])
+        res = ar.handler(boundary_sketch="B", shapes="A:1", quantity=1.5)
+        assert res["isError"] is True and "whole number" in res["message"]
+        assert af.last_input is None
+
+    def test_part_in_part_outside_true_shape_is_refused(self):
+        _, af = _install([_sketch("B")], ["A:1"])
+        res = ar.handler(boundary_sketch="B", shapes="A:1", solver="rectangular",
+                         part_in_part=True)
+        assert res["isError"] is True
+        assert "'part_in_part'" in res["message"] and "true_shape" in res["message"]
+        assert af.last_input is None and af.added is False
+
+    def test_part_in_part_false_is_written_rather_than_ignored(self):
+        # The platform default is TRUE, so false is the value that has to reach the definition; an
+        # omitted input leaves the default alone and writes nothing.
+        _, af = _install([_sketch("B")], ["A:1"])
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1", part_in_part=False))
+        assert af.last_input.definition.isPartInPartAllowed is False
+        assert out["settings"]["part_in_part"] is False
+
+    def test_an_omitted_part_in_part_leaves_the_platform_default(self):
+        _, af = _install([_sketch("B")], ["A:1"])
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1"))
+        assert af.last_input.definition.isPartInPartAllowed is True    # untouched
+        assert "part_in_part" not in out["settings"]
+
+    def test_part_in_part_false_with_the_3d_solver_is_refused(self):
+        _, af = _install([], ["A:1"])
+        res = ar.handler(shapes="A:1", solver="3d", envelope_plane="xy", envelope_length=200,
+                         envelope_width=200, envelope_height=100, part_in_part=False)
+        assert res["isError"] is True and "part_in_part" in res["message"]
+        assert af.last_input is None
 
 
 # ── honesty: failed/absent mutation must surface as isError, never a false ok ─
@@ -399,6 +815,132 @@ class TestHonesty:
         res = ar.handler(boundary_sketch="B", shapes="A:1")
         assert res["isError"] is True and "NOTHING happened" in res["message"]
         assert deleted == [True]
+
+    def test_components_left_out_are_an_error_not_a_quiet_success(self):
+        # The solver places what fits and reports the rest in its statistics; a plain ok here reads
+        # as "all four nested" while a part sits outside the envelope.
+        _, af = _install([_sketch("B")], ["A:1", "B:1", "C:1"])
+        af.unarranged = 1
+        res = ar.handler(boundary_sketch="B", shapes="A:1, B:1, C:1")
+        assert res["isError"] is True
+        assert "1 component(s) UNPLACED" in res["message"]
+        assert "arranged 2, unarranged 1" in res["message"]
+        assert "design_delete_feature" in res["message"]
+        # partial is accepted on every envelope form, so the remedy is consumable on this call too
+        assert "partial=true" in res["message"]
+
+    def test_partial_accepts_what_did_not_fit(self):
+        _, af = _install([], ["A:1", "B:1", "C:1"])
+        af.unarranged = 1
+        out = _payload(ar.handler(shapes="A:1, B:1, C:1", solver="3d", envelope_plane="xy",
+                                  envelope_length=200, envelope_width=200, envelope_height=100,
+                                  partial=True))
+        assert out["components_arranged"] == 2 and out["components_unarranged"] == 1
+
+    def test_the_statistics_map_is_published_with_the_counts(self):
+        _, af = _install([_sketch("B")], ["A:1", "B:1"])
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1, B:1"))
+        assert out["components_arranged"] == 2 and out["components_unarranged"] == 0
+        # the 3D shape's one map, keyed by the name the JSON carries
+        assert out["statistics"]["Arrange1"]["Components Volume"] == 16
+        assert "cm" in out["note"]
+
+    def test_the_plane_envelope_statistics_shape_is_read_per_envelope(self):
+        # The 2D plane envelope answers {"envelopes": [{name, statistics}]} rather than one
+        # top-level map, and reports no 'Components Unarranged' at all.
+        _, af = _install([], ["A:1", "B:1", "C:1"])
+        af.statistics = _sheet_stats_json(6)
+        out = _payload(ar.handler(shapes="A:1, B:1, C:1", solver="rectangular",
+                                  envelope_plane="xy", envelope_length=300, envelope_width=200,
+                                  quantity=2))
+        assert out["components_arranged"] == 6
+        assert out["components_unarranged"] is None
+        assert out["statistics"]["Envelope1"]["Envelope Area"] == 600
+        assert "null rather than zero" in out["note"]
+
+    def test_the_per_envelope_counts_are_summed(self):
+        _, af = _install([], ["A:1", "B:1", "C:1"])
+        af.statistics = _sheet_stats_json(4, 2)
+        out = _payload(ar.handler(shapes="A:1, B:1, C:1", solver="rectangular",
+                                  envelope_plane="xy", envelope_length=300, envelope_width=200))
+        assert out["components_arranged"] == 6
+        assert sorted(out["statistics"]) == ["Envelope1", "Envelope2"]
+
+    def test_both_statistics_levels_at_once_are_not_double_counted(self):
+        # Measured: one arrangeStatistics carries the TOTAL map and the per-envelope breakdown of
+        # the same nest. Summing across the two levels reports twice the components there are.
+        _, af = _install([], ["A:1", "B:1", "C:1"])
+        af.statistics = _both_stats_json(3, 0, 3)
+        out = _payload(ar.handler(shapes="A:1, B:1, C:1", solver="rectangular",
+                                  envelope_plane="xy", envelope_length=300, envelope_width=200))
+        assert out["components_arranged"] == 3
+        assert out["components_unarranged"] == 0
+        # both maps are still published, keyed by the names they came under
+        assert sorted(out["statistics"]) == ["Arrange1", "Envelope1"]
+
+    def test_a_partial_arrange_names_the_shortfall_in_its_note(self):
+        _, af = _install([], ["A:1", "B:1", "C:1"])
+        af.unarranged = 1
+        out = _payload(ar.handler(shapes="A:1, B:1, C:1", solver="3d", envelope_plane="xy",
+                                  envelope_length=200, envelope_width=200, envelope_height=100,
+                                  partial=True))
+        assert out["components_unarranged"] == 1
+        assert "1 component(s) did NOT fit" in out["note"]
+
+    def test_an_unreported_unarranged_count_is_not_an_error(self):
+        # The error fires on a READ value only: a statistics object carrying no unarranged key says
+        # nothing about what was left out, and a defaulted 0 would make that silence an answer.
+        _, af = _install([], ["A:1", "B:1", "C:1"])
+        af.unarranged = 1
+        af.statistics = _sheet_stats_json(2)
+        out = _payload(ar.handler(shapes="A:1, B:1, C:1", solver="rectangular",
+                                  envelope_plane="xy", envelope_length=300, envelope_width=200))
+        assert out["components_arranged"] == 2 and out["components_unarranged"] is None
+
+    def test_empty_statistics_publish_null_and_say_so(self):
+        # arrangeStatistics returns '' on failure - the counts are UNKNOWN then, never a stand-in 0.
+        _, af = _install([_sketch("B")], ["A:1"])
+        af.statistics = ""
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1"))
+        assert out["statistics"] is None
+        assert out["components_arranged"] is None and out["components_unarranged"] is None
+        assert "arrangeStatistics did not read" in out["note"]
+
+    def test_the_result_envelopes_are_published_with_their_occupancy(self):
+        # A PROFILE result envelope carries no bounding box at all, so its row has no 'extent' and
+        # the note says which fact the absence rests on.
+        _, af = _install([_sketch("B")], ["A:1", "B:1", "C:1"])
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1, B:1, C:1"))
+        assert out["envelopes"] == 1
+        row = out["result_envelopes"][0]
+        assert row["name"] == "Envelope1" and row["occurrence_count"] == 3
+        assert "extent" not in row
+        assert "no bounding box" in out["note"] and "no 'extent'" in out["note"]
+
+    def test_a_plane_envelope_publishes_a_two_axis_extent(self):
+        # Its box is a BoundingBox2D of Point2Ds - reading .z raises - so the row carries x and y
+        # only, and the numbers are the envelope's own SIZE in the caller's units.
+        _, af = _install([], ["A:1"])
+        out = _payload(ar.handler(shapes="A:1", solver="rectangular", envelope_plane="xy",
+                                  envelope_length=300, envelope_width=200))
+        assert out["result_envelopes"][0]["extent"] == {"x": 300.0, "y": 200.0}
+        assert "no 'extent'" not in out["note"]
+
+    def test_a_3d_envelope_publishes_a_three_axis_extent(self):
+        _, af = _install([], ["A:1"])
+        out = _payload(ar.handler(shapes="A:1", solver="3d", envelope_plane="xy",
+                                  envelope_length=200, envelope_width=200, envelope_height=100))
+        assert out["result_envelopes"][0]["extent"] == {"x": 200.0, "y": 200.0, "z": 100.0}
+
+    def test_the_published_envelope_rows_stop_at_the_cap(self):
+        # 13 envelopes, 12 rows: the COUNT still reports every one, so a capped list never reads as
+        # the whole set.
+        _, af = _install([_sketch("B")], ["A:1"])
+        af.envelope_rows = [(f"Envelope{i}", 1) for i in range(1, 14)]
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1"))
+        assert out["envelopes"] == 13
+        assert len(out["result_envelopes"]) == 12
+        assert out["result_envelopes"][-1]["name"] == "Envelope12"
 
     def test_a_moved_input_is_named_in_moved(self):
         # A solver that really repositions the input reports it in 'moved'.

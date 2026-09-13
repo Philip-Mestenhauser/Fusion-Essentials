@@ -13,8 +13,8 @@ A non-PASS row means the CLAIM no longer holds: update the fakes and their consu
 re-run to refresh the stamp. `--check` fails when the stamp differs from the installed
 Fusion or any row is not PASS.
 
-Stamp: Fusion 2705.1.15 | verified 2026-09-11 | source f96c23ba57f2ac395c790211440b1b045e5ad3076c7cb05935d78f8cdb814fc7
-Loaded: implementation 3b65153cf82a82092e6f0673061363fb388026ebd7fbb76a1de7de0270f3d84b | schema bf329ad3aae2ffc6b1fdaa76f57fcc080d6861ee6933a70a57d06da49f15d24a | load 1034894acfc743b5b123be23a79c6be6 | session 874305f7f9bd44c99c500edc61897d3a
+Stamp: Fusion 2705.1.15 | verified 2026-09-13 | source eb3879aa6f4913f93c6d15af71decbacbb23de583a0297db5e9e0c47037339ea
+Loaded: implementation 87bd7bc7ab6ee31863741e4d685fed4158fd35acc05b73ea80350fe510945e6f | schema 933d1b4658cffcbdf7b3dd6aa5cf15d91f97ef3996e1244f130d4b1787a885f7 | load 6c885489b88a40afb6a715646d992ec1 | session 3169f5b202754dc28f417c44fa0abb72
 
 | result | claim id | claim | encoded in |
 |---|---|---|---|

@@ -95,10 +95,18 @@ class Sketch:
     """A sketch: its name, sketchCurves, sketchPoints and the parentComponent a feature must be
     built in. `profiles` are the closed regions a blind profiles.item(0) indexes and
     `is_compute_deferred` the flag whose True makes those regions the pre-deferral ones.
-    `is_visible` is the browser bulb a tool hides a helper sketch behind."""
+    `is_visible` is the browser bulb a tool hides a helper sketch behind. `entity_token` is the
+    identity half two sketch references are compared on and `timeline_object` the timeline entry a
+    sketch is addressed by; both are set only when given, since a sketch whose token or timeline
+    item does not read is its own tested state."""
     def __init__(self, name="Sketch1", curves=None, points=(), profiles=(),
-                 is_compute_deferred=False, parent_component=None, is_visible=True):
+                 is_compute_deferred=False, parent_component=None, is_visible=True,
+                 entity_token=None, timeline_object=None):
         self.name = name
+        if entity_token is not None:
+            self.entityToken = entity_token
+        if timeline_object is not None:
+            self.timelineObject = timeline_object
         self.sketchCurves = SketchCurves() if curves is None else curves
         self.sketchPoints = _NamedCollection(points)
         self.profiles = _NamedCollection(profiles)
