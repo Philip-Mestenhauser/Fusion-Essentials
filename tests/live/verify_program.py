@@ -580,7 +580,9 @@ STORY = {
                           "turn); and a bench revolute pair at 2:1"),
     "joint_drive": ("drive the vise jaw OPEN and then closed onto the billet, the screw turning "
                     "with it through the link; then the bench's revolute and slider stations, and "
-                    "every station that has a degree of freedom, home again afterwards"),
+                    "every station that has a degree of freedom, home again afterwards; and the "
+                    "crash guard held against an AMBIGUOUS partner - a second joint of that name "
+                    "inside a sub-assembly, and the second-member drive still refused"),
     "assembly_get": "read the joint wiring, driven angles, and the StockCenter anchor back",
     "assembly_move": "pose a scratch cameo occurrence",
     "assembly_capture_position": "status, discard the pending pose, re-arm and capture",
@@ -609,10 +611,15 @@ STORY = {
                      "SMOOTH branch on the body that round curved - 21 edges reading 19 convex, no "
                      "concave one left and the two tangent joins smooth, published in the refusal a "
                      "filter matching nothing carries. And the hub's flange RIM, rounded 1.5 mm on "
-                     "the one circular edge told from its twin below it by its own centre"),
+                     "the one circular edge told from its twin below it by its own centre; then a "
+                     "FULL ROUND, replacing a slab's whole side face with a round the two faces "
+                     "beside it set the radius of - no radius is given at all"),
     "model_chamfer": ("break the step's outboard edge and a through-bore rim, then a mounting-bore "
                       "rim by distance-and-angle with a miter corner, each read back off the "
-                      "created feature"),
+                      "created feature; and the TARGETING pair on the closed tangent rim - one "
+                      "handle with tangent_chain=false cutting exactly that edge, with the "
+                      "opposite rim read independently to prove nothing reached it, then the "
+                      "default seeding a chain whose edge count is read off the built feature"),
     "model_shell": "shell a scratch cap cameo",
     "model_offset_face": "push a scratch block's top face outward",
     "model_thread": ("thread a scratch post M10x1.5 over part of its length with the extent read "

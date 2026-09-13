@@ -3,6 +3,8 @@
 
 """The OPEN-DOCUMENT resolve doc_activate and doc_close share."""
 
+import time
+
 import adsk.core
 
 from ._common import error, safe
@@ -14,10 +16,54 @@ app = adsk.core.Application.get()
 MAP_BLURB = (
     "_resolve_open_document - exact open-document resolve by handle/index/URN/name, refusing "
     "ambiguity; VERSION_LAG_WINDOW_S - measured cloud-tip lag window; "
-    "fresh_version_read/wait_for_version_advance - fresh cloud identity reads around a save")
+    "fresh_version_read/wait_for_version_advance - fresh cloud identity reads around a save; "
+    "publication_read - the bounded DataFile.isComplete settle read every save publishes")
 
 # MEASURED: a version read taken inside this window can still trail the tip the lineage carries.
 VERSION_LAG_WINDOW_S = 20
+
+# MEASURED: a save answers with DataFile.isComplete false on the HELD document handle, turning true
+# when the new version appears; a FRESH findFileById read of the same lineage stays true throughout,
+# so only the held handle sees this version publishing - and the read is a pump, not one sample.
+PUBLICATION_WINDOW_S = 5.0
+_PUBLICATION_POLL_SLEEP = 0.25
+
+
+def publication_read(document, wait_s=None, poll_sleep=None):
+    """(the cloud-processing fields, one sentence for the caller's note) - DataFile.isComplete
+    pumped until it reads true or the window runs out. The fields report what that flag READ;
+    'was_incomplete' is whether THIS call saw it false, which a settled true alone cannot say."""
+    from . import _export
+    wait_s = PUBLICATION_WINDOW_S if wait_s is None else wait_s
+    poll_sleep = _PUBLICATION_POLL_SLEEP if poll_sleep is None else poll_sleep
+    saw_false = False
+
+    def probe():
+        nonlocal saw_false
+        flag = safe(lambda: document.dataFile.isComplete)
+        flag = flag if isinstance(flag, bool) else None
+        saw_false = saw_false or flag is False
+        return flag is True, flag
+
+    started = time.monotonic()
+    _settled, complete = _export.pump_until(probe, wait_s, poll_sleep)
+    waited = round(time.monotonic() - started, 1)
+    if complete is True and saw_false:
+        sentence = (f"DataFile.isComplete read false, then true {waited}s later - the cloud finished "
+                    "publishing this version while this call waited.")
+    elif complete is True:
+        sentence = ("DataFile.isComplete read true on the first read, so this call never saw this "
+                    "version publishing.")
+    elif complete is False:
+        sentence = (f"DataFile.isComplete still read false after {waited}s - this version was still "
+                    "publishing. Watch version.latest_number in data_get(file=<the lineage URN>); "
+                    "its state.is_complete reads the FILE and stays true meanwhile.")
+    else:
+        sentence = ("DataFile.isComplete did not read, so whether this version finished publishing "
+                    "is unknown - data_get(file=<the lineage URN>) reports version.latest_number.")
+    return {"cloud_processing_complete": complete,
+            "cloud_processing_was_incomplete": saw_false,
+            "cloud_processing_waited_seconds": waited}, sentence
 
 
 def fresh_version_read(application, lineage):

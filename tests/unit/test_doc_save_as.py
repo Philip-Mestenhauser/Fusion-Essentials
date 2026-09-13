@@ -232,6 +232,49 @@ class TestSaveDocumentAs:
         assert desc == "[AI agent] encap template copy"
         assert target.isRoot is True
 
+    def test_publishes_the_cloud_processing_flag_it_read(self, _install):
+        # The save answers while the cloud is still processing the new file - MEASURED, so the
+        # payload carries the false DataFile.isComplete read rather than nothing at all.
+        doc = FakeSaveAsDoc(is_saved=True, new_urn="urn:adsk.lineage:newcopy")
+        doc.dataFile.isComplete = False
+        _install([FakeProject("CAM")], active=doc)
+        out = _payload(dm.handler(name="PartA_CAM", project="CAM"))
+        assert out["cloud_processing_complete"] is False
+        assert out["cloud_processing_was_incomplete"] is True
+        assert "still read false" in out["note"] and "version.latest_number" in out["note"]
+
+    def test_the_settle_wait_stops_at_the_window_the_module_declares(self, _install, monkeypatch):
+        # A flag that never settles must stop at _doc_common's OWN window: a hard-wired bound would
+        # report the same number here while the constant said something else.
+        monkeypatch.setattr(dm._doc_common, "PUBLICATION_WINDOW_S", 2.0)
+        doc = FakeSaveAsDoc(is_saved=True, new_urn="urn:adsk.lineage:bounded")
+        doc.dataFile.isComplete = False
+        _install([FakeProject("CAM")], active=doc)
+        out = _payload(dm.handler(name="Bounded", project="CAM"))
+        assert out["cloud_processing_waited_seconds"] == 2.0
+        assert out["cloud_processing_waited_seconds"] <= dm._doc_common.PUBLICATION_WINDOW_S
+
+    def test_a_finished_file_publishes_cloud_processing_complete(self, _install):
+        doc = FakeSaveAsDoc(is_saved=True, new_urn="urn:adsk.lineage:newcopy")
+        doc.dataFile.isComplete = True
+        _install([FakeProject("CAM")], active=doc)
+        out = _payload(dm.handler(name="PartA_CAM", project="CAM"))
+        assert out["cloud_processing_complete"] is True
+        assert out["cloud_processing_was_incomplete"] is False
+        assert "never saw this version publishing" in out["note"]
+
+    def test_a_recovered_save_publishes_the_same_settle_read(self, _install):
+        # saveAs answered false but the file landed: that payload is an ok() like any other, and a
+        # caller reading it cannot tell which path it took unless the keys are there too.
+        proj = FakeProject("CAM")
+        doc = FakeSaveAsDoc(save_ok=False, land_on_save=True)
+        _install([proj], active=doc)
+        out = _payload(dm.handler(name="Recovered", project="CAM"))
+        assert out["recovered_from_error"] is True
+        assert out["cloud_processing_complete"] is True
+        assert isinstance(out["cloud_processing_was_incomplete"], bool)
+        assert isinstance(out["cloud_processing_waited_seconds"], float)
+
     def test_create_path_makes_nested_folders(self, _install):
         proj = FakeProject("CAM")
         doc = FakeSaveAsDoc(new_urn="urn:adsk.lineage:x")

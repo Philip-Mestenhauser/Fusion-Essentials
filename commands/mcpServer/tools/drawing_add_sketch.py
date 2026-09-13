@@ -169,6 +169,27 @@ def _counts(sketch):
     return {c: (safe(lambda c=c: getattr(sketch, c).count, 0) or 0) for c in _COLLECTIONS}
 
 
+def _rolled_back(sheet, sketch, before_count):
+    """(verdict, what deleteMe answered): True the sheet no longer lists the sketch, False it still
+    does, None its count did not read. The sheet's own COUNT decides; deleteMe's answer is reported
+    beside it, never in its place."""
+    try:
+        answered = "true" if sketch.deleteMe() else "false"
+    except Exception:
+        answered = "raised"
+    after = safe(lambda: sheet.sketches.count)
+    if not isinstance(after, int) or isinstance(after, bool):
+        return None, answered
+    return after == before_count, answered
+
+
+# A sketch point placed near a drawing view's curve snaps onto that curve, so a landed coordinate
+# can differ from the one asked for; the DXF export is the only channel that reads one back.
+_COORDINATE_READBACK = (
+    "A point near a drawing view's curve can land on that curve instead, and nothing here reads a "
+    "landed coordinate back - check placement with drawing_export.")
+
+
 def handler(geometry=None, sheet_name: str = "", name: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     entries, expected, plan_error = _plan(geometry)
@@ -188,6 +209,7 @@ def handler(geometry=None, sheet_name: str = "", name: str = "") -> dict:
     if sketches is None:
         return error(f"Sheet '{on_sheet}' exposes no sketches collection - cannot add a sketch to it.")
     wanted = (name or "").strip()
+    sketches_before = safe(lambda: sketches.count)
     try:
         # The name argument is optional: with none, Fusion auto-names the sketch ('Sketch1').
         sketch = sketches.add(wanted) if wanted else sketches.add()
@@ -217,13 +239,21 @@ def handler(geometry=None, sheet_name: str = "", name: str = "") -> dict:
 
     if failure or short:
         detail = (failure or ("the sketch's own counts came up short: " + "; ".join(short))).rstrip(".")
-        kept = "curve" if total_landed == 1 else "curves"
-        left = (f"That sketch keeps the {total_landed} {kept} already drawn on it"
-                if total_landed else "That empty sketch stays behind")
+        rolled, answered = _rolled_back(sheet, sketch, sketches_before)
+        if rolled is True:
+            left = (f"Sketch '{sketch_name}' was deleted, so this call left nothing on the sheet - "
+                    "fix that entity and call again")
+        elif rolled is False:
+            kept = "curve" if total_landed == 1 else "curves"
+            left = (f"Deleting sketch '{sketch_name}' FAILED too, so it stays on sheet '{on_sheet}' "
+                    f"holding the {total_landed} {kept} already drawn on it - remove it in the "
+                    "Fusion UI")
+        else:
+            left = (f"Deleting sketch '{sketch_name}' is NOT CONFIRMED: deleteMe answered "
+                    f"{answered} and sheet '{on_sheet}' would not report its sketch count. Read "
+                    f"drawing_get for sheet '{on_sheet}' before drawing on it again")
         return error(f"Drew {drawn} of {len(entries)} entities onto sketch '{sketch_name}' on sheet "
-                     f"'{on_sheet}' - {detail}. {left}: Drawing.deleteEntities raises 'API Function "
-                     "not yet implemented' on a drawn curve, so delete the whole sketch in the Fusion "
-                     "UI if it is not wanted.")
+                     f"'{on_sheet}' - {detail}. {left}.")
 
     # The coordinates the factories were handed are in the STANDARD's length unit; sheet_units is
     # the separate dimension display unit and does not move them.
@@ -242,12 +272,10 @@ def handler(geometry=None, sheet_name: str = "", name: str = "") -> dict:
         "curves_landed": total_landed,
         "landed": landed,
         "coordinates_verified": False,
-        "note": (f"Sketch '{sketch_name}' on sheet '{on_sheet}' has {total_landed} curves by "
-                 "collection count; placement coordinates were not verified. Use drawing_export and "
-                 f"inspect its output to check placement. Coordinates were taken as {units_said}, which "
-                 "the drawing STANDARD fixes; sheet_units "
-                 "controls dimension display only. Delete an unwanted sketch in the Fusion UI; "
-                 "Drawing.deleteEntities raises 'API Function not yet implemented' on a drawn curve."),
+        "note": (f"Sketch '{sketch_name}' on sheet '{on_sheet}' holds {total_landed} curve(s) by its "
+                 "own collection count. " + _COORDINATE_READBACK
+                 + f" Coordinates were taken as {units_said}, which the drawing STANDARD fixes; "
+                 "sheet_units controls dimension display only."),
     })
 
 

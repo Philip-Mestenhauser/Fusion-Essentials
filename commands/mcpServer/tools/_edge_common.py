@@ -18,11 +18,11 @@ from . import _geom
 from . import _inputs
 
 MAP_BLURB = (
-    "the edge-treatment substrate: EDGES/FACES/BODY/_EDGE_FILTER_DESC - the targeting inputs, with "
-    "_edges_of_faces expanding a face set to its edges, each once; _edge_convexity + "
-    "_collect_edges - the per-edge dihedral sign a convex/concave filter selects by; "
-    "_apply - the ONE build-and-verify path both tools run, gating on "
-    "the created faces, the health state and the body's own volume delta")
+    "the edge-treatment substrate: EDGES/FACES/BODY/_EDGE_FILTER_DESC/_TANGENT_CHAIN_DESC - the "
+    "targeting inputs; _edges_of_faces - a face set as its edges, each once; _edge_convexity + "
+    "_collect_edges - the dihedral a filter picks by; _tangent_chain_read - the chain flag off the "
+    "feature; _cut_edges - its RESOLVED edge count and a moved-marker clause; _apply - the ONE "
+    "build-and-verify path they run")
 
 # Edge-handle-list input (closes the 'fillet THESE specific edges' gap; takes precedence over edge_filter).
 _EDGES = _inputs.GeometryHandleList("edges", require="edge",
@@ -45,6 +45,10 @@ _CORNER_TYPES = {"chamfer": "ChamferCornerType", "miter": "MiterCornerType",
 # only, so on a plate with holes every hole rim matches exactly like the outer perimeter - the filter
 # cannot mean "outer edges only". The 'edges' handle list is the precise path when the set matters.
 _EDGE_FILTER_DESC = "Required without 'edges': the body's edges by dihedral."
+
+# True is the platform's own default and SEEDS from the handles: one edge of a tangent-continuous
+# rim cut the whole rim (1 handle -> 8 edges resolved, measured). False cuts the handles alone.
+_TANGENT_CHAIN_DESC = "False cuts only the handles given."
 
 # How close to parallel two out-of-material normals may read and still meet smoothly, which is
 # neither convex nor concave. Vectors carry 12 decimals: at 6 the dot quantizes in steps of 1e-6,
@@ -194,17 +198,18 @@ def _collect_edges(body, edge_filter):
     return coll, n, census
 
 
-def _build_edge_set(fillet_input, variant, edges, val, k):
+def _build_edge_set(fillet_input, variant, edges, val, k, tangent_chain):
     """Add the requested edge set to a FilletFeatureInput. Returns an error string, or ''."""
     if variant is None:
-        added = fillet_input.addConstantRadiusEdgeSet(edges, val, True)
+        added = fillet_input.addConstantRadiusEdgeSet(edges, val, tangent_chain)
         label = "constant-radius"
     elif variant["type"] == "chord_length":
-        added = fillet_input.addChordLengthEdgeSet(edges, val, True)
+        added = fillet_input.addChordLengthEdgeSet(edges, val, tangent_chain)
         label = "chord-length"
     else:
-        # positions and radii cross as plain Python lists (the API takes a vector there); an
-        # ObjectCollection raises a vector-type argument error.
+        # addVariableRadiusEdgeSet takes no isTangentChain argument and the set it builds reads the
+        # flag back False; positions and radii cross as plain Python lists (the API takes a vector
+        # there), where an ObjectCollection raises a vector-type argument error.
         added = fillet_input.addVariableRadiusEdgeSet(
             edges, val, adsk.core.ValueInput.createByReal(variant["end_radius"] * k),
             [adsk.core.ValueInput.createByReal(p) for p in variant["positions"]],
@@ -215,6 +220,39 @@ def _build_edge_set(fillet_input, variant, edges, val, k):
                 "for fresh edge handles; a variable-radius chain must be tangentially connected "
                 "and listed in order from its start end.")
     return ""
+
+
+def _tangent_chain_read(kind, feature):
+    """The tangent-chain flag READ BACK off the created feature, or None when it did not read."""
+    # The object that answers it differs by kind, and the other one is a CONSTANT: a ChamferFeature
+    # answers True/False while its own edge set reads False either way, and a FilletFeature answers
+    # True either way while its edge set answers True/False.
+    if kind == "chamfer":
+        return _common.read_flag(lambda: feature.isTangentChain)
+    return _common.read_flag(lambda: feature.edgeSets.item(0).isTangentChain)
+
+
+def _cut_edges(design, feature):
+    """(the edges the feature's own edge set RESOLVED to - what a seed handle chained INTO - and the
+    clause for a timeline marker that did not come back where it stood). Either is None when there
+    is nothing to report."""
+    # That collection reads only with the marker immediately before the feature (otherwise "Didn't
+    # roll editing feature back"), so the marker is moved and put back WHERE IT STOOD: moveToEnd
+    # instead rolls a deliberately parked marker past the features it was parked before.
+    timeline = safe(lambda: design.timeline)
+    tl_obj = safe(lambda: feature.timelineObject)
+    was = _common.counted(lambda: timeline.markerPosition) if timeline is not None else None
+    if tl_obj is None or was is None or safe(lambda: tl_obj.rollTo(True)) is not True:
+        return None, None
+    try:
+        count = safe(lambda: feature.edgeSets.item(0).edges.count)
+    finally:
+        safe(lambda: setattr(timeline, "markerPosition", was))
+    now = _common.counted(lambda: timeline.markerPosition)
+    if now == was:
+        return count, None
+    return count, (f"the timeline marker stood at {was} before the feature's edge set was read and "
+                   f"reads {now} after it - roll it back with design_edit_timeline")
 
 
 def _is_are(names):
@@ -301,7 +339,7 @@ def _chamfer_readback(feature, size_cm, k, angle, corner_key, as_expression=Fals
 
 
 def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distance_two=0.0,
-           variant=None, angle=None, corner_key=None, face_handles=None):
+           variant=None, angle=None, corner_key=None, face_handles=None, tangent_chain=True):
     vtype = variant["type"] if variant else "constant"
     size_key = ("distance" if kind == "chamfer"
                 else "chord_length" if vtype == "chord_length" else "radius")
@@ -425,12 +463,12 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
     try:
         if kind == "fillet":
             fi = comp.features.filletFeatures.createInput()
-            set_err = _build_edge_set(fi, variant, edges, val, k)
+            set_err = _build_edge_set(fi, variant, edges, val, k, tangent_chain)
             if set_err:
                 return error(set_err)
             feature = comp.features.filletFeatures.add(fi)
         else:
-            ci = comp.features.chamferFeatures.createInput(edges, True)
+            ci = comp.features.chamferFeatures.createInput(edges, tangent_chain)
             d2 = float(distance_two or 0.0)
             if angle is not None:
                 # A ValueInput built from a REAL carries RADIANS for an angle, so the wire's
@@ -469,9 +507,8 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
     # fillet/chamfer can consume fewer edges than handed in. feature.faces.count is the fillet FACES
     # created: a real fillet reports >=1, and the 0-face no-op is gated separately below.
     faces_created = safe(lambda: feature.faces.count)
-    # FilletFeature/ChamferFeature expose no .edges collection - "edges" is absent from dir() and
-    # reading it raises AttributeError - so the created faces are the only per-edge effect read-back
-    # the feature offers.
+    # faces_created is not an edge count: corner patches count too. The per-edge number is the
+    # feature's own resolved edge set (_cut_edges), read after the gates below.
 
     # A feature can come back with an ERROR health state and no message at all: a variable-radius
     # chain listed out of connected order does that, and it reads 0 faces like a tangent no-op. The
@@ -527,6 +564,18 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
             return error(rerr + (" The feature has been rolled back."
                                  if removed else " (The feature could not be auto-removed.)"))
 
+    # The tangent-chain flag the FEATURE reports. A variable-radius set is given no such argument,
+    # so nothing was requested for it and there is nothing to compare its reading against.
+    chain_requested = kind == "chamfer" or vtype in ("constant", "chord_length")
+    got_chain = _tangent_chain_read(kind, feature)
+    if chain_requested and got_chain is not None and got_chain != bool(tangent_chain):
+        removed = safe(lambda: feature.deleteMe())
+        return error(
+            f"The {kind} was created but its tangent-chain setting reads back {got_chain}, not the "
+            f"requested {bool(tangent_chain)} - the edge set Fusion built is not the one asked for."
+            + (" The feature has been rolled back." if removed
+               else " (The feature could not be auto-removed.)"))
+
     # A fillet or chamfer either cuts a corner away or fills a concave one, so an unchanged volume
     # means nothing was rounded/beveled however healthy the feature looks. Both kinds publish the
     # same volume_delta_cm3, and both are gated on it.
@@ -545,6 +594,37 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
                      else " faces_created is read from the created feature"
                           " (corner patches count too, so faces_created can exceed"
                           " edges_requested).")
+    edges_cut, marker_clause = _cut_edges(design, feature)
+    # A SHORT edge set is the partial application faces_created cannot see: corner patches can lift
+    # the face count to the requested number while the set Fusion built holds fewer edges.
+    if edges_cut is not None and edges_cut < edges.count:
+        removed = safe(lambda: feature.deleteMe())
+        return error(
+            f"{kind.capitalize()} reported success but only PARTIALLY applied: {edges.count} edge(s) "
+            f"were requested and the feature's own edge set resolved to {edges_cut}, so at least one "
+            "requested edge was dropped (a stale handle recovered the wrong/dead geometry, or an "
+            "edge the operation could not reach). Re-run find_geometry for fresh handles and retry."
+            + (" The feature has been rolled back." if removed
+               else " (The partial feature could not be auto-removed.)")
+            + ((" " + marker_clause + ".") if marker_clause else ""))
+    if edges_cut is None:
+        chain_note = " The feature's own edge set did not read, so edges_cut is not reported."
+    elif edges_cut > edges.count:
+        chain_note = (f" edges_cut {edges_cut} exceeds the {edges.count} handle(s) given: the seeds "
+                      "CHAINED into tangentially connected edges. Pass tangent_chain=false to cut "
+                      "only the handles.")
+    else:
+        # It rides the shared read-back sentence below rather than carrying a clause of its own.
+        chain_note = ""
+    if edges_cut is not None:
+        verified["edges_cut"] = edges_cut
+    if not chain_requested and got_chain is not None:
+        # The wire default is true, so a read-back of false here would otherwise read as a declined
+        # request rather than as the one edge set that is given no such argument.
+        chain_note += (f" tangent_chain reads {got_chain} because a {vtype} edge set takes no such "
+                       "argument - it cuts the edges handed in.")
+    if marker_clause:
+        chain_note += " " + marker_clause + "."
 
     payload = {
         kind + "ed": True,
@@ -556,8 +636,7 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
         "edge_selection": edge_src,
         "edges_requested": edges.count,
         "note": (f"Edges {'rounded' if kind == 'fillet' else 'beveled'}. Pair with view_screenshot."
-                 + (" Chamfer tangent-chain selection includes tangentially connected edges."
-                    if kind == "chamfer" else "")
+                 + chain_note
                  + measured_note
                  + (" " + "/".join(sorted(verified)) + _is_are(verified)
                     + " read back off the created feature, not echoed." if verified else "")
@@ -568,6 +647,12 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
     # Omit rather than report null: a None from safe() means the attribute did not answer.
     if faces_created is not None:
         payload["faces_created"] = faces_created
+    if got_chain is not None:
+        payload["tangent_chain"] = got_chain
+    elif chain_requested:
+        payload["tangent_chain_unverified"] = True
+    if marker_clause:
+        payload["timeline_marker_unrestored"] = True
     if faces_selected is not None:
         payload["faces_selected"] = faces_selected
     if census is not None:

@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 191  |  **description breadcrumbs:** 272  |  **note/error breadcrumbs:** 614
+**Tools:** 191  |  **description breadcrumbs:** 273  |  **note/error breadcrumbs:** 615
   |  **guidance smells flagged:** 8
 ## Blindspots to engineer
 
@@ -21,7 +21,7 @@ close orphans, factor duplicated guards into shared helpers.
   `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_remove_feature`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_insert_image`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_plane_cut`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_sweep`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
-- **50x** across 50 module(s): "No active design. Create or open a document first (see doc_new)."
+- **51x** across 50 module(s): "No active design. Create or open a document first (see doc_new)."
 - **23x** across 23 module(s): "No active design. Open or create a document first (see doc_new)."
 - **9x** across 3 module(s): "' with design_delete_feature."
 - **8x** across 8 module(s): "No active design with components."
@@ -1887,12 +1887,13 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' exposes no sketches collection - cannot add a sketch to it.
 - Adding a sketch to sheet '
 - entities onto sketch '
-- : Drawing.deleteEntities raises 'API Function not yet implemented' on a drawn curve, so delete the whole sketch in the Fusion UI if it is not wanted.
-- curves by collection count; placement coordinates were not verified. Use drawing_export and inspect its output to check placement. Coordinates were taken as
-- , which the drawing STANDARD fixes; sheet_units controls dimension display only. Delete an unwanted sketch in the Fusion UI; Drawing.deleteEntities raises 'API Function not yet implemented' on a dr...
+- Coordinates were taken as
+- , which the drawing STANDARD fixes; sheet_units controls dimension display only.
+- curve(s) by its own collection count.
 - Could not add a sketch to sheet '
-- Drew  of  entities onto sketch '' on sheet '' - . : Drawing.deleteEntities raises 'API Function not yet implemented' on a drawn curve, so delete the whole sketch in the Fusion UI if it is not wanted.
-- Sketch '' on sheet '' has  curves by collection count; placement coordinates were not verified. Use drawing_export and inspect its output to check placement. Coordinates were taken as , which the d...
+- A point near a drawing view's curve can land on that curve instead, and nothing here reads a landed coordinate back - check placement with drawing_export.
+- Deleting sketch '' is NOT CONFIRMED: deleteMe answered  and sheet '' would not report its sketch count. Read drawing_get for sheet '' before drawing on it again
+- Sketch '' on sheet '' holds  curve(s) by its own collection count.  Coordinates were taken as , which the drawing STANDARD fixes; sheet_units controls dimension display only.
 
 ### `drawing_create`
 - Created as a CLOUD file (NOT opened). Reach it: doc_open(file_id, force_api_open=true), then drawing_export for the PDF - a drawing never reviewed in the Fusion UI opens and drives that way, so no ...
@@ -2026,7 +2027,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - s of the export call returning. Treating this as a failure, not a false success.
 - export options could not be created:
 - Could not create output directory '
-- DXF/DWG sheet selection was not verified. Inspect the exported file, or export PDF with sheet_range for explicit sheet selection.
+- The DXF holds the ACTIVE sheet only, each of its sketches on a layer of that sketch's name. Export PDF with sheet_range to reach the other sheets.
+- DWG sheet selection was not verified. Inspect the exported file, or export PDF with sheet_range for explicit sheet selection.
 - '=' is a format= option, but this call asked for format= - the  export options carry no such setting. Drop '', or export with format=.
 
 ### `drawing_get`
@@ -2213,6 +2215,8 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - ', already driven this session, and the pair did NOT read as wholly native - an occurrence of one joint reads as a REFERENCED component, sits under one, did not answer isReferencedComponent, or did...
 - . Fusion IGNORES an out-of-range drive (the value stays where it was), so nothing would move. Command a value inside the limits (a command exactly AT a bound lands on it), or widen them with joint_...
 - Refused: the command lies beyond the enabled joint limits of '
+- ) was accepted, but the joint's own
+- did NOT read back, so nothing here says the mechanism moved - this receipt does not claim it was driven. Read the pose back with assembly_get.
 - Could not drive joint '
 - . Read the pose back with assembly_get.
 - did NOT land the commanded value -
@@ -2225,9 +2229,11 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Joint '' is  - only revolute, slider, and cylindrical joints can be driven by value. (rigid has no value; for a ball joint pose the part with assembly_move.)
 - The link reads neither suppressed nor compute-failed, and  - whether the partner's drive moved it is not read here. Read it back with assembly_get rather than re-driving it.
 - The link , so whether it moved '' is not known here - ; read it back with assembly_get. The refusal stands on that unread state, not on a coupling that was observed.
+- '' names  joints, so which one the link points at is not established here - every one of them was asked, and this verdict covers them all. Rename one in Fusion so the name resolves to a single joint.
 - Refused: '' is motion-linked to '', already driven this session, and the pair did NOT read as wholly native - an occurrence of one joint reads as a REFERENCED component, sits under one, did not ans...
 - Refused: the command lies beyond the enabled joint limits of '' - . Fusion IGNORES an out-of-range drive (the value stays where it was), so nothing would move. Command a value inside the limits (a ...
 - Could not drive joint '': . The assignments made before the failure () were accepted; no value was read back here, so where the mechanism stands now is not known from this receipt. Read the pose ba...
+- Drive of '': the assignment () was accepted, but the joint's own  did NOT read back, so nothing here says the mechanism moved - this receipt does not claim it was driven. Read the pose back with as...
 - NOTE: the drive moved the mechanism to the commanded pose;  - the stored angle kept a full-turn count the command did not.
 - NOTE: , pose-equivalent to the command (modulo 360 deg); the pre-drive value was unreadable, so whether the mechanism moved is not known from this receipt.
 - NOTE: the commanded angle equals the current pose modulo 360 deg - , so the physical pose already matches the command and nothing moved. A whole number of turns is an equivalent pose: command an an...
@@ -2236,6 +2242,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - These observations do not single out a cause. Read the mechanism with assembly_get (per-occurrence ground_to_parent, and the joint limits of every joint in the chain), then re-drive.
 - Drive of '' moved the placement of '' by  mm but its body geometry did not move ( mm) - the transform is a claim, the body corner is the evidence. Read the pose back with assembly_get.
 - 'moved' names the member whose placement changed across this drive: delta_mm is how far its origin moved (mm), delta_deg the angle between its before and after orientation (a magnitude, no sense), ...
+- NOTE: '' names  joints, so which one the link points at is not established here - the second-member refusal was decided over ALL of them. Rename one in Fusion so the name resolves to a single joint.
 - NOTE: '' is motion-linked to '' by , which reads neither suppressed nor compute-failed - the link couples the two joints, so read the partner back with assembly_get rather than driving it. In xref ...
 - NOTE: '' is motion-linked to '' by , which  - this receipt makes NO claim that the partner moved with it, and the second-member refusal is not armed for this pair. Read '' back with assembly_get to...
 - NOTE: '' is motion-linked to '' by , which  - whether the link moved the partner is not known from this receipt. Read '' back with assembly_get, and do not drive it: the second-member refusal stays...
@@ -2808,7 +2815,9 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - WARNING: this  DISCONNECTED the target - it created  additional disconnected body/bodies (the feature now yields : ). Reference each piece by name; a later op assuming one body may hit the wrong pi...
 
 ### `model_fillet`
-- A rule fillet selects FACES, so 'edges' cannot be passed with fillet_type='rule'. Drop 'edges', or use fillet_type='constant' to round exactly those edge handles.
+- A variable-radius fillet cannot take tangent_chain=false: the API's variable-radius edge set has no such argument, and it cuts the edges handed in. Drop 'tangent_chain', or use fillet_type='constant'.
+- fillet selects FACES, so 'edges' cannot be passed with fillet_type='
+- '. Drop 'edges', or use fillet_type='constant' to round exactly those edge handles.
 - A variable-radius fillet cannot take 'faces': its radius runs from the start of the edge chain to the far end, and a face set carries no such order. Pass 'edges' handles in chain order, or fillet_t...
 - A variable-radius fillet needs 'edges' - find_geometry edge handles for a single edge, or a tangentially connected chain listed in order from its start end. An edge_filter sweep has no such order, ...
 - A chord-length fillet needs 'chord_length' - the straight-line distance across the rounded corner. 'radius' does not drive this type.
@@ -2826,10 +2835,22 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Provide a positive radius.
 - The rule fillet refused the given faces, so nothing was created. Re-run find_geometry for fresh face handles.
 - 'radius' must be a number or a parameter-expression string like 'WallT/2'.
+- Full round fillet created - its radius is set by the two side faces, so 'radius' does not drive it. fillet_type and face_sets are read off the created feature. Pair with view_screenshot.
+- A full round fillet needs 'center_face' - the find_geometry face handle of the face the round replaces.
+- A full round fillet needs 'faces' and 'second_faces' - the face handles on either side of 'center_face'. The API refuses an empty side set ('invalid argument sideOneFaces'), so both must be given.
+- Full round fillet reported success but did not build one: the created feature answers
+- full-round face set(s) (any other fillet answers none) and the body's measured volume changed by
+- cm3. The feature has been rolled back.
+- (It could not be auto-removed.)
+- The full round face set was refused, so nothing was created. Re-run find_geometry for fresh face handles.
+- Full round fillet failed:
+- . The three faces must be adjacent - each side face sharing an edge with 'center_face'.
 - A variable-radius fillet needs 'end_radius' - the radius at the far end of the edge chain, where 'radius' is the radius at the start.
 - 'positions' and 'radii' must be the same length - got  position(s) and  radius(es). Each position places the radius paired with it at the same index.
 - 'positions'[] is  - a position is the fraction along the edge chain where its radius applies, and must be between 0 and 1 exclusive. The chain's two ends take their radii from 'radius' and 'end_rad...
 - Rule fillet reported success but rounded nothing. topology '' may exclude every edge of the selected faces ('rounds_only' takes convex edges, 'fillets_only' concave ones), or the faces meet smoothl...
+- Full round fillet reported success but did not build one: the created feature answers  full-round face set(s) (any other fillet answers none) and the body's measured volume changed by  cm3. The fea...
+- A  fillet selects FACES, so 'edges' cannot be passed with fillet_type=''. Drop 'edges', or use fillet_type='constant' to round exactly those edge handles.
 
 ### `model_hole`
 - Hole feature added (a real Hole, with hole/thread metadata - not an extrude-cut). For a bolt circle, pass every position in 'points' in ONE call - the pattern tools take bodies/occurrences, not hol...

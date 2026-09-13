@@ -11,10 +11,11 @@ re-driven so every feature follows it.
 import math
 
 from verify_core import (
-    _RECALL, _box, _chamfered, _component_metadata, _ctx_get, _datum, _datum_plane,
+    _RECALL, _axis_aligned_face_at, _box, _chamfered, _component_metadata, _ctx_get, _cut_a_chain,
+    _cut_exactly, _marker_parked_after, _datum, _datum_plane,
     _document_closed, _drafted, _drilled, _extent_measured, _extruded, _face_up_at, _fg, _fgn,
-    _filleted, _gap_measured, _holes_recognized, _holes_windowed, _home_address, _home_document,
-    _interference_measured, _joined,
+    _filleted, _full_rounded, _gap_measured, _holes_recognized, _holes_windowed, _home_address,
+    _home_document, _interference_measured, _joined,
     _joint_origin_at, _joint_origins_listed, _lofted, _made_component, _made_component_inactive,
     _material_assigned, _matched, _measured, _metadata_set, _mirrored, _moved, _near, _needs,
     _new_document, _offset_faces, _param_added, _param_deleted, _param_read, _param_set_to,
@@ -2475,6 +2476,83 @@ _DETAILS = [
                          {"path": p.get("path"), "path_closed": p.get("path_closed")},
                          _path_count(p.get("path"), 1) == 8
                          and p.get("path_closed") is True), None),
+    # THE SAME CLOSED RIM, now as an edge TREATMENT target: one handle on the front top line, cut
+    # with tangent_chain=false. edges_cut is read off the feature's own edge set, and the rim
+    # OPPOSITE is then read independently - a chain that reached it would put a 45 deg bevel face
+    # centred exactly where the query looks.
+    ("find_geometry", {"target": "TangentLoop", "kind": "line_edge", "nearest_to": [2030, 0, 20],
+                       "max_results": 1}, _matched(1, "line_edge"), _fg("tl_rim_front")),
+    ("model_chamfer", lambda c: {"edges": [_ctx_get(c, "tl_rim_front", "the front top rim line")],
+                                 "distance": 1, "tangent_chain": False},
+     _cut_exactly("chamfer", 1), None),
+    ("find_geometry", {"target": "TangentLoop", "kind": "planar_face",
+                       "nearest_to": [2030, 59.5, 19.5], "max_results": 1},
+     _axis_aligned_face_at(2030, 59.5, 19.5), None),
+    # and the DEFAULT on the back rim line: the seeds chain, so the feature cuts more edges than the
+    # one handle it was given. The number is read off the built feature - the beat above broke the
+    # rim's tangency at the front, so how far this chain reaches is not something to predict.
+    ("find_geometry", {"target": "TangentLoop", "kind": "line_edge", "nearest_to": [2030, 60, 20],
+                       "max_results": 1}, _matched(1, "line_edge"), _fg("tl_rim_back")),
+    ("model_chamfer", lambda c: {"edges": [_ctx_get(c, "tl_rim_back", "the back top rim line")],
+                                 "distance": 1}, _cut_a_chain("chamfer", 1), None),
+    # A PARKED MARKER, which reading the resolved edge set has to move and put back. Rolling to the
+    # previous step parks it before the chamfer above; the cut below lands at the marker, and the
+    # rolled-out feature has to still be rolled out afterwards. The seed is the front BOTTOM rim,
+    # which no earlier beat has touched.
+    # the parked INDEX is saved off the roll's own receipt: it is where the cut below lands, and a
+    # feature name cannot say that - names are component-local and the Bracket has chamfers of its
+    # own carrying the same ones.
+    ("design_edit_timeline", {"action": "roll", "to": "previous"},
+     lambda p: _measured("one feature rolled out", {"rolled_back": p.get("rolled_back"),
+                                                    "marker_position": p.get("marker_position")},
+                         p.get("rolled") is True and p.get("rolled_back") == 1),
+     ("parked_at", _recall("parked_at", lambda p: p["marker_position"]))),
+    ("find_geometry", {"target": "TangentLoop", "kind": "line_edge", "nearest_to": [2030, 0, 0],
+                       "max_results": 1}, _matched(1, "line_edge"), _fg("tl_rim_low")),
+    ("model_chamfer", lambda c: {"edges": [_ctx_get(c, "tl_rim_low", "the front bottom rim line")],
+                                 "distance": 1, "tangent_chain": False},
+     _cut_exactly("chamfer", 1),
+     ("parked_chamfer", _recall("parked_chamfer", lambda p: p["feature"]))),
+    # the INDEPENDENT read: the design's own timeline, not the chamfer's receipt.
+    ("design_get", {"include": ["timeline"], "max_results": 2000},
+     _marker_parked_after("parked_at", "parked_chamfer"), None),
+    ("design_edit_timeline", {"action": "roll", "to": "end"},
+     lambda p: _measured("nothing left rolled out", {"rolled_back": p.get("rolled_back")},
+                         p.get("rolled") is True and p.get("rolled_back") == 0), None),
+    # THE BLANKET call, on a box of its own: every one of a cuboid's 12 edges is a sharp corner with
+    # no tangent junction to chain across, so the resolved set is the swept set.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "BlanketBox", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "BlanketS"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 2200, "y1": 0,
+                                           "x2": 2220, "y2": 20}],
+                             "sketch_name": "BlanketS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "BlanketS", "profile_index": 0, "distance": 10},
+     _extruded, None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_chamfer", {"body_name": "BlanketBox", "edge_filter": "all", "distance": 1},
+     _cut_exactly("chamfer", 12, chain=True), None),
+    # FULL ROUND, on a slab of its own: one face replaced by a round tangent to the two beside it,
+    # so the radius comes from the geometry and 'radius' does not drive it at all.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "FullRound", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "FullRoundS"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 2100, "y1": 0,
+                                           "x2": 2180, "y2": 40}],
+                             "sketch_name": "FullRoundS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "FullRoundS", "profile_index": 0, "distance": 10},
+     _extruded, None),
+    ("find_geometry", {"target": "FullRound", "kind": "planar_face", "nearest_to": [2140, 0, 5],
+                       "max_results": 1}, _matched(1, "planar_face"), _fg("fr_side")),
+    ("find_geometry", {"target": "FullRound", "kind": "planar_face", "nearest_to": [2140, 20, 0],
+                       "max_results": 1}, _matched(1, "planar_face"), _fg("fr_bottom")),
+    ("find_geometry", {"target": "FullRound", "kind": "planar_face", "nearest_to": [2140, 20, 10],
+                       "max_results": 1}, _matched(1, "planar_face"), _fg("fr_top")),
+    ("model_fillet", lambda c: {"fillet_type": "full_round",
+                                "center_face": _ctx_get(c, "fr_side", "the face to round away"),
+                                "faces": [_ctx_get(c, "fr_bottom", "the slab's underside")],
+                                "second_faces": [_ctx_get(c, "fr_top", "the slab's top")]},
+     _full_rounded, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     # Section lifecycle: preserve the camera, retain both generated names, remove one exact cut,
     # and independently read the surviving decoy before the existing clear-all cleanup.

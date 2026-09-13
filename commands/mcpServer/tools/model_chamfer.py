@@ -13,7 +13,8 @@ from ..mcp_primitives.registry import register
 from ._common import error
 from . import _inputs
 from . import _assert
-from ._edge_common import _BODY, _CORNER_TYPES, _EDGES, _EDGE_FILTER_DESC, _FACES, _apply
+from ._edge_common import (_BODY, _CORNER_TYPES, _EDGES, _EDGE_FILTER_DESC, _FACES,
+                           _TANGENT_CHAIN_DESC, _apply)
 
 app = adsk.core.Application.get()
 
@@ -47,7 +48,7 @@ def _angle_spec(angle_deg, distance_two):
 
 def handler(body_name: str = "", distance: float = 1.0, units: str = "mm",
             edge_filter: str = "", edges=None, faces=None, distance_two: float = 0.0,
-            angle_deg=None, corner_type: str = "") -> dict:
+            angle_deg=None, corner_type: str = "", tangent_chain: bool = True) -> dict:
     """Bevel edges with a Chamfer - equal-distance, two-distance (asymmetric) via 'distance_two',
     or distance-and-angle via 'angle_deg'. Edge handles, every edge of named faces, or a filter."""
     angle, aerr = _angle_spec(angle_deg, distance_two)
@@ -57,12 +58,12 @@ def handler(body_name: str = "", distance: float = 1.0, units: str = "mm",
     if cerr:
         return error(cerr)
     return _apply("chamfer", body_name, distance, units, edge_filter, edges, distance_two,
-                  angle=angle, corner_key=corner_key, face_handles=faces)
+                  angle=angle, corner_key=corner_key, face_handles=faces,
+                  tangent_chain=bool(tangent_chain))
 
 
 TOOL_DESCRIPTION = (
-"Bevel edges. Supplied edge handles seed tangent-chain selection, including tangentially "
-"connected edges; model_fillet rounds instead."
+"Bevel edges; model_fillet rounds. An edge handle SEEDS a tangent chain - edges_cut is what it cut."
 )
 
 tool = (
@@ -78,6 +79,8 @@ tool = (
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("edge_filter", {"type": "string", "enum": ["all", "convex", "concave"],
         "description": _EDGE_FILTER_DESC})
+    .add_input_property("tangent_chain", {"type": "boolean",
+        "description": _TANGENT_CHAIN_DESC})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,

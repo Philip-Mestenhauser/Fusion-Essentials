@@ -151,10 +151,14 @@ class FakeDrawingSketch:
     """One sheet sketch. A created entity exposes nothing readable, so each collection's `count` is
     the only read-back there is - and one call hands back ONE entity however many curves it drew.
     `refuses`/`silent`/`nothing`/`raises_after` name the collections whose factory throws before
-    drawing, grows nothing while handing an entity back, returns None, and throws AFTER landing."""
+    drawing, grows nothing while handing an entity back, returns None, and throws AFTER landing.
+    `delete_ok` is what deleteMe answers - True also takes the sketch off its sheet, False answers
+    false, and 'silent' answers true while the sheet goes on listing it."""
     def __init__(self, name="DrwSketch", counts=None, refuses=(), silent=(), nothing=(),
-                 raises_after=(), refusal="the sheet is locked"):
+                 raises_after=(), refusal="the sheet is locked", delete_ok=True):
         self.name = name
+        self._delete_ok = delete_ok
+        self._owner = None
         self._drawn = []
         self._refuses = set(refuses)
         self._silent = set(silent)
@@ -181,6 +185,11 @@ class FakeDrawingSketch:
         return types.SimpleNamespace(objectType="adsk::drawing::" + key)
 
     def deleteMe(self):
+        # MEASURED: deleteMe answers true and the sheet's sketches no longer list the sketch.
+        if self._delete_ok is False:
+            return False
+        if self._delete_ok != "silent" and self._owner is not None and self in self._owner._items:
+            self._owner._items.remove(self)
         return True
 
 
@@ -188,12 +197,15 @@ class FakeDrawingSketch:
 class FakeDrawingSketches:
     """A sheet's sketches: add() records the name it was ASKED for and hands back `sketch`, whose
     own name is what a caller can address later; `landed_name` is that name when it differs.
-    `returns_nothing` is the add that answers None."""
-    def __init__(self, sketch=None, sketches=(), landed_name=None, returns_nothing=False):
+    `returns_nothing` is the add that answers None, and `count_raises` the collection whose own
+    count read throws, so nothing can confirm what the collection holds."""
+    def __init__(self, sketch=None, sketches=(), landed_name=None, returns_nothing=False,
+                 count_raises=False):
         self._sketch = sketch
         self._items = list(sketches)
         self._landed_name = landed_name
         self._returns_nothing = returns_nothing
+        self._count_raises = count_raises
         self._requested = []
 
     def add(self, name=None):
@@ -202,11 +214,14 @@ class FakeDrawingSketches:
             return None
         made = self._sketch if self._sketch is not None else FakeDrawingSketch()
         made.name = self._landed_name or name or made.name
+        made._owner = self
         self._items.append(made)
         return made
 
     @property
     def count(self):
+        if self._count_raises:
+            raise RuntimeError(_STALE_PROXY_READ)
         return len(self._items)
 
     def item(self, i):

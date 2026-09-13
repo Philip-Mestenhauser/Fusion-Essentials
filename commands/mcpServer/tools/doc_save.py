@@ -11,6 +11,7 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _assert
+from . import _doc_common
 from ._data_common import _agent_description
 
 app = adsk.core.Application.get()
@@ -59,12 +60,15 @@ def handler(description: str = "") -> dict:
         return error(f"Fusion declined to save '{safe(lambda: doc.name)}'.")
 
     # The postcondition reports local completion separately from fresh cloud version advancement.
+    published, publication_note = _doc_common.publication_read(doc)
     payload = {
         "saved": True,
         "document_name": safe(lambda: doc.name),
         "description": _agent_description(description),
-        "note": "Document.save returned true; confirmation fields report local completion and observed cloud version state.",
+        "note": ("Document.save returned true; confirmation fields report local completion and "
+                 "observed cloud version state. ") + publication_note,
     }
+    payload.update(published)
     _report_lineage_change(payload, doc, lineage_before)
     return ok(payload)
 
@@ -82,8 +86,10 @@ tool = (
             "description": "Version description (the AI-agent marker is prepended)."})
     .strict_schema()
 )
+# enforce_timeout=False: save() COMMITS a cloud version and the call then waits out the version and
+# the cloud-processing flag - a timeout would report a false failure for a version that landed.
 item = Item.create_tool_item(
-    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    tool=tool, write="write", handler=handler, run_on_main_thread=True, enforce_timeout=False,
     postconditions=[_assert.VersionAdvanced()])
 
 

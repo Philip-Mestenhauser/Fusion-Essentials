@@ -726,6 +726,125 @@ class TestXrefScopingAndTokens:
         assert jd.handler(joint_name="R", distance=-16)["isError"] is True
 
 
+class TestAnAmbiguousPartnerNameDoesNotDisarmTheGuard:
+    """Joint names are unique only within a COMPONENT, so a link's partner name can mean several
+    joints (measured live: a second 'Hinge' in a sub-component made the identical drive stop
+    disclosing that both members were now driven). The safety reads are taken over every candidate:
+    driven if ANY was, plain only if ALL are."""
+
+    def _rig(self, monkeypatch, referenced, decoy_referenced=None):
+        """The live sequence: 'Drive' linked to 'R', driven while 'R' still names ONE joint, then a
+        SECOND 'R' appears in a sub-component. `decoy_referenced` is that second one's own xref
+        state, which is what a MIXED candidate set turns on. Returns (drive, add_decoy)."""
+        decoy_referenced = referenced if decoy_referenced is None else decoy_referenced
+        drive = FakeJoint("Drive", SliderJointMotion(),
+                          occurrence_one=_occ(referenced=referenced), occurrence_two=_plain_occ())
+        r_one = FakeJoint("R", SliderJointMotion(), entity_token="t:r1",
+                          occurrence_one=_occ(referenced=referenced), occurrence_two=_plain_occ())
+        r_two = FakeJoint("R", SliderJointMotion(), entity_token="t:r2",
+                          occurrence_one=_occ(referenced=decoy_referenced),
+                          occurrence_two=_plain_occ())
+        link_pair(drive, r_one)
+        root = _root([drive, r_one])
+        design = make_design(comp=root, all_components=[root])
+        install(jd, design)
+        monkeypatch.setattr(jd._write_guard, "app", _app("DocA"))
+        monkeypatch.setattr(jd, "_driven_this_session", set())
+        return drive, lambda: design._all_components.append(_root([r_two]))
+
+    def test_a_second_joint_of_that_name_does_not_unarm_the_refusal(self, monkeypatch):
+        # THE BITE: find_joint's None for an ambiguous name leaves partner_driven False and
+        # plain_pair True with NO occurrence read at all, so the xref refusal never fires.
+        drive, add_decoy = self._rig(monkeypatch, referenced=True)
+        assert payload(jd.handler(joint_name="R", distance=16))["driven"] is True
+        add_decoy()
+        res = jd.handler(joint_name="Drive", distance=-16)
+        assert res["isError"] is True
+        assert "names 2 joints" in res["message"]
+        assert "did NOT read as wholly native" in res["message"]
+        assert drive.jointMotion.slideValue == 0.0        # refused BEFORE mutating
+
+    def test_one_candidate_in_an_xref_context_is_enough_to_refuse(self, monkeypatch):
+        # The MIXED set, and why the verdict is ALL and not ANY: the joint driven and the one the
+        # link names read wholly native, and only the OTHER candidate sits on a referenced
+        # occurrence. Which of the two the link points at is exactly what cannot be read here, so a
+        # pair called plain because one candidate is plain is a pair nothing proved.
+        drive, add_decoy = self._rig(monkeypatch, referenced=False, decoy_referenced=True)
+        assert payload(jd.handler(joint_name="R", distance=16))["driven"] is True
+        add_decoy()
+        res = jd.handler(joint_name="Drive", distance=-16)
+        assert res["isError"] is True and "names 2 joints" in res["message"]
+        assert drive.jointMotion.slideValue == 0.0
+
+    def test_a_plain_ambiguous_pair_drives_and_the_receipt_names_the_candidates(self, monkeypatch):
+        # Not an over-refusal: a wholly native pair is still drivable, and the receipt discloses
+        # that the partner name does not pick one joint rather than going silent about it.
+        drive, add_decoy = self._rig(monkeypatch, referenced=False)
+        assert payload(jd.handler(joint_name="R", distance=16))["driven"] is True
+        add_decoy()
+        out = payload(jd.handler(joint_name="Drive", distance=-16))
+        assert out["driven"] is True
+        assert out["motion_link_partner_candidates"] == 2
+        assert "names 2 joints" in out["note"]
+
+
+class TestTheNativeWalkProvesNothingItDidNotRead:
+    """_occ_positively_plain is the ONLY thing that can skip the second-member refusal, so every
+    way its walk can stop short has to answer unproven. Measured: a 40-deep nest reads a 39-link
+    assemblyContext chain, and after 32 steps the context is still there."""
+
+    def _chain(self, depth, top_referenced=False):
+        """An occurrence `depth` assemblyContext links below a top-level one."""
+        occ = _occ(referenced=top_referenced)
+        for _ in range(depth):
+            occ = _occ(parent=occ)
+        return occ
+
+    def test_a_chain_at_the_cap_is_still_proven_native(self):
+        # The boundary: the cap counts STEPS TAKEN, so a chain exactly that long is fully read.
+        assert jd._occ_positively_plain(self._chain(jd._CONTEXT_WALK_CAP)) is True
+
+    def test_a_chain_one_link_past_the_cap_is_not_proven_native(self):
+        # THE BITE: a walk that leaves the loop with a context still in hand has read nothing above
+        # it, so answering True claims 'wholly native' over ancestors it never looked at.
+        assert jd._occ_positively_plain(self._chain(jd._CONTEXT_WALK_CAP + 1)) is False
+
+    def test_a_context_read_that_declines_is_not_the_end_of_the_chain(self):
+        # An assemblyContext that RAISES and one that answers None are different facts: only the
+        # second says the occurrence sits at the top.
+        blind = make_occurrence(referenced=False, assembly_context=_occ(referenced=True),
+                                raises_on={"assemblyContext": "3 : read declined"})
+        assert jd._occ_positively_plain(blind) is False
+        assert jd._occ_positively_plain(_occ(referenced=False)) is True   # a real root still passes
+
+
+class TestDrivenIsNotClaimedWithTheValueUnread:
+    def test_a_value_that_does_not_read_back_is_not_published_as_driven(self, monkeypatch):
+        # 'driven' is a claim about the EFFECT and the post-drive value is its only evidence. A
+        # receipt answering driven:true with an empty value_now states a motion nothing read.
+        class RevoluteJointMotion(_Revolute):          # the NAME keys the shared type map
+            """A revolute that ACCEPTS the assignment and whose value read then declines."""
+            @property
+            def rotationValue(self):
+                raise RuntimeError("value unreadable")
+
+            @rotationValue.setter
+            def rotationValue(self, value):
+                self._landed = value
+
+        joint = FakeJoint("J", RevoluteJointMotion())
+        _install(joint)
+        monkeypatch.setattr(jd._write_guard, "app", _app("DocA"))
+        monkeypatch.setattr(jd, "_driven_this_session", set())
+        res = jd.handler(joint_name="J", angle_deg=30)
+        assert res["isError"] is True
+        assert "did NOT read back" in res["message"] and "angle_deg" in res["message"]
+        assert "was accepted" in res["message"]
+        assert joint.jointMotion._landed == pytest.approx(math.radians(30))
+        # the assignment landed, so the crash guard arms anyway - it must fail toward refusal
+        assert jd._driven_this_session
+
+
 # ── the link's own STATE gates the coupling claim and the refusal ────────────
 # A motion link that reads SUPPRESSED or compute-failed transmits nothing, so the receipt claims no
 # moved partner and the second-member refusal is not armed (measured: a suppressed rack/pinion link

@@ -49,8 +49,13 @@ _SCOPED = (("sheet_range", "pdf"), ("line_weights", "pdf"),
 _PREVIEW_NOTE = ("The DXF and DWG export option creators are marked a preview feature by Autodesk "
                  "and may change in a future release.")
 
-_SHEET_SELECTION_NOTE = ("DXF/DWG sheet selection was not verified. Inspect the exported file, "
-                         "or export PDF with sheet_range for explicit sheet selection.")
+# MEASURED: a DXF holds the ACTIVE sheet only - a named sketch on another sheet is absent from the
+# file and present once that sheet is the active one. DWG is not measured either way.
+_DXF_SHEET_NOTE = ("The DXF holds the ACTIVE sheet only, each of its sketches on a layer of that "
+                   "sketch's name. Export PDF with sheet_range to reach the other sheets.")
+
+_DWG_SHEET_NOTE = ("DWG sheet selection was not verified. Inspect the exported file, "
+                   "or export PDF with sheet_range for explicit sheet selection.")
 
 # The write is still in flight when execute() returns, so the file-landed check polls to this
 # deadline instead of reporting a false failure on the first miss.
@@ -205,12 +210,12 @@ def handler(format: str = "pdf", file_path: str = "", sheet_range: str = "",
     if fmt == "pdf":
         note += " Sheet selection: " + (f"range '{rng}'." if rng else "all sheets.")
     else:
-        note += " " + _SHEET_SELECTION_NOTE
+        note += " " + (_DXF_SHEET_NOTE if fmt == "dxf" else _DWG_SHEET_NOTE)
     if is_preview:
         note += " " + _PREVIEW_NOTE
     payload = {"exported": True, "format": fmt, "file_path": path, "size_bytes": size, "note": note}
     if fmt in ("dxf", "dwg"):
-        payload["sheet_selection_verified"] = False
+        payload["sheet_selection_verified"] = fmt == "dxf"
     payload.update(applied)
     return ok(payload)
 

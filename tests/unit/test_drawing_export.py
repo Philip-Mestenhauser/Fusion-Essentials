@@ -450,15 +450,25 @@ class TestPreviewNote:
 # ── sheet selection disclosure ────────────────────────────────────────────────
 
 class TestSheetSelectionDisclosure:
-    @pytest.mark.parametrize("fmt", ["dxf", "dwg"])
-    def test_dxf_and_dwg_disclose_unverified_sheet_selection(self, install, tmp_path, fmt):
+    def test_dxf_states_the_measured_active_sheet_scope(self, install, tmp_path):
+        # MEASURED: a sketch named on sheet 1 is absent from the DXF while sheet 2 is active and
+        # present once sheet 2 is gone - so the DXF's scope is stated, not disclosed as unknown.
         install()
-        out = _payload(_run(format=fmt, file_path=str(tmp_path / ("sheet." + fmt))))
+        out = _payload(_run(format="dxf", file_path=str(tmp_path / "sheet.dxf")))
+        assert out["sheet_selection_verified"] is True
+        assert "ACTIVE sheet only" in out["note"]
+        assert "PDF with sheet_range" in out["note"]
+        assert "not verified" not in out["note"]
+
+    def test_dwg_still_discloses_unverified_sheet_selection(self, install, tmp_path):
+        # DWG was never measured, so it keeps the disclosure DXF no longer needs.
+        install()
+        out = _payload(_run(format="dwg", file_path=str(tmp_path / "sheet.dwg")))
         assert out["sheet_selection_verified"] is False
         assert "not verified" in out["note"]
         assert "Inspect the exported file" in out["note"]
         assert "PDF with sheet_range" in out["note"]
-        assert "first sheet" not in out["note"] and "active" not in out["note"]
+        assert "first sheet" not in out["note"] and "ACTIVE sheet" not in out["note"]
 
     def test_pdf_note_claims_no_single_sheet_limit(self, install, tmp_path):
         install()

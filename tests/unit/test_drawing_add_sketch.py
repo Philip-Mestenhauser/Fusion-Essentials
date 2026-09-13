@@ -31,9 +31,10 @@ def _point(x, y):
 @pytest.fixture
 def wire(monkeypatch):
     def _install(sheets=("Sheet1",), active=0, units="mm", is_drawing=True, landed_name=None,
-                 no_sketches=False, standard="iso"):
-        sketch = FakeDrawingSketch()
-        objs = [FakeSheet(n, sketches=FakeDrawingSketches(sketch, landed_name=landed_name))
+                 no_sketches=False, standard="iso", delete_ok=True, count_raises=False):
+        sketch = FakeDrawingSketch(delete_ok=delete_ok)
+        objs = [FakeSheet(n, sketches=FakeDrawingSketches(sketch, landed_name=landed_name,
+                                                          count_raises=count_raises))
                 for n in sheets]
         if no_sketches:
             for sheet in objs:
@@ -70,7 +71,11 @@ class TestDraw:
         assert out["curves_requested"] == 6          # the 3-point line chain counts as TWO
         assert out["curves_landed"] == 6
         assert out["coordinates_verified"] is False
+        # the note states the one placement fact and points at the tool that reads a coordinate
+        # back; the DXF's own shape is drawing_export's to describe, not this call's.
         assert "drawing_export" in out["note"] and "check placement" in out["note"]
+        assert "can land on that curve" in out["note"]
+        assert len(out["note"]) <= 400
         assert out["landed"] == {"lines": 2, "rectangles": 1, "arcs": 1, "circles": 1, "ellipses": 1}
         assert [k for k, _ in state.sketch._drawn] == [
             "lines", "rectangles", "arcs", "ellipses", "circles"]
@@ -122,7 +127,7 @@ class TestHonesty:
         state.sketch._silent.add("circles")
         msg = error_message(dw.handler(geometry=[_LINE, _CIRCLE]))
         assert "circles 0 of 1" in msg and "came up short" in msg
-        assert "keeps the 2 curves" in msg               # the line segments that DID land stay
+        assert "was deleted" in msg                       # the half-drawn sketch is taken back
 
     def test_a_factory_returning_nothing_is_an_error(self, wire):
         state = wire()
@@ -139,30 +144,44 @@ class TestHonesty:
         msg = error_message(dw.handler(geometry=[_ARC]))
         assert state.sketch.arcs.count == 1               # nothing is short
         assert "geometry[0] ('arc') was refused" in msg and "locked" in msg
-        assert "keeps the 1 curve already drawn" in msg   # singular, not "1 curves"
 
-    def test_a_failure_on_the_first_entity_reports_the_sketch_as_empty(self, wire):
-        state = wire()
-        state.sketch._refuses.add("arcs")
-        msg = error_message(dw.handler(geometry=[_ARC, _CIRCLE]))
-        assert "Drew 0 of 2" in msg
-        assert "That empty sketch stays behind" in msg    # never "the 0 curves already drawn"
-
-    def test_a_refused_entity_names_it_and_reports_what_already_landed(self, wire):
+    def test_a_partly_drawn_sketch_is_rolled_back_off_the_sheet(self, wire):
+        # A partial draw leaves curves nothing can delete one by one, so the SKETCH that holds them
+        # is deleted - and the sheet's own re-read count, not deleteMe's answer, says it went.
         state = wire()
         state.sketch._refuses.add("arcs")
         msg = error_message(dw.handler(geometry=[_LINE, _ARC, _CIRCLE]))
-        assert "Drew 1 of 3" in msg and "geometry[1] ('arc')" in msg and "locked" in msg
-        assert "keeps the 2 curves" in msg               # what the sketch is left holding
-        assert state.sketch.circles.count == 0           # the run stopped, it did not carry on
+        assert "Drew 1 of 3" in msg and "geometry[1] ('arc')" in msg
+        assert "left nothing on the sheet" in msg
+        assert state.sheets[0].sketches.count == 0        # the sketch is gone, not just reported
+        assert state.sketch.circles.count == 0            # the run stopped, it did not carry on
 
-    def test_the_failure_names_the_measured_delete_route_not_an_absence(self, wire):
-        # Drawing.deleteEntities EXISTS and raises 'not yet implemented' on a drawn curve; the wire
-        # states that measured fact rather than claiming no delete call exists.
-        state = wire()
-        state.sketch._nothing.add("circles")
-        msg = error_message(dw.handler(geometry=[_CIRCLE]))
-        assert "Drawing.deleteEntities raises 'API Function not yet implemented'" in msg
+    def test_a_rollback_the_platform_declines_says_the_sketch_stays(self, wire):
+        # deleteMe answering false leaves exactly the half-drawn sketch this branch exists to
+        # remove: the call names it and where it is, rather than reporting a clean rollback.
+        state = wire(delete_ok=False)
+        state.sketch._refuses.add("arcs")
+        msg = error_message(dw.handler(geometry=[_LINE, _ARC]))
+        assert "FAILED too" in msg and "holding the 2 curves" in msg
+        assert "Sheet1" in msg and state.sheets[0].sketches.count == 1
+
+    def test_a_rollback_whose_count_does_not_drop_is_not_called_a_rollback(self, wire):
+        # deleteMe answers TRUE while the sheet still lists the sketch - the answer alone would
+        # report a rollback that did not happen, so the re-read count decides.
+        state = wire(delete_ok="silent")
+        state.sketch._refuses.add("arcs")
+        msg = error_message(dw.handler(geometry=[_LINE, _ARC]))
+        assert "FAILED too" in msg and state.sheets[0].sketches.count == 1
+
+    def test_a_rollback_the_sheet_will_not_confirm_is_not_reported_as_a_failure(self, wire):
+        # deleteMe DID remove the sketch but the sheet's count will not read: calling that FAILED
+        # sends the caller to the Fusion UI to delete something that is no longer there.
+        state = wire(count_raises=True)
+        state.sketch._refuses.add("arcs")
+        msg = error_message(dw.handler(geometry=[_LINE, _ARC]))
+        assert "NOT CONFIRMED" in msg and "Sheet1" in msg and "drawing_get" in msg
+        assert "FAILED" not in msg
+        assert state.sheets[0].sketches._items == []      # the delete did land
 
     def test_a_sketch_that_could_not_be_added_is_an_error(self, wire):
         state = wire()

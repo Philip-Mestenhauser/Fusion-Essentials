@@ -74,6 +74,8 @@ _DRAWING_POPULATED_PDF = DOWNLOAD_DIR + f"/drawing_populated_copy_{_STAMP}.pdf"
 _DRAWING_UPDATE_BEFORE_PDF = DOWNLOAD_DIR + f"/drawing_update_before_{_STAMP}.pdf"
 _DRAWING_UPDATE_AFTER_PDF = DOWNLOAD_DIR + f"/drawing_update_after_{_STAMP}.pdf"
 _DRAWING_RESTORED_PDF = DOWNLOAD_DIR + f"/drawing_restored_{_STAMP}.pdf"
+_DRAWING_SKETCH_DXF = DOWNLOAD_DIR + f"/drawing_sketch_readback_{_STAMP}.dxf"
+_DRAWING_SKETCH_NAME = "SweepCloudSketch"
 _DRAWING_TWO_BEFORE_KEY = "drawing-two-before-" + _STAMP
 _DRAWING_TWO_AFTER_KEY = "drawing-two-after-" + _STAMP
 _DRAWING_POPULATED_KEY = "drawing-populated-" + _STAMP
@@ -505,19 +507,40 @@ def _files_gone(*names):
     return check
 
 
+def _cloud_processing_read(p):
+    """True when the save PUBLISHED what DataFile.isComplete read: the flag, whether this call saw
+    it false first, and the seconds the bounded settle spent.
+
+    The VALUES are published and never asserted - a save answers while the cloud is still working,
+    so demanding true here would assert how fast someone's hub was on the day."""
+    waited = p.get("cloud_processing_waited_seconds")
+    complete = p.get("cloud_processing_complete")
+    return ("cloud_processing_complete" in p
+            and (isinstance(complete, bool) or complete is None)
+            and isinstance(p.get("cloud_processing_was_incomplete"), bool)
+            and _num(waited) and waited >= 0)
+
+
 def _saved_as(name, folder):
     """doc_save_as: the document written into the configured folder under this name, with no name
-    collision - a second file of one name is a fork this run could not then clean up by name."""
+    collision - a second file of one name is a fork this run could not then clean up by name - and
+    the cloud-processing flag the save read off its own DataFile."""
     def check(p):
         return _measured(f"'{name}' saved into '{folder}'",
                          {"saved": p.get("saved"), "name": p.get("name"),
                           "destination_folder": p.get("destination_folder"),
                           "document_id": p.get("document_id"),
                           "auto_created_parents": p.get("auto_created_parents"),
+                          "cloud_processing_complete": p.get("cloud_processing_complete"),
+                          "cloud_processing_was_incomplete":
+                              p.get("cloud_processing_was_incomplete"),
+                          "cloud_processing_waited_seconds":
+                              p.get("cloud_processing_waited_seconds"),
                           "name_collision": p.get("name_collision")},
                          p.get("saved") is True and p.get("name") == name
                          and p.get("destination_folder") == folder
                          and p.get("auto_created_parents") == []
+                         and _cloud_processing_read(p)
                          and "name_collision" not in p)
     return check
 
@@ -647,9 +670,14 @@ def _versioned(name):
                           "local_save_confirmed": p.get("local_save_confirmed"),
                           "version_confirmed": p.get("version_confirmed"),
                           "pending": p.get("pending"), "cloud_tip_advanced": tip,
+                          "cloud_processing_complete": p.get("cloud_processing_complete"),
+                          "cloud_processing_was_incomplete":
+                              p.get("cloud_processing_was_incomplete"),
+                          "cloud_processing_waited_seconds":
+                              p.get("cloud_processing_waited_seconds"),
                           "lineage_changed": p.get("lineage_changed"),
                           "description": p.get("description")},
-                         local and (cloud or pending))
+                         local and (cloud or pending) and _cloud_processing_read(p))
     return check
 
 def _plate_geometry(label, height=10.0):
@@ -975,7 +1003,8 @@ def _exported(p):
                      and fmt in ("pdf", "dxf", "dwg") and isinstance(path, str)
                      and path.lower().endswith("." + fmt)
                      and _num(p.get("size_bytes")) and p["size_bytes"] > 0
-                     and (fmt == "pdf" or selection is False))
+                     # a DXF holds the active sheet, a verified fact; DWG selection is unverified.
+                     and (fmt == "pdf" or selection is (fmt == "dxf")))
 
 
 def _drawing_current(p):
@@ -1810,6 +1839,63 @@ def _sketch_landed(name, count):
     return check
 
 
+def _dxf_layer_entities(path, layer):
+    """Every entity one DXF carries on `layer`, as (type, [(x, y), ...]) - None when the file will
+    not read. A drawing-sketch curve exposes no geometry to the API, so this export is the only
+    channel a landed coordinate reaches at all."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            rows = [line.strip() for line in fh]
+    except OSError:
+        return None
+    out, kind, ent = [], None, None
+    for code, value in ((rows[i], rows[i + 1]) for i in range(0, len(rows) - 1, 2)):
+        if code == "0":
+            if ent is not None and ent["layer"] == layer:
+                out.append((kind, ent["points"]))
+            kind, ent = value, {"layer": None, "points": [], "x": None}
+            continue
+        if ent is None:
+            continue
+        if code == "8" and ent["layer"] is None:
+            ent["layer"] = value
+        elif code in ("10", "11"):
+            ent["x"] = _dxf_number(value)
+        elif code in ("20", "21") and ent["x"] is not None:
+            y = _dxf_number(value)
+            if y is not None:
+                ent["points"].append((ent["x"], y))
+            ent["x"] = None
+    if ent is not None and ent["layer"] == layer:
+        out.append((kind, ent["points"]))
+    return out
+
+
+def _dxf_number(value):
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _sketch_readback(sketch_name, curves):
+    """drawing_export(dxf): the sketch's own DXF layer, holding one entity per landed curve.
+
+    The vertices are published and asserted nowhere - a point near a drawing view's curve snaps onto
+    that curve, so an exact-coordinate assertion would pin where this run's views sit."""
+    def check(p):
+        _exported(p)
+        entities = _dxf_layer_entities(p.get("file_path") or "", sketch_name)
+        landed = [[kind] + [[round(x, 4), round(y, 4)] for x, y in pts]
+                  for kind, pts in (entities or [])]
+        return _measured(f"the DXF layer '{sketch_name}' holds {curves} landed curve(s)",
+                         {"file_path": p.get("file_path"), "layer": sketch_name,
+                          "entity_count": None if entities is None else len(entities),
+                          "landed": landed},
+                         entities is not None and len(entities) == curves)
+    return check
+
+
 def _derived(source):
     """doc_insert_derive: the one-way linked copy this document gained, and the SOURCE VERSION the
     link is bound to - the number a later save of the source moves past, which is what leaves the
@@ -2580,19 +2666,20 @@ _CLOUD_DRAWING = [
      _drawing_reference_current("drawing_source_restored"), None),
     ("drawing_dimension", {"view": 0, "strategy": "baseline"}, _dimensioned, None),
     ("drawing_insert_image", {"image_path": MARKER_PNG, "x": 150, "y": 100}, _image_placed, None),
-    ("drawing_add_sketch", {"name": "SweepCloudSketch", "geometry": [
+    ("drawing_add_sketch", {"name": _DRAWING_SKETCH_NAME, "geometry": [
         {"kind": "line", "points": [[0, 0], [30, 0], [30, 20]]},
         {"kind": "rectangle", "points": [[40, 5], [70, 25]]},
         {"kind": "circle", "points": [[15, 35]], "radius": 5},
-    ]}, _sketch_landed("SweepCloudSketch", 4), None),
+    ]}, _sketch_landed(_DRAWING_SKETCH_NAME, 4), None),
+    # The DXF read-back the tool itself cannot take. It runs BEFORE the sheet add: a DXF holds the
+    # ACTIVE sheet, and an add makes the sheet it adds active, so after it this exports a blank one.
+    ("drawing_export", {"format": "dxf", "file_path": _DRAWING_SKETCH_DXF},
+     _sketch_readback(_DRAWING_SKETCH_NAME, 4), None),
     ("drawing_edit_sheet", {"action": "add", "new_name": "SweepCloudSheet"},
      _sheet_added("SweepCloudSheet"), None),
     ("drawing_get", {}, _sheets_answer, None),
     ("drawing_export", {"format": "pdf",
                         "file_path": DOWNLOAD_DIR + f"/sweep_drawing_{_STAMP}.pdf"},
-     _exported, None),
-    ("drawing_export", {"format": "dxf",
-                        "file_path": DOWNLOAD_DIR + f"/sweep_drawing_{_STAMP}.dxf"},
      _exported, None),
     # TEARDOWN. The drawing REFERENCES the source, so it closes and deletes first, for the same
     # reason the host did.

@@ -16,15 +16,19 @@ from . import _common
 from . import _geom
 from . import _inputs
 from . import _assert
-from ._edge_common import _BODY, _EDGES, _EDGE_FILTER_DESC, _FACES, _apply, _size_hint
+from ._edge_common import (_BODY, _EDGES, _EDGE_FILTER_DESC, _FACES, _TANGENT_CHAIN_DESC, _apply,
+                           _size_hint)
 
 app = adsk.core.Application.get()
 
-_FILLET_TYPE = _inputs.Choice("fillet_type", ["constant", "variable", "chord_length", "rule"],
+_FILLET_TYPE = _inputs.Choice("fillet_type",
+                              ["constant", "variable", "chord_length", "rule", "full_round"],
                               default="constant")
 _TOPOLOGY = _inputs.Choice("topology", ["rounds_and_fillets", "rounds_only", "fillets_only"],
                            default="rounds_and_fillets")
 _RULE_FACES_TWO = _inputs.GeometryHandleList("second_faces", require="face", required=False)
+_CENTER_FACE = _inputs.GeometryHandle("center_face", require="face", required=False,
+                                      description="full_round only: the face the round replaces.")
 
 
 def _variable_radius_spec(end_radius, positions, radii):
@@ -197,21 +201,101 @@ def _rule_fillet(radius, units, faces, second_faces, topology):
     return ok(payload)
 
 
+def _full_round_fillet(center_face, faces, second_faces):
+    """Replace one face with a round tangent to the faces either side of it (a Full Round Fillet).
+    The round's radius comes from those side faces, so no radius is given."""
+    centre, cerr = _CENTER_FACE.resolve(center_face)
+    if cerr or centre is None:
+        return error(cerr or "A full round fillet needs 'center_face' - the find_geometry face "
+                             "handle of the face the round replaces.")
+    if faces in (None, "", []) or second_faces in (None, "", []):
+        return error("A full round fillet needs 'faces' and 'second_faces' - the face handles on "
+                     "either side of 'center_face'. The API refuses an empty side set "
+                     "('invalid argument sideOneFaces'), so both must be given.")
+    one, oerr = _FACES.resolve(faces)
+    if oerr:
+        return error(oerr)
+    two, terr = _RULE_FACES_TWO.resolve(second_faces)
+    if terr:
+        return error(terr)
+
+    design = _common.design()
+    if not design:
+        return error("No active design. Create or open a document first (see doc_new).")
+    comp = target_component(design)
+    verify_bodies = _geom.owning_bodies([centre] + list(one) + list(two))
+    vol_before = _geom.volumes(verify_bodies)
+    try:
+        fi = comp.features.filletFeatures.createFullRoundFilletInput()
+        # The face sets cross as plain Python lists, and areAutomaticSideFaces does not make the
+        # lists optional: an empty sideOneFaces raises whatever that flag says.
+        if not fi.faceSets.add(centre, list(one), list(two), False):
+            return error("The full round face set was refused, so nothing was created. Re-run "
+                         "find_geometry for fresh face handles.")
+        feature = comp.features.filletFeatures.addFullRoundFillet(fi)
+    except Exception as e:
+        return error(f"Full round fillet failed: {e}. The three faces must be adjacent - each side "
+                     "face sharing an edge with 'center_face'.")
+    if not feature:
+        return error(_common.no_feature_error(design, "Full round fillet"))
+
+    # fullRoundFilletFaceSets names WHICH fillet got built without reading an enum: it answers a
+    # collection on a full round and None on any other fillet, measured both ways.
+    face_sets = safe(lambda: feature.fullRoundFilletFaceSets.count)
+    vol_delta, vol_readable = _geom.volume_delta(verify_bodies, vol_before)
+    moved = (abs(vol_delta) >= _common.NO_VOLUME_CHANGE_CM3 if vol_readable
+             else face_sets not in (None, 0))
+    if face_sets in (None, 0) or not moved:
+        removed = safe(lambda: feature.deleteMe())
+        return error(
+            "Full round fillet reported success but did not build one: the created feature answers "
+            f"{face_sets} full-round face set(s) (any other fillet answers none) and the body's "
+            f"measured volume changed by "
+            f"{round(vol_delta, 6) if vol_readable else 'an unreadable amount'} cm3. The feature "
+            "has been rolled back."
+            + ("" if removed else " (It could not be auto-removed.)"))
+
+    payload = {
+        "filleted": True,
+        "feature": safe(lambda: feature.name),
+        "fillet_type": "full_round",
+        "faces_selected": 1 + len(one) + len(two),
+        "note": "Full round fillet created - its radius is set by the two side faces, so 'radius' "
+                "does not drive it. fillet_type and face_sets are read off the created feature. "
+                "Pair with view_screenshot.",
+    }
+    faces_created = safe(lambda: feature.faces.count)
+    if faces_created is not None:
+        payload["faces_created"] = faces_created
+    if face_sets is not None:
+        payload["face_sets"] = face_sets
+    if vol_readable:
+        payload["volume_delta_cm3"] = round(vol_delta, 6)
+    return ok(payload)
+
+
 def handler(body_name: str = "", radius: float = 1.0, units: str = "mm",
             edge_filter: str = "", edges=None, fillet_type: str = "constant",
             end_radius=None, positions=None, radii=None, chord_length=None,
-            faces=None, second_faces=None, topology: str = "rounds_and_fillets") -> dict:
+            faces=None, second_faces=None, topology: str = "rounds_and_fillets",
+            center_face: str = "", tangent_chain: bool = True) -> dict:
     """Round edges (Fillet) - constant radius, variable radius along a tangent chain, chord length,
     or a rule fillet over the edges of whole faces."""
     ftype, terr = _FILLET_TYPE.resolve(fillet_type)
     if terr:
         return error(terr)
-    if ftype == "rule":
+    if ftype in ("rule", "full_round"):
         if edges not in (None, "", []):
-            return error("A rule fillet selects FACES, so 'edges' cannot be passed with "
-                         "fillet_type='rule'. Drop 'edges', or use fillet_type='constant' to round "
-                         "exactly those edge handles.")
+            return error(f"A {ftype} fillet selects FACES, so 'edges' cannot be passed with "
+                         f"fillet_type='{ftype}'. Drop 'edges', or use fillet_type='constant' to "
+                         "round exactly those edge handles.")
+        if ftype == "full_round":
+            return _full_round_fillet(center_face, faces, second_faces)
         return _rule_fillet(radius, units, faces, second_faces, topology)
+    if not tangent_chain and ftype == "variable":
+        return error("A variable-radius fillet cannot take tangent_chain=false: the API's "
+                     "variable-radius edge set has no such argument, and it cuts the edges handed "
+                     "in. Drop 'tangent_chain', or use fillet_type='constant'.")
 
     variant, size = None, radius
     if ftype == "variable":
@@ -234,11 +318,12 @@ def handler(body_name: str = "", radius: float = 1.0, units: str = "mm",
                          "across the rounded corner. 'radius' does not drive this type.")
         variant, size = {"type": "chord_length"}, chord_length
     return _apply("fillet", body_name, size, units, edge_filter, edges, variant=variant,
-                  face_handles=faces)
+                  face_handles=faces, tangent_chain=bool(tangent_chain))
 
 
 TOOL_DESCRIPTION = (
-    "Round (fillet) edges; model_chamfer bevels instead."
+    "Round (fillet) edges; model_chamfer bevels. An edge handle SEEDS a tangent chain - edges_cut "
+    "is what it cut."
 )
 
 tool = (
@@ -257,7 +342,10 @@ tool = (
     .add_input_property("chord_length", {"type": "number"})
     .add_input_property(*_FACES.as_property())
     .add_input_property(*_RULE_FACES_TWO.as_property(brief=True))
+    .add_input_property(*_CENTER_FACE.as_property())
     .add_input_property(*_TOPOLOGY.as_property())
+    .add_input_property("tangent_chain", {"type": "boolean",
+        "description": _TANGENT_CHAIN_DESC})
     .strict_schema()
 )
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,

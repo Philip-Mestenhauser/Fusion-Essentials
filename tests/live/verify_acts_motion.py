@@ -400,6 +400,36 @@ _MOTION = (
     ("joint_drive", {"joint_name": "JRev", "angle_deg": 0}, _driven_angle(0), None),
     ("joint_drive", {"joint_name": "JSld", "distance": 0}, _driven_slide(0), None),
     ("assembly_inspect_interference", {}, _interference_measured, None),   # rest pose
+    # THE SAME REFUSAL WITH THE PARTNER NAME AMBIGUOUS. Joint names are unique only within a
+    # COMPONENT, so a second 'JRev' inside a sub-assembly makes BenchLink's partner name mean two
+    # joints - and the safety reads have to be taken over BOTH of them. Every JRev beat above is
+    # done, so the decoy lands after the last of them.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "AmbHost", "activate": True}, _made_component, None),
+    ]
+    + _box("AmbP", ox=1560, tint="#B28A4C")
+    + _box("AmbQ", ox=1590, tint="#4C8AB2")
+    + [
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    # model_create_component builds at the ROOT whatever is active, so the two are RE-PARENTED into
+    # the host: an as-built joint between two occurrences of one sub-assembly is owned by that
+    # sub-assembly, and only there can its name sit beside the bench's without colliding.
+    ("design_move_occurrence", {"occurrence": "AmbP:1", "into_component": "AmbHost"},
+     lambda p: p.get("changed") is True
+     and str(p.get("full_path", "")).startswith("AmbHost:1+"), None),
+    ("design_move_occurrence", {"occurrence": "AmbQ:1", "into_component": "AmbHost"},
+     lambda p: p.get("changed") is True
+     and str(p.get("full_path", "")).startswith("AmbHost:1+"), None),
+    ("joint_create_as_built", {"occurrence_one": "AmbHost:1+AmbP:1",
+                               "occurrence_two": "AmbHost:1+AmbQ:1",
+                               "geometry": "AmbHost:1+AmbQ:1:origin",
+                               "joint_type": "revolute", "axis": "z", "name": "JRev"},
+     lambda p: p.get("created") is True and p.get("joint") == "JRev", None),
+    # Resolving that name to ONE joint is now impossible, and taking the miss for 'nothing driven,
+    # pair plain' would let this drive through - both members of a linked pair, the sequence that
+    # has killed the Fusion process. It refuses, naming what it could not resolve.
+    ("joint_drive", {"joint_name": "BenchLink", "angle_deg": 10},
+     _refused("names 2 joints", "did NOT read as wholly native"), None),
     # pose + constrain cameos (do not disturb the jointed bench).
     ("model_create_component", {"name": "PoseCameo", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xy", "name": "PoseS"}, "ok", None),

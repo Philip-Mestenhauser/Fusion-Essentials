@@ -20,6 +20,7 @@ from . import _inputs
 from . import _write_guard
 from .design_move_occurrence import _corner
 from ._joints import (DRIVES_ANGLE, DRIVES_ANY, DRIVES_SLIDE, find_joint as _find_joint,
+                      find_joints_by_name as _find_joints_by_name,
                       current_joint_type as _current_joint_type,
                       motion_link_record as _motion_link_record)
 
@@ -86,21 +87,34 @@ def _doc_key():
     return _NO_DOCUMENT if key is None else key
 
 
+# How many assemblyContext steps the native check climbs before it gives up. A 40-deep nest reads a
+# 39-link chain, so the cap is reachable: a walk CUT here has read nothing above it and answers
+# unproven rather than native.
+_CONTEXT_WALK_CAP = 32
+
+# What a context read that RAISED answers, distinct from the None a root-level occurrence answers -
+# only one of the two is evidence that the chain ended.
+_CONTEXT_UNREAD = object()
+
+
 def _occ_positively_plain(occ):
-    """True only when this occurrence is POSITIVELY confirmed native - no referenced component up
-    its assembly-context chain. Any unreadable value is False, keeping the crash guard ON."""
+    """True only when this occurrence is POSITIVELY confirmed native - the whole assembly-context
+    chain read, and no referenced component anywhere up it. Any unread value, and a chain longer
+    than the cap, is False, keeping the crash guard ON."""
     if occ is None:
         return False
     ref = safe(lambda: occ.isReferencedComponent)
     if ref is None or ref:
         return False
-    ctx = safe(lambda: occ.assemblyContext)
+    ctx = safe(lambda: occ.assemblyContext, _CONTEXT_UNREAD)
     depth = 0
-    while ctx is not None and depth < 32:
+    while ctx is not None:
+        if ctx is _CONTEXT_UNREAD or depth >= _CONTEXT_WALK_CAP:
+            return False
         r = safe(lambda c=ctx: c.isReferencedComponent)
         if r is None or r:
             return False
-        ctx = safe(lambda c=ctx: c.assemblyContext)
+        ctx = safe(lambda c=ctx: c.assemblyContext, _CONTEXT_UNREAD)
         depth += 1
     return True
 
@@ -116,6 +130,16 @@ def _pair_is_plain(j1, j2):
                 and _occ_positively_plain(safe(lambda jj=j: jj.occurrenceTwo))):
             return False
     return True
+
+
+def _partner_candidates(design, partner):
+    """Every joint the link's partner NAME could mean, as (candidates, ambiguous). A name only one
+    joint carries is the ordinary case; joint names are unique only within a component, so a name
+    several carry leaves the guard with a SET and no way to tell which the link points at."""
+    if not partner:
+        return [], False
+    hits = _find_joints_by_name(design, partner)
+    return hits, len(hits) > 1
 
 
 def _current_value_text(jm, jtype):
@@ -418,11 +442,13 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
     link = _motion_link_record(joint)
     partner = link["partner"]
     couples = _link_couples(link)
-    # A partner name SEVERAL joints carry resolves to None here (find_joint refuses it), so the
-    # already-driven check below simply has no partner to key on - it does not block this drive.
-    partner_joint = (_find_joint(design, partner)[0] if partner else None)
-    partner_driven = bool(partner_joint and _reg_key(doc_id, partner_joint) in _driven_this_session)
-    plain_pair = _pair_is_plain(joint, partner_joint) if partner_joint else True
+    # A partner name SEVERAL joints carry resolves to no ONE joint, and find_joint's None there
+    # answers both safety reads "nothing driven, pair plain" with no joint read at all. Every
+    # candidate is asked instead: driven if ANY was, plain only if ALL are.
+    candidates, partner_ambiguous = _partner_candidates(design, partner)
+    partner_joint = candidates[0] if len(candidates) == 1 else None
+    partner_driven = any(_reg_key(doc_id, c) in _driven_this_session for c in candidates)
+    plain_pair = (all(_pair_is_plain(joint, c) for c in candidates) if candidates else True)
     if partner_driven and not plain_pair and couples is not False:
         # What was READ: the link's two states and this joint's current value. Whether the
         # partner's drive moved THIS joint is a comparison no read here makes.
@@ -436,6 +462,11 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
                            f"{_value_clause(resolved_name, jm, jtype, 'now reads')}; read it back "
                            f"with assembly_get. The refusal stands on that unread state, not on a "
                            f"coupling that was observed. ")
+        pick_claim = ("" if not partner_ambiguous else
+                      f"'{partner}' names {len(candidates)} joints, so which one the link points at "
+                      f"is not established here - every one of them was asked, and this verdict "
+                      f"covers them all. Rename one in Fusion so the name resolves to a single "
+                      f"joint. ")
         # _pair_is_plain SHORT-CIRCUITS at the first occurrence that is not positively native, so
         # the refusal claims only the reading it has - the pair did not read as wholly native -
         # with all four outcomes that produce it, rather than an xref context no read established.
@@ -445,7 +476,8 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
             f"reads as a REFERENCED component, sits under one, did not answer "
             f"isReferencedComponent, or did not read as an occurrence at all. Driving BOTH members "
             f"of a linked pair has killed the Fusion process. "
-            + moved_claim + f"Rebuilding '{partner}' (a new token) clears this refusal.")
+            + pick_claim + moved_claim
+            + f"Rebuilding '{partner}' (a new token) clears this refusal.")
 
     applied = {}
     # Out-of-range commands are REFUSED before ANY assignment, since Fusion IGNORES a beyond-limit
@@ -525,6 +557,17 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
         sv = safe(lambda: jm.slideValue)
         if sv is not None:
             read_back["distance_mm"] = round(sv * 10.0, 4)   # cm -> mm
+
+    # 'driven' is a claim about the EFFECT, and the only evidence of it is the post-drive value. A
+    # commanded DOF whose value did not read back leaves that claim unbacked, so it is not made.
+    unread = [key for key, back in (("angle_deg", "angle_deg"), ("distance", "distance_mm"))
+              if key in applied and back not in read_back]
+    if unread:
+        _driven_this_session.add(_reg_key(doc_id, joint))
+        return error(
+            f"Drive of '{resolved_name}': the assignment ({applied}) was accepted, but the joint's "
+            f"own {'/'.join(unread)} did NOT read back, so nothing here says the mechanism moved - "
+            "this receipt does not claim it was driven. Read the pose back with assembly_get.")
 
     result = {
         "driven": True,
@@ -736,6 +779,12 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
         result["motion_link_state"] = {k: link[k] for k in
                                        ("link", "suppressed", "broken", "value_self",
                                         "value_partner", "reversed")}
+        if partner_ambiguous:
+            result["motion_link_partner_candidates"] = len(candidates)
+            result["note"] += (f" NOTE: '{partner}' names {len(candidates)} joints, so which one "
+                               "the link points at is not established here - the second-member "
+                               "refusal was decided over ALL of them. Rename one in Fusion so the "
+                               "name resolves to a single joint.")
         link_ref = f"'{link['link'] or '(unnamed link)'}'"
         if couples is True:
             result["note"] += (f" NOTE: '{resolved_name}' is motion-linked to '{partner}' by "

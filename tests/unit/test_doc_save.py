@@ -6,6 +6,7 @@ nothing into an error.
 """
 
 import json
+import time
 
 import pytest
 
@@ -13,6 +14,22 @@ from conftest import (FakeApplication, FakeData, FakeDataFile, FakeDocuments,
                       FakeFusionDocument, load_tool)
 
 dm = load_tool("doc_save")
+
+
+@pytest.fixture(autouse=True)
+def pump_clock(monkeypatch):
+    """A VIRTUAL clock for the bounded settle reads, in place of real sleep.
+
+    publication_read pumps DataFile.isComplete to its window whenever the flag never turns true, and
+    a document with no DataFile never turns it true - real sleep there is dead wall-clock for a fixed
+    outcome. BOTH time.sleep and time.monotonic are replaced on the time MODULE _export.pump_until
+    and _doc_common read, so the deadline is reached virtually rather than spun for."""
+    record = {"virtual_seconds": 0.0}
+    base = time.monotonic()
+    monkeypatch.setattr(time, "sleep", lambda s: record.__setitem__(
+        "virtual_seconds", record["virtual_seconds"] + s))
+    monkeypatch.setattr(time, "monotonic", lambda: base + record["virtual_seconds"])
+    return record
 
 
 def _payload(result):
@@ -33,6 +50,25 @@ class _ForkingSave(FakeFusionDocument):
     def save(self, description=""):
         self.dataFile = FakeDataFile(self._name, file_id="urn:new")
         return super().save(description)
+
+
+class _SettlingDataFile(FakeDataFile):
+    """A cloud file whose isComplete reads false for its first `false_reads` samples and true after
+    - the transition a save's bounded settle read waits out."""
+    def __init__(self, *args, false_reads=2, **kwargs):
+        self._false_reads = false_reads
+        super().__init__(*args, **kwargs)
+
+    @property
+    def isComplete(self):
+        if self._false_reads > 0:
+            self._false_reads -= 1
+            return False
+        return True
+
+    @isComplete.setter
+    def isComplete(self, value):
+        pass          # the constructor's own assignment must not displace the property
 
 
 class _VersionData(FakeData):
@@ -154,3 +190,63 @@ class TestSaveDocument:
         install_app(None)
         res = dm.handler()
         assert res["isError"] is True and "No active document" in res["message"]
+
+
+class TestCloudProcessing:
+    """doc_save publishes what DataFile.isComplete READ after the save - the one public signal of
+    cloud publication state this build exposes."""
+
+    @pytest.fixture(autouse=True)
+    def _no_wait(self, monkeypatch):
+        # The pump probes once before waiting, so a zero window still reads the flag.
+        monkeypatch.setattr(dm._doc_common, "PUBLICATION_WINDOW_S", 0.0)
+
+    def test_a_flag_that_was_true_all_along_says_so(self, install_app):
+        # A settled true alone cannot tell "this save published" from "the flag never dipped", so
+        # was_incomplete carries what this call actually SAW.
+        doc = _doc(is_modified=True, urn="urn:same")
+        doc.dataFile.isComplete = True
+        install_app(doc)
+        out = _payload(dm.handler())
+        assert out["cloud_processing_complete"] is True
+        assert out["cloud_processing_was_incomplete"] is False
+        assert out["cloud_processing_waited_seconds"] == 0.0
+        assert "never saw this version publishing" in out["note"]
+
+    def test_a_flag_that_turned_true_while_waiting_is_reported_as_a_transition(
+            self, install_app, monkeypatch, pump_clock):
+        # false -> true across the pump: this save DID wait out cloud processing for the file, which
+        # is a different fact from a flag that read true on the first sample.
+        monkeypatch.setattr(dm._doc_common, "PUBLICATION_WINDOW_S", 5.0)
+        doc = _doc(is_modified=True, urn="urn:same")
+        doc.dataFile = _SettlingDataFile("PartA", file_id="urn:same", false_reads=2)
+        install_app(doc)
+        out = _payload(dm.handler())
+        assert out["cloud_processing_complete"] is True
+        assert out["cloud_processing_was_incomplete"] is True
+        assert out["cloud_processing_waited_seconds"] == 0.5      # two polls, virtual clock
+        assert "read false, then true" in out["note"]
+
+    def test_an_unfinished_file_publishes_false_and_the_re_read(self, install_app):
+        # The save answered while the cloud was still processing: the flag is reported as the false
+        # it read, never coerced to a claim that the file is published.
+        doc = _doc(is_modified=True, urn="urn:same")
+        doc.dataFile.isComplete = False
+        install_app(doc)
+        out = _payload(dm.handler())
+        assert out["cloud_processing_complete"] is False
+        assert out["cloud_processing_was_incomplete"] is True
+        assert "still read false" in out["note"]
+        # MEASURED: data_get's own state.is_complete reads the FILE and stays true through a new
+        # version's upload, so the remedy points at the version number, not back at that flag.
+        assert "version.latest_number" in out["note"]
+
+    def test_an_unreadable_flag_publishes_null_not_false(self, install_app):
+        # A document with no DataFile cannot answer the flag; null says "not read", while false
+        # would say "the cloud is not finished" - two different facts.
+        doc = _doc(is_modified=True)
+        install_app(doc)
+        out = _payload(dm.handler())
+        assert out["cloud_processing_complete"] is None
+        assert out["cloud_processing_was_incomplete"] is False
+        assert "did not read" in out["note"]

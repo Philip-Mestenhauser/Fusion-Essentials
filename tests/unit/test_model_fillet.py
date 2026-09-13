@@ -3,9 +3,9 @@
 import math
 import pytest
 import types
-from conftest import (BRepBody, BRepEdge, BRepFace, FakePoint, FakeUnitsManager, FakeVector3D,
-                      MakeComp, install, load_tool, make_design, payload as _payload,
-                      _NamedCollection)
+from conftest import (BRepBody, BRepEdge, BRepFace, FakePoint, FakeTimeline, FakeTimelineObject,
+                      FakeUnitsManager, FakeVector3D, MakeComp, install, load_tool, make_design,
+                      make_timeline, payload as _payload, _NamedCollection)
 
 fl = load_tool("model_fillet")
 edge_common_mod = load_tool("_edge_common")
@@ -161,20 +161,65 @@ class FakeChamferInput:
             self._corner = value
 
 
+class FakeFullRoundFaceSets:
+    """FullRoundFilletFaceSets.add(centerFace, sideOneFaces, sideTwoFaces, areAutomaticSideFaces).
+    The side sets are plain Python lists, and an EMPTY one raises 'invalid argument sideOneFaces'
+    whatever areAutomaticSideFaces says - so the automatic flag does not make the lists optional."""
+
+    def __init__(self):
+        self.added = None
+        self.refuse = False
+
+    def add(self, centre, one, two, auto):
+        for name, arg in (("sideOneFaces", one), ("sideTwoFaces", two)):
+            if not isinstance(arg, list):
+                raise TypeError(f"in method 'FullRoundFilletFaceSets_add', argument '{name}' is "
+                                "not a vector")
+            if not arg:
+                raise RuntimeError(f"3 : invalid argument {name}")
+        self.added = (centre, one, two, auto)
+        return None if self.refuse else types.SimpleNamespace(areAutomaticSideFaces=auto)
+
+
+class FakeFullRoundFilletInput:
+    def __init__(self):
+        self.faceSets = FakeFullRoundFaceSets()
+
+
 class FakeCountingFeature:
-    """A created feature that ANSWERS .faces.count - the only per-edge effect read-back the real
-    Fillet/ChamferFeature offers (neither exposes an .edges collection, measured live).
-    healthState 2 with an EMPTY errorOrWarningMessage is a real shape: a variable-radius chain listed
-    out of order comes back failed and silent, reading 0 faces like a tangent no-op does."""
-    def __init__(self, name, faces, health=0, message=""):
+    """A created FILLET feature at the read-backs the live one answers: .faces.count, the health
+    pair, and the tangent-chain flag - which a FilletFeature carries on its EDGE SET while its own
+    isTangentChain reads True whether the fillet chained or not. `cut_edges` is the set the seeds
+    RESOLVED to, which reads only behind a timelineObject.rollTo."""
+    # What a FilletFeature answers either way - so reading the flag off the feature is reading a
+    # constant, not the fillet's setting.
+    FEATURE_FLAG = True
+
+    def __init__(self, name, faces, health=0, message="", tangent=None, cut_edges=None):
         self.name = name
         self.faces = _NamedCollection([None] * faces)
         self.healthState = health
         self.errorOrWarningMessage = message
         self.deleted = False
+        self.isTangentChain = self.FEATURE_FLAG
+        self.timelineObject = FakeTimelineObject(name=name)
+        edge_set = types.SimpleNamespace(
+            isTangentChain=True if tangent is None else tangent,
+            edges=_NamedCollection([None] * (faces if cut_edges is None else cut_edges)))
+        self.edgeSets = _NamedCollection([edge_set])
     def deleteMe(self):
         self.deleted = True
         return True
+
+
+def _full_round_feature(face_sets=1, faces=1):
+    """The feature addFullRoundFillet answers. fullRoundFilletFaceSets is what names WHICH fillet
+    was built: a collection on a full round, None on every other fillet (measured both ways). Its
+    centerFace does not read back off a built feature ('faces not found'), so it is not here."""
+    feature = FakeCountingFeature("Fillet1", faces=faces)
+    feature.fullRoundFilletFaceSets = (_NamedCollection([None] * face_sets)
+                                       if face_sets is not None else None)
+    return feature
 
 
 class FakeFilletFeatures:
@@ -185,9 +230,19 @@ class FakeFilletFeatures:
         self.result = type("F", (), {"name": "Fillet1"})()
         self.rule_result = FakeCountingFeature("RuleFillet1", faces=4)
         self.rule_settings_override = None   # set to model a radius/topology that did not land
+        self.full_round_last = None
+        self.full_round_result = _full_round_feature()
         # applied when a feature is added, so a test can model the geometry actually moving
         self.on_add = None
         self.refuse_edge_set = False
+    def createFullRoundFilletInput(self):
+        self.full_round_last = FakeFullRoundFilletInput()
+        self.full_round_last.faceSets.refuse = self.refuse_edge_set
+        return self.full_round_last
+    def addFullRoundFillet(self, inp):
+        if self.on_add:
+            self.on_add()
+        return self.full_round_result
     def createInput(self):
         self.last = FakeFilletInput()
         self.last.refuse = self.refuse_edge_set
@@ -301,11 +356,13 @@ def _face_with_edges(edges, body_name="Block"):
     return BRepFace(surface=None, body_name=body_name, edges=edges)
 
 
-def _install_edge_handles(handle_map):
+def _install_edge_handles(handle_map, timeline=None):
     """Install a design whose findEntityByToken resolves `handle_map` - the seam GeometryHandleList
-    reads an edge/face handle through, before its isinstance(BRepEdge/BRepFace) gate."""
+    reads an edge/face handle through, before its isinstance(BRepEdge/BRepFace) gate. `timeline` is
+    the marker the resolved-edge-set read rolls and puts back; a design without one is the shape
+    where that read declines."""
     ff = FakeFilletFeatures(); cf = FakeChamferFeatures()
-    install(fl, make_design(comp=_component([], ff, cf), tokens=handle_map))
+    install(fl, make_design(comp=_component([], ff, cf), tokens=handle_map, timeline=timeline))
     import adsk.fusion, adsk.core
     adsk.fusion.BRepEdge = BRepEdge
     adsk.fusion.BRepFace = BRepFace
@@ -630,6 +687,179 @@ class TestFilletType:
         ff.refuse_edge_set = True
         res = fl.handler(edges=["E1"], radius=1)
         assert res["isError"] is True and "constant-radius" in res["message"]
+
+
+class TestFullRoundFillet:
+    """A full round replaces ONE face with a round tangent to the faces either side, so it takes no
+    radius at all - measured on a 80 x 40 x 10 mm slab: 32.0 cm3 -> 31.141593 cm3, the exact
+    half-cylinder, with filletFeatureType reading the full-round member."""
+
+    def _handles(self):
+        return _install_edge_handles({"C": _face(), "S1": _face(), "S2": _face()})
+
+    def test_it_builds_from_three_face_sets_and_reads_its_type_back(self):
+        ff, _ = self._handles()
+        out = _payload(fl.handler(fillet_type="full_round", center_face="C",
+                                  faces=["S1"], second_faces=["S2"]))
+        centre, one, two, auto = ff.full_round_last.faceSets.added
+        assert isinstance(one, list) and isinstance(two, list) and auto is False
+        assert out["fillet_type"] == "full_round" and out["face_sets"] == 1
+        assert out["faces_selected"] == 3
+        assert "radius" not in out                      # the side faces set it, not an input
+
+    def test_a_fillet_of_another_type_is_rolled_back(self):
+        # addFullRoundFillet answering a plain FilletFeature would still report a healthy feature
+        # and a face count; its fullRoundFilletFaceSets reading None is what names the difference.
+        ff, _ = self._handles()
+        ff.full_round_result = _full_round_feature(face_sets=None)
+        res = fl.handler(fillet_type="full_round", center_face="C",
+                         faces=["S1"], second_faces=["S2"])
+        assert res["isError"] is True and "did not build one" in res["message"]
+        assert ff.full_round_result.deleted is True
+
+    def test_a_missing_side_set_is_refused_before_the_api_raises(self):
+        self._handles()
+        res = fl.handler(fillet_type="full_round", center_face="C", faces=["S1"])
+        assert res["isError"] is True and "second_faces" in res["message"]
+
+    def test_edges_cannot_be_passed_to_a_face_selected_fillet(self):
+        _install_edge_handles({"C": _face(), "E1": _edge_ent()})
+        res = fl.handler(fillet_type="full_round", center_face="C", edges=["E1"])
+        assert res["isError"] is True and "selects FACES" in res["message"]
+
+
+class _StuckTimeline(FakeTimeline):
+    """A Timeline whose markerPosition ASSIGNMENT does not land: the marker stays where the feature
+    roll left it (one step back, immediately before the rolled feature), which is the state a
+    swallowed restore leaves and the read after it is the only signal of."""
+
+    def __init__(self, marker, items):
+        super().__init__([FakeTimelineObject(name=f"F{i}", index=i) for i in range(items)],
+                         marker=marker)
+
+    @FakeTimeline.markerPosition.setter
+    def markerPosition(self, value):
+        self._moves.append(value)
+        self._marker = max(0, value - 1)
+
+
+class TestTangentChainTargeting:
+    """One seed handle on a tangent-continuous rim resolved to EIGHT edges live (1 mm chamfer on a
+    rounded-rectangle rim: 8 faces created, 4 of them on the opposite rim). What the caller gets is
+    the flag it asked for, the flag the FEATURE reports, and the edge count the set resolved to."""
+
+    def _seeded(self, cut_edges, faces=1, tangent=None, marker_at=2):
+        """One handle 'E1' (a second, 'E2', for the shortfall case), a timeline to roll, and a
+        created feature answering the read-backs."""
+        ff, _ = _install_edge_handles({"E1": _edge_ent(), "E2": _edge_ent()},
+                                      timeline=make_timeline("Extrude1", "Fillet1",
+                                                             marker=marker_at))
+        ff.result = FakeCountingFeature("Fillet1", faces=faces, tangent=tangent,
+                                        cut_edges=cut_edges)
+        return ff
+
+    def test_the_requested_flag_reaches_the_edge_set(self):
+        # A hard-wired True bevels the opposite rim from one top edge with no input able to say
+        # otherwise.
+        ff = self._seeded(cut_edges=1, tangent=False)
+        _payload(fl.handler(edges=["E1"], radius=1, tangent_chain=False))
+        assert ff.last.edge_set[2] is False
+        ff = self._seeded(cut_edges=8, faces=8)
+        _payload(fl.handler(edges=["E1"], radius=1))
+        assert ff.last.edge_set[2] is True                 # the platform's own default
+
+    def test_the_flag_is_read_off_the_edge_set_not_the_feature(self):
+        # A FilletFeature's own isTangentChain is a CONSTANT True, so reading it there reports every
+        # fillet as chained - including the one that cut a single edge - and the mismatch gate then
+        # rolls back exactly the calls that did what was asked.
+        for asked in (True, False):
+            self._seeded(cut_edges=1, tangent=asked)
+            out = _payload(fl.handler(edges=["E1"], radius=1, tangent_chain=asked))
+            assert out["tangent_chain"] is asked
+
+    def test_a_flag_the_platform_declined_rolls_the_fillet_back(self):
+        # The edge set Fusion built is the only trace: a chained fillet where none was asked for
+        # cuts edges the caller never named, and every other read-back looks healthy.
+        ff = self._seeded(cut_edges=8, faces=8, tangent=True)
+        res = fl.handler(edges=["E1"], radius=1, tangent_chain=False)
+        assert res["isError"] is True and "tangent-chain" in res["message"]
+        assert "reads back True" in res["message"] and ff.result.deleted is True
+
+    def test_edges_cut_names_the_resolved_chain_and_the_note_says_so(self):
+        ff = self._seeded(cut_edges=8, faces=8)
+        out = _payload(fl.handler(edges=["E1"], radius=1))
+        assert out["edges_requested"] == 1 and out["edges_cut"] == 8
+        assert out["tangent_chain"] is True
+        assert "CHAINED" in out["note"] and "tangent_chain=false" in out["note"]
+        # the read-back is behind a timeline roll, and the marker is DRIVEN back to where it stood -
+        # the move is recorded, so a restore that never ran cannot read as one that did
+        assert ff.result.timelineObject._rolls == [True]
+        timeline = fl._inputs._common.design().timeline
+        assert timeline._moves == [2] and timeline.markerPosition == 2
+        assert "timeline_marker_unrestored" not in out
+
+    def test_a_parked_marker_goes_back_where_it_stood_not_to_the_end(self):
+        # A marker parked before later features is what moveToEnd rolls past, recomputing every one
+        # of them back in - so the restore is an assignment to the position that was read, and the
+        # position read after it is what the receipt stands on.
+        self._seeded(cut_edges=1, tangent=False, marker_at=1)
+        out = _payload(fl.handler(edges=["E1"], radius=1, tangent_chain=False))
+        timeline = fl._inputs._common.design().timeline
+        assert timeline._moves == [1] and timeline.markerPosition == 1
+        assert "timeline_marker_unrestored" not in out
+
+    def test_a_marker_that_does_not_come_back_is_named_in_the_payload(self):
+        # An assignment the proxy drops leaves the caller's rolled-out features recomputed back in,
+        # and nothing but the read-after says so.
+        ff, _ = _install_edge_handles({"E1": _edge_ent()},
+                                      timeline=_StuckTimeline(marker=2, items=2))
+        ff.result = FakeCountingFeature("Fillet1", faces=1, tangent=False, cut_edges=1)
+        out = _payload(fl.handler(edges=["E1"], radius=1, tangent_chain=False))
+        assert out["timeline_marker_unrestored"] is True
+        assert "timeline marker stood at 2" in out["note"] and "reads 1 after it" in out["note"]
+
+    def test_a_set_that_matches_the_handles_is_not_reported_as_a_chain(self):
+        # The boundary: reporting a chain at edges_cut == edges_requested would call every plain
+        # one-edge fillet a chain. It still says the number was READ rather than echoed - once,
+        # among the other read-back fields, not in a clause of its own.
+        self._seeded(cut_edges=1, tangent=False)
+        out = _payload(fl.handler(edges=["E1"], radius=1, tangent_chain=False))
+        assert out["edges_cut"] == 1 and out["tangent_chain"] is False
+        assert "CHAINED" not in out["note"]
+        assert "edges_cut is read back off the created feature, not echoed." in out["note"]
+
+    def test_a_design_with_no_timeline_withholds_edges_cut(self):
+        # A direct-mode design has no timeline to roll, so the resolved set cannot be read; the
+        # receipt says so rather than reporting the request as the cut.
+        ff, _ = _install_edge_handles({"E1": _edge_ent()})
+        ff.result = FakeCountingFeature("Fillet1", faces=8)
+        out = _payload(fl.handler(edges=["E1"], radius=1))
+        assert "edges_cut" not in out and "did not read" in out["note"]
+
+    def test_variable_radius_refuses_the_flag_the_api_has_no_argument_for(self):
+        self._seeded(cut_edges=1)
+        res = fl.handler(edges=["E1"], radius=1, end_radius=2, fillet_type="variable",
+                         tangent_chain=False)
+        assert res["isError"] is True and "variable-radius edge set has no such argument" \
+            in res["message"]
+
+    def test_a_variable_radius_set_is_not_judged_against_a_flag_it_was_never_given(self):
+        # Its edge set reads isTangentChain False while the default request is True; comparing the
+        # two would roll a healthy variable-radius fillet back. The wire default being true, a bare
+        # false here reads as a DECLINED request, so the receipt says which it is.
+        ff = self._seeded(cut_edges=1, tangent=False)
+        out = _payload(fl.handler(edges=["E1"], radius=1, end_radius=2, fillet_type="variable"))
+        assert out["filleted"] is True and ff.result.deleted is False
+        assert out["tangent_chain"] is False          # published as READ, not as requested
+        assert "no such argument" in out["note"] and "cuts the edges handed in" in out["note"]
+
+    def test_a_short_edge_set_is_the_partial_application_faces_cannot_see(self):
+        # Corner patches can lift faces_created to the requested number while the set Fusion built
+        # holds fewer edges, so the faces gate passes and an edge the caller named was dropped.
+        ff = self._seeded(cut_edges=1, faces=2, tangent=False)
+        res = fl.handler(edges=["E1", "E2"], radius=1, tangent_chain=False)
+        assert res["isError"] is True and "PARTIALLY applied" in res["message"]
+        assert "resolved to 1" in res["message"] and ff.result.deleted is True
 
 
 class TestVariableRadius:

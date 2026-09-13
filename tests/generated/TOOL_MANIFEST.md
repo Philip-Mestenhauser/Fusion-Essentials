@@ -41,7 +41,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 |---|---|---|
 | ✎ | `model_arrange` | Nest occurrences into a sketch-profile or plane envelope, 2D true-shape/rectangular or 3D packing. |
 | ✎ | `model_base_feature` | Open or close a base-feature direct-edit scope; the mesh_* tools open and finish one per call. |
-| ✎ | `model_chamfer` | Bevel edges |
+| ✎ | `model_chamfer` | Bevel edges; model_fillet rounds |
 | ✎ | `model_combine` | Boolean-combine solid bodies: join, cut or intersect 'tools' into 'target', the body that survives. |
 | · | `model_compute_holder` | Profile a solid holder body into CAM tool-holder segments, returned with 'holder_json'. |
 | ✎ | `model_construction` | Add a construction point, axis, or plane; each 'mode' reads its own subset of the inputs. |
@@ -51,7 +51,7 @@ Produces: feature -> design_delete_feature, faces_drafted. |
 | ✎ | `model_emboss` | Stamp sketch profiles or text onto faces; a negative 'depth' engraves.
 Produces: feature -> design_delete_feature. |
 | ✎ | `model_extrude` | Extrude a closed sketch profile into a solid; sketch_get returns profile handles. |
-| ✎ | `model_fillet` | Round (fillet) edges; model_chamfer bevels instead. |
+| ✎ | `model_fillet` | Round (fillet) edges; model_chamfer bevels |
 | ✎ | `model_hole` | Drill holes with the Hole feature, so it carries hole and thread metadata; several 'points' make ONE patterned feature. |
 | · | `model_inspect` | Measure a target: the bounding box by default, mass or mesh stats through 'include'. |
 | ✎ | `model_loft` | Loft through an ordered list of profiles; model_stitch closes a surface loft. |

@@ -214,6 +214,10 @@ def handler(name: str = "", project: str = "", project_id: str = "",
             payload["preflight_name_census_incomplete"] = preflight_problem
             payload["note"] += (" The caller allowed a same-name fork while the pre-save name "
                                 "census was incomplete: " + preflight_problem)
+        # A recovered save landed a file like any other, so it publishes the same settle read.
+        recovered, recovered_note = _doc_common.publication_read(doc)
+        payload.update(recovered)
+        payload["note"] += " " + recovered_note
         return ok(payload)
 
     try:
@@ -249,6 +253,7 @@ def handler(name: str = "", project: str = "", project_id: str = "",
     # Report the lineage URN this save wrote - the stable identity that ADDRESSES the file (a name
     # can be shared). It resolves asynchronously, so the call waits for it rather than returning null.
     new_id, urn_wait = _settled_lineage_urn(doc)
+    published, publication_note = _doc_common.publication_read(doc)
 
     note = ("The saved document becomes the active document. Its 'document_id' is the lineage URN - "
             "the stable identity to address it by (doc_open/doc_activate/data_delete_file); a NAME can "
@@ -267,6 +272,8 @@ def handler(name: str = "", project: str = "", project_id: str = "",
         "document_id": new_id,   # the lineage URN of the file just written (null only if not yet settled)
         "urn_wait_seconds": urn_wait,
     }
+    result.update(published)
+    note += " " + publication_note
     if preflight_problem:
         result["name_census_incomplete"] = preflight_problem
         note = ("NAME CENSUS INCOMPLETE - allow_duplicate_name authorized the save despite an "

@@ -1116,6 +1116,89 @@ _filleted = _edge_feature("fillet")
 _chamfered = _edge_feature("chamfer")
 
 
+def _cut_exactly(kind, handles, chain=False, restored=True):
+    """The feature's OWN edge set resolved to exactly the edges requested - what faces_created
+    cannot say, corner patches counting there too. `chain` is the tangent-chain flag expected back
+    (a box has no tangent junction to chain across); `restored` asserts the timeline marker the
+    edge-set read rolled came back where it stood."""
+    def check(p):
+        return _measured(f"{kind} cut exactly the {handles} edge(s) requested",
+                         {"edges_cut": p.get("edges_cut"), "tangent_chain": p.get("tangent_chain"),
+                          "edges_requested": p.get("edges_requested"),
+                          "timeline_marker_unrestored": p.get("timeline_marker_unrestored")},
+                         p.get("edges_cut") == handles and p.get("edges_requested") == handles
+                         and p.get("tangent_chain") is chain
+                         and (p.get("timeline_marker_unrestored") is None) is restored)
+    return check
+
+
+def _marker_parked_after(parked_key, feature_key):
+    """design_get(include=['timeline']): a feature built against a PARKED marker landed AT the
+    parked index, the marker moved one step past it, and the row it now sits on is still rolled
+    back - the reading that says the edge-set roll left the caller's roll where it was.
+
+    The index comes from the roll's own receipt, never from the feature NAME: a name is component
+    local, so several rows carry the one the create reported."""
+    def check(p):
+        slice_ = p.get("timeline") or {}
+        rows, marker = slice_.get("timeline") or [], slice_.get("marker_position")
+        at, made = _RECALL.get(parked_key), _RECALL.get(feature_key)
+        built = next((r for r in rows if r.get("index") == at), None)
+        parked = next((r for r in rows if r.get("index") == marker), None)
+        return _measured(f"'{made}' built at the parked index {at}, marker one past it, the rolled "
+                         "row still rolled back",
+                         {"marker_position": marker, "parked_at": at,
+                          "row_at_parked_index": built and built.get("name"),
+                          "row_at_marker": parked and {"name": parked.get("name"),
+                                                       "rolled": parked.get("is_rolled_back")}},
+                         at is not None and marker == at + 1
+                         and built is not None and built.get("name") == made
+                         and parked is not None and parked.get("is_rolled_back") is True)
+    return check
+
+
+def _cut_a_chain(kind, handles):
+    """The default: the seeds resolved to MORE edges than were handed in. The number is read off the
+    built feature, never predicted - how far a chain reaches depends on the rim it starts on."""
+    def check(p):
+        n = p.get("edges_cut")
+        return _measured(f"{kind} chained past its {handles} seed handle(s)",
+                         {"edges_cut": n, "tangent_chain": p.get("tangent_chain"),
+                          "edges_requested": p.get("edges_requested")},
+                         isinstance(n, int) and not isinstance(n, bool) and n > handles
+                         and p.get("edges_requested") == handles
+                         and p.get("tangent_chain") is True)
+    return check
+
+
+def _full_rounded(p):
+    """model_fillet(fillet_type='full_round'): the created feature answers full-round FACE SETS -
+    the read that names which fillet was built (any other fillet answers none) - and the body lost
+    the material the replaced face stood in front of."""
+    delta = p.get("volume_delta_cm3")
+    return _measured("a full round fillet, read off the created feature",
+                     {"fillet_type": p.get("fillet_type"), "face_sets": p.get("face_sets"),
+                      "volume_delta_cm3": delta, "feature": p.get("feature")},
+                     p.get("fillet_type") == "full_round" and p.get("face_sets") == 1
+                     and _num(delta) and delta < 0 and bool(p.get("feature")))
+
+
+def _axis_aligned_face_at(x, y, z):
+    """find_geometry(kind='planar_face', nearest_to=...): the nearest face there is AXIS-ALIGNED -
+    the INDEPENDENT read that an edge treatment did not reach this rim. A bevel lands at 45 deg with
+    its centroid on the point asked for, so a chain that got here answers two 0.707 components."""
+    def check(p):
+        ms = p.get("matches") or []
+        nrm = (ms[0] if ms else {}).get("normal")
+        aligned = (isinstance(nrm, list) and len(nrm) == 3
+                   and sorted(round(abs(c), 3) for c in nrm) == [0.0, 0.0, 1.0])
+        return _measured(f"no bevel face at {[x, y, z]} - that rim was not cut",
+                         {"count": len(ms), "normal": nrm,
+                          "position": (ms[0] if ms else {}).get("position")},
+                         len(ms) == 1 and aligned)
+    return check
+
+
 def _shelled(p):
     """model_shell: the before/after volume difference over the shelled body - a hollowing removes
     material, and the key is published only where both reads answered."""

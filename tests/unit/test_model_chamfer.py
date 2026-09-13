@@ -3,9 +3,9 @@
 import math
 import pytest
 import types
-from conftest import (BRepBody, BRepEdge, BRepFace, FakePoint, FakeUnitsManager, FakeVector3D,
-                      MakeComp, install, load_tool, make_design, payload as _payload,
-                      _NamedCollection)
+from conftest import (BRepBody, BRepEdge, BRepFace, FakePoint, FakeTimelineObject, FakeUnitsManager,
+                      FakeVector3D, MakeComp, install, load_tool, make_design, make_timeline,
+                      payload as _payload, _NamedCollection)
 
 fl = load_tool("model_chamfer")
 edge_common_mod = load_tool("_edge_common")
@@ -155,16 +155,26 @@ class FakeChamferInput:
 
 
 class FakeCountingFeature:
-    """A created feature that ANSWERS .faces.count - the only per-edge effect read-back the real
-    Fillet/ChamferFeature offers (neither exposes an .edges collection, measured live).
-    healthState 2 with an EMPTY errorOrWarningMessage is a real shape: a variable-radius chain listed
-    out of order comes back failed and silent, reading 0 faces like a tangent no-op does."""
-    def __init__(self, name, faces, health=0, message=""):
+    """A created CHAMFER feature at the read-backs the live one answers: .faces.count, the health
+    pair, and the tangent-chain flag - which a ChamferFeature carries on ITSELF while its edge set
+    reads False whether the chamfer chained or not. `cut_edges` is the set the seeds RESOLVED to,
+    which reads only behind a timelineObject.rollTo."""
+    # What a ChamferEdgeSet answers either way - so reading the flag off there is reading a
+    # constant, not the chamfer's setting.
+    EDGE_SET_FLAG = False
+
+    def __init__(self, name, faces, health=0, message="", tangent=None, cut_edges=None):
         self.name = name
         self.faces = _NamedCollection([None] * faces)
         self.healthState = health
         self.errorOrWarningMessage = message
         self.deleted = False
+        self.isTangentChain = True if tangent is None else tangent
+        self.timelineObject = FakeTimelineObject(name=name)
+        edge_set = types.SimpleNamespace(
+            isTangentChain=self.EDGE_SET_FLAG,
+            edges=_NamedCollection([None] * (faces if cut_edges is None else cut_edges)))
+        self.edgeSets = _NamedCollection([edge_set])
     def deleteMe(self):
         self.deleted = True
         return True
@@ -301,11 +311,12 @@ def _face_with_edges(edges):
     return BRepFace(surface=None, body_name="Block", edges=edges)
 
 
-def _install_handles(handle_map):
+def _install_handles(handle_map, timeline=None):
     """Install a design whose findEntityByToken resolves `handle_map` - the seam a face/edge handle
-    list reads through before its isinstance(BRepEdge/BRepFace) gate."""
+    list reads through before its isinstance(BRepEdge/BRepFace) gate. `timeline` is the marker the
+    resolved-edge-set read rolls and puts back."""
     ff = FakeFilletFeatures(); cf = FakeChamferFeatures()
-    install(fl, make_design(comp=_component([], ff, cf), tokens=handle_map))
+    install(fl, make_design(comp=_component([], ff, cf), tokens=handle_map, timeline=timeline))
     import adsk.fusion, adsk.core
     adsk.fusion.BRepEdge = BRepEdge
     adsk.fusion.BRepFace = BRepFace
@@ -330,6 +341,59 @@ def _parametric(monkeypatch, installer, *args, engine=None, **kw):
     monkeypatch.setattr(adsk.core.ValueInput, "createByString",
                         staticmethod(lambda s: ("string", s)), raising=False)
     return out + (design,)
+
+
+class TestTangentChainTargeting:
+    """The measurement this exists for: one 1 mm chamfer seeded from ONE handle on a
+    tangent-continuous rim created 8 faces, four of them on the OPPOSITE rim. A chamfer reports its
+    own isTangentChain (its edge set reads False either way), so that is the read-back."""
+
+    def _seeded(self, cut_edges, faces=1, tangent=None, marker_at=2):
+        ff, cf = _install_handles({"E1": _edge_ent(), "E2": _edge_ent()},
+                                  timeline=make_timeline("Extrude1", "Chamfer1", marker=marker_at))
+        cf.result = FakeCountingFeature("Chamfer1", faces=faces, tangent=tangent,
+                                        cut_edges=cut_edges)
+        return cf
+
+    def test_the_requested_flag_reaches_create_input(self):
+        cf = self._seeded(cut_edges=1, tangent=False)
+        _payload(fl.handler(edges=["E1"], distance=1, tangent_chain=False))
+        assert cf.last.tangent is False
+        cf = self._seeded(cut_edges=8, faces=8)
+        _payload(fl.handler(edges=["E1"], distance=1))
+        assert cf.last.tangent is True
+
+    def test_the_flag_is_read_off_the_feature_not_its_edge_set(self):
+        # A ChamferEdgeSet's isTangentChain is a CONSTANT False, so reading it there reports every
+        # chamfer as unchained - and the mismatch gate then rolls back the default call that did
+        # exactly what the platform does.
+        for asked in (True, False):
+            self._seeded(cut_edges=1, tangent=asked)
+            out = _payload(fl.handler(edges=["E1"], distance=1, tangent_chain=asked))
+            assert out["tangent_chain"] is asked
+
+    def test_a_flag_the_platform_declined_rolls_the_chamfer_back(self):
+        cf = self._seeded(cut_edges=8, faces=8, tangent=True)
+        res = fl.handler(edges=["E1"], distance=1, tangent_chain=False)
+        assert res["isError"] is True and "tangent-chain" in res["message"]
+        assert cf.result.deleted is True
+
+    def test_edges_cut_is_read_through_a_timeline_roll_that_is_put_back(self):
+        cf = self._seeded(cut_edges=8, faces=8)
+        out = _payload(fl.handler(edges=["E1"], distance=1))
+        assert out["edges_requested"] == 1 and out["edges_cut"] == 8
+        assert out["tangent_chain"] is True and "CHAINED" in out["note"]
+        # the marker is DRIVEN back to where it stood, and the recorded move is what says so
+        assert cf.result.timelineObject._rolls == [True]
+        timeline = fl._inputs._common.design().timeline
+        assert timeline._moves == [2] and timeline.markerPosition == 2
+        assert "timeline_marker_unrestored" not in out
+
+    def test_a_short_edge_set_is_the_partial_application_faces_cannot_see(self):
+        cf = self._seeded(cut_edges=1, faces=2, tangent=False)
+        res = fl.handler(edges=["E1", "E2"], distance=1, tangent_chain=False)
+        assert res["isError"] is True and "PARTIALLY applied" in res["message"]
+        assert "resolved to 1" in res["message"] and cf.result.deleted is True
 
 
 class TestGuards:
