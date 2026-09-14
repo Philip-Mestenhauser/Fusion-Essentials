@@ -925,6 +925,7 @@ _MESH = [
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "MD", "quality": "low"}, "ok", None),
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "ME", "quality": "low"}, "ok", None),
     ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "MF", "quality": "low"}, "ok", None),
+    ("save_as_mesh", lambda c: {"body": _ctx_get(c, "msh_body", "box body"), "name": "MOPEN", "quality": "low"}, "ok", None),
     ("mesh_get", {"target": "Msh"}, "ok", None),
     # MA is a box cast to mesh, measured to segment 1 -> 6 groups under 'fast', so THIS row's
     # generation must move the count - a payload reporting no movement here is a generation that
@@ -937,6 +938,31 @@ _MESH = [
     ("mesh_to_brep", {"mesh": "MA", "method": "faceted", "operation": "base_feature"},
      lambda p: (bool(p["brep_bodies"]) and all(b["handle"] for b in p["brep_bodies"])
                 and p["design_mode"] == "parametric"), None),
+    # THE OPEN HALF: 'none' leaves the cut face unfilled, so the trimmed mesh is not watertight.
+    ("mesh_plane_cut", {"mesh": "MOPEN", "plane": "MshMid", "cut_type": "trim", "fill": "none"},
+     lambda p: p.get("fill") == "none" and p.get("triangles_before") and p.get("triangles_after")
+     and (p["triangles_after"] != p["triangles_before"]
+          or p.get("volume_after_cm3") != p.get("volume_before_cm3")), None),
+    # the independent read that says WHY the convert below lands a surface rather than a solid.
+    ("mesh_get", {"target": "Msh"},
+     lambda p: _measured("the trimmed half reads open",
+                         {"rows": [[m.get("name"), m.get("is_closed")] for m in p["meshes"]]},
+                         any(m.get("name") == "MOPEN" and m.get("is_closed") is False
+                             for m in p["meshes"])), None),
+    # prismatic on an open mesh is unmeasured, so it still refuses - naming the repair that closes a
+    # hole, which is what makes the refusal actionable. It runs first: it mutates nothing.
+    ("mesh_to_brep", {"mesh": "MOPEN", "method": "prismatic"},
+     _refused("NOT watertight", "mesh_repair(repair_type='close_holes')"), None),
+    # MEASURED: the faceted convert of an OPEN mesh builds a SURFACE body - the watertight guard
+    # refuses only the two methods that were never measured on one. is_solid and face_count are read
+    # off the produced body, so a solid here is the wrong body published under the right count.
+    ("mesh_to_brep", {"mesh": "MOPEN", "method": "faceted", "operation": "base_feature"},
+     lambda p: _measured("faceted convert of an open mesh",
+                         {"brep_bodies": p.get("brep_bodies"), "note": p.get("note")},
+                         bool(p["brep_bodies"])
+                         and all(b["is_solid"] is False and (b["face_count"] or 0) > 0
+                                 for b in p["brep_bodies"])
+                         and "SURFACE" in (p.get("note") or "")), None),
     # both triangle counts are read off the model; 'reduced_pct' is published only where both read,
     # so an after-count that would not read is caught here rather than passing as a reduce.
     ("mesh_reduce", {"mesh": "MRED", "target": "proportion", "value": 50},

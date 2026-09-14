@@ -21,8 +21,8 @@ MAP_BLURB = (
     "the edge-treatment substrate: EDGES/FACES/BODY/_EDGE_FILTER_DESC/_TANGENT_CHAIN_DESC - the "
     "targeting inputs; _edges_of_faces - a face set as its edges, each once; _edge_convexity + "
     "_collect_edges - the dihedral a filter picks by; _tangent_chain_read - the chain flag off the "
-    "feature; _cut_edges - its RESOLVED edge count and a moved-marker clause; _apply - the ONE "
-    "build-and-verify path they run")
+    "feature; _cut_edges - its RESOLVED edge count, over rolled_to; _apply - the ONE "
+    "build-and-verify path, on volume OR area")
 
 # Edge-handle-list input (closes the 'fillet THESE specific edges' gap; takes precedence over edge_filter).
 _EDGES = _inputs.GeometryHandleList("edges", require="edge",
@@ -237,22 +237,10 @@ def _cut_edges(design, feature):
     clause for a timeline marker that did not come back where it stood). Either is None when there
     is nothing to report."""
     # That collection reads only with the marker immediately before the feature (otherwise "Didn't
-    # roll editing feature back"), so the marker is moved and put back WHERE IT STOOD: moveToEnd
-    # instead rolls a deliberately parked marker past the features it was parked before.
-    timeline = safe(lambda: design.timeline)
-    tl_obj = safe(lambda: feature.timelineObject)
-    was = _common.counted(lambda: timeline.markerPosition) if timeline is not None else None
-    if tl_obj is None or was is None or safe(lambda: tl_obj.rollTo(True)) is not True:
-        return None, None
-    try:
-        count = safe(lambda: feature.edgeSets.item(0).edges.count)
-    finally:
-        safe(lambda: setattr(timeline, "markerPosition", was))
-    now = _common.counted(lambda: timeline.markerPosition)
-    if now == was:
-        return count, None
-    return count, (f"the timeline marker stood at {was} before the feature's edge set was read and "
-                   f"reads {now} after it - roll it back with design_edit_timeline")
+    # roll editing feature back"), which is what the shared roll-and-restore owns.
+    return _common.rolled_to(design, feature,
+                             lambda: safe(lambda: feature.edgeSets.item(0).edges.count),
+                             "the feature's edge set")
 
 
 def _is_are(names):
@@ -460,6 +448,7 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
                         + " - pass edges=[...] handles to target a specific set.")
 
     vol_before = _geom.volumes(verify_bodies)
+    area_before = _geom.areas(verify_bodies)
     try:
         if kind == "fillet":
             fi = comp.features.filletFeatures.createInput()
@@ -576,18 +565,24 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
             + (" The feature has been rolled back." if removed
                else " (The feature could not be auto-removed.)"))
 
-    # A fillet or chamfer either cuts a corner away or fills a concave one, so an unchanged volume
-    # means nothing was rounded/beveled however healthy the feature looks. Both kinds publish the
-    # same volume_delta_cm3, and both are gated on it.
+    # One convex or concave edge alone always moves the volume, but a set holding BOTH cancels to
+    # the last bit and only the surface area still moves (measured: a convex and a concave edge of
+    # equal length at r=5 left 36.0 cm3 and took the area 72.0 -> 70.712389).
     vol_delta, vol_readable = _geom.volume_delta(verify_bodies, vol_before)
-    if vol_readable and abs(vol_delta) < _common.NO_VOLUME_CHANGE_CM3:
+    area_delta_cm2, area_readable = _geom.area_delta(verify_bodies, area_before)
+    moved = ((vol_readable and abs(vol_delta) >= _common.NO_VOLUME_CHANGE_CM3)
+             or (area_readable and abs(area_delta_cm2) >= _common.NO_AREA_CHANGE_CM2))
+    if (vol_readable or area_readable) and not moved:
         removed = safe(lambda: feature.deleteMe())
         size_desc = f"{vtype} fillet" if kind == "fillet" else "chamfer"
+        measured = " and ".join(
+            [s for s in ("volume" if vol_readable else "", "surface area" if area_readable else "")
+             if s])
         return error(
-            f"{kind.capitalize()} reported success but moved no material - the body's measured "
-            f"volume is unchanged after the {size_desc}. The feature has been rolled back; check "
-            "that the requested edges really are corners at this size, and re-run find_geometry "
-            "for fresh handles."
+            f"{kind.capitalize()} reported success but changed no geometry - the body's measured "
+            f"{measured} is unchanged after the {size_desc}. The feature has been rolled back; "
+            "check that the requested edges really are corners at this size, and re-run "
+            "find_geometry for fresh handles."
             + ("" if removed else f" (The inert {kind} feature could not be auto-removed.)"))
 
     measured_note = ("" if faces_created is None
@@ -661,6 +656,8 @@ def _apply(kind, body_name, size, units, edge_filter, edge_handles=None, distanc
         payload["edges_smooth"] = census["smooth"]
     if vol_readable:
         payload["volume_delta_cm3"] = round(vol_delta, 6)
+    if area_readable:
+        payload["area_delta_cm2"] = round(area_delta_cm2, 6)
     if kind == "fillet":
         payload["fillet_type"] = vtype
     if vtype == "variable":

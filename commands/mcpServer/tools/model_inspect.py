@@ -491,8 +491,12 @@ def handler(target: str = "", include=None, units: str = "mm", accuracy: str = "
         if e:
             return e
         out["kind"] = "mesh"
+        # The measure sets a note of its own only for an OPEN mesh, and that sentence is the
+        # actionable half - composing over it rather than assigning is what keeps it on the wire.
+        measured = out.pop("note", "")
         out["note"] = ("Mesh target: triangle/vertex counts + watertight (is_closed) + bbox. (A mesh has "
-                       "no B-Rep bounding box or mass; target a solid body/occurrence for include=['mass'].)")
+                       "no B-Rep bounding box or mass; target a solid body/occurrence for "
+                       "include=['mass'].)") + ((" " + measured) if measured else "")
         return ok(out)
 
     # Solid/occurrence/component/design: the bbox measurement, unless include= asked past it.

@@ -38,24 +38,45 @@ def _shift_face_count(body, delta):
         del items[delta:]
 
 
+class _ReplaceFeature:
+    """The created ReplaceFaceFeature, recording whether the tool rolled it back."""
+
+    def __init__(self, health, removable=True):
+        self.name = "ReplaceFace1"
+        self.healthState = health
+        self.errorOrWarningMessage = "the face(s) could not be replaced"
+        self.deleted = False
+        self._removable = removable
+
+    def deleteMe(self):
+        self.deleted = self._removable
+        return self._removable
+
+
 class ReplaceFaceFeatures:
     """Stands in for adsk.fusion.ReplaceFaceFeatures: createInput(...) -> input -> add(input) ->
-    feature or None. add() shifts the body's volume by `volume_delta` and its face count by
-    `face_delta`; both at 0 models the silent no-op the API still calls success.
+    feature or None. add() shifts the body's volume by `volume_delta`, its face count by
+    `face_delta` and its surface area by `area_delta`; all three at 0 models the silent no-op the
+    API still calls success.
 
     `return_feature` False models a falsy add(); `raises` makes add() throw a platform message;
-    `signals_unreadable` drops both read-backs, leaving the call with no evidence at all."""
+    `signals_unreadable` drops the read-backs, leaving the call with no evidence at all;
+    `removable` False models a feature whose rollback the platform refuses."""
 
     def __init__(self, body, volume_delta=8.0, face_delta=1, return_feature=True, health=0,
-                 raises=None, signals_unreadable=False, input_none=False):
+                 raises=None, signals_unreadable=False, input_none=False, area_delta=None,
+                 removable=True):
         self.body = body
         self.volume_delta = volume_delta
         self.face_delta = face_delta
+        self.area_delta = area_delta
         self.return_feature = return_feature
         self.health = health
         self.raises = raises
         self.signals_unreadable = signals_unreadable
         self.input_none = input_none
+        self.removable = removable
+        self.feature = None
         self.last_input = None
 
     def createInput(self, source, is_tangent, target):
@@ -78,13 +99,15 @@ class ReplaceFaceFeatures:
             raise RuntimeError(self.raises)
         self.body.volume += self.volume_delta
         _shift_face_count(self.body, self.face_delta)
+        if self.area_delta is not None:
+            self.body.area = getattr(self.body, "area", 0.0) + self.area_delta
         if self.signals_unreadable:
-            go_stale(self.body, attrs=("volume", "faces"))
+            go_stale(self.body, attrs=("volume", "faces", "area"))
         go_stale(self.body)          # the body survives the edit; only identity reads go stale
         if not self.return_feature:
             return None
-        return types.SimpleNamespace(name="ReplaceFace1", healthState=self.health,
-                                     errorOrWarningMessage="the face(s) could not be replaced")
+        self.feature = _ReplaceFeature(self.health, self.removable)
+        return self.feature
 
 
 def _wire(monkeypatch, feats, faces, target=None, target_kind="body", design_type=None):
@@ -252,16 +275,46 @@ class TestHonesty:
         assert res["isError"] is True
         assert "failed to compute" in res["message"] and "could not be replaced" in res["message"]
 
-    def test_neither_signal_moving_is_an_error_not_a_false_ok(self, monkeypatch):
-        body = BRepBody(name="Block", volume=100.0, face_count=6, entity_token="tok-a")
-        feats = ReplaceFaceFeatures(body, volume_delta=0.0, face_delta=0)
+    def test_no_signal_moving_is_an_error_not_a_false_ok(self, monkeypatch):
+        body = BRepBody(name="Block", volume=100.0, face_count=6, entity_token="tok-a", area=24.0)
+        feats = ReplaceFaceFeatures(body, volume_delta=0.0, face_delta=0, area_delta=0.0)
         _wire(monkeypatch, feats, [_face_of(body)])
         res = rf.handler(faces=["h"], target="Patch1")
         assert res["isError"] is True
         assert "'Block' did not change" in res["message"]
         assert "volume is unchanged" in res["message"] and "face count is unchanged" in res["message"]
-        # a parametric design leaves a timeline entry, so the remedy names it
+        assert "surface area is unchanged" in res["message"]
+
+    def test_an_inert_replace_is_rolled_back_not_left_in_the_timeline(self, monkeypatch):
+        # Every other effect gate rolls its inert feature back; leaving this one behind made each
+        # retry add another, and told the caller to delete what it had just been refused.
+        body = BRepBody(name="Block", volume=100.0, face_count=6, entity_token="tok-a", area=24.0)
+        feats = ReplaceFaceFeatures(body, volume_delta=0.0, face_delta=0, area_delta=0.0)
+        _wire(monkeypatch, feats, [_face_of(body)])
+        res = rf.handler(faces=["h"], target="Patch1")
+        assert res["isError"] is True and feats.feature.deleted is True
+        assert "rolled back" in res["message"]
+
+    def test_a_rollback_the_platform_refuses_is_disclosed(self, monkeypatch):
+        body = BRepBody(name="Block", volume=100.0, face_count=6, entity_token="tok-a", area=24.0)
+        feats = ReplaceFaceFeatures(body, volume_delta=0.0, face_delta=0, area_delta=0.0,
+                                    removable=False)
+        _wire(monkeypatch, feats, [_face_of(body)])
+        res = rf.handler(faces=["h"], target="Patch1")
+        assert res["isError"] is True and "could not be auto-removed" in res["message"]
         assert "design_delete_feature" in res["message"]
+
+    def test_area_move_alone_is_a_landed_replace(self, monkeypatch):
+        # THE exact boundary: a replacement surface meeting the face at its MIDDLE pivots there and
+        # adds exactly what it cuts, so volume and face count both hold to the last bit. Measured
+        # live: volume 8.0 either side, faces 6 -> 6, area 24.0 -> 24.079216.
+        body = BRepBody(name="Block", volume=8.0, face_count=6, entity_token="tok-a", area=24.0)
+        feats = ReplaceFaceFeatures(body, volume_delta=0.0, face_delta=0, area_delta=0.079216)
+        _wire(monkeypatch, feats, [_face_of(body)])
+        out = payload(rf.handler(faces=["h"], target="Patch1"))
+        assert out["replaced"] is True
+        assert out["volume_delta_cm3"] == 0.0 and out["face_count_delta"] == 0
+        assert out["area_delta_cm2"] == 0.079216
 
     def test_unreadable_signals_with_a_feature_omit_the_delta_keys(self, monkeypatch):
         # In parametric the feature object is itself evidence, so an unreadable body is not an

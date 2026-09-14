@@ -1477,16 +1477,20 @@ class TestAddParameterRefusals:
         assert "param_set after activating the row" in res["message"]
 
     def test_a_text_parameter_is_refused_before_the_column_lands(self, col_design):
-        # MEASURED LIVE: a text parameter reads unit 'Text', and a shipped configured sample varies
-        # such a column per row, its cells reading the expression quoted ('40') and the value only
-        # on textValue - a form this handler neither sets nor verifies, so it refuses up front.
+        # MEASURED LIVE on a scratch configured design: the Text column IS created, and then every
+        # write to it is dropped - a cell's expression and its textValue each accept a write and
+        # discard it, cell.textValue raises on read, and the parameter's textValue is the same after
+        # activating each row while a numeric column drove 10/20/30 mm across the same switches.
         table = _top(col_design)
         p = col_design.allParameters.itemByName("plate_len")
         p.unit = "Text"
         res = dc.handler(action="add_parameter", parameter="plate_len",
                          values={"Default": "'50'"})
         assert res["isError"] is True
-        assert "is a Text parameter" in res["message"]
+        assert "is a Text parameter and a Text column cannot be driven" in res["message"]
+        assert "accept a write and discard it" in res["message"]
+        assert "cell.textValue raises on read" in res["message"]
+        assert "textValue is the same after activating each row" in res["message"]
         assert "param_set after activating the row" in res["message"]
         assert table.columns.added == []          # nothing was mutated at all
 

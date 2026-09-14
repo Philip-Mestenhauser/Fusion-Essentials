@@ -312,9 +312,12 @@ def _refuse_foreign_context(sketch, sources, labels) -> str:
 
 def _plane_label(sketch) -> str:
     """The name of the plane/face the sketch sits on, for the nothing-crossed error."""
-    rp = safe(lambda: sketch.referencePlane)
-    nm = safe(lambda: rp.name) if rp is not None else None
-    return nm if isinstance(nm, str) and nm else "its plane"
+    nm = _sketch_detail._plane_name(sketch)
+    if isinstance(nm, str) and nm:
+        return nm
+    # A face-attached sketch has no plane NAME at all - naming the support it does have beats
+    # "its plane", which reads as a construction plane that could be looked up.
+    return "the face it sits on" if _sketch_detail.on_a_face(sketch) else "its plane"
 
 
 def _surface_project_type(key):

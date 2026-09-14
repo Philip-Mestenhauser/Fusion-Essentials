@@ -12,11 +12,11 @@ import adsk.core
 import adsk.fusion
 
 MAP_BLURB = (
-    "response+resolve: ok/error/safe (per-FIELD guard, never a MUTATION), "
-    "measured/read_flag/counted (None, never a coerced 0/False), design/target_component, "
-    "find_sketch/resolve_sketch (a shared name REFUSED), timeline_health/set_verified "
-    "(effect reads), same_component/native_identity/occurrence_walk/broken_reference "
-    "(TRI-STATE identity, census), scale/iter_collection/named_with_remainder/told_apart")
+    "response+resolve: ok/error/safe (per-FIELD, never a MUTATION), "
+    "measured/read_flag/counted (None, never a coerced 0), design/target_component, "
+    "find_sketch/resolve_sketch (shared name REFUSED), timeline_health/set_verified/rolled_to "
+    "(effect reads; the ONE roll-restore), same_component/native_identity/occurrence_walk/"
+    "broken_reference (TRI-STATE), scale/iter_collection/named_with_remainder/told_apart")
 
 app = adsk.core.Application.get()
 
@@ -963,9 +963,39 @@ def timeline_health(design, limit=None):
     return errors, warnings, total
 
 
+def rolled_to(design, entity, read, subject):
+    """(what `read()` answered with the timeline marker parked at `entity`'s own row, a clause for a
+    marker that did not come back where it stood) - (None, None) when the roll could not run.
+
+    `subject` names the read inside that clause."""
+    # Some properties answer ONLY with the marker before their own row ("Didn't roll editing feature
+    # back"; "referencePlane is a BRefFace"). The marker is put back WHERE IT STOOD: moveToEnd
+    # instead rolls a deliberately parked marker past the features it was parked before.
+    timeline = safe(lambda: design.timeline)
+    tl_obj = safe(lambda: entity.timelineObject)
+    was = counted(lambda: timeline.markerPosition) if timeline is not None else None
+    if tl_obj is None or was is None or safe(lambda: tl_obj.rollTo(True)) is not True:
+        return None, None
+    try:
+        got = read()
+    finally:
+        safe(lambda: setattr(timeline, "markerPosition", was))
+    now = counted(lambda: timeline.markerPosition)
+    if now == was:
+        return got, None
+    return got, (f"the timeline marker stood at {was} before {subject} was read and reads {now} "
+                 "after it - roll it back with design_edit_timeline")
+
+
 # A before/after volume difference (cm3) smaller than this is NO CHANGE - the ONE band every
 # material-changing feature judges "the API reported success but nothing moved" against.
 NO_VOLUME_CHANGE_CM3 = 1e-9
+
+
+# The same band for SURFACE AREA (cm2). A feature pivoting a boundary at the middle of what it acts
+# on adds exactly what it cuts, so the volume holds while the area moves - measured on a draft, a
+# replace face and a convex+concave fillet pair, each reading an unchanged volume to the last bit.
+NO_AREA_CHANGE_CM2 = 1e-9
 
 
 # The band a landed extent may differ from the requested one by and still be the same length: both

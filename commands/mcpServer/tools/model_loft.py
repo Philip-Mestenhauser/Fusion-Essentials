@@ -32,6 +32,10 @@ _LOFT_CENTERLINE = _inputs.GeometryHandle("centerline", require="any", required=
 # spine drawn before any body exists needs this second spelling, '<sketch>/<type>:<index>'.
 _SKETCH_CURVE_SEP = "/"
 
+# The GUIDES' own scope. Measured: a loft hosted on its profiles' component accepts a rail owned by a
+# sketch in ANOTHER component, so one scope over both would leave that build with no legal call.
+_GUIDE_SCOPE = _sketch_detail.component_scope("guide_component", narrows="rails/centerline")
+
 
 def _sketch_curve_ref(raw):
     """The '<sketch>/<type>:<index>' parts of a sketch-curve ref, or None when it is not one."""
@@ -42,11 +46,13 @@ def _sketch_curve_ref(raw):
     return (name.strip(), ref.strip()) if name.strip() and kind in _common.ENTITY_REF_KINDS else None
 
 
-def _resolve_sketch_curve(design, raw, label):
-    """(SketchCurve, None) for a '<sketch>/<type>:<index>' ref, or (None, error)."""
+def _resolve_sketch_curve(design, raw, label, guide_component=""):
+    """(SketchCurve, None) for a '<sketch>/<type>:<index>' ref, or (None, error) - resolved inside
+    'guide_component', which scopes the GUIDES alone: a rail may live in another component than the
+    sections (measured: a loft hosted on its profiles takes a rail owned elsewhere)."""
     name, ref = _sketch_curve_ref(raw)
-    sketch, ambiguous = _common.find_sketch(
-        design, name, remedy="Name the component that owns it in 'component'.")
+    sketch, ambiguous = _sketch_detail.scoped_sketch(design, name, guide_component,
+                                                     input_name=_GUIDE_SCOPE[0])
     if ambiguous:
         return None, f"{label} '{raw}': {ambiguous}"
     if sketch is None:
@@ -59,7 +65,7 @@ def _resolve_sketch_curve(design, raw, label):
     return curve, None
 
 
-def _resolve_guides(design, raw, kind, label):
+def _resolve_guides(design, raw, kind, label, guide_component=""):
     """(entities, error) for rails/centerline: each item is a find_geometry handle OR a sketch-curve
     ref, resolved item by item so the two spellings can be mixed in one call."""
     items = raw if isinstance(raw, (list, tuple)) else [raw]
@@ -67,7 +73,7 @@ def _resolve_guides(design, raw, kind, label):
         out = []
         for i in items:
             if _sketch_curve_ref(i):
-                ent, err = _resolve_sketch_curve(design, i, label)
+                ent, err = _resolve_sketch_curve(design, i, label, guide_component)
             else:
                 ent, err = kind.resolve(i) if not isinstance(kind, _inputs.GeometryHandleList) \
                     else _inputs.GeometryHandle.resolve(kind, i)
@@ -87,7 +93,8 @@ def _cut_check_bodies(comp):
 
 
 def handler(profiles=None, rails=None, centerline="", operation="new",
-            as_surface=None, is_closed=None, component: str = "") -> dict:
+            as_surface=None, is_closed=None, component: str = "",
+            guide_component: str = "") -> dict:
     """Loft a body through an ORDERED list of profiles, optionally shaped by rails OR a centerline."""
     op_key = (operation or "new").strip().lower()
     if op_key not in _OPERATION_KEYS:
@@ -110,12 +117,13 @@ def handler(profiles=None, rails=None, centerline="", operation="new",
 
     rail_ents = []
     if has_rails:
-        rail_ents, rerr = _resolve_guides(design, rails, _LOFT_RAILS, "rails")
+        rail_ents, rerr = _resolve_guides(design, rails, _LOFT_RAILS, "rails", guide_component)
         if rerr:
             return error(rerr)
     center_ent = None
     if has_centerline:
-        center_ent, cerr = _resolve_guides(design, centerline, _LOFT_CENTERLINE, "centerline")
+        center_ent, cerr = _resolve_guides(design, centerline, _LOFT_CENTERLINE, "centerline",
+                                           guide_component)
         if cerr:
             return error(cerr)
         if isinstance(center_ent, list):
@@ -219,7 +227,7 @@ def handler(profiles=None, rails=None, centerline="", operation="new",
     if is_solid is True:
         shape = "Result is a SOLID."
     elif is_solid is False:
-        shape = "Result is a SURFACE - pair with model_stitch/model_thicken to close it."
+        shape = "Result is a SURFACE - pair with model_stitch/surface_thicken to close it."
     else:
         shape = ("The feature's isSolid flag could not be read back, so whether the result is a "
                  "solid or a surface is UNVERIFIED.")
@@ -262,6 +270,7 @@ tool = (
     .add_input_property("as_surface", {"type": "boolean"})
     .add_input_property("is_closed", {"type": "boolean"})
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
+    .add_input_property(*_GUIDE_SCOPE)
     .add_required_input("profiles")
     .strict_schema()
 )

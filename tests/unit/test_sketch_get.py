@@ -13,9 +13,25 @@ import json
 import sys
 import types
 
-from conftest import MakeComp, Profile, load_tool, make_design, make_occurrence, make_sketch
+from conftest import (MakeComp, Profile, load_tool, make_design, make_occurrence, make_sketch,
+                      make_timeline)
 
 sketches = load_tool("sketch_get")
+
+
+def _face_attached(name):
+    """A sketch on a BRepFace. MEASURED on 2705.1.15: referencePlane raises this text at the end of
+    the timeline, which is what tells a face-attached sketch from an unreadable plane."""
+    sketch = make_sketch(name=name)
+
+    class _OnFace(type(sketch)):
+        @property
+        def referencePlane(self):
+            raise RuntimeError("3 : referencePlane is a BRefFace - need to roll timeline back "
+                               "before sketch")
+
+    sketch.__class__ = _OnFace
+    return sketch
 
 
 def _never(what):
@@ -160,6 +176,23 @@ class TestSketchSummaryWalk:
         assert res["isError"] is True
         assert "No component named 'Ghost'" in res["message"]
         assert "Frame" in res["message"] and "OuterRing" in res["message"]
+
+    def test_a_face_attached_row_is_flagged_without_rolling_the_timeline(self, monkeypatch):
+        # The census must not roll: it would roll ONCE PER SKETCH, recomputing the model each time.
+        # It says a sketch sits on a face; sketch_get(sketch_name=...) names which one.
+        comp = MakeComp(name="Root", sketches=[_face_attached("OnFace"), make_sketch("OnPlane")],
+                        entity_token="comp-root")
+        d = make_design(comp=comp, all_components=[comp],
+                        timeline=make_timeline("OnFace", "OnPlane", marker=2))
+        monkeypatch.setattr(sketches._common, "design", lambda: d)
+        payload = json.loads(sketches._list_sketches()["content"][0]["text"])
+        rows = {r["name"]: r for r in payload["sketches"]}
+        # a BOOLEAN under its OWN key: 'on_face' is the RECORD sketch_get(sketch_name=...) returns,
+        # and one key must never answer two types between the two reads.
+        assert rows["OnFace"]["on_face_flagged"] is True and rows["OnFace"]["plane"] is None
+        assert "on_face" not in rows["OnFace"]
+        assert "on_face_flagged" not in rows["OnPlane"] and "on_face" not in rows["OnPlane"]
+        assert d.timeline._moves == []          # nothing rolled
 
     def test_no_scope_still_lists_every_component(self, monkeypatch):
         # The other side of the branch: the scope is opt-in, so a blank one must not narrow.

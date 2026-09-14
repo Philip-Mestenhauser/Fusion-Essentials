@@ -19,10 +19,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import (FakeBoundingBox3D, FakeOccurrence, FakePoint,
-                      FakeSketchPoint as _SharedSketchPoint, MakeComp, Profile, Sketch,
-                      SketchCurves, _NamedCollection, install, load_tool, make_design,
-                      make_occurrence)
+from conftest import (BRepBody, BRepFace, FakeBoundingBox3D, FakeOccurrence, FakePoint,
+                      FakeSketchPoint as _SharedSketchPoint, FakeTimeline, FakeTimelineObject,
+                      MakeComp, Profile, Sketch, SketchCurves, _NamedCollection, install, load_tool,
+                      make_design, make_occurrence, make_timeline)
 
 sd = load_tool("_sketch_detail")
 
@@ -263,6 +263,53 @@ def _install(sketch):
 def _payload(result):
     assert result["isError"] is False, result
     return json.loads(result["content"][0]["text"])
+
+
+# ── a sketch attached to a FACE, whose support needs the marker rolled back ─────────────────────
+
+class FaceAttachedSketch(FakeSketch):
+    """A sketch on a BRepFace. MEASURED on 2705.1.15: referencePlane RAISES at the end of the
+    timeline ('referencePlane is a BRefFace - need to roll timeline back before sketch') and answers
+    the face once the marker is parked before the sketch's own row."""
+
+    def __init__(self, name, face, **kw):
+        super().__init__(name, **kw)
+        self._face = face
+        self.timelineObject = FakeTimelineObject(name=name, index=0)
+
+    @property
+    def referencePlane(self):
+        if not self.timelineObject.isRolledBack:
+            raise RuntimeError("3 : referencePlane is a BRefFace - need to roll timeline back "
+                               "before sketch")
+        return self._face
+
+    @referencePlane.setter
+    def referencePlane(self, value):
+        self._face = value
+
+
+class _DriftingMarkerTimeline(FakeTimeline):
+    """A timeline whose restoring assignment lands somewhere ELSE - the one state the unrestored
+    clause exists for. No shared fake models it: the live marker restores."""
+
+    @FakeTimeline.markerPosition.setter
+    def markerPosition(self, value):
+        self._moves.append(value)
+        self._marker = value - 1
+
+
+def _face_support(area=9.0, token="face-tok", body="Body1"):
+    """The BRepFace a face-attached sketch sits on, carrying what face_record reads off it."""
+    return BRepFace(surface=None, area=area, entity_token=token,
+                    centroid=FakePoint(7.5, 7.5, 1.5), body=BRepBody(name=body))
+
+
+def _install_face_sketch(sketch, marker=2, move_ok=True):
+    design = make_design(sketches=[sketch],
+                         timeline=make_timeline("Extrude1", sketch.name, marker=marker))
+    design.timeline._move_ok = move_ok
+    return install(sd, design)
 
 
 def _install_subcomponent(sketch):
@@ -2449,3 +2496,86 @@ class TestEveryRefusalNamesTheCallersInput:
         _comp, _occ, err = sd.scope_component(design, "Frame")
         assert "design_get(include=['tree'])" in err
         assert "design_get" not in sd.COMPONENT_SCOPE[1]["description"]
+
+
+class TestFaceAttachedSketchNamesItsFace:
+    """A sketch on a face has no plane NAME - publishing only plane:null tells the caller nothing
+    about what it sits on, while the face is one timeline roll away."""
+
+    def test_the_single_read_names_the_body_and_mints_a_face_handle(self):
+        sketch = FaceAttachedSketch("OnFace", _face_support())
+        _install_face_sketch(sketch)
+        out = _payload(sd.handler(sketch_name="OnFace"))
+        assert out["plane"] is None
+        assert out["on_face"]["body"] == "Body1"
+        assert out["on_face"]["handle"].startswith("face-tok")
+        assert "planar_face:" in out["on_face"]["handle"]     # find_geometry's own spelling
+        assert "sits on a FACE" in out["note"]
+
+    def test_the_marker_is_put_back_where_it_stood_mid_timeline(self):
+        # The marker is PARKED at 1 of 4 - a deliberately rolled-back model. Restoring by moveToEnd
+        # (or by any move that assumes the end) would leave it at 4 and silently rebuild the three
+        # features the user had rolled past; only an assignment to where it STOOD passes here.
+        sketch = FaceAttachedSketch("OnFace", _face_support())
+        design = make_design(sketches=[sketch],
+                             timeline=make_timeline("Extrude1", "OnFace", "Fillet1", "Shell1",
+                                                    marker=1))
+        install(sd, design)
+        _payload(sd.handler(sketch_name="OnFace"))
+        assert design.timeline.markerPosition == 1            # not 4, and not left at the sketch
+        assert design.timeline._moves == [1]                  # restored by ONE assignment
+        assert sketch.timelineObject._rolls == [True]         # rolled BEFORE its own row
+
+    def test_a_marker_that_did_not_come_back_is_disclosed(self):
+        sketch = FaceAttachedSketch("OnFace", _face_support())
+        design = make_design(sketches=[sketch],
+                             timeline=_DriftingMarkerTimeline(
+                                 [FakeTimelineObject(name="Extrude1", index=0)], marker=2))
+        install(sd, design)
+        out = _payload(sd.handler(sketch_name="OnFace"))
+        assert out["timeline_marker_unrestored"] is True
+        assert "marker stood at 2" in out["note"] and "reads 1 after it" in out["note"]
+        assert "design_edit_timeline" in out["note"]
+
+    def test_a_roll_that_refuses_keeps_the_record_shape_with_null_members(self):
+        # ONE type for 'on_face' on every face-attached path: a caller that reads on_face["body"]
+        # must not meet a bool here just because the roll could not run.
+        sketch = FaceAttachedSketch("OnFace", _face_support())
+        sketch.timelineObject._roll_ok = False
+        _install_face_sketch(sketch)
+        out = _payload(sd.handler(sketch_name="OnFace"))
+        assert out["plane"] is None
+        assert out["on_face"] == {"body": None, "handle": None}
+        # the clause names its OWN subject: a bare "which" attaches to the construction plane, the
+        # opposite fact, and reads as a contradiction beside a handle that WAS minted.
+        assert "The body it sits on did not read back." in out["note"]
+        assert "which did not read back" not in out["note"]
+
+    def test_a_drifted_marker_still_publishes_the_record_not_a_bare_flag(self):
+        sketch = FaceAttachedSketch("OnFace", _face_support())
+        design = make_design(sketches=[sketch],
+                             timeline=_DriftingMarkerTimeline(
+                                 [FakeTimelineObject(name="Extrude1", index=0)], marker=2))
+        install(sd, design)
+        out = _payload(sd.handler(sketch_name="OnFace"))
+        assert isinstance(out["on_face"], dict) and out["on_face"]["body"] == "Body1"
+        assert out["timeline_marker_unrestored"] is True
+
+    def test_a_face_with_no_readable_centroid_publishes_a_null_handle_and_says_so(self):
+        # face_record mints no handle without a centroid; the note must not promise one anyway.
+        face = _face_support()
+        face.centroid = None
+        sketch = FaceAttachedSketch("OnFace", face)
+        _install_face_sketch(sketch)
+        out = _payload(sd.handler(sketch_name="OnFace"))
+        assert out["on_face"] == {"body": "Body1", "handle": None}
+        assert "No handle could be minted for that face." in out["note"]
+        assert "carries that face's handle" not in out["note"]
+
+    def test_a_plane_attached_sketch_publishes_no_on_face_and_never_rolls(self):
+        sketch = FakeSketch("OnPlane")
+        design = make_design(sketches=[sketch], timeline=make_timeline("OnPlane", marker=1))
+        install(sd, design)
+        out = _payload(sd.handler(sketch_name="OnPlane"))
+        assert out["plane"] == "XY" and "on_face" not in out
+        assert design.timeline._moves == []

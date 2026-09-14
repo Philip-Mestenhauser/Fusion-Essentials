@@ -6,6 +6,8 @@ drafted-face read-back, the no-active-design guard, resolution-error propagation
 verifier that a feature which computes with a health ERROR is reported as failure, not a false ok.
 """
 
+import types
+
 from conftest import (BRepBody, BRepFace, load_tool, make_design, install, MakeComp, payload,
                       error_message, assert_no_active_design, _NamedCollection)
 
@@ -28,13 +30,19 @@ class FakeDraftInput:
 
 
 class FakeDraftFeature:
-    def __init__(self, name="Draft1", n_faces=2, health=0):
+    def __init__(self, name="Draft1", n_faces=2, health=0, removable=True):
         self.name = name
         # DraftFeature.faces - the faces the draft created or modified, which is the count the tool
         # reads back (its `inputFaces` raises on this platform).
         self.faces = _NamedCollection([None] * n_faces)
         self.healthState = health
         self.errorOrWarningMessage = "geometry undercut"
+        self.deleted = False
+        self._removable = removable
+
+    def deleteMe(self):
+        self.deleted = self._removable
+        return self._removable
 
 
 class FakeDraftFeatures:
@@ -155,10 +163,18 @@ class TestDraft:
 # flipped direction that lands back on itself). The feature object reads identically either way, so
 # the owning bodies' volumes on both sides of the add are the only evidence.
 
-def _face_on(body):
+class _Vec:
+    """A Vector3D stand-in for the face evaluator's normal - no shared fake carries one."""
+
+    def __init__(self, x, y, z):
+        self.x, self.y, self.z = x, y, z
+
+
+def _face_on(body, area=0.0, normal=None):
     """A face whose owning body is `body` - the chain _geom.owning_bodies walks to find what the
-    draft must move."""
-    return BRepFace(surface=None, body=body)
+    draft must move. `normal` installs the evaluator the face frame is sampled through."""
+    return BRepFace(surface=None, body=body, area=area, normal=normal,
+                    point_on_face=object() if normal is not None else None)
 
 
 def _add_moving_volume(feats, feature, *changes):
@@ -171,14 +187,41 @@ def _add_moving_volume(feats, feature, *changes):
     feats.add = _add
 
 
+def _add_tilting_face(feats, feature, face, normal, area):
+    """Make draftFeatures.add TILT `face` and leave every volume alone - the pivot-at-the-plane
+    taper, whose only evidence is the face's own frame."""
+    def _add(inp):
+        if normal is not None:
+            face.evaluator = types.SimpleNamespace(getNormalAtPoint=lambda _p: (True, normal))
+        face.area = area
+        return feature
+    feats.add = _add
+
+
+def _add_consuming_face(feats, feature, face, splits=0, bodies=()):
+    """Make draftFeatures.add CONSUME `face` - the wrapper stops answering its normal and area, as
+    a replace-face's input does. `splits` grows each body's face count (what a SYMMETRIC draft's
+    split leaves behind when the wrapper is gone)."""
+    def _add(inp):
+        face.evaluator = None
+        face.area = None
+        face.pointOnFace = None
+        for body in bodies:
+            body.faces._items.extend([None] * splits)
+        return feature
+    feats.add = _add
+
+
 class TestTaperMovesMaterial:
-    def test_draft_that_moves_no_volume_is_an_error(self, monkeypatch):
+    def test_draft_that_changes_no_geometry_is_an_error(self, monkeypatch):
         bar = BRepBody("Bar", volume=20.0)
-        _wire(monkeypatch, faces=[_face_on(bar)])
+        _wire(monkeypatch, faces=[_face_on(bar, area=6.0)])
         res = dr.handler(faces=["a"], pull_direction="xy", angle_deg=5)
         assert res["isError"] is True
         assert "tapered nothing" in res["message"] and "Bar" in res["message"]
-        assert "design_delete_feature" in res["message"]
+        assert "1 face(s) compared" in res["message"]
+        # the inert feature goes, so the refusal must NOT send the caller to delete one
+        assert "rolled back" in res["message"] and "design_delete_feature" not in res["message"]
 
     def test_draft_that_moved_material_publishes_the_delta(self, monkeypatch):
         bar = BRepBody("Bar", volume=20.0)
@@ -188,13 +231,83 @@ class TestTaperMovesMaterial:
         out = payload(dr.handler(faces=["a"], pull_direction="xy", angle_deg=5))
         assert out["drafted"] is True and out["volume_delta_cm3"] == -1.5
 
-    def test_symmetric_draft_is_never_volume_gated(self, monkeypatch):
-        # A symmetric draft tapers both sides of the pull plane in OPPOSITE directions, so the two
-        # wedges can cancel on a taper that really happened - the delta cannot carry a no-op verdict.
+    def test_a_taper_that_pivots_at_the_plane_passes_on_the_tilted_face(self, monkeypatch):
+        # THE exact boundary: a pull plane crossing the face cuts one side and adds the other in
+        # equal measure, so the volume delta is 0.0 to the last bit while the face tilts. Measured
+        # live at 5 deg: volume 36.0 either side, normal (-1,0,0) -> (-0.996195,0,0.087156).
         bar = BRepBody("Bar", volume=20.0)
-        _wire(monkeypatch, faces=[_face_on(bar)])
+        face = _face_on(bar, area=12.0, normal=_Vec(-1.0, 0.0, 0.0))
+        feature = FakeDraftFeature(n_faces=1)
+        feats = _wire(monkeypatch, feature=feature, faces=[face])
+        _add_tilting_face(feats, feature, face, _Vec(-0.996195, 0.0, 0.087156), 12.045838)
+        out = payload(dr.handler(faces=["a"], pull_direction="xy", angle_deg=5))
+        assert out["drafted"] is True
+        assert out["volume_delta_cm3"] == 0.0        # the material gate alone would have refused
+        assert out["faces_moved"] == 1
+
+    def test_a_face_whose_area_alone_moves_counts_as_moved(self, monkeypatch):
+        # The normal is unreadable (no evaluator), so the area is the only frame signal left.
+        bar = BRepBody("Bar", volume=20.0)
+        face = _face_on(bar, area=12.0)
+        feature = FakeDraftFeature(n_faces=1)
+        feats = _wire(monkeypatch, feature=feature, faces=[face])
+        _add_tilting_face(feats, feature, face, None, 12.5)
+        out = payload(dr.handler(faces=["a"], pull_direction="xy", angle_deg=5))
+        assert out["drafted"] is True and out["faces_moved"] == 1
+
+    def test_symmetric_draft_is_gated_the_same_way(self, monkeypatch):
+        # MEASURED: a symmetric draft leaves its input wrapper valid and answering the tilted
+        # normal, so the same verdict covers it - the branch needs no exemption.
+        bar = BRepBody("Bar", volume=20.0, face_count=6)
+        _wire(monkeypatch, faces=[_face_on(bar, area=6.0)])
+        res = dr.handler(faces=["a"], pull_direction="xy", angle_deg=5, symmetric=True)
+        assert res["isError"] is True and "tapered nothing" in res["message"]
+
+    def test_a_split_face_is_proof_even_when_the_wrapper_is_consumed(self, monkeypatch):
+        # THE symmetric case the face frames cannot see: the split invalidates the input wrapper, so
+        # faces_moved reads 0 of 0, and the volume cancels exactly about the midplane. The body's
+        # FACE COUNT is the channel the split cannot hide - without it this is a false refusal that
+        # also deletes a good feature.
+        bar = BRepBody("Bar", volume=20.0, face_count=6)
+        face = _face_on(bar, area=12.0, normal=_Vec(-1.0, 0.0, 0.0))
+        feature = FakeDraftFeature(n_faces=2)
+        feats = _wire(monkeypatch, feature=feature, faces=[face])
+        _add_consuming_face(feats, feature, face, splits=1, bodies=[bar])
         out = payload(dr.handler(faces=["a"], pull_direction="xy", angle_deg=5, symmetric=True))
-        assert out["drafted"] is True and out["volume_delta_cm3"] == 0.0
+        assert out["drafted"] is True
+        assert out["volume_delta_cm3"] == 0.0                 # the material channel saw nothing
+        assert out["faces_moved"] == 0 and out["faces_compared"] == 0   # nor did the frames
+        assert "faces_compared is 0" in out["note"]
+
+    def test_a_consumed_face_is_never_counted_as_moved(self, monkeypatch):
+        # The mutant: reading a face's frame BEFORE and getting None after is evidence of nothing -
+        # counting it as moved would pass every no-op whose wrapper the feature consumed.
+        bar = BRepBody("Bar", volume=20.0, face_count=6)
+        face = _face_on(bar, area=12.0, normal=_Vec(-1.0, 0.0, 0.0))
+        feature = FakeDraftFeature(n_faces=1)
+        feats = _wire(monkeypatch, feature=feature, faces=[face])
+        _add_consuming_face(feats, feature, face)             # no split, no volume move
+        res = dr.handler(faces=["a"], pull_direction="xy", angle_deg=5)
+        assert res["isError"] is True and "tapered nothing" in res["message"]
+        assert "no requested face's normal or area could be compared" in res["message"]
+        assert "the volume is unchanged" in res["message"]
+        assert "the face count is unchanged" in res["message"]
+
+    def test_an_inert_draft_is_rolled_back_not_left_in_the_timeline(self, monkeypatch):
+        bar = BRepBody("Bar", volume=20.0, face_count=6)
+        feature = FakeDraftFeature(n_faces=1)
+        _wire(monkeypatch, feature=feature, faces=[_face_on(bar, area=6.0)])
+        res = dr.handler(faces=["a"], pull_direction="xy", angle_deg=5)
+        assert res["isError"] is True and feature.deleted is True
+        assert "rolled back" in res["message"]
+
+    def test_a_rollback_the_platform_refuses_is_disclosed(self, monkeypatch):
+        bar = BRepBody("Bar", volume=20.0, face_count=6)
+        feature = FakeDraftFeature(n_faces=1, removable=False)
+        _wire(monkeypatch, feature=feature, faces=[_face_on(bar, area=6.0)])
+        res = dr.handler(faces=["a"], pull_direction="xy", angle_deg=5)
+        assert res["isError"] is True and "could not be auto-removed" in res["message"]
+        assert "design_delete_feature" in res["message"]
 
     def test_faces_with_no_readable_body_neither_error_nor_publish_a_delta(self, monkeypatch):
         # Cannot measure is not "measured the same": no verdict, and no null delta that would read
@@ -202,6 +315,7 @@ class TestTaperMovesMaterial:
         _wire(monkeypatch, faces=[object()])
         out = payload(dr.handler(faces=["a"], pull_direction="xy", angle_deg=5))
         assert out["drafted"] is True and "volume_delta_cm3" not in out
+        assert out["effect_unverified"] is True and "no geometric proof" in out["note"]
 
 
 class TestDraftedCountIsRead:

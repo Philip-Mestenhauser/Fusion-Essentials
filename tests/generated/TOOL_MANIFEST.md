@@ -47,7 +47,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | ✎ | `model_construction` | Add a construction point, axis, or plane; each 'mode' reads its own subset of the inputs. |
 | ✎ | `model_create_component` | Create a new EMPTY component occurrence, at root unless 'parent' nests it |
 | ✎ | `model_draft` | Taper (draft) faces relative to a pull plane.
-Produces: feature -> design_delete_feature, faces_drafted. |
+Produces: feature -> design_delete_feature, faces_drafted, faces_moved, faces_compared. |
 | ✎ | `model_emboss` | Stamp sketch profiles or text onto faces; a negative 'depth' engraves.
 Produces: feature -> design_delete_feature. |
 | ✎ | `model_extrude` | Extrude a closed sketch profile into a solid; sketch_get returns profile handles. |
@@ -126,7 +126,7 @@ Produces: feature, area_after. |
 | ✎ | `mesh_separate` | Split a MESH body into its disconnected shells; the input body is CONSUMED. |
 | ✎ | `mesh_shell` | Hollow a MESH body in place - the BRep model_shell cannot reach a mesh. |
 | ✎ | `mesh_smooth` | Smooth a MESH body - relaxes scan noise and faceting. |
-| ✎ | `mesh_to_brep` | Convert a MESH body into a BRep solid/surface - the bridge back to find_geometry / fillet / CAM. |
+| ✎ | `mesh_to_brep` | Convert a MESH body into a BRep solid, or an OPEN mesh into a surface with method='faceted' - the bridge back to find_geometry / fillet / CAM. |
 
 ### sketch
 

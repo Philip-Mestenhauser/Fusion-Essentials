@@ -353,7 +353,7 @@ item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_m
                              verification=Verification(
                                  kind="inline", rung="geometry",
                                  evidence_test="tests/unit/test_model_fillet.py::TestVolumeReadBack"
-                                               "::test_unchanged_volume_errors_and_rolls_back"))
+                                               "::test_unchanged_volume_and_area_errors_and_rolls_back"))
 
 
 def register_tool():

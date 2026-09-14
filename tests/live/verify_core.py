@@ -1058,6 +1058,56 @@ def _drafted(p):
                      isinstance(n, int) and not isinstance(n, bool) and n >= 1)
 
 
+# A before/after difference this small is the tool's own NO CHANGE band (_common.NO_VOLUME_CHANGE_
+# CM3 / NO_AREA_CHANGE_CM2), so a delta inside it is what the material gate alone would refuse on.
+_NO_CHANGE = 1e-9
+
+
+def _pivoted(label, moved_key, moved_min=None):
+    """A write whose pull/replacement/edge set PIVOTS at the middle of what it acts on: the volume
+    delta lands inside the no-change band while `moved_key` shows the boundary moved. The material
+    gate alone would refuse each of these, so the row is what proves it does not."""
+    def check(p):
+        vol, moved = p.get("volume_delta_cm3"), p.get(moved_key)
+        held = isinstance(vol, (int, float)) and abs(vol) < _NO_CHANGE
+        if moved_min is None:
+            shifted = isinstance(moved, (int, float)) and abs(moved) >= _NO_CHANGE
+        else:
+            shifted = isinstance(moved, int) and not isinstance(moved, bool) and moved >= moved_min
+        return _measured(label, {"volume_delta_cm3": vol, moved_key: moved,
+                                 "feature": p.get("feature")}, held and shifted)
+    return check
+
+
+_drafted_on_its_pivot = _pivoted("a taper the volume cannot show", "faces_moved", moved_min=1)
+_replaced_on_its_pivot = _pivoted("a replace the volume cannot show", "area_delta_cm2")
+_cut_on_its_pivot = _pivoted("a cut the volume cannot show", "area_delta_cm2")
+
+
+def _drafted_symmetric(p):
+    """model_draft(symmetric=true): it SPLITS each requested face at the pull plane, so the feature
+    takes more faces than were asked for. MEASURED on the L-prism about its midplane: both halves
+    taper the same way and the volume MOVES (-0.787398 cm3) - so this branch carries a real verdict
+    of its own, and the split is not asserted to cancel anything."""
+    took, asked = p.get("faces_drafted"), p.get("faces_requested")
+    vol = p.get("volume_delta_cm3")
+    return _measured("a symmetric draft's split and its material",
+                     {"faces_drafted": took, "faces_requested": asked, "volume_delta_cm3": vol,
+                      "faces_compared": p.get("faces_compared")},
+                     isinstance(took, int) and isinstance(asked, int) and took > asked
+                     and isinstance(vol, (int, float)) and abs(vol) >= _NO_CHANGE)
+
+
+def _sits_on_a_face(p):
+    """sketch_create / sketch_get on a FACE-attached sketch: 'plane' is null because there is no
+    construction plane to name, and 'on_face' names the body and carries the face's own handle."""
+    face = p.get("on_face") if isinstance(p.get("on_face"), dict) else {}
+    body, handle = face.get("body"), face.get("handle")
+    return _measured("the face the sketch sits on", {"plane": p.get("plane"), "on_face": face},
+                     p.get("plane") is None and isinstance(body, str) and bool(body)
+                     and isinstance(handle, str) and "planar_face:" in handle)
+
+
 def _drilled(count):
     """model_hole: 'holes_verified' says the DRILL AXES were counted off the created feature (the
     read that catches a point which cut nothing), and 'holes' is that verified count."""

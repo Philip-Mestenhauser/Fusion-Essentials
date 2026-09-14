@@ -15,7 +15,7 @@ import adsk.core
 import pytest
 
 from conftest import (load_tool, error_message, FakePoint, FakeBoundingBox3D, FakeMatrix3D,
-                      FakeOccurrence, FakeVector3D, BRepBody, BRepFace, MakeComp, Plane,
+                      FakeOccurrence, FakeVector3D, BRepBody, BRepFace, MakeComp, MeshBody, Plane,
                       body_proxy, make_design, make_occurrence, _NamedCollection)
 
 mi = load_tool("model_inspect")
@@ -107,6 +107,29 @@ class TestDefaultAndDispatch:
         assert out["triangle_count"] == 900 and out["kind"] == "mesh"
         assert "x" not in out                            # NOT the bbox path
         assert "mesh" in out["note"].lower()             # breadcrumb explains the mesh path
+
+    def _mesh_route(self, monkeypatch, mesh):
+        """The mesh route with the REAL measure core behind it - no stub_slices, so the note the
+        payload carries is the one _mesh_common actually ships."""
+        monkeypatch.setattr(mi._common, "design", lambda: object())
+        monkeypatch.setattr(mi._TARGET, "resolve", lambda raw: ((mesh, "mesh"), None))
+        return _payload(mi.handler(target=mesh.name))
+
+    def test_an_open_mesh_keeps_the_measures_watertight_sentence(self, monkeypatch):
+        # Two notes meet on one key here. Assigning over the measure's drops the actionable half:
+        # which convert an open mesh still has, and the repair that closes it.
+        out = self._mesh_route(monkeypatch, MeshBody("Open", is_closed=False, volume=0.0, area=4.0))
+        assert out["kind"] == "mesh" and out["is_closed"] is False
+        assert out["note"].startswith("Mesh target:")     # the router's own sentence still leads
+        assert "mesh_to_brep(method='faceted')" in out["note"]
+        assert "mesh_repair(repair_type='close_holes')" in out["note"]
+
+    def test_a_watertight_mesh_carries_the_routers_note_alone(self, monkeypatch):
+        # the measure writes no note for a closed mesh, so there is nothing to append - and an
+        # unconditional join would leave a trailing separator on every watertight read
+        out = self._mesh_route(monkeypatch, MeshBody("Shut", is_closed=True, volume=8.0, area=24.0))
+        assert out["note"].endswith("include=['mass'].)")
+        assert "watertight (is_closed=false)" not in out["note"]
 
     def test_mesh_is_not_a_valid_include(self, monkeypatch, stub_slices):
         # mesh stats are automatic for a mesh target, NOT a selectable slice — advertising it would lie.

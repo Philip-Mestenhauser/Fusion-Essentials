@@ -771,6 +771,23 @@ class TestIntersect:
         assert "Body1" in out["message"] and "Body2" in out["message"]
         assert "Section" in out["message"] and "XY" in out["message"]
 
+    def test_a_face_attached_sketch_is_named_as_a_face_not_as_a_plane(self, run):
+        # A face-attached sketch has no plane NAME at all, and "its plane" reads as a construction
+        # plane the caller could go and look up.
+        b1 = BRepBody(name="Body1", entity_token="tok-1")
+        sk = FakeSketch(name="OnFace", contributions={})
+
+        class _OnFace(type(sk)):
+            @property
+            def referencePlane(self):
+                raise RuntimeError("3 : referencePlane is a BRefFace - need to roll timeline "
+                                   "back before sketch")
+
+        sk.__class__ = _OnFace
+        out, _ = run("intersect", raw=True, sketch=sk, bodies_out=[b1], bodies="Body1")
+        assert out["isError"] is True
+        assert "the face it sits on" in out["message"] and "its plane" not in out["message"]
+
     def test_partial_result_is_ok_and_names_the_zero_contributors(self, run):
         b1, b2 = BRepBody(name="Body1", entity_token="tok-1"), BRepBody(name="Body2", entity_token="tok-2")
         sk = FakeSketch(contributions={"tok-1": 4, "tok-2": 0})

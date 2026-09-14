@@ -131,8 +131,8 @@ def handler(body: str = "", quality: str = "normal", name: str = "") -> dict:
     tri_count = safe(lambda: tm.triangleCount)
 
     # The calculator emits one node per triangle corner, so an unwelded mesh is topologically open
-    # (isClosed=false even for a watertight solid) and mesh_to_brep refuses it. Only the coordinate
-    # indices are remapped - a TriangleMesh exposes no normal index list to remap.
+    # (isClosed=false even for a watertight solid) and mesh_to_brep then converts it through faceted
+    # alone. Only the coordinate indices are remapped - a TriangleMesh exposes no normal index list.
     coords, coord_idx = _weld(coords, coord_idx)
     node_count = len(coords) // 3
 

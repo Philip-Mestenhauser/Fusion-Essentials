@@ -14,11 +14,11 @@ from ._common import counted, safe
 from . import _common
 
 MAP_BLURB = (
-    "the geometry reads' measurement math: unit_vector/unit_vector_between/"
-    "evaluator_normal_at/dot/cross (vector math); body_aabb/occ_world_frame/axis_vec "
-    "(bodies-only AABB, placement); volumes/volume_delta/signed_volume/face_counts/"
-    "face_count_delta/lump_count/aabb_gap/parallel_plane_facts (the effect reads a write is "
-    "judged by); address/subtree_facts (a measure row's name, nested children)")
+    "measurement math: unit_vector/unit_vector_between/evaluator_normal_at/dot/cross "
+    "(vectors); body_aabb/occ_world_frame/axis_vec (AABB, placement); volumes/volume_delta/"
+    "signed_volume/face_counts/face_count_delta/areas/area_delta/face_frames/faces_moved/"
+    "lump_count/aabb_gap/parallel_plane_facts (what a write is judged by; area/frames move where "
+    "a pivot leaves the volume); address/subtree_facts")
 
 # boundingBox2's body types: the plain .boundingBox also counts the VISIBLE sketch and construction
 # datums, so an orphaned shown plane inflates it (measured: an occurrence's Z read 4x).
@@ -123,6 +123,57 @@ def signed_volume(body):
     feature judged on the SIGN: a mesh whose normals were reversed reports the opposite sign."""
     v = volumes([body]).get(id(body))
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def areas(bodies):
+    """{id(body): surface-area-or-None} - the pre/post sample a BOUNDARY-changing feature compares,
+    where neither volume nor face count moves. Same id() precondition as volumes()."""
+    return {id(b): safe(lambda b=b: b.area) for b in bodies}
+
+
+def area_delta(bodies, before):
+    """(total cm2 of boundary gained/lost, readable) between `before` (from areas()) and the bodies
+    NOW - readable False when no body's area read at both ends. Mirrors volume_delta."""
+    after = areas(bodies)
+    delta, readable = 0.0, False
+    for b in bodies:
+        ab, aa = before.get(id(b)), after.get(id(b))
+        if isinstance(ab, (int, float)) and isinstance(aa, (int, float)):
+            readable = True
+            delta += (aa - ab)
+    return delta, readable
+
+
+def face_frames(faces):
+    """{id(face): (unit normal at the face's own point, area)} - the pre/post sample for a feature
+    that TILTS the faces it was GIVEN. Either component is None where it did not read, so a face
+    the feature consumed answers None rather than a moved frame. Same id() precondition as
+    volumes()."""
+    # MEASURED: a draft leaves its input face wrappers valid and answering the NEW normal and area
+    # (a symmetric draft, which splits the face, included) - so the before sample has to be these
+    # VALUES, taken before the add; re-reading the wrapper is re-reading the after state.
+    return {id(f): (evaluator_normal_at(f, safe(lambda f=f: f.pointOnFace)),
+                    safe(lambda f=f: f.area)) for f in faces}
+
+
+def faces_moved(faces, before):
+    """(how many of `faces` changed normal or area, how many were comparable at both ends) against
+    `before` (from face_frames). A face comparable on neither component counts in neither number, so
+    'none moved' never speaks for a face that could not be read."""
+    after = face_frames(faces)
+    moved, compared = 0, 0
+    for f in faces:
+        nb, ab = before.get(id(f), (None, None))
+        na, aa = after.get(id(f), (None, None))
+        normals = nb is not None and na is not None
+        areas_ = isinstance(ab, (int, float)) and isinstance(aa, (int, float))
+        if not normals and not areas_:
+            continue
+        compared += 1
+        if (normals and list(nb) != list(na)) or (areas_ and abs(aa - ab)
+                                                  >= _common.NO_AREA_CHANGE_CM2):
+            moved += 1
+    return moved, compared
 
 
 def face_counts(bodies):

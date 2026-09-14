@@ -721,9 +721,49 @@ def _detail_engine():
     return importlib.import_module("._sketch_detail", __package__)
 
 
+# What referencePlane raises on a FACE-attached sketch, measured on 2705.1.15: '3 : referencePlane
+# is a BRefFace - need to roll timeline back before sketch'. The text is matched because it is what
+# tells that state from any OTHER read failure, which claims nothing about a face.
+_BREP_FACE_RAISE = "brefface"
+
+
+def _plane_read(sketch):
+    """(the sketch's referencePlane, whether the read raised NAMING a BRepFace)."""
+    try:
+        return sketch.referencePlane, False
+    except Exception as e:
+        return None, _BREP_FACE_RAISE in str(e).lower()
+
+
 def _plane_name(sketch) -> str:
-    rp = safe(lambda: sketch.referencePlane)
+    rp, _on_face = _plane_read(sketch)
     return safe(lambda: rp.name) if rp is not None else None
+
+
+def on_a_face(sketch) -> bool:
+    """True when this sketch sits on a BRepFace rather than a construction plane. Costs no roll -
+    face_support names WHICH face, and does."""
+    return _plane_read(sketch)[1]
+
+
+def face_record(face=None):
+    """{body, handle} - the ONE shape a sketch's face support is published as, with a null member
+    per read that did not answer (no face at all answers both null). The handle is find_geometry's
+    own spelling, so every face-handle input takes it."""
+    centroid = _geom._coords(safe(lambda: face.centroid)) if face is not None else None
+    return {"body": safe(lambda: face.body.name) if face is not None else None,
+            "handle": _inputs.make_handle(face, "planar_face", centroid) if centroid else None}
+
+
+def face_support(sketch, design):
+    """(face_record for the FACE a face-attached sketch sits on, a marker clause) - the record's
+    members are null where the face did not read, and it is None only when the roll never ran."""
+    # ONE roll: referencePlane answers the BRepFace only before the sketch's own row. MEASURED on a
+    # freshly extruded box: the token minted under the roll resolved to that same face after the
+    # marker was restored.
+    def read():
+        return face_record(safe(lambda: sketch.referencePlane))
+    return _common.rolled_to(design, sketch, read, "the face the sketch sits on")
 
 
 def _sketch_summary(sketch) -> dict:
@@ -732,6 +772,10 @@ def _sketch_summary(sketch) -> dict:
     row = {
     "name": safe(lambda: sketch.name),
     "plane": _plane_name(sketch),
+    # A BOOLEAN under its own key: the census never rolls the timeline (it would roll once per
+    # sketch), so it can only FLAG the state. sketch_get(sketch_name=...) rolls once and publishes
+    # the face itself under 'on_face', which therefore never changes type between the two reads.
+    **({"on_face_flagged": True} if on_a_face(sketch) else {}),
     "line_count": safe(lambda: curves.sketchLines.count, 0) if curves else 0,
     "circle_count": safe(lambda: curves.sketchCircles.count, 0) if curves else 0,
     "arc_count": safe(lambda: curves.sketchArcs.count, 0) if curves else 0,
@@ -943,9 +987,12 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
     dim_count = safe(lambda: sketch.sketchDimensions.count, 0)
 
     profiles = _profiles(sketch, f)
+    # ONE sketch was named, so ONE roll names the face it sits on rather than leaving plane null.
+    sits_on_a_face = on_a_face(sketch)
+    face, marker_clause = face_support(sketch, design) if sits_on_a_face else (None, None)
     out = {
         "sketch": safe(lambda: sketch.name),
-        "plane": safe(lambda: sketch.referencePlane.name),
+        "plane": _plane_name(sketch),
         # The only DOF signal the API exposes - no DOF count, no over-constrained flag.
         "is_fully_constrained": bool(fully) if fully is not None else None,
         "counts": counts,
@@ -963,11 +1010,26 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
         out["profiles_stale"] = True
     else:
         out["profiles"] = profiles
+    face_note = ""
+    if sits_on_a_face:
+        # ONE shape on every face-attached path: the record, with a null member per read that did
+        # not answer. A roll that never ran publishes it all-null rather than a different type.
+        out["on_face"] = face if face is not None else face_record()
+        face_note = " 'plane' is null because this sketch sits on a FACE, not a construction plane."
+        face_note += (f" 'on_face' names body '{out['on_face']['body']}'."
+                      if out["on_face"]["body"]
+                      else " The body it sits on did not read back.")
+        face_note += (" 'on_face' carries that face's handle, which model_offset_face / "
+                      "sketch_create take." if out["on_face"]["handle"]
+                      else " No handle could be minted for that face.")
+    if marker_clause:
+        out["timeline_marker_unrestored"] = True
+        face_note += " " + marker_clause + "."
     lead = DEFERRED_NOTE + " " if profiles is None else ""
 
     if not include_entities:
         out["note"] = (lead + "Overview only, lengths in 'units' (area=units^2). "
-                       + frame_space_note(out.get("frame"))
+                       + frame_space_note(out.get("frame")) + face_note
                        + " For the full entity/constraint/dimension X-ray, call again with "
                        "include_entities=true.")
         return ok(out)
@@ -975,7 +1037,7 @@ def handler(sketch_name: str = "", include_entities: bool = False, units: str = 
     entities, constraints, dimensions, construction_count, driving_dims, truncated = _entity_xray(
         sketch, f, unit)
     note = (lead + "Full X-ray, lengths in 'units'. Entity coordinates are sketch-LOCAL; "
-                 + frame_space_note(out.get("frame"))
+                 + frame_space_note(out.get("frame")) + face_note
                  + " Entity ids ('line:0', ...) match sketch_constrain "
                  "/ extrude refs. A point off the sketch plane carries a 'z'; origin:true is the "
                  "sketch ORIGIN. is_fully_constrained=false means free DOF remain; a dimension "

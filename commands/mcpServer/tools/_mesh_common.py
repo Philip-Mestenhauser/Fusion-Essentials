@@ -139,7 +139,8 @@ def mesh_measure_of_body(mb, units="mm") -> dict:
     rec["bbox"] = _bbox_record(mb, inv_scale)
     rec["units"] = (units or "mm").strip().lower()
     if rec.get("is_closed") is False:
-        rec["note"] = ("This mesh is NOT watertight (is_closed=false), so it has no closed volume for "
-    "mesh_to_brep to convert to a solid - repair with mesh_remesh first. Its 'volume' reads 0.0 "
-    "because there is nothing enclosed to report, not because the body is empty.")
+        rec["note"] = ("This mesh is NOT watertight (is_closed=false): mesh_to_brep(method='faceted') "
+    "converts it to a SURFACE body, and the other convert methods refuse it until "
+    "mesh_repair(repair_type='close_holes') closes the holes. Its 'volume' reads 0.0 because there "
+    "is nothing enclosed to report, not because the body is empty.")
     return ok(rec)

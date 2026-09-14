@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 import pytest
-from conftest import load_tool
+from conftest import BRepBody, BRepFace, FakePoint, load_tool
 from _sketch_fakes import FakeSketch, _datum, _payload, draw_installer
 
 sk = load_tool("sketch_create")
@@ -34,6 +34,29 @@ class TestOnFacePlaneNameMisuse:
         res = sk.handler(on_face="NOTAPLANE")
         assert res["isError"] is True
         assert "stale handle" in res["message"]
+
+
+class TestOnFaceSupportIsNamed:
+    """A sketch made ON a face has no plane NAME - 'plane' reads null, and the face it sits on is
+    what the caller needs back. It is in hand here, so no timeline roll is needed."""
+
+    def test_the_face_is_published_with_its_body_and_a_handle(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        face = BRepFace(surface=None, area=9.0, entity_token="face-tok",
+                        centroid=FakePoint(7.5, 7.5, 1.5), body=BRepBody(name="Body1"))
+        monkeypatch.setattr(sk._ON_FACE, "resolve", lambda raw: (face, None))
+        out = _payload(sk.handler(on_face="a-handle"))
+        assert out["plane"] is None
+        assert out["on_face"] == {"body": "Body1",
+                                  "handle": out["on_face"]["handle"]}
+        assert out["on_face"]["handle"].startswith("face-tok")
+        assert "planar_face:" in out["on_face"]["handle"]
+        assert "sits on a FACE" in out["note"]
+
+    def test_a_plane_sketch_publishes_no_on_face(self, monkeypatch):
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        out = _payload(sk.handler(plane="xy"))
+        assert "on_face" not in out and "sits on a FACE" not in out["note"]
 
 
 class TestCreateSketchPlaneRef:

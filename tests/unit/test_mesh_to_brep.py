@@ -14,9 +14,10 @@ mo = load_tool("mesh_to_brep")
 _CONV = adsk.fusion.MeshConvertMethodTypes
 
 
-def _brep(name, is_solid=True):
+def _brep(name, is_solid=True, face_count=0, solid_readable=True):
     """One BRep body carrying the find_geometry-style handle the payload publishes."""
-    return BRepBody(name, is_solid=is_solid, entity_token=f"BTOK::{name}")
+    return BRepBody(name, is_solid=is_solid, face_count=face_count,
+                    solid_readable=solid_readable, entity_token=f"BTOK::{name}")
 
 
 class _Features(FakeFeatures):
@@ -89,7 +90,7 @@ def _wire(src, feats, brep_bodies, design_type=0, base_feature=None):
 class TestMeshToBrep:
 
     def _setup(self, is_closed=True, raise_on_add=False, none_feature=False, organic=True,
-               none_appends_body=False, parametric=False, base_feature=None):
+               none_appends_body=False, parametric=False, base_feature=None, result_body=None):
         if not organic:
             # organic method ABSENT (older Fusion / no Product Design Extension) -> _organic_available()
             # False -> honest refusal. Genuinely REMOVE the seeded member so the safe() read raises,
@@ -97,10 +98,11 @@ class TestMeshToBrep:
             if hasattr(_CONV, "OrganicMeshConvertMethodType"):
                 delattr(_CONV, "OrganicMeshConvertMethodType")
         brep_coll = _NamedCollection()                      # comp.bRepBodies - starts empty
+        made = result_body if result_body is not None else _brep("ConvertedBody")
         # In non-parametric mode add() returns None; none_appends_body models the side effect: the
         # convert still drops a new BRep body onto the component (that body is the success signal).
-        append = (brep_coll, _brep("ConvertedBody")) if none_appends_body else None
-        feats = _MeshFeatures([_brep("ConvertedBody")], raise_on_add=raise_on_add,
+        append = (brep_coll, made) if none_appends_body else None
+        feats = _MeshFeatures([made], raise_on_add=raise_on_add,
                               none_feature=none_feature, on_add_append=append)
         src = MeshBody("Scan", is_closed=is_closed)
         bf = base_feature
@@ -148,15 +150,44 @@ class TestMeshToBrep:
         assert out["method"] == "prismatic"
         assert out["brep_bodies"][0]["name"] == "ConvertedBody"
         assert out["brep_bodies"][0]["handle"] == "BTOK::ConvertedBody"
+        # a closed mesh still converts to a SOLID, and the note says nothing about a surface
+        assert out["brep_bodies"][0]["is_solid"] is True
+        assert "SURFACE" not in out["note"]
 
-    def test_non_watertight_refused_up_front(self):
-        # the watertight pre-check: an open mesh is refused BEFORE any add(), with the likely cause
+    def test_non_watertight_refused_up_front_naming_the_repair_that_closes_holes(self):
+        # prismatic on an OPEN mesh is unmeasured, so the pre-check still refuses it BEFORE any
+        # add() - naming the offending method and mesh_repair(close_holes), which is the repair that
+        # closes a hole (a remesh re-triangulates and closes none).
         src, feats = self._setup(is_closed=False)
         res = mo.handler(mesh="H", method="prismatic")
         assert res["isError"] is True
-        assert "not watertight" in res["message"].lower()
+        assert "NOT watertight" in res["message"]      # the exact spelling the live row matches on
+        assert "method='prismatic'" in res["message"]
+        assert "mesh_repair(repair_type='close_holes')" in res["message"]
+        assert "mesh_remesh" not in res["message"]
         # and the mutation was never attempted (no input was created)
         assert feats.last_input is None
+
+    def test_an_open_mesh_converts_faceted_and_publishes_the_surface_it_made(self):
+        # MEASURED: the faceted method on an OPEN mesh builds a SURFACE BRep body - so the watertight
+        # guard lets it through, and the solid flag and face count come off the produced body rather
+        # than from the method that was asked for.
+        src, feats = self._setup(is_closed=False, result_body=_brep("Sheet", is_solid=False,
+                                                                   face_count=2))
+        out = payload(mo.handler(mesh="H", method="faceted"))
+        assert feats.last_input is not None              # the add WAS reached
+        assert out["brep_bodies"] == [{"name": "Sheet", "handle": "BTOK::Sheet",
+                                       "is_solid": False, "face_count": 2}]
+        assert "SURFACE" in out["note"] and "surface_thicken" in out["note"]
+
+    def test_a_body_whose_solid_flag_will_not_read_is_not_narrated_as_a_surface(self):
+        # read_flag answers None, which is NOT False - the boundary the note is worded off. A
+        # falsiness test here would call a body nobody read a SURFACE.
+        self._setup(is_closed=True, result_body=_brep("Blind", solid_readable=False, face_count=6))
+        out = payload(mo.handler(mesh="H", method="faceted"))
+        assert out["brep_bodies"][0]["is_solid"] is None
+        assert out["brep_bodies"][0]["face_count"] == 6
+        assert "SURFACE" not in out["note"]
 
     def test_organic_without_extension_is_honest_error(self):
         # API-not-available op surfaces an HONEST error, NOT a fake success or a silent fallback

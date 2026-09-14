@@ -12,8 +12,9 @@ import math
 
 from verify_core import (
     _RECALL, _axis_aligned_face_at, _box, _chamfered, _component_metadata, _ctx_get, _cut_a_chain,
-    _cut_exactly, _marker_parked_after, _datum, _datum_plane,
-    _document_closed, _drafted, _drilled, _extent_measured, _extruded, _face_up_at, _fg, _fgn,
+    _cut_exactly, _cut_on_its_pivot, _marker_parked_after, _datum, _datum_plane,
+    _document_closed, _drafted, _drafted_on_its_pivot, _drafted_symmetric, _drilled,
+    _extent_measured, _extruded, _face_up_at, _fg, _fgn,
     _filleted, _full_rounded, _gap_measured, _holes_recognized, _holes_windowed, _home_address,
     _home_document, _interference_measured, _joined,
     _joint_origin_at, _joint_origins_listed, _lofted, _made_component, _made_component_inactive,
@@ -21,7 +22,8 @@ from verify_core import (
     _new_document, _offset_faces, _param_added, _param_deleted, _param_read, _param_set_to,
     _param_traced, _path_count, _patterned, _piped, _pocket_boss, _pockets_recognized, _prof,
     _recall, _recognized_cbore_walls, _recognized_pocket_floor, _refused, _relation_measured,
-    _relation_passes, _relation_read, _revolved, _shelled, _swept, _watch)
+    _relation_passes, _relation_read, _replaced_on_its_pivot, _revolved, _shelled,
+    _sits_on_a_face, _swept, _watch)
 from verify_acts_cam import MACHINING_EXTENSION
 from verify_layout import _px, _py
 
@@ -1176,6 +1178,65 @@ _SOLIDS = [
     ("model_sweep", {"profile": {"sketch": "SweepProf", "profile_index": 0},
                      "path": "sketch:SweepPath"}, _swept, None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    # THE GUIDE SCOPE: a sketch name is only unique INSIDE a component, so two components each hold
+    # one called 'Spine' and the loft below has to be told which one its rail lives in.
+    ("model_create_component", {"name": "GuideRail", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "GuideBase"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "circle", "cx": 420, "cy": 0, "radius": 16}],
+                             "sketch_name": "GuideBase"}, "ok", None),
+    ("sketch_get", {"sketch_name": "GuideBase"}, "ok", _prof("guide_base")),
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": 40, "name": "GuideTopPlane"},
+     _datum_plane("xy"), None),
+    ("sketch_create", {"plane": "GuideTopPlane", "name": "GuideTop"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "circle", "cx": 420, "cy": 0, "radius": 8}],
+                             "sketch_name": "GuideTop"}, "ok", None),
+    ("sketch_get", {"sketch_name": "GuideTop"}, "ok", _prof("guide_top")),
+    # the rail climbs from the base circle's rim to the top circle's: z runs along the xy sketch's
+    # own normal, which is where the offset plane above put the top section.
+    ("sketch_create", {"plane": "xy", "name": "Spine"}, "ok", None),
+    ("sketch_add_3d_line", {"sketch_name": "Spine", "component": "GuideRail",
+                            "x1": 436, "y1": 0, "z1": 0, "x2": 428, "y2": 0, "z2": 40},
+     "ok", None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "GuideDupe", "activate": True}, _made_component, None),
+    # The DRAWN sketch carries a name of its own: the framing pass writes a camera row per sketch it
+    # sees drawn, and view_set refuses a 'focus' that two sketches answer to.
+    ("sketch_create", {"plane": "xy", "name": "DupeMark"}, "ok", None),
+    ("sketch_add_3d_line", {"sketch_name": "DupeMark", "component": "GuideDupe",
+                            "x1": 520, "y1": 0, "z1": 0, "x2": 520, "y2": 20, "z2": 10},
+     "ok", None),
+    # the SAME name in the second component, left EMPTY - nothing draws on it, so it is no framing
+    # subject. Asserted: a name Fusion had deduped would leave every refusal below testing nothing.
+    ("sketch_create", {"plane": "xy", "name": "Spine"},
+     lambda p: _measured("the duplicate guide name survived the create",
+                         {"sketch_name": p.get("sketch_name"),
+                          "rename_warning": p.get("rename_warning")},
+                         p.get("sketch_name") == "Spine" and "rename_warning" not in p), None),
+    ("design_activate_component", {"occurrence": "GuideRail:1"}, "ok", None),
+    # un-scoped, the rail's sketch name answers to two sketches and the loft refuses rather than
+    # picking one - naming the scope that narrows the GUIDES, which is the one this call can pass.
+    ("model_loft", lambda c: {"profiles": [_ctx_get(c, "guide_base", "the guide loft's base"),
+                                           _ctx_get(c, "guide_top", "the guide loft's top")],
+                              "rails": ["Spine/line:0"]},
+     _refused("2 sketches are named 'Spine'", "'guide_component'"), None),
+    # a scope that owns no sketch of that name refuses NAMING the scope - 'GuideBase' answers to
+    # exactly one sketch design-wide, so dropping the scope would loft along another component's
+    # curve and say nothing.
+    ("model_loft", lambda c: {"profiles": [_ctx_get(c, "guide_base", "the guide loft's base"),
+                                           _ctx_get(c, "guide_top", "the guide loft's top")],
+                              "rails": ["GuideBase/circle:0"], "guide_component": "GuideDupe"},
+     _refused("GuideDupe", "no sketch named 'GuideBase'", "GuideRail"), None),
+    # scoped, the same call builds: the rail resolves inside GuideRail, whose 'Spine' is the line
+    # that touches both sections (GuideDupe's runs off sideways and would fail the add).
+    ("model_loft", lambda c: {"profiles": [_ctx_get(c, "guide_base", "the guide loft's base"),
+                                           _ctx_get(c, "guide_top", "the guide loft's top")],
+                              "rails": ["Spine/line:0"], "guide_component": "GuideRail"},
+     lambda p: _measured("loft along the component-scoped guide",
+                         {"feature": p.get("feature"), "result_bodies": p.get("result_bodies"),
+                          "rails_count": p.get("rails_count")},
+                         bool(p.get("feature")) and bool(p.get("result_bodies"))
+                         and p.get("rails_count") == 1), None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
     # the part is whole: frame IT for the colouring beats, not the metre-wide cameo grid.
     _watch("Bracket:1"),
     ("appearance_set", {"target": "Bracket", "color": "#5E6AD2"}, "ok", None),
@@ -1490,6 +1551,80 @@ _SOLIDS = [
     ("find_geometry", {"target": "FeatureCameo", "kind": "planar_face", "nearest_to": [200, 20, 10], "max_results": 1}, "ok", _fg("fc_side")),
     ("model_draft", lambda c: {"faces": [_ctx_get(c, "fc_side", "cameo side face")], "pull_direction": "xy", "angle_deg": 3},
      _drafted, None),
+    # The three PIVOT gates: a write whose pull plane / replacement surface / edge set meets the
+    # geometry at its MIDDLE adds exactly what it cuts, so the volume holds to the last bit. Each
+    # of these was a false refusal until the boundary read joined the material one.
+    ("model_create_component", {"name": "PivotCameo", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "PvL"}, "ok", None),
+    ("sketch_add_geometry", {"sketch_name": "PvL", "geometry": [
+        {"kind": "closed_path", "points": [[300, 0], [340, 0], [340, 20], [320, 20], [320, 40],
+                                           [300, 40]]}]}, "ok", None),
+    ("model_extrude", {"sketch_name": "PvL", "profile_index": 0, "distance": 30}, _extruded, None),
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": 15, "name": "PvMid"},
+     _datum_plane("xy"), None),
+    # Each gate gets its OWN face, so none disturbs another and nothing has to be deleted: a fillet
+    # standing on a drafted face eats a strip off it, which both spoils the pivot (measured: the
+    # volume moves -0.000615 cm3) and consumes the input wrapper (faces_compared 0).
+    # ONE-SIDED about a plane CROSSING the face: it pivots there, tilting the face while the volume
+    # holds to the last bit - the case the material gate alone refused.
+    ("find_geometry", {"target": "PivotCameo", "kind": "planar_face", "nearest_to": [300, 20, 15],
+                       "max_results": 1}, "ok", _fg("pv_face")),
+    ("model_draft", lambda c: {"faces": [_ctx_get(c, "pv_face", "the face the plane crosses")],
+                               "pull_direction": "PvMid", "angle_deg": 5, "tangent_chain": False},
+     _drafted_on_its_pivot, None),
+    # SYMMETRIC, on the next face round: it SPLITS that face at the plane (faces_drafted 2 from one
+    # requested) and, measured here, tapers both halves the same way - so the volume MOVES. This
+    # branch carries its own verdict, not an exemption.
+    ("find_geometry", {"target": "PivotCameo", "kind": "planar_face", "nearest_to": [320, 0, 15],
+                       "max_results": 1}, "ok", _fg("pv_sym_face")),
+    ("model_draft", lambda c: {"faces": [_ctx_get(c, "pv_sym_face", "the y=0 face")],
+                               "pull_direction": "PvMid", "angle_deg": 5, "symmetric": True,
+                               "tangent_chain": False}, _drafted_symmetric, None),
+    # one CONVEX and one CONCAVE vertical edge, same length and radius, both on faces no draft
+    # touched: the wedge cut off the first is the wedge filled into the second, so only the surface
+    # area moves.
+    ("find_geometry", {"target": "PivotCameo", "kind": "line_edge", "nearest_to": [340, 20, 15],
+                       "max_results": 1}, "ok", _fg("pv_convex")),
+    ("find_geometry", {"target": "PivotCameo", "kind": "line_edge", "nearest_to": [320, 20, 15],
+                       "max_results": 1}, "ok", _fg("pv_concave")),
+    ("model_fillet", lambda c: {"edges": [_ctx_get(c, "pv_convex", "the outer corner"),
+                                          _ctx_get(c, "pv_concave", "the inner corner")],
+                                "radius": 5, "tangent_chain": False}, _cut_on_its_pivot, None),
+    # A sketch on a FACE has no construction plane to name. Both the write that makes it and the
+    # read that returns to it name the BODY and carry that face's own handle instead of plane null;
+    # the read gets there by rolling the marker to the sketch and putting it back, because
+    # referencePlane answers a BRepFace only from there.
+    ("find_geometry", {"target": "PivotCameo", "kind": "planar_face", "nearest_to": [310, 30, 30],
+                       "max_results": 1}, "ok", _fg("pv_lid")),
+    ("sketch_create", lambda c: {"on_face": _ctx_get(c, "pv_lid", "the L-prism lid"),
+                                 "name": "PvOnFace"}, _sits_on_a_face, None),
+    ("sketch_get", {"sketch_name": "PvOnFace"},
+     lambda p: _sits_on_a_face(p) and "timeline_marker_unrestored" not in p,
+     ("pv_face_handle", lambda p: p["on_face"]["handle"])),
+    # the handle that read CONSUMED: fed straight back as a face handle, it pushes that same face.
+    ("model_offset_face", lambda c: {"faces": [_ctx_get(c, "pv_face_handle", "the sketch's face")],
+                                     "distance": 2}, _offset_faces, None),
+    # the third pivot gate, in this same component so the block and the sheet share one cell: a
+    # replacement surface TILTED about the middle of the face it replaces adds exactly what it cuts,
+    # so volume AND face count both hold and only the area moves.
+    ("sketch_create", {"plane": "xy", "name": "PvBlkS"}, "ok", None),
+    ("sketch_add_geometry", {"sketch_name": "PvBlkS", "geometry": [
+        {"kind": "rectangle", "x1": 360, "y1": 0, "x2": 390, "y2": 30}]}, "ok", None),
+    ("model_extrude", {"sketch_name": "PvBlkS", "profile_index": 0, "distance": 20},
+     _extruded, None),
+    ("sketch_create", {"plane": "xz", "name": "PvRoofS"}, "ok", None),
+    # sketch +Y maps to world -Z here, so these two points put the sheet at world z 16 -> 24,
+    # crossing the block's z=20 top at x=375 - the middle of that face.
+    ("sketch_add_geometry", {"sketch_name": "PvRoofS", "geometry": [
+        {"kind": "line", "x1": 355, "y1": -16, "x2": 395, "y2": -24}]}, "ok", None),
+    ("surface_extrude", {"sketch_name": "PvRoofS", "distance": 80, "symmetric": True},
+     lambda p: p.get("is_solid") is False, ("pv_sheet_body", lambda p: p["result_bodies"][0])),
+    ("find_geometry", {"target": "PivotCameo", "kind": "planar_face", "nearest_to": [375, 15, 20],
+                       "max_results": 1}, "ok", _fg("pv_top")),
+    ("model_replace_face", lambda c: {"faces": [_ctx_get(c, "pv_top", "the block top")],
+                                      "target": _ctx_get(c, "pv_sheet_body", "the tilted sheet")},
+     _replaced_on_its_pivot, None),
+    ("design_activate_component", {"occurrence": "FeatureCameo:1"}, "ok", None),
     ("find_geometry", {"target": "FeatureCameo", "kind": "planar_face", "nearest_to": [220, 20, 20], "max_results": 1}, "ok", _fg("fc_top")),
     # hole points are in the FACE'S LOCAL frame, whose origin for this face is the MODEL origin
     # projected onto its plane - so on-pad coordinates are the world x,y. ([5,5] here drilled at

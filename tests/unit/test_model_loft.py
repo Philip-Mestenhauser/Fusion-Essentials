@@ -1,13 +1,14 @@
 """Unit tests for model_loft.py - the ordered sections, rails/centerline and the cut evidence."""
 
 import json
+import re
 
 import adsk.core
 import adsk.fusion
 import pytest
 
-from conftest import (load_tool, make_design, install, MakeComp, BRepBody, BRepFace, FakeFeature,
-                      FakeFeatures, Profile, make_sketch)
+from conftest import (load_tool, make_design, install, register_all_tools, MakeComp, BRepBody,
+                      BRepFace, FakeFeature, FakeFeatures, Profile, make_sketch)
 
 so = load_tool("model_loft")
 
@@ -161,6 +162,23 @@ class TestLoft:
         assert out["is_solid"] is False
         assert "SURFACE" in out["note"]
 
+    def test_every_tool_the_note_names_is_a_registered_tool(self):
+        # the note is the only next step an agent gets, and a name no tool answers to is a dead end -
+        # the registered thickener is 'surface_thicken'.
+        registered = {it.to_dict().get("name") for it in register_all_tools()}
+        families = {n.split("_", 1)[0] for n in registered}
+        self._profiles_design(result_is_solid=False,
+                              result_bodies=[BRepBody("Srf1", is_solid=False)])
+        notes = [_payload(so.handler(profiles=["H0", "H1"], as_surface=True))["note"]]
+        _install(_FakeFeatures(loft=_FakeLoftFeatures()),
+                 bodies_by_name={"Bar": BRepBody("Bar")},
+                 handle_map={"H0": Profile("0"), "H1": Profile("1")})
+        notes.append(_payload(so.handler(profiles=["H0", "H1"], operation="join"))["note"])
+        cited = {t for note in notes for t in re.findall(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+", note)
+                 if t.split("_", 1)[0] in families}
+        assert cited, notes                       # a scan that finds no name proves nothing
+        assert not cited - registered, sorted(cited - registered)
+
     def test_as_surface_sets_isSolid_false_on_input(self):
         lf, _ = self._profiles_design()
         _payload(so.handler(profiles=["H0", "H1"], as_surface=True))
@@ -274,6 +292,75 @@ class TestLoft:
         res = so.handler(profiles=["H0", "H1"], rails=["Spine/arc:7"])
         assert res["isError"] is True
         assert "arc:7" in res["message"] and "sketch_get" in res["message"]
+
+    def _guide_components_design(self, guide_b_sketch="Spine"):
+        """A loft host beside GuideA and GuideB, each holding one guide sketch carrying one arc.
+        Sketch names are only component-locally unique, so 'Spine' in both is the live shape."""
+        lf = _FakeLoftFeatures()
+        arc_a, arc_b = object(), object()
+        host = MakeComp(name="Comp", bodies=(), mesh_bodies=())
+        host.features = _FakeFeatures(loft=lf)
+        guide_a = MakeComp(name="GuideA", sketches=[make_sketch(name="Spine", arcs=[arc_a])])
+        guide_b = MakeComp(name="GuideB", sketches=[make_sketch(name=guide_b_sketch, arcs=[arc_b])])
+        install(so, make_design(comp=host, tokens={"H0": Profile("0"), "H1": Profile("1")},
+                                all_components=[host, guide_a, guide_b]))
+        return lf, arc_a, arc_b
+
+    def test_a_rail_whose_sketch_name_is_shared_resolves_inside_the_guide_scope(self):
+        # A name two components carry needs the scope that narrows the GUIDES to pick one.
+        lf, arc_a, _arc_b = self._guide_components_design()
+        out = _payload(so.handler(profiles=["H0", "H1"], rails=["Spine/arc:0"],
+                                  guide_component="GuideA"))
+        assert lf.last_input.centerLineOrRails.rails == [arc_a]
+        assert out["rails_count"] == 1
+
+    def test_a_centerline_whose_sketch_name_is_shared_resolves_inside_the_guide_scope(self):
+        # the OTHER component's curve, so a scope that resolved by position rather than by name
+        # would hand back GuideA's arc here
+        lf, _arc_a, arc_b = self._guide_components_design()
+        out = _payload(so.handler(profiles=["H0", "H1"], centerline="Spine/arc:0",
+                                  guide_component="GuideB"))
+        assert lf.last_input.centerLineOrRails.centerlines == [arc_b]
+        assert out["has_centerline"] is True
+
+    def test_a_shared_guide_name_with_no_scope_is_still_refused(self):
+        lf, _arc_a, _arc_b = self._guide_components_design()
+        res = so.handler(profiles=["H0", "H1"], rails=["Spine/arc:0"])
+        assert res["isError"] is True
+        assert "2 sketches are named 'Spine'" in res["message"]
+        # the remedy names the input that narrows the GUIDES, which is the one this call can pass
+        assert "'guide_component'" in res["message"]
+        assert lf.last_input is None
+
+    def test_a_guide_scope_holding_no_sketch_of_that_name_refuses_naming_it(self):
+        # GuideB holds no 'Spine' and design-wide exactly one sketch does, so a dropped scope would
+        # loft along ANOTHER component's curve without saying so.
+        lf, _arc_a, _arc_b = self._guide_components_design(guide_b_sketch="Rib")
+        res = so.handler(profiles=["H0", "H1"], rails=["Spine/arc:0"], guide_component="GuideB")
+        assert res["isError"] is True
+        # the exact spelling the live row matches on: the scope, the name, and the real owner
+        assert "'GuideB'" in res["message"] and "no sketch named 'Spine'" in res["message"]
+        assert "'GuideA'" in res["message"]
+        assert "'guide_component'" in res["message"]
+        assert lf.last_input is None
+
+    def test_the_guides_scope_is_separate_from_the_profiles_scope(self):
+        # MEASURED: a loft hosted on its profiles' component accepts a rail owned by a sketch in
+        # ANOTHER component. One scope over both inputs makes that build unreachable - each
+        # refusal's remedy produces the other refusal.
+        lf = _FakeLoftFeatures()
+        line = object()
+        host = MakeComp(name="SecComp", bodies=(), mesh_bodies=())
+        host.features = _FakeFeatures(loft=lf)
+        p0 = Profile("0", parent_sketch=make_sketch(name="SecA", parent_component=host))
+        p1 = Profile("1", parent_sketch=make_sketch(name="SecB", parent_component=host))
+        guide = MakeComp(name="GuideB", sketches=[make_sketch(name="Spine", lines=[line])])
+        install(so, make_design(comp=host, tokens={"H0": p0, "H1": p1},
+                                all_components=[host, guide]))
+        out = _payload(so.handler(profiles=["H0", "H1"], rails=["Spine/line:0"],
+                                  component="SecComp", guide_component="GuideB"))
+        assert lf.last_input.centerLineOrRails.rails == [line]
+        assert out["rails_count"] == 1 and out["profiles_count"] == 2
 
     def test_unknown_operation_rejected(self):
         self._profiles_design()
@@ -407,6 +494,10 @@ class TestLoft:
         sd = load_tool("_sketch_detail")
         assert so._LOFT_PROFILES.scope_input == "component"
         assert so.tool.input_schema["properties"]["component"] == sd.COMPONENT_SCOPE[1]
+        # the guides answer to a scope of their OWN, declared beside it - a refusal may only name an
+        # input this strict schema takes.
+        assert so.tool.input_schema["properties"]["guide_component"] == so._GUIDE_SCOPE[1]
+        assert "rails/centerline" in so._GUIDE_SCOPE[1]["description"]
 
     def test_the_component_scope_reaches_the_profile_resolve(self, monkeypatch):
         # a declared property the resolve never sees is a remedy the tool then ignores.

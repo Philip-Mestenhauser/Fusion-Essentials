@@ -50,10 +50,10 @@ def _edge(kind):
     }[kind]()
 
 
-def make_body(name, edge_kinds, volume=None):
+def make_body(name, edge_kinds, volume=None, area=None):
     """A solid body whose edges are the dihedral rigs above. volume None = the read does not answer,
-    so the volume gate has nothing to judge."""
-    body = BRepBody(name=name, volume=volume)
+    so the volume gate has nothing to judge; `area` is the surface-area signal beside it."""
+    body = BRepBody(name=name, volume=volume, area=area)
     body.edges = _NamedCollection([_edge(k) for k in edge_kinds])
     return body
 
@@ -697,15 +697,26 @@ class TestChamferReadsBackWhatItBuilt:
 
 class TestVolumeReadBack:
 
-    def test_chamfer_with_unchanged_volume_errors_and_rolls_back(self):
-        # A chamfer that moved no material must not read chamfered:true - the same volume gate as
-        # its fillet sibling (a bevel always removes or adds material).
-        body = make_body("B", [True], volume=10.0)
+    def test_chamfer_with_unchanged_volume_and_area_errors_and_rolls_back(self):
+        # A chamfer that changed nothing must not read chamfered:true - the same shared gate as its
+        # fillet sibling, over volume OR surface area.
+        body = make_body("B", [True], volume=10.0, area=30.0)
         _, cf = _install([body])
         cf.result = FakeCountingFeature("Chamfer1", faces=1)
         res = fl.handler(body_name="B", distance=1, edge_filter="all")
-        assert res["isError"] is True and "moved no material" in res["message"]
+        assert res["isError"] is True and "changed no geometry" in res["message"]
         assert cf.result.deleted is True
+
+    def test_chamfer_cancelling_pair_passes_on_the_area_alone(self):
+        # The chamfer half of the exact boundary: a convex and a concave edge cancel in volume, and
+        # only the surface area still moves.
+        body = make_body("B", [True], volume=36.0, area=72.0)
+        _, cf = _install([body])
+        cf.result = FakeCountingFeature("Chamfer1", faces=1)
+        cf.on_add = lambda: setattr(body, "area", 70.9)
+        out = _payload(fl.handler(body_name="B", distance=1, edge_filter="all"))
+        assert out["chamfered"] is True and out["volume_delta_cm3"] == 0.0
+        assert out["area_delta_cm2"] == -1.1 and cf.result.deleted is False
 
     def test_chamfer_reports_volume_delta_like_its_sibling(self):
         body = make_body("B", [True], volume=10.0)

@@ -11,7 +11,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import apply_rename, error, ok, safe, target_component
-from ._sketch_detail import _plane_name, frame_space_note, sketch_world_frame
+from ._sketch_detail import _plane_name, face_record, frame_space_note, sketch_world_frame
 from . import _common
 from . import _inputs
 
@@ -45,6 +45,10 @@ def handler(plane: str = "xy", name: str = "", on_face: str = "") -> dict:
                              "'on_face' takes a planar-FACE handle from find_geometry.")
             return error(ferr)
         planar, desc = face, f"face {on_face[:12]}..."
+        # The face is in hand here, so the support is reported without the timeline roll
+        # sketch_get needs - a face-attached sketch's referencePlane raises at the end of the
+        # timeline, which is why 'plane' below reads null.
+        support = face_record(face)
     else:
         values, perr = _inputs.resolve_inputs([_PLANE], {"plane": plane})
         if perr:
@@ -53,6 +57,7 @@ def handler(plane: str = "xy", name: str = "", on_face: str = "") -> dict:
         # rather than the empty string the caller sent.
         given = (plane or "").strip() or _PLANE.default
         planar, desc = values["plane"], f"plane '{given}'"
+        support = None
 
     try:
         sketch = target_component(design).sketches.add(planar)
@@ -67,6 +72,13 @@ def handler(plane: str = "xy", name: str = "", on_face: str = "") -> dict:
     # up with world, so the frame is what lets a caller place geometry by computed coords.
     frame = safe(lambda: sketch_world_frame(sketch, design))
 
+    face_note = ""
+    if support is not None:
+        face_note = " 'plane' is null because this sketch sits on a FACE."
+        face_note += (f" 'on_face' names body '{support['body']}'." if support["body"]
+                      else " The body it sits on did not read back.")
+        face_note += (" 'on_face' carries that face's handle." if support["handle"]
+                      else " No handle could be minted for that face.")
     payload = {
         "created": True,
         "sketch_name": final_name,
@@ -74,8 +86,10 @@ def handler(plane: str = "xy", name: str = "", on_face: str = "") -> dict:
         "plane": _plane_name(sketch),
         "frame": frame,
         "note": ("Draw on it with sketch_add_geometry (target this sketch by name). "
-            + frame_space_note(frame)),
+                 + frame_space_note(frame) + face_note),
     }
+    if support is not None:
+        payload["on_face"] = support
     if rename_warning:
         payload["rename_warning"] = rename_warning
     return ok(payload)

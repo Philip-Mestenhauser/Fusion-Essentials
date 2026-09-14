@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 191  |  **description breadcrumbs:** 273  |  **note/error breadcrumbs:** 615
+**Tools:** 191  |  **description breadcrumbs:** 273  |  **note/error breadcrumbs:** 616
   |  **guidance smells flagged:** 8
 ## Blindspots to engineer
 
@@ -17,8 +17,8 @@ close orphans, factor duplicated guards into shared helpers.
 **Read/Acquire (8)** - higher concern, a check-your-work tool nothing points to:
   `cam_compare_operations`, `cam_find_holes`, `cam_find_pockets`, `cam_inspect_toolpaths`, `drawing_get_status`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`
 
-**Edit (49)** - usually leaf actions, scan for genuine gaps:
-  `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_remove_feature`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_insert_image`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_plane_cut`, `mesh_repair`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_sweep`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
+**Edit (48)** - usually leaf actions, scan for genuine gaps:
+  `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_remove_feature`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_insert_image`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_plane_cut`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_sweep`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
 - **51x** across 50 module(s): "No active design. Create or open a document first (see doc_new)."
@@ -42,8 +42,8 @@ close orphans, factor duplicated guards into shared helpers.
 - `view_screenshot`  <- 34  (desc 5, note 29)
 - `cam_get`  <- 28  (desc 11, note 17)
 - `data_get`  <- 25  (desc 10, note 15)
+- `model_inspect`  <- 24  (desc 3, note 21)
 - `doc_open`  <- 23  (desc 5, note 18)
-- `model_inspect`  <- 23  (desc 3, note 20)
 - `sketch_create`  <- 23  (desc 7, note 16)
 - `sketch_get`  <- 22  (desc 5, note 17)
 - `assembly_get`  <- 21  (desc 3, note 18)
@@ -1228,7 +1228,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide 'parameter' - the name of a model parameter to vary across configurations.
 - '. (Add/expose it first; a parameter column only matters if the parameter drives geometry.)
 - Values reference configurations that don't exist:
-- parameter: its cells read the expression quoted ('10'), with the value only on textValue. This tool sets and verifies plain expressions, so it does not configure a Text column. Vary a length/number...
+- column cannot be driven: a cell's expression and its textValue each accept a write and discard it, cell.textValue raises on read, and the parameter's textValue is the same after activating each row...
 - addParameterColumn for '
 - Parameter column added and per-configuration expressions set. Switch with design_configure(action='activate', name=...) - the geometry rebuilds only if this parameter drives a dimension.
 - No cell for configuration '
@@ -1300,7 +1300,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' after the set - the mapping did not take.
 - No material named '' in the design. Copy it into the design first (design.materials.addByCopy from a loaded material library) - a configuration material cell only accepts a material the design alre...
 - Switching to '' left the timeline with a new error (). This configuration's values may over/under-constrain the model - the switch stands; inspect with design_get(include=['timeline']).
-- '' is a  parameter: its cells read the expression quoted ('10'), with the value only on textValue. This tool sets and verifies plain expressions, so it does not configure a Text column. Vary a leng...
+- '' is a  parameter and a  column cannot be driven: a cell's expression and its textValue each accept a write and discard it, cell.textValue raises on read, and the parameter's textValue is the same...
 - Cell '' of the '' column reads  after the set - the expression '' did not verifiably take.  Relabel per configuration with param_set after activating the row.
 - No appearance named '' in the design. Copy it in first (design.appearances.addByCopy) - appearance_set copies the Fusion Appearance Library's 'Paint - Enamel Glossy (White)' and keeps it in the doc...
 - The appearance table holds  theme rows after adding, not the  this call needs - one per configuration named in 'appearances'. Name fewer configurations, or add the theme rows in the UI first.
@@ -2567,7 +2567,8 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 ### `mesh_to_brep`
 - Converted to BRep - find_geometry / fillet / chamfer / CAM can now act on these bodies. 'prismatic' merges flat face groups (fewest faces); 'faceted' is one face per triangle (exact, heavy).
 - No active design. Open or create a document first (see doc_new).
-- This mesh is NOT watertight (is_closed=false), so it has no closed volume to convert to a solid. Repair it first with mesh_remesh (or fill the holes), then retry. Refusing up front so you don't get...
+- This mesh is NOT watertight (is_closed=false), so method='
+- ' has no closed volume to convert to a solid. Close the holes with mesh_repair(repair_type='close_holes') and retry, or convert it as a surface with method='faceted'.
 - method='organic' requires the Product Design Extension to be active - it is not available in this session. Use method='prismatic' (best for machined/scanned parts) or 'faceted' (exact, one BRep fac...
 - This design has no meshConvertFeatures collection (mesh->BRep unavailable here).
 - Mesh->BRep conversion did not produce a BRep body. The mesh may be non-watertight or too dense to convert.
@@ -2576,6 +2577,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Could not configure the mesh-convert input:
 - Mesh->BRep conversion failed (meshConvertFeatures.add raised):
 - . A common cause is a non-watertight or very dense mesh.
+- This mesh is NOT watertight (is_closed=false), so method='' has no closed volume to convert to a solid. Close the holes with mesh_repair(repair_type='close_holes') and retry, or convert it as a sur...
 - If the failure mentions face groups (MESH_FAILED_BREP / 'Use Generate Face Groups'), run mesh_generate_face_groups on this mesh first, then retry mesh_to_brep(method='prismatic') - prismatic conver...
 
 ### `model_arrange`
@@ -2723,14 +2725,17 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - No active design. Create or open a document first (see doc_new).
 - Draft feature was created but failed to compute:
 - . Try a smaller angle, 'flip', or a different pull direction.
+- Draft computed but tapered nothing - on
+- deg taper changed no geometry. Check 'pull_direction' is the plane the faces taper relative to, and try 'flip' or a face that is not already parallel to it.
+- The feature has been rolled back.
+- (The inert feature could not be auto-removed.)
 - 'angle_deg' must be a number (draft angle in degrees).
 - deg (setSingleAngle returned false), so nothing was drafted.
 - . (The pull direction may not suit these faces, or the angle undercuts the geometry - try a smaller angle or 'flip'.)
-- Draft computed but tapered nothing -
-- measures the volume it had before, so the
-- deg taper moved no material. Check 'pull_direction' is the plane the faces taper relative to, and try 'flip' or a face that is not already parallel to it.
 - Draft failed: . (The pull direction may not suit these faces, or the angle undercuts the geometry - try a smaller angle or 'flip'.)
-- Draft computed but tapered nothing -  measures the volume it had before, so the  deg taper moved no material. Check 'pull_direction' is the plane the faces taper relative to, and try 'flip' or a fa...
+- Draft computed but tapered nothing - on , , so the  deg taper changed no geometry. Check 'pull_direction' is the plane the faces taper relative to, and try 'flip' or a face that is not already para...
+- NONE of the bodies' volume, their face count or the requested faces' own normal/area could be read back, so there is no geometric proof the taper landed - re-read the faces with model_inspect befor...
+- faces_compared is 0 - no requested face's normal or area could be compared across the add, so faces_moved counts nothing; the volume and face-count deltas are what this result rests on.
 - 'faces_drafted' is null - the count could not be read off the feature, so how many faces the draft took is UNKNOWN here;  face(s) were requested.
 
 ### `model_emboss`
@@ -3106,14 +3111,14 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 
 ### `model_replace_face`
 - The listed face(s) of that body now follow the target surface; the deltas below are the measured change on the body.
-- The feature computed cleanly, but NEITHER the body's volume NOR its face count could be read back, so there is no geometric proof the faces were replaced - no deltas are reported. Re-read the body ...
+- The feature computed cleanly, but NONE of the body's volume, face count or surface area could be read back, so there is no geometric proof the faces were replaced - no deltas are reported. Re-read ...
 - No active design. Create or open a document first (see doc_new).
 - 'faces' resolved to face(s) with no readable owning body - cannot replace.
 - 'faces' must all be on ONE body, but they span
 - ). Replace the faces of one body per call.
 - Replace face was created but failed to compute:
 - Replace face could not build its feature input (createInput returned nothing) - nothing was changed.
-- Replace face ran in a DIRECT design, which returns no feature object, and neither the body's volume nor its face count could be read back - so whether the faces were replaced is UNVERIFIED. Re-read...
+- Replace face ran in a DIRECT design, which returns no feature object, and none of the body's volume, face count or surface area could be read back - so whether the faces were replaced is UNVERIFIED...
 - Replace face reported success but body '
 
 ### `model_revolve`

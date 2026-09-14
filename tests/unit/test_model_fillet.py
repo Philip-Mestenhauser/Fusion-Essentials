@@ -57,10 +57,10 @@ def _edge(kind):
     }[kind]()
 
 
-def make_body(name, edge_kinds, volume=None):
+def make_body(name, edge_kinds, volume=None, area=None):
     """A solid body whose edges are the dihedral rigs above. volume None = the read does not answer,
-    so the volume gate has nothing to judge."""
-    body = BRepBody(name=name, volume=volume)
+    so the volume gate has nothing to judge; `area` is the surface-area signal beside it."""
+    body = BRepBody(name=name, volume=volume, area=area)
     body.edges = _NamedCollection([_edge(k) for k in edge_kinds])
     return body
 
@@ -1090,15 +1090,29 @@ class TestRuleFillet:
 
 class TestVolumeReadBack:
 
-    def test_unchanged_volume_errors_and_rolls_back(self):
-        # A fillet cuts a convex corner away or fills a concave one; an unchanged volume means the
-        # feature exists but moved nothing, which must not read as filleted:true.
-        body = make_body("B", [True], volume=10.0)
+    def test_unchanged_volume_and_area_errors_and_rolls_back(self):
+        # A fillet cuts a convex corner away or fills a concave one; with neither the volume nor the
+        # surface area moving, the feature exists and rounded nothing.
+        body = make_body("B", [True], volume=10.0, area=30.0)
         ff, _ = _install([body])
         ff.result = FakeCountingFeature("Fillet1", faces=1)
         res = fl.handler(body_name="B", radius=1, edge_filter="all")
-        assert res["isError"] is True and "moved no material" in res["message"]
+        assert res["isError"] is True and "changed no geometry" in res["message"]
+        assert "volume and surface area is unchanged" in res["message"]
         assert ff.result.deleted is True
+
+    def test_cancelling_edge_pair_passes_on_the_area_alone(self):
+        # THE exact boundary: a convex and a concave edge of equal length at one radius each move
+        # L*r^2*(1-pi/4) with OPPOSITE sign, so the volume delta is 0.0 to the last bit. Measured
+        # live: volume 36.0 either side, area 72.0 -> 70.712389, faces 8 -> 10.
+        body = make_body("B", [True], volume=36.0, area=72.0)
+        ff, _ = _install([body])
+        ff.result = FakeCountingFeature("Fillet1", faces=1)
+        ff.on_add = lambda: setattr(body, "area", 70.712389)
+        out = _payload(fl.handler(body_name="B", radius=1, edge_filter="all"))
+        assert out["volume_delta_cm3"] == 0.0        # the material gate alone would have refused
+        assert out["area_delta_cm2"] == -1.287611
+        assert ff.result.deleted is False
 
     def test_measured_volume_change_is_reported(self):
         body = make_body("B", [True], volume=10.0)

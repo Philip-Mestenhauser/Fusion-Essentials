@@ -289,14 +289,14 @@ def _do_add_parameter(design, table, parameter, values):
         return error(f"Values reference configurations that don't exist: {', '.join(unknown)}. "
                      f"Existing: {', '.join(str(n) for n in _row_names(table))}.")
     # A TEXT parameter's column is refused BEFORE it lands rather than rolled back after. Measured
-    # on the owner's open Configured Dumbbell: a text parameter reads unit 'Text', and its per-row
-    # cells read the expression quoted ('10'), with the value only on textValue.
+    # on a scratch configured design: the column is created, then every write to it is dropped - so
+    # the refusal is about the column being undrivable, not about this tool's read-back.
     if safe(lambda: p.unit) == _TEXT_UNIT:
-        return error(f"'{parameter}' is a {_TEXT_UNIT} parameter: its cells read the expression "
-                     "quoted ('10'), with the value only on textValue. This tool sets and verifies "
-                     "plain expressions, so it does not configure a Text column. Vary a "
-                     "length/number parameter in the table, and relabel per configuration with "
-                     "param_set after activating the row.")
+        return error(f"'{parameter}' is a {_TEXT_UNIT} parameter and a {_TEXT_UNIT} column cannot "
+                     "be driven: a cell's expression and its textValue each accept a write and "
+                     "discard it, cell.textValue raises on read, and the parameter's textValue is "
+                     "the same after activating each row. Vary a length/number parameter here, and "
+                     "relabel per configuration with param_set after activating the row.")
     col = table.columns.addParameterColumn(p)    # MUTATION
     if not col:
         return error(f"addParameterColumn for '{parameter}' returned null.")

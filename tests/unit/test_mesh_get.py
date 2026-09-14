@@ -248,8 +248,14 @@ class TestMeshMeasure:
         assert abs(out["bbox"]["z"] - 40) < 1e-6
 
     def test_non_watertight_carries_warning(self):
+        # MEASURED: the faceted convert builds a SURFACE body out of an open mesh, and close_holes is
+        # the repair that closes a hole - a remesh re-triangulates and closes none.
         out = payload(mesh_common_mod.mesh_measure_of_body(MeshBody("Open", is_closed=False)))
         assert out["is_closed"] is False and "not watertight" in out["note"].lower()
+        assert "mesh_to_brep(method='faceted')" in out["note"]
+        assert "SURFACE body" in out["note"]
+        assert "mesh_repair(repair_type='close_holes')" in out["note"]
+        assert "mesh_remesh" not in out["note"]
 
     def test_measure_reports_area_volume_scaled(self):
         m = MeshBody("Scan", area=10.0, volume=5.0)

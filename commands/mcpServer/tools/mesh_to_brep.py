@@ -16,6 +16,7 @@ from . import _common
 from ._common import target_component as _target_component
 from . import _inputs
 from ._design_common import run_in_base_feature
+from ._surface_common import _solid_verdict
 
 app = adsk.core.Application.get()
 
@@ -37,6 +38,13 @@ def _organic_available():
     return safe(lambda: mct.OrganicMeshConvertMethodType) is not None
 
 
+def _body_row(b):
+    """One converted body: its name and handle, plus the solid flag and face count read off it."""
+    return {"name": safe(lambda: b.name), "handle": safe(lambda: b.entityToken),
+            "is_solid": _common.read_flag(lambda: b.isSolid),
+            "face_count": _common.counted(lambda: b.faces.count)}
+
+
 def handler(mesh: str = "", method: str = "prismatic", resolution: str = "by_accuracy",
             accuracy: str = "medium", face_count: int = 0,
             operation: str = "parametric") -> dict:
@@ -50,14 +58,14 @@ def handler(mesh: str = "", method: str = "prismatic", resolution: str = "by_acc
     meth, _ = _CONVERT_METHOD.resolve(method)
     op, _ = _CONVERT_OP.resolve(operation)
 
-    # Pre-check watertight: a non-watertight mesh isn't a closed volume, so refuse up front with the
-    # actionable next step rather than letting `add` fail opaquely.
+    # Faceted converts an OPEN mesh into a SURFACE body, so it runs on one. Prismatic and organic
+    # refuse one; a remesh re-triangulates and closes no hole.
     is_closed = safe(lambda: bool(mb.isClosed))
-    if is_closed is False:
+    if is_closed is False and meth != "faceted":
         return error(
-    "This mesh is NOT watertight (is_closed=false), so it has no closed volume to convert to a solid. "
-    "Repair it first with mesh_remesh (or fill the holes), then retry. Refusing up front so you don't "
-    "get an opaque conversion failure.")
+    f"This mesh is NOT watertight (is_closed=false), so method='{meth}' has no closed volume to "
+    "convert to a solid. Close the holes with mesh_repair(repair_type='close_holes') and retry, or "
+    "convert it as a surface with method='faceted'.")
 
     # ORGANIC is gated behind the Product Design Extension - be honest, do NOT silently fall back.
     if meth == "organic" and not _organic_available():
@@ -87,10 +95,9 @@ def handler(mesh: str = "", method: str = "prismatic", resolution: str = "by_acc
     # add() returns nothing for a non-parametric feature (a direct design, or an add inside the
     # base-feature scope), so success is a NEW BRep body in the before/after snapshot below.
     def _brep_snapshot():
-        # (physical-body key, name, handle, body). A proxy and its native carry DIFFERENT tokens, so
-        # the diff keys on native_identity; the published handle stays the wrapper's own token.
-        return [(_common.native_identity(b), safe(lambda b=b: b.name),
-                 safe(lambda b=b: b.entityToken), b)
+        # (physical-body key, body). A proxy and its native carry DIFFERENT tokens, so the diff keys
+        # on native_identity; the published handle stays the wrapper's own token.
+        return [(_common.native_identity(b), b)
                 for b in _common.iter_collection(safe(lambda: comp.bRepBodies))]
 
     def inner_op(base_feature):
@@ -137,7 +144,7 @@ def handler(mesh: str = "", method: str = "prismatic", resolution: str = "by_acc
         except Exception as e:
             return error(f"Could not configure the mesh-convert input: {e}")
 
-        before_keys = {k for (k, _n, _h, _b) in _brep_snapshot() if k is not None}
+        before_keys = {k for (k, _b) in _brep_snapshot() if k is not None}
 
         # Mutation - direct call, no safe. Only an EXCEPTION is a hard failure.
         try:
@@ -163,16 +170,13 @@ def handler(mesh: str = "", method: str = "prismatic", resolution: str = "by_acc
     brep_bodies = []
     # Parametric path: the feature object carries .bodies - use it directly.
     if feat is not None:
-        for b in _common.iter_collection(safe(lambda: feat.bodies)):
-            brep_bodies.append({"name": safe(lambda b=b: b.name),
-        "handle": safe(lambda b=b: b.entityToken)})
+        brep_bodies = [_body_row(b) for b in _common.iter_collection(safe(lambda: feat.bodies))]
 
     # Non-parametric path (feat is None) OR a feature with no readable .bodies: diff the component's
     # BRep bodies - the NEW body(ies) are the conversion result.
     if not brep_bodies:
-        for (key, name, handle, _b) in _brep_snapshot():
-            if key is None or key not in before_keys:
-                brep_bodies.append({"name": name, "handle": handle})
+        brep_bodies = [_body_row(b) for (key, b) in _brep_snapshot()
+                       if key is None or key not in before_keys]
 
     if not brep_bodies:
         # No feature AND no new BRep body appeared -> a REAL failure. Keep the face-groups hint.
@@ -182,6 +186,9 @@ def handler(mesh: str = "", method: str = "prismatic", resolution: str = "by_acc
     note = ("Converted to BRep - find_geometry / fillet / chamfer / CAM can now act on these "
             "bodies. 'prismatic' merges flat face groups (fewest faces); 'faceted' is one face "
             "per triangle (exact, heavy).")
+    if _solid_verdict([r["is_solid"] for r in brep_bodies]) is False:
+        note += (" No body reads is_solid true: this is a SURFACE - surface_thicken gives it a "
+                 "wall.")
     if feat is None:
         note += " " + _common.null_feature_note(design, feat, bf_name, "conversion")
 
@@ -199,8 +206,8 @@ def handler(mesh: str = "", method: str = "prismatic", resolution: str = "by_acc
 
 
 TOOL_DESCRIPTION = (
-    "Convert a MESH body into a BRep solid/surface - the bridge back to "
-    "find_geometry / fillet / CAM."
+    "Convert a MESH body into a BRep solid, or an OPEN mesh into a surface with method='faceted' - "
+    "the bridge back to find_geometry / fillet / CAM."
 )
 
 _CONVERT_SPEC = [_CONVERT_MESH, _CONVERT_METHOD, _CONVERT_RES, _CONVERT_ACC, _CONVERT_OP]

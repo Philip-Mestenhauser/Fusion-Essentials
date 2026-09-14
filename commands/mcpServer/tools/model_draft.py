@@ -28,6 +28,11 @@ from . import _outputs
 RETURNS = [
     _outputs.ReturnsName("feature", of="feature", consumers=["design_delete_feature"]),
     _outputs.ReturnsValue("faces_drafted", "how many faces the draft actually applied to (read from the feature)"),
+    _outputs.ReturnsValue("faces_moved",
+                          "how many of the faces_compared changed normal or area (0 of 0 means "
+                          "nothing could be compared, not that nothing moved)"),
+    _outputs.ReturnsValue("faces_compared",
+                          "how many requested faces answered a normal or area at BOTH ends"),
 ]
 
 # faces to taper (any BRep face); the pull direction is a PlaneRef - exactly the planar-face/plane
@@ -37,6 +42,17 @@ _FACES = _inputs.GeometryHandleList("faces", require="face", required=True)
 _PULL = _inputs.PlaneRef("pull_direction", required=True)
 
 app = adsk.core.Application.get()
+
+
+def _unchanged_detail(vol_readable: bool, count_readable: bool, compared_faces: int) -> str:
+    """Which effect channels were actually READ, for the 'tapered nothing' refusal - a channel that
+    did not read is named as unread, never as measured."""
+    return ", ".join([
+        "the volume is unchanged" if vol_readable else "the volume could not be read",
+        "the face count is unchanged" if count_readable else "the face count could not be read",
+        (f"none of the {compared_faces} face(s) compared moved its normal or area" if compared_faces
+         else "no requested face's normal or area could be compared"),
+    ])
 
 
 def handler(faces=None, pull_direction: str = "", angle_deg: float = 0.0,
@@ -66,10 +82,12 @@ def handler(faces=None, pull_direction: str = "", angle_deg: float = 0.0,
     # DraftFeatures.createInput wants a Python list of BRepFace (per the live signature), not an
     # ObjectCollection.
     face_list = list(face_ents)
-    # The bodies the taper must move, sampled BEFORE the add: a draft that computes cleanly while
-    # tapering nothing is the silent no-op this gate catches, and a feature object cannot show it.
+    # The two effect samples taken BEFORE the add: a draft that computes cleanly while tapering
+    # nothing is the silent no-op these gates catch, and a feature object cannot show it.
     draft_bodies = _geom.owning_bodies(face_list)
     vol_before = _geom.volumes(draft_bodies)
+    faces_before = _geom.face_counts(draft_bodies)
+    frames_before = _geom.face_frames(face_list)
     angle_val = adsk.core.ValueInput.createByReal(math.radians(angle))
     try:
         di = comp.features.draftFeatures.createInput(face_list, plane, bool(tangent_chain))
@@ -93,20 +111,33 @@ def handler(faces=None, pull_direction: str = "", angle_deg: float = 0.0,
                      "'flip', or a different pull direction. "
                      + _common.failed_effect_remedy(design, feature))
 
-    # MATERIAL evidence: a one-sided taper always cuts or adds a wedge, so an unmoved volume means
-    # the draft tapered nothing. A SYMMETRIC draft tapers both sides in OPPOSITE directions, where
-    # the wedges can cancel on a real taper - so its delta is published but carries no verdict.
+    # THREE channels, any one moving is proof. A pull plane CROSSING the faces pivots there, so the
+    # volume can hold to the last bit while the face tilts; a SYMMETRIC draft SPLITS each face
+    # there, which the face count shows even when the split leaves the wrappers unreadable.
     volume_delta_cm3 = None
+    delta, vol_readable = 0.0, False
+    face_delta, count_readable = 0, False
     if draft_bodies:
-        delta, readable = _geom.volume_delta(draft_bodies, vol_before)
-        if readable:
+        delta, vol_readable = _geom.volume_delta(draft_bodies, vol_before)
+        if vol_readable:
             volume_delta_cm3 = round(delta, 6)
-        if readable and not symmetric and abs(delta) < _common.NO_VOLUME_CHANGE_CM3:
-            named = ", ".join(str(safe(lambda b=b: b.name)) for b in draft_bodies)
-            return error(f"Draft computed but tapered nothing - {named} measures the volume it had "
-                         f"before, so the {angle} deg taper moved no material. Check 'pull_direction' "
-                         "is the plane the faces taper relative to, and try 'flip' or a face that is "
-                         "not already parallel to it. " + _common.failed_effect_remedy(design, feature))
+        face_delta, count_readable = _geom.face_count_delta(draft_bodies, faces_before)
+    moved_faces, compared_faces = _geom.faces_moved(face_list, frames_before)
+    moved = ((vol_readable and abs(delta) >= _common.NO_VOLUME_CHANGE_CM3)
+             or (count_readable and face_delta != 0) or moved_faces > 0)
+    read_any = vol_readable or count_readable or bool(compared_faces)
+    effect_unverified = not read_any
+    if not moved and read_any:
+        named = ", ".join(str(safe(lambda b=b: b.name)) for b in draft_bodies) or "its body"
+        removed = bool(safe(lambda: feature.deleteMe()))
+        return error(f"Draft computed but tapered nothing - on {named}, "
+                     f"{_unchanged_detail(vol_readable, count_readable, compared_faces)}, so the "
+                     f"{angle} deg taper changed no geometry. Check 'pull_direction' is the plane "
+                     "the faces taper relative to, and try 'flip' or a face that is not already "
+                     "parallel to it."
+                     + (" The feature has been rolled back." if removed
+                        else " (The inert feature could not be auto-removed.) "
+                             + _common.failed_effect_remedy(design, feature)))
 
     requested = len(face_list)
     # The count the FEATURE reports, never the request echoed back. NOT `inputFaces`: that property
@@ -114,6 +145,14 @@ def handler(faces=None, pull_direction: str = "", angle_deg: float = 0.0,
     # feature and on an earlier one alike.
     drafted = _common.counted(lambda: feature.faces.count)
     note = "Faces tapered to the pull direction. Pair with view_screenshot to view."
+    if effect_unverified:
+        note += (" NONE of the bodies' volume, their face count or the requested faces' own "
+                 "normal/area could be read back, so there is no geometric proof the taper landed "
+                 "- re-read the faces with model_inspect before relying on this result.")
+    elif not compared_faces:
+        note += (" faces_compared is 0 - no requested face's normal or area could be compared "
+                 "across the add, so faces_moved counts nothing; the volume and face-count deltas "
+                 "are what this result rests on.")
     if drafted is None:
         note += (f" 'faces_drafted' is null - the count could not be read off the feature, so how "
                  f"many faces the draft took is UNKNOWN here; {requested} face(s) were requested.")
@@ -122,6 +161,8 @@ def handler(faces=None, pull_direction: str = "", angle_deg: float = 0.0,
         "feature": safe(lambda: feature.name),
         "faces_requested": requested,
         "faces_drafted": drafted,
+        "faces_moved": moved_faces,
+        "faces_compared": compared_faces,
         "angle_deg": round(angle, 6),
         "symmetric": bool(symmetric),
         "tangent_chain": bool(tangent_chain),
@@ -129,6 +170,8 @@ def handler(faces=None, pull_direction: str = "", angle_deg: float = 0.0,
         "pull_direction": pull_direction,
         "note": note,
     }
+    if effect_unverified:
+        payload["effect_unverified"] = True
     # Published only where the before/after pair was READABLE: a null here would read as "no material
     # moved" rather than "the measurement could not be taken", so the key is simply absent instead.
     if volume_delta_cm3 is not None:
@@ -158,7 +201,7 @@ draft_item = Item.create_tool_item(tool=draft_tool, write="write", handler=handl
                                        kind="inline", rung="geometry",
                                        evidence_test="tests/unit/test_model_draft.py"
                                        "::TestTaperMovesMaterial"
-                                       "::test_draft_that_moves_no_volume_is_an_error"))
+                                       "::test_draft_that_changes_no_geometry_is_an_error"))
 
 
 def register_tool():

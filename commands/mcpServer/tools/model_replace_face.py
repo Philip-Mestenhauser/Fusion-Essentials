@@ -34,11 +34,12 @@ _TARGET = _inputs.TargetRef("target", required=True, allow=("body", "face"))
 app = adsk.core.Application.get()
 
 
-def _unchanged_detail(vol_readable: bool, faces_readable: bool) -> str:
+def _unchanged_detail(vol_readable: bool, faces_readable: bool, area_readable: bool) -> str:
     """Which effect signals were actually READ, for the 'nothing changed' refusal."""
-    return " and ".join([
+    return ", ".join([
         "its volume is unchanged" if vol_readable else "its volume could not be read",
         "its face count is unchanged" if faces_readable else "its face count could not be read",
+        "its surface area is unchanged" if area_readable else "its surface area could not be read",
     ])
 
 
@@ -70,10 +71,12 @@ def handler(faces=None, target=None, tangent_chain: bool = True) -> dict:
     target_ent, target_kind = resolved
     target_label = _inputs.surface_ref_label(target_ent)
 
-    # Both signals sampled before the mutation; the gate accepts EITHER moving - a clean replace
-    # can move the volume while the face count holds.
+    # Three signals sampled before the mutation; ANY moving is enough. A surface meeting the face at
+    # its MIDDLE pivots there and adds exactly what it cuts, so volume and face count both hold and
+    # only the area moves (measured: 8.0 cm3, 6 faces either side, area 24.0 -> 24.079216).
     vol_before = _geom.volumes(bodies)
     faces_before = _geom.face_counts(bodies)
+    area_before = _geom.areas(bodies)
 
     src = adsk.core.ObjectCollection.create()
     for f in face_ents:
@@ -103,25 +106,34 @@ def handler(faces=None, target=None, tangent_chain: bool = True) -> dict:
         return error(f"Replace face was created but failed to compute: {msg}. "
                      + _common.failed_effect_remedy(design, feature))
 
-    # The feature exposes no sourceFaces, so the body's own geometry is the only evidence.
+    # The feature exposes no sourceFaces and CONSUMES the input face wrappers (measured: they read
+    # invalid and raise afterwards), so the body's own geometry is the only evidence.
     vol_delta, vol_readable = _geom.volume_delta(bodies, vol_before)
     face_delta, faces_readable = _geom.face_count_delta(bodies, faces_before)
+    area_delta_cm2, area_readable = _geom.area_delta(bodies, area_before)
     moved = ((vol_readable and abs(vol_delta) > _common.NO_VOLUME_CHANGE_CM3)
-             or (faces_readable and face_delta != 0))
+             or (faces_readable and face_delta != 0)
+             or (area_readable and abs(area_delta_cm2) > _common.NO_AREA_CHANGE_CM2))
     effect_unverified = False
-    if not vol_readable and not faces_readable:
+    if not vol_readable and not faces_readable and not area_readable:
         if direct_no_feature:
             return error("Replace face ran in a DIRECT design, which returns no feature object, and "
-                         "neither the body's volume nor its face count could be read back - so "
-                         "whether the faces were replaced is UNVERIFIED. Re-read the body with "
+                         "none of the body's volume, face count or surface area could be read back "
+                         "- so whether the faces were replaced is UNVERIFIED. Re-read the body with "
                          "model_inspect.")
-        # Parametric with neither signal readable: the feature computed cleanly, but the geometric
+        # Parametric with no signal readable: the feature computed cleanly, but the geometric
         # check did not run, so the gap is published with the result.
         effect_unverified = True
     elif not moved:
+        # An inert feature is rolled back rather than left for the caller to delete: left behind, it
+        # gives every retry another orphan and asks the caller to clean up what it was just refused.
+        # A DIRECT design returns no feature object, so there the standing remedy is all there is.
+        removed = None if direct_no_feature else bool(safe(lambda: feature.deleteMe()))
+        tail = (" The feature has been rolled back." if removed
+                else ((" (The inert feature could not be auto-removed.)" if removed is False
+                       else "") + " " + _common.failed_effect_remedy(design, feature)))
         return error(f"Replace face reported success but body '{body_name or '?'}' did not change - "
-                     f"{_unchanged_detail(vol_readable, faces_readable)}. "
-                     + _common.failed_effect_remedy(design, feature))
+                     f"{_unchanged_detail(vol_readable, faces_readable, area_readable)}." + tail)
 
     payload = {
         "replaced": True,
@@ -135,10 +147,10 @@ def handler(faces=None, target=None, tangent_chain: bool = True) -> dict:
     }
     if effect_unverified:
         payload["effect_unverified"] = True
-        payload["note"] = ("The feature computed cleanly, but NEITHER the body's volume NOR its face "
-                           "count could be read back, so there is no geometric proof the faces were "
-                           "replaced - no deltas are reported. Re-read the body with model_inspect "
-                           "before relying on this result.")
+        payload["note"] = ("The feature computed cleanly, but NONE of the body's volume, face count "
+                           "or surface area could be read back, so there is no geometric proof the "
+                           "faces were replaced - no deltas are reported. Re-read the body with "
+                           "model_inspect before relying on this result.")
     if direct_no_feature:
         payload["no_timeline_feature"] = True
         payload["note"] += " " + _common.DIRECT_FEATURE_NOTE
@@ -148,6 +160,8 @@ def handler(faces=None, target=None, tangent_chain: bool = True) -> dict:
         payload["volume_delta_cm3"] = round(vol_delta, 6)
     if faces_readable:
         payload["face_count_delta"] = face_delta
+    if area_readable:
+        payload["area_delta_cm2"] = round(area_delta_cm2, 6)
     return ok(payload)
 
 
