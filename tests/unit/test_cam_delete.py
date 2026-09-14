@@ -9,7 +9,8 @@ and the guards (no CAM, nothing named that, an ambiguous name).
 
 import json
 
-from conftest import FakeCAMFolder, FakeOperation, FakeSetup, _NamedCollection, load_tool, make_cam
+from conftest import (FakeCAMFolder, FakeOperation, FakeSetup, _AdditiveContainer, _BaseNode,
+                      _NamedCollection, load_tool, make_cam)
 
 cd = load_tool("cam_delete")
 
@@ -95,6 +96,11 @@ class Setup(_Container, FakeSetup):
 
 class CAMFolder(_Container, FakeCAMFolder):
     pass
+
+
+class Base(_Deletable, _BaseNode):
+    """A bare OperationBase - the browser node hole recognition and the additive individual
+    strategies land as. MEASURED: deleteMe() returned true on one and removed it."""
 
 
 class _NCProgram(_Deletable, _Named):
@@ -255,3 +261,28 @@ class TestNCPrograms:
         res = cd.handler(entity="1003")
         assert res["isError"] is True and "declin" in res["message"].lower()
         assert cam.ncPrograms.count == 1
+
+
+class TestBaseNodes:
+    """The browser nodes that are no operation - hole recognition, the additive individual
+    strategies. They sit in the setup's `children` alone, and deleteMe removes one."""
+
+    def _setup_holding(self, node):
+        s = Setup("Setup1", ops=[Operation("Face1")])
+        s._others.append(node)
+        return s
+
+    def test_a_base_node_is_deleted_by_name_and_reports_its_own_kind(self, monkeypatch):
+        node = Base("Hole Recognition1")
+        _install(monkeypatch, [self._setup_holding(node)])
+        out = _payload(cd.handler(entity="Hole Recognition1"))
+        assert out["deleted"] is True and out["entity_type"] == "base"
+        assert node.deleted is True and out["remaining_with_name"] == 0
+
+    def test_an_additive_container_is_NOT_offered_for_deletion(self, monkeypatch):
+        # deleting a CONTAINER is unmeasured, so its name resolves to nothing here rather than
+        # taking a delete whose effect nothing has read back.
+        held = _AdditiveContainer("Orientations", ops=[Operation("Orient1")])
+        _install(monkeypatch, [self._setup_holding(held)])
+        res = cd.handler(entity="Orientations")
+        assert res["isError"] is True and "No CAM entity named 'Orientations'" in res["message"]

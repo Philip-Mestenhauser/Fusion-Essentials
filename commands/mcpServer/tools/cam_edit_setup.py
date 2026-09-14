@@ -14,9 +14,9 @@ from ..mcp_primitives.registry import register
 from ._common import apply_rename, named_with_remainder, ok, error, read_flag, safe
 # The machine catalog read + the by-name machine resolver are the shared CAM substrate's (one home,
 # so cam_get's catalog, this assignment and cam_create_machine's reachability gate cannot drift).
-from ._cam_common import (STOCK_MODES, _setup_node, get_cam, enumeration_remedy, expression_error,
+from ._cam_common import (STOCK_MODES, get_cam, enumeration_remedy, expression_error,
                           machine_catalog, machine_label, matched_quoting, parse_parameters,
-                          resolve_cam_node, resolve_machine, setups, stock_mode_member,
+                          resolve_cam_node, resolve_machine, setup_nodes, stock_mode_member,
                           stock_mode_name, unquote_expression)
 from .cam_create_setup import setup_name_clash
 from . import _inputs
@@ -50,7 +50,7 @@ def _resolve_setup(cam, name):
     caller can take the node's position in it. resolve_cam_node also answers the '<name>#<n>'
     address its own ambiguity refusal hands out, which is how one of two setups sharing a name is
     reached at all."""
-    nodes = [_setup_node(s) for s in setups(cam)]
+    nodes = setup_nodes(cam)
     node, err = resolve_cam_node(cam, name, kinds=("setup",), label="setup", nodes=nodes)
     return node, nodes, err
 
@@ -278,7 +278,7 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
     # The resolver's own refusal is returned verbatim: it is the one place that knows whether the
     # name was ABSENT or AMBIGUOUS, and only it can say which. Its walk is kept: an order-sensitive
     # mode below needs the resolved setup's POSITION in the list it was matched against.
-    node, setup_nodes, serr = _resolve_setup(cam, setup)
+    node, setup_row, serr = _resolve_setup(cam, setup)
     if not node:
         return error(serr)
     target = node.obj
@@ -322,7 +322,7 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
 
     predecessor = None
     if want_stock_mode == _PREVIOUS_SETUP:
-        predecessor, pserr = _preceding_setup(node, setup_nodes)
+        predecessor, pserr = _preceding_setup(node, setup_row)
         if pserr:
             return error(pserr)
 

@@ -213,7 +213,7 @@ class TestGenerateHandler:
         cam = _FakeCAM([_setup("S", [SharedOp("Groove1", operation_state=0)])],
                        machining_times={"Groove1": 9223372036854.775})
         import adsk.cam
-        monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: x))
+        monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
         monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
         out = _payload(gen.handler(target="S", skip_valid=True))

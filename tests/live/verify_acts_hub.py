@@ -1260,6 +1260,48 @@ def _additive_setup_created(name, machine_mark, setting):
     return check
 
 
+def _container_rows(setup, ops):
+    """cam_get(include=['operations','default']): each of the named operations is LISTED carrying a
+    non-empty 'container', and the two sit in DIFFERENT containers - which is what says the walk
+    reached each one where it actually lives rather than crediting both to one node. The listing is
+    not truncated and carries exactly as many rows as the setup's own operation_count, which COUNTS
+    a container's children; those two disagreeing is what the slice reports as a cap. The container
+    NAMES are disclosed in the measurement, not asserted - nothing has measured their spelling."""
+    def check(p):
+        rec = next((r for r in ((p.get("operations") or {}).get("setups") or [])
+                    if r.get("setup") == setup), None)
+        row = next((r for r in (p.get("setups") or []) if r.get("name") == setup), None)
+        rows = (rec or {}).get("operations") or []
+        by_name = {r.get("name"): r for r in rows}
+        held = [(by_name.get(n) or {}).get("container") for n in ops]
+        declared = (row or {}).get("operation_count")
+        return _measured(f"'{setup}' lists each container-held operation under its own container",
+                         {"listed": len(rows), "operation_count": declared,
+                          "containers_observed": dict(zip(ops, held)),
+                          "truncated": (rec or {}).get("operations_truncated"),
+                          "other_nodes": (rec or {}).get("other_nodes")},
+                         bool(rec) and bool(row)
+                         and (rec or {}).get("operations_truncated") is False
+                         and declared == len(rows)
+                         and all(n in by_name for n in ops)
+                         and all(isinstance(c, str) and c.strip() for c in held)
+                         and len(set(held)) == len(held))
+    return check
+
+
+def _op_deleted_by_name(name):
+    """cam_delete of a CONTAINER-HELD operation by its own name: the take-out the row promises, and
+    the proof that a name inside a container is an address the CAM tools resolve."""
+    def check(p):
+        return _measured(f"'{name}' deleted by name as an operation",
+                         {"deleted": p.get("deleted"), "entity": p.get("entity"),
+                          "entity_type": p.get("entity_type"),
+                          "remaining": p.get("remaining_with_name")},
+                         p.get("deleted") is True and p.get("entity") == name
+                         and p.get("entity_type") == "operation")
+    return check
+
+
 def _additive_op_created(setup, strategy):
     """cam_create_operation on an additive strategy: it landed, and it carries NO cutting tool -
     the whole point of the additive arm. 'tool' null is asserted, not merely absent."""
@@ -1324,9 +1366,21 @@ _HUB_ADDITIVE = [
     ("cam_create_operation", {"setup": _ADD_SETUP, "strategy": "additive_arrange"},
      _additive_op_created(_ADD_SETUP, "additive_arrange"), None),
     ("cam_create_operation", {"setup": _ADD_SETUP, "strategy": "automatic_orientation"},
-     _additive_op_created(_ADD_SETUP, "automatic_orientation"), None),
+     _additive_op_created(_ADD_SETUP, "automatic_orientation"),
+     ("add_orient_op", _recall("add_orient_op", lambda p: p["operation"]))),
     ("cam_create_operation", {"setup": _ADD_SETUP, "strategy": "solid_volume_support"},
-     _additive_op_created(_ADD_SETUP, "solid_volume_support"), None),
+     _additive_op_created(_ADD_SETUP, "solid_volume_support"),
+     ("add_support_op", _recall("add_support_op", lambda p: p["operation"]))),
+    # THE CONTAINER-HELD ROWS, read back: the orientation and the support operations live in the
+    # setup's own containers, which .operations/.folders/.patterns list under none of the three -
+    # setup.children is the only collection that holds them.
+    ("cam_get", {"include": ["operations", "default"], "setup": _ADD_SETUP},
+     lambda p: _container_rows(_ADD_SETUP, (_RECALL["add_orient_op"],
+                                            _RECALL["add_support_op"]))(p), None),
+    # and the address that reaches one: the support operation deleted BY ITS OWN NAME.
+    ("cam_delete",
+     lambda c: {"entity": _ctx_get(c, "add_support_op", "the support operation")},
+     lambda p: _op_deleted_by_name(_RECALL["add_support_op"])(p), None),
     # A cutting tool handed to one is refused BEFORE the add - the other side of the same branch.
     ("cam_create_operation", {"setup": _ADD_SETUP, "strategy": "bar_support",
                               "tool_scope": "document", "tool_index": 0},

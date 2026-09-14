@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 191  |  **description breadcrumbs:** 281  |  **note/error breadcrumbs:** 621
+**Tools:** 192  |  **description breadcrumbs:** 285  |  **note/error breadcrumbs:** 624
   |  **guidance smells flagged:** 8
 ## Blindspots to engineer
 
@@ -17,8 +17,8 @@ close orphans, factor duplicated guards into shared helpers.
 **Read/Acquire (8)** - higher concern, a check-your-work tool nothing points to:
   `cam_compare_operations`, `cam_find_holes`, `cam_find_pockets`, `cam_inspect_toolpaths`, `drawing_get_status`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`
 
-**Edit (47)** - usually leaf actions, scan for genuine gaps:
-  `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_remove_feature`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_insert_image`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_plane_cut`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_sweep`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
+**Edit (48)** - usually leaf actions, scan for genuine gaps:
+  `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_remove_feature`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_delete_sketch`, `drawing_dimension`, `drawing_insert_image`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_plane_cut`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_sweep`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
 - **51x** across 50 module(s): "No active design. Create or open a document first (see doc_new)."
@@ -40,10 +40,10 @@ close orphans, factor duplicated guards into shared helpers.
 - `find_geometry`  <- 49  (desc 13, note 36)
 - `design_delete_feature`  <- 40  (desc 16, note 24)
 - `view_screenshot`  <- 34  (desc 5, note 29)
-- `cam_get`  <- 30  (desc 13, note 17)
+- `cam_get`  <- 31  (desc 14, note 17)
 - `data_get`  <- 25  (desc 10, note 15)
+- `doc_open`  <- 24  (desc 5, note 19)
 - `model_inspect`  <- 24  (desc 3, note 21)
-- `doc_open`  <- 23  (desc 5, note 18)
 - `sketch_create`  <- 23  (desc 7, note 16)
 - `sketch_get`  <- 22  (desc 5, note 17)
 - `assembly_get`  <- 21  (desc 3, note 18)
@@ -974,6 +974,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - applyMachineAvoidGroups failed: . Nothing was applied - drop machine_mode, then machine_over_holes, and retry to find which of them this strategy refuses at the commit.
 - The surface groups could not be read back after applyMachineAvoidGroups, so the group is UNCONFIRMED - re-read the operation with .
 - The height setting(s)  were applied BEFORE this failure and REMAIN on the operation - this call did not undo them; set them back if the selection is not going to be applied.
+- Every non-construction curve of the sketch is taken; text alone is not selectable - put it in its own sketch, or sketch_delete_entity.
 - stock_faces names the STOCK's own analytic faces, so it takes no model geometry -  was passed beside it. Pass stock_faces alone, or drop it and select model faces with 'handles'.
 - 'handles' holds  chains that share no vertex () - a flat list is taken as ONE connected chain. Pass chain_groups, one list per contour, to group them yourself. No heights or selections were changed.
 - Selection applied but generation failed to launch: . The selection is saved - fix the cause, then run cam_generate(target='').
@@ -1924,18 +1925,14 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - '' names  DIFFERENT source files referenced by this document: . Fusion allows same-name files in different folders, so refreshing them all could pull a version you did not ask for - refusing. Omit ...
 
 ### `drawing_add_sketch`
+- : the STANDARD fixes this.
 - Nothing to draw on: the active document is not a drawing. Open the drawing and make it active (doc_open, or the Fusion UI), then retry.
 - ' exposes no sketches collection - cannot add a sketch to it.
 - Adding a sketch to sheet '
 - entities onto sketch '
-- Coordinates were taken as
-- , which the drawing STANDARD fixes; sheet_units controls dimension display only.
-- curve(s) by its own collection count.
 - Could not add a sketch to sheet '
 - geometry[] ('') carries , far outside . This call bounds every coordinate and radius to ,  times the sheet's longer side; coordinates are taken as . A coordinate far outside the sheet can stop this...
-- A point near a drawing view's curve can land on that curve instead, and nothing here reads a landed coordinate back - check placement with drawing_export.
 - Deleting sketch '' is NOT CONFIRMED: deleteMe answered  and sheet '' would not report its sketch count. Read drawing_get for sheet '' before drawing on it again
-- Sketch '' on sheet '' holds  curve(s) by its own collection count.  Coordinates were taken as , which the drawing STANDARD fixes; sheet_units controls dimension display only.
 
 ### `drawing_create`
 - Created as a CLOUD file (NOT opened). Reach it: doc_open(file_id, force_api_open=true), then drawing_export for the PDF - a drawing never reviewed in the Fusion UI opens and drives that way, so no ...
@@ -1974,6 +1971,18 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - creation_mode 'manual' requires template_file, which was empty.  This call stops here without creating anything. Pass the template's DataFile id/URL as template_file, or use creation_mode 'automatic'.
 - '' cannot be applied: adsk.drawing has no  enum on this Fusion version (the namespace carries  classes instead), so the setting has no API to reach and no drawing was created. Leave  at 'default'.
 - Custom sheet size:  x   (the document unit),  x  zones - all four read back off the input before the create. The created SHEET's own width/height are not readable from here, so open it and read the...
+
+### `drawing_delete_sketch`
+- Provide 'sketch' - the exact name of the drawing sketch to delete.
+- Nothing to delete: the active document is not a drawing. Open the drawing and make it active (doc_open, or the Fusion UI), then retry.
+- Fusion refused to delete sketch '
+- ' (deleteMe returned false). The sketch is still there.
+- deleteMe() reported success for sketch '
+- ', but the sheet's sketch count reads
+- - treating the delete as unverified. Re-read drawing_get before retrying.
+- ' deleted from sheet '
+- ': its sketch count fell from
+- deleteMe() reported success for sketch '' on sheet '', but the sheet's sketch count reads  (was ) - treating the delete as unverified. Re-read drawing_get before retrying.
 
 ### `drawing_dimension`
 - Save the drawing with doc_save to keep them.
@@ -2661,6 +2670,9 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - . Try solver='rectangular', or enable the extension.
 - No face of these shapes reads a plane, which solver='{label}' needs: {names}. Nothing was created. Drop them from 'shapes' to nest the rest, or pass solver='3d', which packed a body with no planar ...
 - Arrange (solver='{label}') failed with '{code}': a shape it holds carries no planar face and the platform names none of them. The feature is gone from the timeline, so nothing was created. Arrange ...
+- {names} read isGroundToParent True - the platform refuses to arrange a pinned component with move_originals=true. Nothing was created. Release each with assembly_ground(ground_to_parent=false), or ...
+- Arrange failed on a pinned component: {names}. Release it with assembly_ground(ground_to_parent=false), or drop it from 'shapes'. Platform: {msg}
+- Arrange failed{code_clause}: a shape it holds is pinned to its parent and the platform names none of them. Release a pinned shape with assembly_ground(ground_to_parent=false), or drop it from 'shap...
 - Pass exactly ONE envelope: 'boundary_sketch' (a sketch profile), or 'envelope_plane' with 'envelope_length' and 'envelope_width'. Given boundary_sketch='', envelope_plane=''.
 - solver='3d' packs into a 3D envelope: pass 'envelope_plane' with 'envelope_length', 'envelope_width' and 'envelope_height' instead of 'boundary_sketch' ('').
 - 'envelope_origin' offsets a SIZED envelope from its plane's origin, and the profile envelope this call takes from sketch '' carries no origin offsets. Drop it, or pass 'envelope_plane' with its sizes.

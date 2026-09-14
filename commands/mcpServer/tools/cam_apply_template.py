@@ -31,9 +31,10 @@ def _setup_op_nodes(setup_obj) -> list:
 
 
 def _path_census(nodes) -> dict:
-    """How many of these operation nodes each breadcrumb holds. The PATH is the census key: the
-    walk visits a parent's own operations before its folders, so crediting a held 'Drill1' in a
-    folder to a new 'Drill1' under the setup would report the held operation as the applied one."""
+    """How many of these operation nodes each breadcrumb holds. The PATH is the census key because
+    it names the container an operation sits in: crediting a held 'Drill1' in a folder to a new
+    'Drill1' under the setup would report the held operation as the applied one, and a count per
+    NAME cannot tell those two apart."""
     census = {}
     for n in nodes:
         census[n.path] = census.get(n.path, 0) + 1

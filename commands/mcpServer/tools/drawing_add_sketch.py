@@ -208,8 +208,15 @@ def _rolled_back(sheet, sketch, before_count):
 # A sketch point placed near a drawing view's curve snaps onto that curve, so a landed coordinate
 # can differ from the one asked for; the DXF export is the only channel that reads one back.
 _COORDINATE_READBACK = (
-    "A point near a drawing view's curve can land on that curve instead, and nothing here reads a "
-    "landed coordinate back - check placement with drawing_export.")
+    "A point near a drawing view's curve can land on that curve instead - check placement with "
+    "drawing_export.")
+
+# A coordinate is bounded even when the standard cannot read: the raw millimetre number is the
+# exact limit under ISO and up to 25.4x too permissive under ASME - loose, never too tight, so
+# this stays a real bound rather than a skipped one.
+_LOOSE_BOUND_NOTE = (
+    "The drawing standard did not read, so the bound ran against the sheet's millimetre "
+    "number - 25.4x loose under ASME.")
 
 
 def handler(geometry=None, sheet_name: str = "", name: str = "") -> dict:
@@ -230,12 +237,17 @@ def handler(geometry=None, sheet_name: str = "", name: str = "") -> dict:
     coordinate_unit = _drawing_common.coordinate_unit(dwg)
     extent = _drawing_common.sheet_facts(sheet)
     width, height = extent["width"], extent["height"]
+    bound_loose = ""
     # An extent that does not read is no sheet to measure against: the bound is skipped, not guessed.
     if width is not None and height is not None and max(width, height) > 0:
         span = _SPAN_LIMIT_MULTIPLE * max(width, height)
-        refusal = _bounded(entries,
-                           round(_drawing_common.extent_in_coordinates(span, dwg), 3),
-                           coordinate_unit or "the standard's unit",
+        limit = _drawing_common.extent_in_coordinates(span, dwg)
+        if limit is None:
+            # No standard to convert through: the bound runs against the raw millimetre span
+            # rather than being skipped - loose under ASME, but still a real bound.
+            limit = span
+            bound_loose = _LOOSE_BOUND_NOTE
+        refusal = _bounded(entries, round(limit, 3), coordinate_unit or "the standard's unit",
                            f"the {extent['sheet_size'] or 'custom-size'} sheet, "
                            f"{width} x {height} {_drawing_common.SHEET_EXTENT_UNIT}")
         if refusal:
@@ -295,7 +307,11 @@ def handler(geometry=None, sheet_name: str = "", name: str = "") -> dict:
     # the separate dimension display unit and does not move them.
     units = _drawing_common.sheet_units(dwg)
     units_said = (coordinate_unit if coordinate_unit
-                  else "the standard's own length unit (mm under ISO, in under ASME)")
+                  else "the standard's unit (mm under ISO, in under ASME)")
+    note = (f"Sketch '{sketch_name}' on sheet '{on_sheet}' holds {total_landed} curve(s), taken "
+            f"as {units_said}: the STANDARD fixes this. " + _COORDINATE_READBACK)
+    if bound_loose:
+        note = bound_loose + " " + note
     return ok({
         "created": True,
         "sketch_name": sketch_name,
@@ -307,10 +323,7 @@ def handler(geometry=None, sheet_name: str = "", name: str = "") -> dict:
         "curves_landed": total_landed,
         "landed": landed,
         "coordinates_verified": False,
-        "note": (f"Sketch '{sketch_name}' on sheet '{on_sheet}' holds {total_landed} curve(s) by its "
-                 "own collection count. " + _COORDINATE_READBACK
-                 + f" Coordinates were taken as {units_said}, which the drawing STANDARD fixes; "
-                 "sheet_units controls dimension display only."),
+        "note": note,
     })
 
 

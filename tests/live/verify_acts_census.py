@@ -743,9 +743,9 @@ CENSUS = _LONG + (
      "ACT 10c7 ThreePlusTwo on the inclined flat cut into the shaft's plain stretch, machining "
      "time read in ACT 10c8; the flat's own normal becomes the tool axis, and the selection "
      "engages toolAxisMode in the same call"),
-    ("blend", SKIPPED, "two or more drive curves - no route", "ball end mill",
-     "'Drive Curves: Incorrect number of drive curves. Select two or more drive curves.' - and the "
-     "chain kind lands on this operation's machining BOUNDARY instead"),
+    ("blend", PROVEN, "chain -> blend_curves (a curve PAIR)", "ball end mill",
+     "ACT 10a BlendRims: two rim-edge chains applied on blend_curves; one reference refuses naming "
+     "the pair"),
     ("corner", MEASURED, "none - the setup's model", "ball end mill",
      "a rest-machining family: it answers 'No valid reference tool nor valid reference stock model' "
      "until it has a reference. Driven by hand on a pocketed block as the ONLY operation in its "

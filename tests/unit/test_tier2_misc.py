@@ -147,11 +147,12 @@ def _coll(items):
 def _cam_with(ops, setup_error=None, programs=(), machine=SimpleNamespace(description="Haas VF-2")):
     """Fake CAM with a single setup holding the given operations. setup_error makes the SETUP itself
     hasError; programs is a list of NC programs (each a SimpleNamespace with hasError/error/name).
-    allOperations is the count/item collection shape (_coll) - the measured live protocol
-    _cam_common.walk_operations reads (live_readiness's op walk), not a plain Python list.
+    `children` is what the tree walk reads and allOperations the flat total it is counted against,
+    both in the count/item collection shape (_coll) - the measured live protocol, not a list.
     The setup carries an assigned machine by default: setup_blockers reads Setup.machine, so a
     machine-less fake is a setup blocked by no_machine_selected, not a clean job."""
-    setup = SimpleNamespace(allOperations=_coll(list(ops)), name="Setup1",
+    setup = SimpleNamespace(children=_coll(list(ops)), allOperations=_coll(list(ops)),
+                            name="Setup1",
                             hasError=setup_error is not None, error=setup_error or "",
                             machine=machine)
     return SimpleNamespace(setups=_coll([setup]), ncPrograms=_coll(list(programs)))

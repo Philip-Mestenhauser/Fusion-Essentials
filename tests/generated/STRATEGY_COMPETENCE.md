@@ -12,7 +12,7 @@ declines it before mutating anything, and 'skipped' carries the message the plat
 answered with; nothing in either column is a guess about cause. Create with
 cam_create_operation, aim with cam_select_geometry.
 
-Counts: 54 proven, 2 measured, 1 created, 6 refused, 8 skipped, 71 strategies.
+Counts: 55 proven, 2 measured, 1 created, 6 refused, 7 skipped, 71 strategies.
 
 | Strategy | Verdict | Geometry kind (cam_select_geometry) | Tool | Proven on / the measured reason |
 |---|---|---|---|---|
@@ -20,7 +20,7 @@ Counts: 54 proven, 2 measured, 1 created, 6 refused, 8 skipped, 71 strategies.
 | adaptive2d | proven | pocket | flat end mill that fits the pocket | ACT 10c7 Adaptive2D |
 | advanced_swarf | proven | surfaces -> advancedSwarfSurfaces | flat end mill | ACT 10c11 AdvSwarf on the hub's flange wall, machining time read in ACT 10c12; the chain kind is refused naming the 'swarf' surface set this operation carries instead, and a drafted block wall generates EMPTY ('The tool or surface selections may prevent any area from being machined.') (machining extension) |
 | bar_pull | skipped | - | turning grooving insert | generated with 'Toolpath is not supported for the given tool and settings.' |
-| blend | skipped | two or more drive curves - no route | ball end mill | 'Drive Curves: Incorrect number of drive curves. Select two or more drive curves.' - and the chain kind lands on this operation's machining BOUNDARY instead |
+| blend | proven | chain -> blend_curves (a curve PAIR) | ball end mill | ACT 10a BlendRims: two rim-edge chains applied on blend_curves; one reference refuses naming the pair |
 | bore | proven | holes -> circularFaces | flat end mill | ACT 10a |
 | chamfer | refused | - | - | isGenerationAllowed reads false; refused live by ACT 10c on the cameo setup |
 | chamfer2d | proven | face | chamfer mill | ACT 10a |

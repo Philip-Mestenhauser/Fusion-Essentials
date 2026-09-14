@@ -552,6 +552,15 @@ _NESTING = _box("ArrP1", ox=200, oy=350) + [
                              "sketch_name": "ArrB"},
      lambda p: p["results"][0].get("curves_added") == 6, None),
     _watch(["ArrB", "ArrP1:1", "ArrP2:1", "ArrP3:1"]),
+    # THE PINNED SHAPE: a shape reading isGroundToParent True is what the solver calls "Pinned"
+    # (ARRANGE_ITEM_GROUNDED, measured), so an in-place arrange refuses it BEFORE the feature, naming
+    # the shape and the release; the phrase asserted is the pre-flight's own, not the platform's.
+    ("assembly_ground", {"occurrence": "ArrP1:1", "ground_to_parent": True},
+     lambda p: p.get("isGroundToParent") is True and bool(p.get("occurrence")), None),
+    ("model_arrange", {"boundary_sketch": "ArrB", "shapes": ["ArrP1:1"], "move_originals": True},
+     _refused("ArrP1:1", "read isGroundToParent True", "ground_to_parent=false"), None),
+    ("assembly_ground", {"occurrence": "ArrP1:1", "ground_to_parent": False},
+     lambda p: p.get("isGroundToParent") is False and bool(p.get("occurrence")), None),
     # TRUE-SHAPE, because the boundary is a hexagon: the rectangular solver nests bounding boxes and
     # refuses a non-rectangular envelope outright (ARRANGE_ERROR_ENVELOPE_INVALIDRECTANGULAR), which
     # is exactly what a slanted wall is for. The solver places COPIES under an Envelope occurrence

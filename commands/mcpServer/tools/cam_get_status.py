@@ -6,6 +6,7 @@ tool only READS progress. A cam_generate launch mints a Future the handle path s
 generated inline or in the UI has none."""
 
 import time
+from collections import OrderedDict
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
@@ -18,6 +19,43 @@ from ._write_guard import _active_identity, document_key
 # launch goes through. These names are those same objects.
 _GENERATIONS = _cam_common._GENERATIONS
 _HANDLE_SEQ = _cam_common._HANDLE_SEQ
+
+_RELEASED_CAP = 20
+# Bounded so a long session's completed handles cannot grow this table without limit; the oldest
+# release is evicted first, since a poller has no reason to ask about one that old.
+_RELEASED = OrderedDict()
+
+
+def _release(key: str, entry: dict, elapsed: float, live=None) -> None:
+    """Move `key` out of `_GENERATIONS` into the bounded `_RELEASED` table with what its completed
+    read published, so the NEXT poll of it can say why it misses instead of a bare unknown handle."""
+    _GENERATIONS.pop(key, None)
+    _RELEASED[key] = {"target": entry.get("target"), "target_name": entry.get("target_name"),
+                      "doc_name": entry.get("doc_name"), "doc_key": entry.get("doc_key"),
+                      "elapsed_seconds": elapsed, "tally": dict(live) if live else None}
+    if len(_RELEASED) > _RELEASED_CAP:
+        _RELEASED.popitem(last=False)
+
+
+def _released_miss(key: str, released: dict) -> str:
+    """The error for a handle `_RELEASED` already answered once: what it completed as and which
+    document, then how to read the same scope live - or, when a different document is active now,
+    that a live-read remedy here would not reach the one that launched it."""
+    tally = released.get("tally")
+    doc_name = released.get("doc_name")
+    where = f" on document '{doc_name}'" if doc_name else ""
+    counts = (f" ({released.get('target')}: {tally['valid']} valid, {tally['errored']} errored)"
+              if tally and released.get("target") else "")
+    name = (released.get("target_name") or "").strip()
+    switched = bool(released.get("doc_key")) and document_key() != released.get("doc_key")
+    if switched:
+        tail = (f"'{doc_name}' is NOT the active document - its live state cannot be read from "
+                f"here. doc_activate '{doc_name}' first.")
+    else:
+        remedy = f"cam_get_status(target='{name}')" if name else "cam_get_status()"
+        tail = f"{remedy} reads the live state."
+    return (f"Handle '{key}' completed at {released.get('elapsed_seconds')} s{counts}{where} and "
+            f"is released - {tail}")
 
 
 # Keyed on _cam_common.is_rail_driven - the same parameter cam_select_geometry feeds a rail pair
@@ -198,6 +236,9 @@ def handler(handle: str = "", target: str = "", include_operations: bool = True)
     if key and key.lower() != "latest":
         entry = _GENERATIONS.get(key)
         if not entry:
+            released = _RELEASED.get(key)
+            if released:
+                return error(_released_miss(key, released))
             return error(
                 f"No generation with handle '{handle}'. Active handles: "
                 f"{', '.join(_GENERATIONS.keys()) or '(none)'}. Omit 'handle' to read live document "
@@ -320,7 +361,7 @@ def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
              if future_done else
              "Still generating in the background - check again later.") + why + count_caveat)
         if future_done:
-            _GENERATIONS.pop(key, None)
+            _release(key, entry, elapsed)
         return ok(payload)
 
     # Health/readiness is NOT re-derived here - it is the _cam_common domain (the single CAM-health
@@ -341,7 +382,7 @@ def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
             + f" The per-op tallies could not be read ({tally_err}), so this rests on the "
             "generation Future alone - cam_get for the job's health." + count_caveat)
         if future_done:
-            _GENERATIONS.pop(key, None)
+            _release(key, entry, elapsed)
         return ok(payload)
 
     # The Future flips isGenerationCompleted a beat BEFORE live op state settles, so completed needs
@@ -375,8 +416,8 @@ def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
                        + " cam_get(include=['operations']) for detail."
                        + health_note + count_caveat + _cam_common.settled_clause(live))
 
-    # Generation finished - drop the registry entry so it does not leak across the session.
-    _GENERATIONS.pop(key, None)
+    # Generation finished - release the entry so a later poll of this handle explains why it misses.
+    _release(key, entry, elapsed, live)
     return ok(payload)
 
 

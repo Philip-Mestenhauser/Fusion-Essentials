@@ -16,7 +16,8 @@ from conftest import (FakeAppearance, FakeAppearances, FakeUnitsManager,
                       FakeDocumentReference, FakeFeature, FakeFeatures, FakeJoint, FakeJoints,
                       FakeModelParameter,
                       FakeMachine, FakeMatrix3D,
-                      FakeMotionLink, FakeMotionLinks, FakePoint, FakeRigidGroup, FakeRigidGroups,
+                      FakeMotionLink, FakeMotionLinks, FakeOperation, FakePoint, FakeRigidGroup,
+                      FakeRigidGroups,
                       FakeSelection, FakeSetups, FakeTimeline, FakeTimelineObject, FakeTool,
                       FakeUserParameter, FakeVector3D,
                       FakeSetup,
@@ -308,6 +309,22 @@ class TestCamJobWorld:
         # and it is one setup behind both reads: a write through the first is read back by the next
         first.stockMode = "PreviousSetupStock"
         assert cam.setups.item(0).stockMode == "PreviousSetupStock"
+
+    def test_a_child_read_twice_is_a_new_wrapper_that_compares_equal(self):
+        # the same contract one level down, over the list the tree walk actually reads: a fake
+        # handing back ONE object per child lets a walk comparing identity across two reads pass
+        # here and match nothing live. No read offers hash(): Setup is measured to refuse it and an
+        # Operation read is unmeasured, so a fake that hashed would teach an answer nothing read.
+        op = FakeOperation("Face1")
+        setup = FakeSetup("Mill", ops=[op])
+        first, second = setup.children.item(0), setup.children.item(0)
+        assert first is not second and first == second and not (first != second)
+        assert first == op and first in [second]     # and it compares equal to the node itself
+        with pytest.raises(TypeError):
+            hash(first)
+        # one operation behind both reads: a write through the first is read back by the next
+        first.name = "Face2"
+        assert setup.children.item(0).name == "Face2" and op.name == "Face2"
 
     def test_a_setup_created_through_the_input_joins_the_walk_with_what_it_was_given(self):
         setups = FakeSetups()

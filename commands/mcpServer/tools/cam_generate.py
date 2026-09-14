@@ -92,11 +92,11 @@ def _launch_reason(facts) -> str:
     return _LAUNCH_REASON.get(facts.get("operation_state"), "state_unread")
 
 
-def _launch_set(rows, skip_valid, cam=None):
+def _launch_set(rows, skip_valid, cam):
     """(the (label, node, reason) rows a launch builds a toolpath for, suppressed count,
     already-valid count) - a suppressed operation carries no toolpath to build, and skip_valid
-    passes over the ones already reading operationState IsValid (0). A path whose own motion is not
-    a number reads that state and is NOT already valid: it is what the caller came to redo."""
+    passes over the ones already reading operationState IsValid (0). `cam` is REQUIRED: without it
+    a path whose motion is not a number reads valid, and skip_valid would pass over it."""
     covered, parked, already_valid = [], 0, 0
     for label, node in rows:
         facts = _cam_common.op_state_facts(node.obj, cam)

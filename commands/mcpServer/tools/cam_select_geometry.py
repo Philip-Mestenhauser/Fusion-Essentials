@@ -1263,6 +1263,19 @@ def _rail_tail(result) -> str:
     return " For a rail pair, see cam_get_status's rail_triage."
 
 
+# MEASURED: selection='sketch' takes every non-construction curve of the sketch, construction
+# lines excluded and projected (isReference) curves included; a ChainSelection given SketchText
+# alone raises "not compatible with input type" - there is no text-object route to select instead.
+_SKETCH_SCOPE_NOTE = (
+    " Every non-construction curve of the sketch is taken; text alone is not selectable - put it "
+    "in its own sketch, or sketch_delete_entity.")
+
+
+def _sketch_scope_tail(result) -> str:
+    """The note clause stating the sketch route's scope, or '' - gated on selection='sketch'."""
+    return _SKETCH_SCOPE_NOTE if result.get("selection") == _SKETCH else ""
+
+
 def _unread_entitlement(result, allowed):
     """`result`, with the disclosure a launch made under an UNREAD isGenerationAllowed flag carries -
     no pre-flight was made, so nothing here excluded anything."""
@@ -1451,10 +1464,10 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
         result["diameter_filter"] = diam_note
 
     # ── generate: LAUNCH async and return - generation runs in the background on its own ──
-    contour = _contour_tail(result)
+    tails = _contour_tail(result) + _sketch_scope_tail(result)
     if not generate:
         result["note"] = ("Selection applied; pass generate=true (or cam_generate) to compute the "
-                          "toolpath.") + contour
+                          "toolpath.") + tails
         return ok(result)
 
     op_name = result["operation"] or operation
@@ -1465,7 +1478,7 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
     if allowed is False:
         result["launched"] = False
         result["entitlement_blocked"] = {"operation": op_name, "strategy": strategy}
-        result["note"] = _BLOCKED_GENERATE.format(strategy=strategy) + contour
+        result["note"] = _BLOCKED_GENERATE.format(strategy=strategy) + tails
         return ok(result)
 
     handle, gerr = _launch_generation(cam, op, op_name)
@@ -1473,7 +1486,7 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
         result["generate_error"] = gerr
         result["note"] = (f"Selection applied but generation failed to launch: {gerr}. The selection "
                           f"is saved - fix the cause, then run "
-                          f"cam_generate(target='{op_name}').") + contour
+                          f"cam_generate(target='{op_name}').") + tails
         return ok(_unread_entitlement(result, allowed))
     result["launched"] = True
     result["handle"] = handle
@@ -1481,7 +1494,7 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
                       f"cam_get_status(target='{op_name}') until completed=true. has_toolpath False "
                       "on completion means no path was produced, and the warning channel can be "
                       "silent there - check the heights and the selection."
-                      + _rail_tail(result) + contour)
+                      + _rail_tail(result) + tails)
     return ok(_unread_entitlement(result, allowed))
 
 

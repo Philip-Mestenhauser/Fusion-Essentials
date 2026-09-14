@@ -241,26 +241,6 @@ def FakeSetup(ops):
     return SharedSetup("Setup1", ops=ops)
 
 
-class _AllOperationsOnlySetup(SharedSetup):
-    """A setup whose .operations reads None, so only allOperations can answer it."""
-
-    def __init__(self, ops):
-        super().__init__("Setup1", ops=ops)
-        self._ops = list(ops)
-
-    @property
-    def operations(self):
-        return None
-
-    @operations.setter
-    def operations(self, value):
-        pass
-
-    @property
-    def allOperations(self):
-        return _NamedCollection(self._ops)
-
-
 def FakeCAM(ops, doc_tools=()):
     """A CAM product holding one setup of `ops`, plus the document tool library the document-scope
     tool reference reads by index."""
@@ -1075,15 +1055,6 @@ class TestParseParameters:
 
 
 class TestFindOperation:
-    def test_falls_back_to_allOperations_when_operations_missing(self, monkeypatch):
-        # A setup that exposes only allOperations (operations is None) must still resolve.
-        op = FakeOp("OnlyAll", {"tool_stepover": "2."})
-        cam = make_cam(_AllOperationsOnlySetup([op]))    # forces the `or allOperations` fallback
-        monkeypatch.setattr(ce, "get_cam", lambda: (cam, None))
-        out = _payload(ce.handler(operation="OnlyAll", parameters={"tool_stepover": "1"}))
-        assert out["operation"] == "OnlyAll"
-        assert op.parameters.itemByName("tool_stepover").expression == "1"
-
     def test_unknown_operation_lists_available_names(self, monkeypatch):
         _install(monkeypatch, op_name="RealOp")
         res = ce.handler(operation="Ghost", parameters={"tool_stepover": "1"})

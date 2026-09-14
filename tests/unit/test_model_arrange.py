@@ -78,9 +78,10 @@ def _sheet_stats_json(*per_envelope):
         }} for i, arranged in enumerate(per_envelope, start=1)]})
 
 
-def _occ(path):
+def _occ(path, ground_to_parent=None):
     return make_occurrence(path=path, component=SimpleNamespace(name=path.split(":")[0]),
-                           transform2=SimpleNamespace(translation=_vec()))
+                           transform2=SimpleNamespace(translation=_vec()),
+                           ground_to_parent=ground_to_parent)
 
 
 class FakeArrangeComponents:
@@ -874,6 +875,79 @@ class TestPlanarFacePreflight:
         assert "gone from the timeline" in res["message"] and "solver='3d'" in res["message"]
 
 
+class TestGroundedPreflight:
+    """MEASURED on a scratch tray (Tray:1 holding P1:1, P2:1): move_originals=true failed the WHOLE
+    arrange with the platform's '3 : Pinned component cannot be arranged' when one shape read
+    isGroundToParent True. A positive read is the only thing this gate refuses on."""
+
+    def test_a_grounded_shape_with_move_originals_is_refused_before_the_add(self):
+        _, af = _install_shapes(_occ("Pinned:1", ground_to_parent=True), _occ("Free:1"))
+        res = ar.handler(boundary_sketch="Boundary", shapes="Pinned:1,Free:1", move_originals=True)
+        assert res["isError"] is True
+        assert "Pinned:1" in res["message"] and "Free:1" not in res["message"]
+        assert "assembly_ground(ground_to_parent=false)" in res["message"]
+        assert af.added is False and af.last_input is None      # nothing created
+
+    def test_the_same_shapes_with_the_flag_false_arrange(self):
+        _, af = _install_shapes(_occ("Pinned:1", ground_to_parent=False), _occ("Free:1"))
+        out = _payload(ar.handler(boundary_sketch="Boundary", shapes="Pinned:1,Free:1",
+                                  move_originals=True))
+        assert out["arranged"] is True and af.added is True
+
+    def test_move_originals_false_is_not_refused_by_this_gate(self):
+        # The copy path was not measured against a grounded shape - the gate leaves it alone.
+        _, af = _install_shapes(_occ("Pinned:1", ground_to_parent=True))
+        out = _payload(ar.handler(boundary_sketch="Boundary", shapes="Pinned:1"))
+        assert out["arranged"] is True and af.added is True
+
+    def test_the_platform_pinned_raise_is_mapped_to_the_shapes_the_preflight_would_have_named(self):
+        # move_originals=false never runs the preflight, so this except-block mapping is the FIRST
+        # read of the flag - it re-derives the same name the gate would have refused on.
+        _, af = _install_shapes(_occ("Pinned:1", ground_to_parent=True))
+
+        def _boom(inp):
+            raise RuntimeError("3 : Arrange1 / Compute Failed // ARRANGE_ITEM_GROUNDED - Pinned "
+                               "component cannot be arranged.")
+
+        af.add = _boom
+        res = ar.handler(boundary_sketch="Boundary", shapes="Pinned:1")
+        assert res["isError"] is True
+        assert "Pinned:1" in res["message"]
+        assert "assembly_ground(ground_to_parent=false)" in res["message"]
+        # "gone from the timeline" is NOT claimed here: unlike the missing-face platform text, this
+        # raise names a feature (Arrange1) that may still be sitting in the timeline - unmeasured.
+
+    def test_an_unnamed_platform_pinned_raise_without_the_code_omits_it(self):
+        # The measured CREATE-path text carries no ARRANGE_ITEM_GROUNDED token - naming it anyway
+        # would assert a platform code nothing here saw. No shape reads True either, so the
+        # sentence still avoids the bare platform string via the remedy, not a fabricated code.
+        _, af = _install_shapes(_occ("Ghost:1"))
+
+        def _boom(inp):
+            raise RuntimeError("3 : Pinned component cannot be arranged.")
+
+        af.add = _boom
+        res = ar.handler(boundary_sketch="Boundary", shapes="Ghost:1")
+        assert res["isError"] is True
+        assert "ARRANGE_ITEM_GROUNDED" not in res["message"]
+        assert "assembly_ground(ground_to_parent=false)" in res["message"]
+
+    def test_an_unnamed_platform_pinned_raise_with_the_code_names_it(self):
+        # The other side: when the raise DOES carry the code and still names no shape, the code is
+        # the one fact this branch actually observed, so it is named.
+        _, af = _install_shapes(_occ("Ghost:1"))
+
+        def _boom(inp):
+            raise RuntimeError("3 : Arrange1 / Compute Failed // ARRANGE_ITEM_GROUNDED - Pinned "
+                               "component cannot be arranged.")
+
+        af.add = _boom
+        res = ar.handler(boundary_sketch="Boundary", shapes="Ghost:1")
+        assert res["isError"] is True
+        assert "ARRANGE_ITEM_GROUNDED" in res["message"]
+        assert "assembly_ground(ground_to_parent=false)" in res["message"]
+
+
 class TestHonesty:
     def test_add_returning_none_is_error(self):
         _, af = _install([_sketch("B")], ["A:1"])
@@ -944,9 +1018,18 @@ class TestHonesty:
         _, af = _install([_sketch("B")], ["A:1", "B:1"])
         out = _payload(ar.handler(boundary_sketch="B", shapes="A:1, B:1"))
         assert out["components_arranged"] == 2 and out["components_unarranged"] == 0
-        # the 3D shape's one map, keyed by the name the JSON carries
-        assert out["statistics"]["Arrange1"]["Components Volume"] == 16
-        assert "cm" in out["note"]
+        # the 3D shape's one map, keyed by the name the JSON carries; mm: 16 cm3 * 1000
+        assert out["statistics"]["Arrange1"]["Components Volume"] == 16000
+        assert "volumes in mm^3" in out["note"]
+        assert "areas are in" not in out["note"]     # this map carries no 'Area' key at all
+
+    def test_a_volume_statistic_converts_to_units_cubed_while_a_count_does_not(self):
+        # mm: cm3 -> mm3 is factor 10 CUBED (x1000) - the boundary an area-shaped (x100) mistake
+        # would miss; 'Components Arranged' is a bare count and must pass through unconverted.
+        _, af = _install([_sketch("B")], ["A:1"])
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1"))
+        assert out["statistics"]["Arrange1"]["Components Volume"] == 16000
+        assert out["statistics"]["Arrange1"]["Components Arranged"] == 1
 
     def test_the_plane_envelope_statistics_shape_is_read_per_envelope(self):
         # The 2D plane envelope answers {"envelopes": [{name, statistics}]} rather than one
@@ -958,8 +1041,18 @@ class TestHonesty:
                                   quantity=2))
         assert out["components_arranged"] == 6
         assert out["components_unarranged"] is None
-        assert out["statistics"]["Envelope1"]["Envelope Area"] == 600
+        assert out["statistics"]["Envelope1"]["Envelope Area"] == 60000    # mm: 600 cm2 * 100
         assert "null rather than zero" in out["note"]
+
+    def test_an_area_statistic_converts_to_units_squared_while_a_count_does_not(self):
+        # mm: cm2 -> mm2 is factor 10 SQUARED (x100), the boundary a linear-length mistake would
+        # miss; 'Envelopes Quantity' is a bare count and must pass through unconverted.
+        _, af = _install([], ["A:1"])
+        af.statistics = _sheet_stats_json(1)
+        out = _payload(ar.handler(shapes="A:1", solver="rectangular", envelope_plane="xy",
+                                  envelope_length=300, envelope_width=200))
+        assert out["statistics"]["Envelope1"]["Envelope Area"] == 60000
+        assert out["statistics"]["Envelope1"]["Envelopes Quantity"] == 1
 
     def test_the_per_envelope_counts_are_summed(self):
         _, af = _install([], ["A:1", "B:1", "C:1"])
@@ -1055,3 +1148,23 @@ class TestHonesty:
         af.add = _moving_add
         out = _payload(ar.handler(boundary_sketch="B", shapes="A:1"))
         assert out["moved"] == ["A:1"]
+
+    def test_the_shortfall_and_units_clauses_compose_within_the_wire_budget(self):
+        # This composes the partial-shortfall clause with the new units sentence (266 chars) -
+        # test_prose_budget cannot see a runtime composition, so it is measured here. NOT the
+        # reachable worst case (shortfall + no-extent + the COPIES clause + units + envelope-cap
+        # composes to 628, a pre-existing overflow this item did not cause - ledgered separately).
+        design, af = _install([], ["A:1", "B:1", "C:1"])
+        af.unarranged = 1
+        real_add = af.add
+        def _moving_add(inp):
+            design.rootComponent.allOccurrences[0].transform2.translation = _vec(5.0, 0.0, 0.0)
+            return real_add(inp)
+        af.add = _moving_add
+        out = _payload(ar.handler(shapes="A:1, B:1, C:1", solver="rectangular",
+                                  envelope_plane="xy", envelope_length=300, envelope_width=200,
+                                  partial=True))
+        note = out["note"]
+        assert "did NOT fit" in note and "volumes in mm^3" in note
+        assert "restructured" in note      # the short clause: this scenario MOVED an input too
+        assert len(note) <= 400, len(note)      # test_prose_budget.NOTE_BUDGET_CHARS

@@ -11,13 +11,14 @@ from tests.fakes.geometry import FakePoint, FakeVector3D
 from tests.fakes.scaffold import _NamedCollection, fusion_fake
 
 
-# ── CAM tree fakes (setup / folder / operation) ────────────────────────────
+# ── CAM tree fakes (setup / folder / operation / container / base node) ────
 #
-# The shared object model for the CAM setup/operation tree every cam_* tool walks. The one
-# load-bearing behavior lives here ONCE: allOperations mirrors the measured live flatten
-# (BEHAVIOR flags) - folder/pattern children are flattened IN while the folder/pattern
-# CONTAINERS are DROPPED - so a container is only reachable through the explicit
-# .operations/.folders/.patterns walk, exactly like live Fusion.
+# The shared object model for the CAM setup tree every cam_* tool walks. Two load-bearing
+# behaviors live here ONCE. `children` is the ONE ordered list a parent keeps every child in, and
+# the walk classifies each by CAST - so each child carries the `_cam_kind` marker the cast stubs
+# answer from, and a child a collection never lists (a container, a base node) is reachable there
+# and nowhere else. allOperations mirrors the measured live flatten (BEHAVIOR flags): folder and
+# pattern children are flattened IN while the CONTAINERS are DROPPED.
 
 @fusion_fake(live_type="Operation", facts=("shape-dump-cam-world",))
 class FakeOperation:
@@ -62,14 +63,30 @@ class FakeOperation:
 @fusion_fake(live_type="CAMFolder", facts=("shape-dump-cam-world", "cam-alloperations-shape"))
 class FakeCAMFolder:
     """A CAM folder/pattern container: .operations/.folders/.patterns hold the DIRECT children
-    (Fusion's count/item protocol); allOperations applies the measured flatten (see the section
-    note above). Use it for a pattern too - the tools classify nodes STRUCTURALLY (by which
-    collection yielded them), never by type name."""
-    def __init__(self, name, ops=(), folders=(), patterns=()):
+    (Fusion's count/item protocol) and `children` hands them back as one list - this fake's own
+    three collections in construction order then `others`, where live it is the browser's
+    interleaved creation order. Use it for a pattern too: one handed in as `patterns=` casts as
+    CAMPattern; `others` takes the children no per-kind collection lists at all."""
+
+    _cam_kind = "folder"        # the cast the walk classifies it by (see cam_kind)
+
+    def __init__(self, name, ops=(), folders=(), patterns=(), others=()):
         self.name = name
         self.operations = _NamedCollection(list(ops))
         self.folders = _NamedCollection(list(folders))
         self.patterns = _NamedCollection(list(patterns))
+        self._others = list(others)
+        # one fake serves the folder and the pattern alike, so the collection a child was handed in
+        # under is what re-stamps which of the two it casts as.
+        for child in patterns:
+            child._cam_kind = "pattern"
+
+    @property
+    def children(self):
+        """Every direct child, a FRESH read each time (see _NodeRead) - the one list the tree walk
+        reads and classifies by cast."""
+        return _ChildrenCollection(list(self.operations) + list(self.folders)
+                                   + list(self.patterns) + list(self._others))
 
     @property
     def allOperations(self):
@@ -80,6 +97,10 @@ class FakeCAMFolder:
                     flat.extend(child.allOperations)
                 if not _api_facts.BEHAVIOR["alloperations_drops_folder_objects"]:
                     flat.append(child)
+        # MEASURED: a container's OPERATIONS are in the setup's allOperations while the container
+        # itself and the base nodes - which answer no allOperations at all - are not.
+        for child in self._others:
+            flat.extend(list(getattr(child, "allOperations", ()) or ()))
         return _NamedCollection(flat)
 
 
@@ -99,10 +120,12 @@ class FakeSetup(FakeCAMFolder):
 
     _UNSET = object()
 
-    def __init__(self, name, ops=(), folders=(), patterns=(), parameters=None, is_active=False,
-                 activate_ok=True, activate_lies=False, machine=_UNSET, has_error=_UNSET,
-                 error=_UNSET):
-        super().__init__(name, ops=ops, folders=folders, patterns=patterns)
+    _cam_kind = "setup"         # a Setup casts as neither Operation nor CAMFolder
+
+    def __init__(self, name, ops=(), folders=(), patterns=(), others=(), parameters=None,
+                 is_active=False, activate_ok=True, activate_lies=False, machine=_UNSET,
+                 has_error=_UNSET, error=_UNSET):
+        super().__init__(name, ops=ops, folders=folders, patterns=patterns, others=others)
         self.parameters = parameters
         if machine is not FakeSetup._UNSET:
             self.machine = machine
@@ -120,6 +143,68 @@ class FakeSetup(FakeCAMFolder):
         if self._activate_ok and not self._activate_lies:
             self.isActive = True
         return self._activate_ok
+
+
+@fusion_fake(live_type="CAMAdditiveContainer", facts=("shape-cam-additive-container",))
+class _AdditiveContainer:
+    """adsk::cam::CAMAdditiveContainer - what an additive strategy folder lands as, holding its
+    operations in `children` / `allOperations` ALONE: operations, folders, patterns and hasToolpath
+    are ABSENT on it (a reach raises AttributeError, as live), so this fake carries none."""
+
+    _cam_kind = "container"
+
+    def __init__(self, name, strategy="additive_support_folder", ops=(), parent=None,
+                 suppressed=False):
+        self.name = name
+        self.strategy = strategy
+        self.isSuppressed = suppressed
+        self.parent = parent            # live: the SETUP's name, read off the container
+        self._ops = list(ops)
+
+    @property
+    def children(self):
+        return _ChildrenCollection(list(self._ops))
+
+    @property
+    def allOperations(self):
+        return _NamedCollection(list(self._ops))
+
+
+@fusion_fake(live_type="OperationBase", facts=("shape-cam-additive-container",))
+class _BaseNode:
+    """A bare adsk::cam::OperationBase - where hole recognition and the additive individual
+    strategies land: a name, a strategy and the suppression flag; `children` and `parent` are
+    ABSENT on it (a reach raises AttributeError, as live), so this fake carries neither."""
+
+    _cam_kind = "base"
+
+    def __init__(self, name, strategy="hole_recognition", suppressed=False):
+        self.name = name
+        self.strategy = strategy
+        self.isSuppressed = suppressed
+
+
+def cam_kind(obj):
+    """The CAM type a fake stands for when the walk CASTS it - 'folder' / 'pattern' / 'container' /
+    'base', off the `_cam_kind` marker its parent stamped or it declares. None for an operation and
+    for anything else, which is what makes Operation.cast the only cast that answers for those."""
+    return getattr(obj, "_cam_kind", None)
+
+
+def cam_cast(kind):
+    """adsk.cam.<CAMFolder|CAMPattern|CAMAdditiveContainer>.cast over the shared fakes: the fake
+    standing for `kind` passes through and every other object casts None, as live refuses a type
+    that is not its own."""
+    def cast(obj):
+        return obj if cam_kind(obj) == kind else None
+    return cast
+
+
+def operation_cast(obj):
+    """adsk.cam.Operation.cast over the shared fakes: a container, a folder, a pattern or a base
+    node answers None the way live does, and everything else passes through - so a test's own
+    double still flows unchanged."""
+    return None if cam_kind(obj) else obj
 
 
 @fusion_fake(factory_for="_NamedCollection")
@@ -177,37 +262,64 @@ def strategy_factory(table, seen=None):
     return create
 
 
-def _underlying(obj):
-    """The setup one read stands for - the object itself for anything that is not a read."""
-    return object.__getattribute__(obj, "_setup") if isinstance(obj, _SetupRead) else obj
+def underlying(obj):
+    """The node one read stands for - the object itself for anything that is not a read. A test
+    telling one fake from another by isinstance goes through this: a read is a DISTINCT object of
+    its own type, exactly as a live wrapper is."""
+    return object.__getattribute__(obj, "_node") if isinstance(obj, _NodeRead) else obj
 
 
-class _SetupRead:
-    """ONE read of a setup out of cam.setups. MEASURED on one setup read twice: `is` False, `==`
-    True, `==` another setup False, ids differ, and hash() RAISES TypeError - the live wrapper
-    defines equality and NO hash. Reads and writes forward to the setup itself, so a test writing
-    through one read sees it through the next."""
+class _NodeRead:
+    """ONE read of a CAM node out of a Fusion collection: a DISTINCT Python object per read that
+    compares EQUAL to any other read of the same node (cam-setup-read-identity), so a resolver
+    comparing `is` across two walks matches nothing here either. Reads and writes forward to the
+    node. Setup is measured to REFUSE hash(); an Operation read's hashability is unmeasured, so no
+    read offers one rather than teaching an answer nothing read."""
 
-    __slots__ = ("_setup",)
+    __slots__ = ("_node",)
 
-    def __init__(self, setup):
-        object.__setattr__(self, "_setup", setup)
+    def __init__(self, node):
+        object.__setattr__(self, "_node", node)
 
     def __getattr__(self, name):
-        return getattr(object.__getattribute__(self, "_setup"), name)
+        return getattr(object.__getattribute__(self, "_node"), name)
 
     def __setattr__(self, name, value):
-        setattr(object.__getattribute__(self, "_setup"), name, value)
+        setattr(object.__getattribute__(self, "_node"), name, value)
 
     def __eq__(self, other):
-        return _underlying(self) is _underlying(other)
+        return underlying(self) is underlying(other)
 
-    __hash__ = None         # live: hash(setup) raises TypeError: unhashable type 'Setup'
+    __hash__ = None         # see the docstring: measured on Setup, unmeasured on an Operation
+
+
+class _SetupRead(_NodeRead):
+    """One read of a SETUP. MEASURED on one setup read twice (cam-setup-read-identity): `is` False,
+    `==` True, `==` another setup False, and hash() RAISES TypeError - the live wrapper defines
+    equality and NO hash."""
+
+    __slots__ = ()
+
+
+class _ChildrenCollection(_NamedCollection):
+    """A parent's `children`: the counted/by-name walk, handing back a FRESH read per lookup the
+    way live does."""
+
+    def item(self, i):
+        got = super().item(i)
+        return None if got is None else _NodeRead(got)
+
+    def itemByName(self, name):
+        got = super().itemByName(name)
+        return None if got is None else _NodeRead(got)
+
+    def __iter__(self):
+        return (_NodeRead(c) for c in super().__iter__())
 
 
 class _SetupsCollection(_NamedCollection):
-    """cam.setups: the counted/by-name walk, handing back a FRESH read per lookup the way live does
-    - so a resolver comparing `is` across two walks matches nothing here either."""
+    """cam.setups: the same fresh-read-per-lookup walk, handing back the SETUP read - the one that
+    also refuses hash()."""
 
     def item(self, i):
         got = super().item(i)

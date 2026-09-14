@@ -293,7 +293,7 @@ def _applied_clause(parts):
     return f" ({'. '.join(parts)}.)" if parts else ""
 
 
-_PARAM_NOTE =("Parameters set. changed[].value is evaluated and may lag; changed[].after plus "
+_PARAM_NOTE = ("Parameters set. changed[].value is evaluated and may lag; changed[].after plus "
                "the evaluation gate confirm the write.")
 
 

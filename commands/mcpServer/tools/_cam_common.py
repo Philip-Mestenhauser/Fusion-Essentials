@@ -277,7 +277,7 @@ def setup_names(cam):
     return [safe(lambda s=s: s.name) for s in setups(cam)]
 
 
-# One node of the CAM tree: kind is the collection that yielded it, path the 'Setup / Folder / Op'
+# One node of the CAM tree: kind is the cast the child answered to, path the 'Setup / Folder / Op'
 # breadcrumb, parent the node that contained it (a name carrying ' / ' splits the path wrong).
 CamNode = collections.namedtuple("CamNode", ["obj", "kind", "name", "setup", "path", "parent"],
                                  defaults=(None,))
@@ -293,35 +293,43 @@ def _segment(name):
     return _UNREAD_SEGMENT if name is None else name
 
 
-# A parent (Setup/CAMFolder/CAMPattern) keeps its operations, folders and patterns in three
-# SEPARATE collections, so only same-kind children of one parent sit in a single ordered list.
+# The per-KIND ordered collection one parent keeps each class of child in - the row a reorder moves
+# inside, and the membership a folder listing reads. The tree walk below reads `children` instead.
 CHILD_COLLECTIONS = {"operation": "operations", "folder": "folders", "pattern": "patterns"}
+
+# A child is classified by CAST, never by the collection that yielded it: `children` is ONE ordered
+# list holding the operations, folders and patterns PLUS the additive containers and the bare nodes
+# those three collections never list.
+_CHILD_CASTS = (("folder", "CAMFolder"), ("pattern", "CAMPattern"),
+                ("container", "CAMAdditiveContainer"))
+
+# The kinds that HOLD other nodes; every other kind is a leaf this walk does not descend into.
+_PARENT_KINDS = ("folder", "pattern", "container")
+
+
+def _child_kind(child):
+    """The CamNode kind ONE child reads as: folder/pattern/container by cast, 'operation' for an
+    Operation, and 'base' for a child that casts as none of them - the hole-recognition and
+    individual-strategies nodes, which are an OperationBase and nothing else."""
+    for kind, type_name in _CHILD_CASTS:
+        family = getattr(adsk.cam, type_name, None)
+        if family is not None and safe(lambda family=family: family.cast(child)) is not None:
+            return kind
+    return "operation" if safe(lambda: adsk.cam.Operation.cast(child)) is not None else "base"
 
 
 def _walk_children(parent, setup_name, path, out, parent_node=None):
-    """Collect CamNodes for everything nested under `parent` (a Setup/CAMFolder/CAMPattern) -
-    setup.allOperations DROPS the folder/pattern containers, so those are reached by recursing
-    `.folders`/`.patterns`; a parent exposing no `.operations` degrades to that flatten."""
-    ops = safe(lambda: getattr(parent, CHILD_COLLECTIONS["operation"]))
-    if ops is not None:
-        for o in iter_collection(ops):
-            nm = safe(lambda o=o: o.name)
-            out.append(CamNode(o, "operation", nm, setup_name,
-                               f"{path} / {_segment(nm)}", parent_node))
-        for kind in ("folder", "pattern"):
-            for c in iter_collection(safe(lambda k=kind: getattr(parent, CHILD_COLLECTIONS[k]))):
-                nm = safe(lambda c=c: c.name)
-                child_path = f"{path} / {_segment(nm)}"
-                child_node = CamNode(c, kind, nm, setup_name, child_path, parent_node)
-                out.append(child_node)
-                _walk_children(c, setup_name, child_path, out, child_node)
-        return
-    for o in iter_collection(safe(lambda: parent.allOperations)):
-        op = adsk.cam.Operation.cast(o)
-        if op is not None:
-            nm = safe(lambda op=op: op.name)
-            out.append(CamNode(op, "operation", nm, setup_name,
-                               f"{path} / {_segment(nm)}", parent_node))
+    """Collect CamNodes for everything nested under `parent` (a Setup, or a container below one),
+    off the ONE `children` list Fusion keeps them in - a parent whose `children` does not read holds
+    nothing this walk can reach, which is what both base nodes answer."""
+    for child in iter_collection(safe(lambda: parent.children)):
+        kind = _child_kind(child)
+        nm = safe(lambda child=child: child.name)
+        child_path = f"{path} / {_segment(nm)}"
+        node = CamNode(child, kind, nm, setup_name, child_path, parent_node)
+        out.append(node)
+        if kind in _PARENT_KINDS:
+            _walk_children(child, setup_name, child_path, out, node)
 
 
 def _setup_node(s):
@@ -332,9 +340,16 @@ def _setup_node(s):
     return CamNode(s, "setup", nm, nm, _segment(nm), None)
 
 
+def setup_nodes(cam):
+    """A CamNode per Setup in the document, in cam.setups order - the rootless pool every setup
+    resolve runs over, and the order a position-sensitive caller reads."""
+    return [_setup_node(s) for s in setups(cam)]
+
+
 def tree_nodes(setup_obj):
-    """CamNodes for ONE setup subtree: the setup itself, then every operation/folder/pattern nested
-    anywhere under it - the setup-scoped slice of walk_cam_tree."""
+    """CamNodes for ONE setup subtree: the setup itself, then every operation, folder, pattern,
+    container and base node under it - the setup-scoped slice of walk_cam_tree. A caller wanting
+    operations alone filters kind == 'operation'."""
     node = _setup_node(setup_obj)
     nodes = [node]
     _walk_children(setup_obj, node.name, node.path, nodes, node)
@@ -343,8 +358,8 @@ def tree_nodes(setup_obj):
 
 def walk_cam_tree(cam):
     """Every node of the CAM tree as CamNode(obj, kind, name, setup, path, parent): each Setup plus
-    all operations/folders/patterns nested anywhere under it. The ONE traversal every CAM tool walks
-    and resolves names over."""
+    every operation, folder, pattern, container and base node under it. The ONE traversal every CAM
+    tool walks and resolves names over; kind is what narrows it."""
     nodes = []
     for s in setups(cam):
         nodes.extend(tree_nodes(s))
@@ -434,7 +449,7 @@ def resolve_cam_node(cam, name, kinds=("operation",), setup=None, label=None, no
     elif nodes is not None:
         pass                                  # the caller's own walk, reused rather than repeated
     elif set(kinds) == {"setup"}:
-        nodes = [_setup_node(s) for s in setups(cam)]
+        nodes = setup_nodes(cam)
     else:
         nodes = walk_cam_tree(cam)
     label = label or "/".join(kinds)
@@ -491,15 +506,17 @@ def resolve_cam_node(cam, name, kinds=("operation",), setup=None, label=None, no
 
 
 def operation_nodes_under(node):
-    """Every operation CamNode nested under one setup/folder/pattern NODE, each keeping the
-    'Setup / ... / op' breadcrumb that separates two operations of one name."""
+    """Every operation CamNode nested under one setup/folder/pattern/container NODE - the walk
+    filtered to kind 'operation' - each keeping the 'Setup / ... / op' breadcrumb that separates
+    two operations of one name."""
     nodes = []
     _walk_children(node.obj, node.setup, node.path, nodes, node)
     return [n for n in nodes if n.kind == "operation"]
 
 
 def operations_under(parent):
-    """Every real Operation nested anywhere under one setup/folder/pattern OBJECT; a caller
+    """Every real Operation nested anywhere under one setup/folder/pattern/container OBJECT - the
+    walk filtered to kind 'operation', so no folder, container or base node rides along; a caller
     naming the results takes operation_nodes_under instead."""
     nodes = []
     _walk_children(parent, None, "", nodes)

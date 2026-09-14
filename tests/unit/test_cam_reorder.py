@@ -244,19 +244,21 @@ class _VanishingMover(Operation):
         return True
 
 
-class _AllOperationsOnly(_Movable):
-    """A container that answers only allOperations - the walk's degraded path. Its children are in
-    the tree, but the parent exposes no per-kind collection to re-read an order off, which no
-    shared CAM fake models (FakeCAMFolder always answers all three)."""
+class _ChildrenOnly(_Movable):
+    """A container whose children the tree walk reaches through `children`, and which answers NO
+    per-kind collection to re-read an order off - which no shared CAM fake models (FakeCAMFolder
+    always answers all three)."""
 
     _COLL = "patterns"
+    _cam_kind = "pattern"
 
     def __init__(self, name, ops=()):
         super().__init__()
         self.name = name
-        self.allOperations = _NamedCollection(list(ops))
-        for child in self.allOperations:
-            child._home, child._parent = self.allOperations._items, self
+        self.children = _NamedCollection(list(ops))
+        self.allOperations = self.children
+        for child in self.children:
+            child._home, child._parent = self.children._items, self
 
 
 class TestLyingMove:
@@ -390,7 +392,7 @@ class TestPublishedOrder:
         # the two items ARE same-kind children of one parent, but that parent answers no
         # 'operations' collection to re-read - so there is no order to judge the landing by, and
         # the payload says the order was not read rather than passing OR failing the move on it.
-        pat = _AllOperationsOnly("Pattern1", ops=[_StuckMover("A"), _StuckMover("B")])
+        pat = _ChildrenOnly("Pattern1", ops=[_StuckMover("A"), _StuckMover("B")])
         _install(monkeypatch, [Setup("Setup1", patterns=[pat])])
         out = _payload(cr.handler(entity="A", position="after", reference="B"))
         assert out["order"] is None and out["order_unverified"] is True

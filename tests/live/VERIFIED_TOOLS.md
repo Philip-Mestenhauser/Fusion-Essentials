@@ -29,10 +29,10 @@ recomputes the hash and fails on any difference, so a green suite cannot ride on
 run that never saw the current code or a weakened predicate. Only a run with zero
 FAIL/blocked/pass* steps rewrites this file.
 
-Stamp: source 1aaf473d41e663ffdadb178e695a1d3ba641329d63fba71f42a166f041f9dc08 | Fusion 2705.1.15 | verified 2026-09-14
-Loaded: implementation f5b96259d4e3ac88de562cdbbae6ccb4b87d94a5fb857944ec8fd5fc87aaef57 | schema 824a53297dfcad152a08df4ec5efdc0c303aa79a526daf9591923b659a932b02 | load 794a45aa6b7f42d2a976995aba34d558 | session f4f68aa8f4084f588b0d6b42a5b8721b
+Stamp: source a058429b5e9e29576016dba40d377e7ad63c3dc8d87e4a409507d682e409c8b7 | Fusion 2705.1.15 | verified 2026-09-14
+Loaded: implementation 028b55e49a4d97583feedecce6462ebb4d7e9e3eb59b87bf2ac683ae0bb3eec8 | schema 89e23832211737809b8889ec0b6fbda6c83e3610eb1bf47e5d7d5fa4513d6f10 | load a28cde8b6b634b0bb4d3fb62c6964968 | session ad73d4b23f7c4afea335a38ba4cc1f94
 
-184 covered / 0 called / 1 refusals-only / 6 skipped(reason) / 0 pending
+185 covered / 0 called / 1 refusals-only / 6 skipped(reason) / 0 pending
 
 | act | mode |
 |---|---|
@@ -163,6 +163,7 @@ Loaded: implementation f5b96259d4e3ac88de562cdbbae6ccb4b87d94a5fb857944ec8fd5fc8
 | doc_update_xref | covered | walk the host's one reference with only_out_of_date true, THREE times: straight after the insert, where the bucket is reported (measured: a just-inserted xref read out of date, bound a version behind the source's stream); again immediately, where nothing is stale and it is SKIPPED; and once more after the source is edited and saved, where it is UPDATED. A row in each bucket is what makes the partition a measurement - only_out_of_date false can never fill 'skipped' |
 | drawing_add_sketch | covered | draw a line chain, a rectangle and a circle on the sheet - four curves |
 | drawing_create | covered | meet every guard the drawing generator sits behind, each settled before the tool reaches for a cloud source: the shaded style with no member to set, the two centre annotations with no enum family on this build, a tangent-edge value outside the Choice, manual creation with no template, and a sheet size from the other standard - none of them creating anything, and the session healthy afterwards. Then the CREATION path, on the cloud tier: an A3 ISO drawing generated from the saved source, its own name and lineage URN read off the DataFile that landed |
+| drawing_delete_sketch | covered |  |
 | drawing_dimension | covered | dimension the generated view with the baseline strategy |
 | drawing_edit_sheet | covered | add a named sheet with the count read either side; it comes after every beat needing the generated views, since an add makes the NEW sheet active |
 | drawing_export | covered | write the drawing to PDF and to DXF, each measured by its bytes on disk |

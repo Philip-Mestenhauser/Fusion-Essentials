@@ -16,7 +16,9 @@ from ._cam_common import get_cam, nc_program_nodes, resolve_cam_node, walk_cam_t
 
 app = adsk.core.Application.get()
 
-_KINDS = ("setup", "operation", "folder", "pattern", "nc_program")
+# 'base' is a browser node that is no operation - hole recognition, the additive individual
+# strategies. MEASURED: OperationBase.deleteMe() removed one. An additive CONTAINER is not offered.
+_KINDS = ("setup", "operation", "folder", "pattern", "base", "nc_program")
 
 
 def _pool(cam):
@@ -89,7 +91,8 @@ tool = (
         name="cam_delete",
         description=TOOL_DESCRIPTION,
         input_param_name="entity",
-        input_param_description="Setup / operation / folder / pattern / NC program name.",
+        input_param_description=("Setup / operation / folder / pattern / NC program name, or an "
+                                 "other_nodes row from cam_get."),
     )
     .strict_schema()
 )

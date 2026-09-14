@@ -2,7 +2,7 @@
 
 _Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails the suite if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
-**Tools:** 191  |  **Input-kinds:** 22  |  write-status: `·` read · `✎` write · `⚠` destructive
+**Tools:** 192  |  **Input-kinds:** 22  |  write-status: `·` read · `✎` write · `⚠` destructive
 
 ## Input kinds — reference EXISTING geometry/structure with these (don't hand-roll a name/index)
 
@@ -276,6 +276,8 @@ Produces: file_path, size_bytes. |
 | ✎ | `drawing_add_sketch` | Draw 2D geometry on a NEW sketch on a sheet of the active 2D drawing document.
 Produces: sketch_name, curves_landed. |
 | ✎ | `drawing_create` | Create a 2D drawing from the active design |
+| ⚠ | `drawing_delete_sketch` | Delete a drawing sketch by exact name from a sheet of the active 2D drawing document.
+Produces: sketch_count. |
 | ✎ | `drawing_dimension` | Auto-dimension one view on a named sheet of the active drawing - the API's route to dimensions.
 Produces: document_modified. |
 | ⚠ | `drawing_edit_sheet` | Manage the active 2D drawing's sheets - add, copy, delete, rename, set_size, set_orientation, or tidy_up (lay a sheet's views out again). |

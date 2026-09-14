@@ -24,6 +24,7 @@ from conftest import (
     FakeDataProject,
     FakeDocumentReference,
     FakeFusionDocument,
+    FakeCAMFolder as _SharedFolder,
     FakeJoint as _SharedJoint,
     FakeOperation,
     FakeSetup as _SharedSetup,
@@ -37,6 +38,8 @@ from conftest import (
     MakeComp,
     MakeDesign,
     Viewport,
+    _AdditiveContainer,
+    _BaseNode,
     _NamedCollection,
     load_tool,
     make_bbox,
@@ -199,27 +202,17 @@ class FakeSetup(_SharedSetup):
         super().__init__(name, ops=ops)
 
 
-class _OpFolder:
-    """A CAMFolder: the direct-children collection the shared walk recurses through, which is the
-    only place the folder objects exist - setup.allOperations flattens past them."""
+class _OpFolder(_SharedFolder):
+    """The shared CAM folder taking its operations positionally, as this file's rollups build it -
+    the folder objects exist only in the walk, since setup.allOperations flattens past them."""
     def __init__(self, name, ops):
-        self.name = name
-        self.operations = _Coll(ops)
-        self.folders = _Coll([])
-        self.patterns = _Coll([])
+        super().__init__(name, ops=ops)
 
 
-class _FoldersSetup:
-    """A Setup whose operations are reachable BOTH ways: .operations + .folders (what the walk
-    descends, keeping the containers) and .allOperations (the flat list the census counts against,
-    holding the same operations with the folders dropped)."""
-    def __init__(self, name, ops=(), folders=()):
-        self.name = name
-        self.operations = _Coll(list(ops))
-        self.folders = _Coll(list(folders))
-        self.patterns = _Coll([])
-        nested = [o for f in folders for o in f.operations]
-        self.allOperations = _Coll(list(ops) + nested)
+class _FoldersSetup(_SharedSetup):
+    """A Setup whose operations are reachable BOTH ways: `children` (what the walk descends,
+    keeping the containers) and .allOperations (the flat list the census counts against, holding
+    the same operations with the folders dropped)."""
 
 
 class FakeOp:
@@ -744,19 +737,19 @@ class TestCam:
         # read. A row is named by its whole chain or by its own name - never by a breadcrumb with a
         # hole in the middle. The sibling in the same list still gets its own, which is what shows
         # the decision is per row.
-        class _BlindNameFolder:
-            def __init__(self, ops):
-                self.operations = _Coll(ops)
-                self.folders = _Coll([])
-                self.patterns = _Coll([])
-
+        class _BlindNameFolder(_SharedFolder):
             @property
             def name(self):
                 raise RuntimeError("folder name unreadable")
 
+            @name.setter
+            def name(self, value):
+                pass                    # inert, so the shared container protocol still builds
+
         out = self._orient_setups(monkeypatch, [
             _FoldersSetup("Front", folders=[_OpFolder("Rough", [FakeOp(False, name="Bore")]),
-                                            _BlindNameFolder([FakeOp(False, name="Bore")])])])
+                                            _BlindNameFolder("ignored",
+                                                             ops=[FakeOp(False, name="Bore")])])])
         listed = out["cam"]["empty_toolpaths"]
         assert listed == ["Front / Rough / Bore", "Bore"]
         assert not any("None" in n for n in listed)
@@ -806,17 +799,34 @@ class TestCam:
         assert listed[0] == "Front / Dup"          # its namesake was cut, the row is still told apart
         assert out["cam"]["empty_toolpath_operations"] == wo._EMPTY_NAME_CAP + 2
 
+    def test_a_container_held_operation_counts_and_a_base_node_does_not(self, monkeypatch):
+        # the census counts kind == 'operation' ONLY, and it is compared against the setup's own
+        # allOperations - which holds a container's operations and neither the container nor the
+        # base node beside it. Counting the base node would also make that census read long.
+        # the namesake pair is what shows the breadcrumb names the CONTAINER a row sits in.
+        held = _AdditiveContainer("Orientations", ops=[FakeOp(False, name="Bore")])
+        out = self._orient_setups(monkeypatch, [
+            _FoldersSetup("Build", ops=[FakeOp(False, name="Bore")],
+                          others=[held, _BaseNode("Strategies1")])])
+        assert out["cam"]["total_operations"] == 2
+        assert out["cam"]["empty_toolpaths"] == ["Build / Bore", "Build / Orientations / Bore"]
+        assert "operations_unread" not in out["cam"]     # the walk MEETS the declared count
+
     def test_a_setup_whose_name_does_not_read_keeps_the_operation_name(self, monkeypatch):
         # An empty discriminator is not a label: told_apart keeps the plain name, so a setup whose
         # name RAISES never renders as half of an address. The sibling in the same list still gets
         # its own, which is what shows the row-by-row decision.
-        class _BlindNameSetup:
+        class _BlindNameSetup(_SharedSetup):
             def __init__(self, ops):
-                self.allOperations = _Coll(ops)
+                super().__init__("ignored", ops=ops)
 
             @property
             def name(self):
                 raise RuntimeError("setup name unreadable")
+
+            @name.setter
+            def name(self, value):
+                pass                    # inert, so the shared container protocol still builds
 
         out = self._orient_setups(monkeypatch, [
             _BlindNameSetup([FakeOp(False, name="Rest Finishing")]),
@@ -830,13 +840,17 @@ class TestCam:
         # carrying NO operation name at all - ' (operation 1)' - which names nothing and reaches
         # the wire beside a count that says two operations are empty. A repeated plain name is the
         # honest rendering: told_apart's own rule, and what a caller can still pass to cam_get.
-        class _BlindNameSetup:
+        class _BlindNameSetup(_SharedSetup):
             def __init__(self, ops):
-                self.allOperations = _Coll(ops)
+                super().__init__("ignored", ops=ops)
 
             @property
             def name(self):
                 raise RuntimeError("setup name unreadable")
+
+            @name.setter
+            def name(self, value):
+                pass                    # inert, so the shared container protocol still builds
 
         out = self._orient_setups(monkeypatch, [
             _BlindNameSetup([FakeOp(False, name="Bore"), FakeOp(False, name="Bore")])])
@@ -935,7 +949,8 @@ class TestCam:
                     raise RuntimeError("operation cannot be read")
                 return self._i[i]
 
-        cam = FakeCAM([type("S", (), {"allOperations": _ShortCollection([FakeOp(True)])})()])
+        short = _ShortCollection([FakeOp(True)])
+        cam = FakeCAM([type("S", (), {"children": short, "allOperations": short})()])
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
         _install(active_product=des, doc=_doc(design=des, cam=cam))
@@ -954,7 +969,8 @@ class TestCam:
             def item(self, i):
                 raise RuntimeError("item cannot be read")
 
-        cam = FakeCAM([type("S", (), {"allOperations": _NoCount()})()])
+        blind = _NoCount()
+        cam = FakeCAM([type("S", (), {"children": blind, "allOperations": blind})()])
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
         _install(active_product=des, doc=_doc(design=des, cam=cam))
@@ -981,7 +997,8 @@ class TestCam:
                 return self._i[i]
 
         broken = FakeOp(False, name="Broken", toolpath_valid=False, errored=True)
-        cam = FakeCAM([type("S", (), {"allOperations": _ShortCollection([broken])})()])
+        short = _ShortCollection([broken])
+        cam = FakeCAM([type("S", (), {"children": short, "allOperations": short})()])
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
         _install(active_product=des, doc=_doc(design=des, cam=cam))
@@ -1008,7 +1025,8 @@ class TestCam:
 
         stale = FakeOp(False, name="Stale", toolpath_valid=False,
                        state=self._STATES.IsInvalidOperationState)
-        cam = FakeCAM([type("S", (), {"allOperations": _ShortCollection([stale])})()])
+        short = _ShortCollection([stale])
+        cam = FakeCAM([type("S", (), {"children": short, "allOperations": short})()])
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
         _install(active_product=des, doc=_doc(design=des, cam=cam))

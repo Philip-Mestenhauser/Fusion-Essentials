@@ -26,8 +26,9 @@ from types import SimpleNamespace
 import adsk.cam
 import pytest
 
-from conftest import (_FakeObjectCollection, _NamedCollection, _Strategy, _make_object_collection,
-                      load_tool, make_cam, make_occurrence, strategy_factory, wcs_params)
+from conftest import (_AdditiveContainer, _BaseNode, _FakeObjectCollection, _NamedCollection,
+                      _Strategy, _make_object_collection, load_tool, make_cam, make_occurrence,
+                      operation_cast, strategy_factory, underlying, wcs_params)
 from conftest import (FakeApplication, FakeCAMParameter, FakeCAMParameters, FakeDataFile,
                       FakeDocumentReference, FakeMachine, FakeMatrix3D, FakeSetup, FakeCAMFolder,
                       FakeOperation, FakeTool)
@@ -60,10 +61,11 @@ def install(monkeypatch):
 
 @pytest.fixture
 def operation_cast_passthrough(monkeypatch):
-    # cam.Operation.cast is a SHARED mock other test modules also wire; pin it to a pass-through
-    # for this test only (monkeypatch restores it) rather than relying on session-wide state.
+    # cam.Operation.cast is a SHARED mock other test modules also wire; pin it to the shared CAM
+    # cast for this test only (monkeypatch restores it) rather than relying on session-wide state.
+    # A bare pass-through would answer for a container and a base node, which live refuses.
     import adsk.cam
-    monkeypatch.setattr(adsk.cam.Operation, "cast", lambda x: x)
+    monkeypatch.setattr(adsk.cam.Operation, "cast", operation_cast)
 
 
 @pytest.fixture
@@ -1287,7 +1289,9 @@ def _MTCam(setups, seconds=120.0, per_op=60.0, per_op_by_name=None):
 
     def get_machining_time(obj, feed_scale, rapid_feed, tool_change):
         cam.calls.append((obj, feed_scale, rapid_feed, tool_change))
-        if isinstance(obj, FakeOperation):             # a per-OPERATION call
+        # underlying(): a collection read hands back a DISTINCT wrapper per read, so the fake it
+        # stands for is what says whether this call was per-operation.
+        if isinstance(underlying(obj), FakeOperation):             # a per-OPERATION call
             return _MTResult(by_name.get(obj.name, per_op), feed_distance=100.0,
                              rapid_distance=25.0)
         return _MTResult(seconds, feed_distance=1000.0, rapid_distance=250.0, tool_changes=17)
@@ -1298,7 +1302,7 @@ def _MTCam(setups, seconds=120.0, per_op=60.0, per_op_by_name=None):
 
 def _aggregate_calls(cam):
     """Only the whole-collection calls - the per-operation ones are a different question."""
-    return [c for c in cam.calls if not isinstance(c[0], FakeOperation)]
+    return [c for c in cam.calls if not isinstance(underlying(c[0]), FakeOperation)]
 
 
 class _RefusingCollection(_FakeObjectCollection):
@@ -1611,6 +1615,116 @@ class TestWalkCamTree:
         assert cc.operation_nodes_under(empty) == []
 
 
+class _BlindContainer(_AdditiveContainer):
+    """An additive container whose `children` RAISES - the parent that answers nothing, which the
+    walk treats as a leaf rather than letting the read out."""
+
+    @property
+    def children(self):
+        raise RuntimeError("children cannot be read on this container")
+
+
+def _additive_cam(container_ops=("Orient1",), loose=("Arrange1",), base=True):
+    """A setup shaped like the measured additive one: a loose operation, an additive container
+    holding its own, and the bare OperationBase the individual strategies land as."""
+    held = [FakeOperation(n, strategy="automatic_orientation") for n in container_ops]
+    container = _AdditiveContainer("Orientations", strategy="additive_orientations_folder",
+                                   ops=held)
+    others = [container] + ([_BaseNode("Strategies1",
+                                       strategy="additive_individual_strategies")] if base else [])
+    setup = FakeSetup("Build", ops=[FakeOperation(n) for n in loose], others=others)
+    return make_cam(setup), setup, container
+
+
+class TestContainerAndBaseNodes:
+    """The children `.operations`/`.folders`/`.patterns` never list: an additive container holding
+    operations, and the bare OperationBase where hole recognition and the individual strategies
+    land. `children` is the only collection either of them appears in."""
+
+    def test_a_container_and_its_operations_are_walked_and_named(self):
+        cam, _setup, _c = _additive_cam()
+        nodes = {(n.kind, n.path): n for n in cc.walk_cam_tree(cam)}
+        assert ("container", "Build / Orientations") in nodes
+        assert ("operation", "Build / Orientations / Orient1") in nodes
+        assert nodes[("operation", "Build / Orientations / Orient1")].setup == "Build"
+
+    def test_a_container_held_operation_resolves_by_name(self):
+        cam, *_ = _additive_cam()
+        node, err = cc.resolve_cam_node(cam, "orient1")          # case-insensitive exact
+        assert err is None and node.kind == "operation"
+        assert node.path == "Build / Orientations / Orient1"
+
+    def test_a_container_is_not_resolved_as_an_operation(self):
+        # the default kinds stay ("operation",) - a container answers its own name only where a
+        # caller asks for that kind, so no edit aimed at an operation lands on one.
+        cam, *_ = _additive_cam()
+        node, err = cc.resolve_cam_node(cam, "Orientations", label="operation")
+        assert node is None and "No operation named 'Orientations'" in err
+
+    def test_a_base_node_is_walked_as_a_leaf_and_its_raising_reads_do_not_stop_the_walk(self):
+        # OperationBase raises on .children AND .parent; the walk must read it as a leaf and carry
+        # on to the siblings after it.
+        cam, setup, _c = _additive_cam()
+        setup._others.append(FakeOperation("After"))
+        kinds = {n.name: n.kind for n in cc.walk_cam_tree(cam)}
+        assert kinds["Strategies1"] == "base" and kinds["After"] == "operation"
+
+    def test_operations_under_a_setup_reaches_the_container_held_ones(self):
+        cam, setup, _c = _additive_cam(container_ops=("Orient1", "Support1"))
+        assert sorted(o.name for o in cc.operations_under(setup)) == [
+            "Arrange1", "Orient1", "Support1"]
+
+
+class TestContainerRowsAndOtherNodes:
+    """What the operations slice publishes for the nodes only the children walk reaches."""
+
+    def _rows(self, install, setup):
+        install(FakeCAM([setup]))
+        return _payload(cr.get_cam_operations_handler())["setups"][0]
+
+    def test_a_container_held_row_names_its_container_and_a_folder_held_row_its_folder(
+            self, install, operation_cast_passthrough):
+        cam, setup, _c = _additive_cam()
+        setup.folders._items.append(FakeCAMFolder("Holes", ops=[FakeOperation("Drill1")]))
+        rows = {r["name"]: r for r in self._rows(install, setup)["operations"]}
+        assert rows["Orient1"]["container"] == "Orientations"
+        assert "folder" not in rows["Orient1"]
+        assert rows["Drill1"]["folder"] == "Holes"
+        assert "container" not in rows["Drill1"]
+        assert "container" not in rows["Arrange1"] and "folder" not in rows["Arrange1"]
+
+    def test_a_base_node_rides_in_other_nodes_and_is_no_operation(self, install,
+                                                                   operation_cast_passthrough):
+        rec = self._rows(install, _additive_cam()[1])
+        assert [r["name"] for r in rec["operations"]] == ["Arrange1", "Orient1"]
+        assert rec["other_nodes"] == [{"name": "Strategies1",
+                                       "strategy": "additive_individual_strategies",
+                                       "kind": "base"}]
+
+    def test_a_setup_holding_no_base_node_publishes_no_other_nodes_key(
+            self, install, operation_cast_passthrough):
+        rec = self._rows(install, _additive_cam(base=False)[1])
+        assert "other_nodes" not in rec              # absent = none, never an empty list
+
+    def test_the_walked_count_MEETS_the_flat_count_once_containers_are_walked(
+            self, install, operation_cast_passthrough):
+        # the boundary: allOperations COUNTS a container's children, so a walk that does not reach
+        # them reads short and the slice flags a cap nothing hit.
+        setup = _additive_cam()[1]
+        assert setup.allOperations.count == 2        # the loose op and the container's own
+        assert self._rows(install, setup)["operations_truncated"] is False
+
+    def test_one_operation_short_of_that_count_is_still_truncated(self, install,
+                                                                   operation_cast_passthrough):
+        # one fewer reached than the setup declares - the other side of `walked < expected`.
+        setup = FakeSetup("Build", ops=[FakeOperation("Arrange1")],
+                          others=[_BlindContainer("Orientations",
+                                                  ops=[FakeOperation("Orient1")])])
+        rec = self._rows(install, setup)
+        assert [r["name"] for r in rec["operations"]] == ["Arrange1"]
+        assert rec["operations_truncated"] is True
+
+
 class _UnreadableNameFolder(FakeCAMFolder):
     """A CAM folder whose .name RAISES - the read the walk cannot answer, which safe() reports as
     None. The setter is inert so the container protocol still builds."""
@@ -1771,10 +1885,10 @@ class TestDuplicateNameAddress:
         cam, setup, op = self._dup()
         one, err_one = cc.resolve_cam_node(cam, "Dup#1", kinds=_ANY_KIND)
         two, err_two = cc.resolve_cam_node(cam, "Dup#2", kinds=_ANY_KIND)
-        # == , not `is`: a setup read out of cam.setups is a NEW wrapper per read (measured), so
+        # == , not `is`: every node read out of a Fusion collection is a NEW wrapper (measured), so
         # identity across two walks answers False on the live product and in the shared fake.
         assert err_one is None and one.obj == setup and one.kind == "setup"
-        assert err_two is None and two.obj is op and two.kind == "operation"
+        assert err_two is None and two.obj == op and two.kind == "operation"
 
     def test_an_ordinal_past_the_end_names_the_range_it_stops_at(self):
         cam, *_ = self._dup()
@@ -1793,7 +1907,7 @@ class TestDuplicateNameAddress:
         # the upper boundary of `1 <= ordinal <= len(same)`: '#2' of two is the last VALID address.
         cam, _setup, op = self._dup()
         node, err = cc.resolve_cam_node(cam, "Dup#2", kinds=_ANY_KIND)
-        assert err is None and node.obj is op
+        assert err is None and node.obj == op
 
     def test_a_name_that_itself_carries_a_hash_wins_over_the_address(self):
         # a literal name resolves by its own spelling; '#n' is read only where none does. Only ONE
@@ -1823,7 +1937,7 @@ class TestDuplicateNameAddress:
         # the address resolves as before.
         cam, _setup, op = self._dup()
         node, err = cc.resolve_cam_node(cam, "Dup#2", kinds=_ANY_KIND)
-        assert err is None and node.obj is op
+        assert err is None and node.obj == op
 
     def test_a_name_carrying_a_hash_is_addressed_on_its_LAST_separator(self):
         # a setup and an operation both named 'Op#3': the address for the second is 'Op#3#2'.
@@ -1833,7 +1947,7 @@ class TestDuplicateNameAddress:
         other = FakeSetup("S2", ops=[FakeOperation("Op#3")])
         cam = make_cam(setup, other)
         node, err = cc.resolve_cam_node(cam, "Op#3#2", kinds=_ANY_KIND)
-        assert err is None and node.obj is other.operations.item(0)
+        assert err is None and node.obj == other.operations.item(0)
         first_node, first_err = cc.resolve_cam_node(cam, "Op#3#1", kinds=_ANY_KIND)
         assert first_err is None and first_node.obj == setup
 
@@ -3571,8 +3685,8 @@ class TestOperationRowContext:
         assert row["machine_max_rpm"] == 12000.0                # the readable half still rides
 
     def test_a_row_built_without_a_walk_node_carries_no_path(self):
-        # _folder_of reads the walk's parent node; with no node there is nothing to name
-        assert cr._folder_of(None) is None
+        # _parent_key reads the walk's parent node; with no node there is nothing to name
+        assert cr._parent_key(None) == (None, None)
 
 
 class TestSpindleScopedToActiveOps:
@@ -3668,16 +3782,32 @@ class TestSpindleScopedToActiveOps:
         row = self._rows(install, setup)["operations"][0]
         assert row["folder"] == "Holes / Move and unsuppress"
 
+    def test_a_holder_whose_name_did_not_read_is_named_by_the_unread_marker(
+            self, install, operation_cast_passthrough):
+        # An ABSENT 'folder' key reads as "this row sits directly under the setup", which is the
+        # one thing it does not, and a null reads as "no folder". The row carries the same marker
+        # its breadcrumb does, so both halves of the address say the level did not answer.
+        blind = _UnreadableNameFolder("ignored", ops=[_row_op("Drill1")])
+        row = self._rows(install, FakeSetup("S1", folders=[blind]))["operations"][0]
+        assert row["folder"] == cc._UNREAD_SEGMENT
+        assert row["path"] == f"S1 / {cc._UNREAD_SEGMENT} / Drill1"
+
     def test_the_folder_comes_from_the_container_not_the_string(self):
         # the structural read: a node whose parent is a FOLDER names it; a node whose parent is the
-        # SETUP names nothing, whatever the two names look like.
+        # SETUP names nothing, whatever the two names look like. An additive CONTAINER is the same
+        # read under its own key, so a caller never has to tell them apart by name.
         setup_node = cc.CamNode(object(), "setup", "S / 1", "S / 1", "S / 1", None)
         folder_node = cc.CamNode(object(), "folder", "F", "S / 1", "S / 1 / F", setup_node)
+        held_node = cc.CamNode(object(), "container", "Supports", "S / 1", "S / 1 / Supports",
+                               setup_node)
         under_setup = cc.CamNode(object(), "operation", "Op", "S / 1", "S / 1 / Op", setup_node)
         under_folder = cc.CamNode(object(), "operation", "Op", "S / 1", "S / 1 / F / Op",
                                   folder_node)
-        assert cr._folder_of(under_setup) is None
-        assert cr._folder_of(under_folder) == "F"
+        under_container = cc.CamNode(object(), "operation", "Op", "S / 1",
+                                     "S / 1 / Supports / Op", held_node)
+        assert cr._parent_key(under_setup) == (None, None)
+        assert cr._parent_key(under_folder) == ("folder", "F")
+        assert cr._parent_key(under_container) == ("container", "Supports")
 
     def test_a_container_that_slips_through_the_walk_is_skipped(self, install, monkeypatch):
         monkeypatch.setattr(adsk.cam.Operation, "cast",
@@ -4218,7 +4348,7 @@ class TestMachiningTimeScope:
         whole = cam.getMachiningTime
 
         def _only_per_op(obj, *knobs):
-            if not isinstance(obj, FakeOperation):
+            if not isinstance(underlying(obj), FakeOperation):
                 raise RuntimeError("3 : Machining time could not be calculated.")
             return whole(obj, *knobs)
         monkeypatch.setattr(cam, "getMachiningTime", _only_per_op)
@@ -4240,7 +4370,7 @@ class TestMachiningTimeScope:
 
         def _s1_total_raises(obj, *knobs):
             # the whole-collection call carries the setup's own operations, which is what names it
-            if not isinstance(obj, FakeOperation) and any(
+            if not isinstance(underlying(obj), FakeOperation) and any(
                     getattr(o, "name", "") == "S1 op" for o in obj):
                 raise RuntimeError("3 : Machining time could not be calculated.")
             return whole(obj, *knobs)
@@ -4269,7 +4399,7 @@ class TestMachiningTimeScope:
         whole = cam.getMachiningTime
 
         def _total_raises(obj, *knobs):
-            if not isinstance(obj, FakeOperation):
+            if not isinstance(underlying(obj), FakeOperation):
                 raise RuntimeError("3 : Machining time could not be calculated.")
             return whole(obj, *knobs)
         monkeypatch.setattr(cam, "getMachiningTime", _total_raises)
@@ -4318,7 +4448,8 @@ class TestMachiningTimeExcludesSuppressed:
         rows = {r["operation"]: r for r in out["setups"][0]["operations"]}
         assert rows["Swarf1"] == {"operation": "Swarf1", "empty_toolpath": True}
         assert rows["Cut"]["machining_time_seconds"] == 60.0
-        assert [c[0].name for c in cam.calls if isinstance(c[0], FakeOperation)] == ["Cut", "Swarf1"]
+        assert [c[0].name for c in cam.calls
+                if isinstance(underlying(c[0]), FakeOperation)] == ["Cut", "Swarf1"]
         # the empty row carries no figure, so it is out of the summed count
         assert out["setups"][0]["operations_time_summed"] == 1
         assert out["setups"][0]["operations_time_sum_seconds"] == 60.0
@@ -4333,7 +4464,7 @@ class TestMachiningTimeExcludesSuppressed:
         assert out["setups"][0]["excluded_suppressed"] == 2
         assert out["setups"][0]["timed_operations"] == 1
         # the SETUP object itself is never the target - that is the shape that fails live
-        assert not any(isinstance(c[0], FakeSetup) for c in cam.calls)
+        assert not any(isinstance(underlying(c[0]), FakeSetup) for c in cam.calls)
 
     def test_empty_toolpath_ops_stay_in_the_collection(self, install, object_collection,
                                                        operation_cast_passthrough):
@@ -4363,7 +4494,7 @@ class TestMachiningTimeExcludesSuppressed:
         assert "0 of 1" in out["setups"][0]["error"]
         # the per-OPERATION pass runs before the collection is built (it decides what goes in it);
         # what must never happen is a fallback that times the collection or the Setup anyway
-        assert all(isinstance(c[0], FakeOperation) for c in cam.calls)
+        assert all(isinstance(underlying(c[0]), FakeOperation) for c in cam.calls)
 
     def test_an_empty_toolpath_op_is_named_not_timed(self, install, object_collection,
                                                      operation_cast_passthrough):
@@ -4378,7 +4509,8 @@ class TestMachiningTimeExcludesSuppressed:
         assert "machining_time_seconds" not in rows["Empty"]
         assert rows["Cut"]["machining_time_seconds"] == 60.0
         # the doomed call is never made: only the op holding a toolpath was timed per-op
-        assert [c[0].name for c in cam.calls if isinstance(c[0], FakeOperation)] == ["Cut"]
+        assert [c[0].name for c in cam.calls
+                if isinstance(underlying(c[0]), FakeOperation)] == ["Cut"]
         # ...and the empty op still rides in the setup's collection, which times fine
         assert [op.name for op in object_collection[0]] == ["Cut", "Empty"]
 
@@ -4449,7 +4581,7 @@ class TestMachiningTimeExcludesSuppressed:
             if getattr(obj, "name", None) in names:
                 return _MTResult(_SATURATED, feed_distance=float("nan"),
                                  rapid_distance=float("nan"))
-            if collection_too and not isinstance(obj, FakeOperation):
+            if collection_too and not isinstance(underlying(obj), FakeOperation):
                 mt = _MTResult(_SATURATED, feed_distance=float("nan"),
                                rapid_distance=float("nan"), tool_changes=17)
                 mt.totalFeedTime = float("nan")     # the two the loaded slice put on the wire raw
@@ -4526,7 +4658,7 @@ class TestMachiningTimeExcludesSuppressed:
         real = cam.getMachiningTime
 
         def _boom(obj, *a):
-            if isinstance(obj, FakeOperation):
+            if isinstance(underlying(obj), FakeOperation):
                 raise RuntimeError("per-op estimate unavailable")
             return real(obj, *a)
         monkeypatch.setattr(cam, "getMachiningTime", _boom)
@@ -4575,7 +4707,7 @@ class TestMachiningTimeExcludesSuppressed:
         real = cam.getMachiningTime
 
         def _boom(obj, *a):
-            if isinstance(obj, FakeOperation):
+            if isinstance(underlying(obj), FakeOperation):
                 raise RuntimeError("per-op estimate unavailable")
             return real(obj, *a)
         monkeypatch.setattr(cam, "getMachiningTime", _boom)
@@ -4605,7 +4737,7 @@ class TestMachiningTimeExcludesSuppressed:
         out = _payload(cr.get_machining_time_handler())
         assert "Could not build the operation collection" in out["setups"][0]["error"]
         # never falls back to timing the Setup object - the only calls are the per-operation pass
-        assert all(isinstance(c[0], FakeOperation) for c in cam.calls)
+        assert all(isinstance(underlying(c[0]), FakeOperation) for c in cam.calls)
 
 
 # --- the async-generation registry: the handle cam_get_status reads, and what keeps a launch alive ---
@@ -5664,13 +5796,15 @@ class TestPartialReadsAreFlaggedIncomplete:
         assert names == ["A"] and truncated is False
 
     def test_operations_from_a_dying_walk_read_truncated(self):
-        # the ops walk reads count/item (iter_collection's protocol), so the dying collection here
-        # promises one more item than it can hand over - the rows already read must survive.
+        # the ops walk reads count/item over `children` (iter_collection's protocol), so the dying
+        # collection here promises one more item than it can hand over - the rows already read must
+        # survive, and the setup's own flat count is what says the walk came up short.
         ops = [FakeOperation("Op1"), FakeOperation("Op2")]
-        setup = SimpleNamespace(allOperations=_DyingCollection(ops))
-        summaries, truncated = cr._operations_in(setup)
+        dying = _DyingCollection(ops)
+        setup = SimpleNamespace(children=dying, allOperations=dying)
+        summaries, truncated, other = cr._operations_in(setup)
         assert [s["name"] for s in summaries] == ["Op1", "Op2"]
-        assert truncated is True
+        assert truncated is True and other == []
 
     def test_references_from_a_dying_walk_read_truncated(self):
         dying = _dying_after([])

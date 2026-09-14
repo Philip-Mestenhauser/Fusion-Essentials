@@ -148,6 +148,34 @@ class TestCoordinateUnit:
         assert dc.coordinate_unit(None) is None
 
 
+class TestExtentConversion:
+    def test_millimetre_standard_is_the_identity_both_directions(self, wire):
+        dwg = wire(standard="iso")
+        assert dc.extent_in_coordinates(55.0, dwg) == 55.0
+        assert dc.coordinates_to_extent(55.0, dwg) == 55.0
+
+    def test_the_inverse_round_trips_the_forward_for_millimetre_and_inch(self, wire):
+        for standard in ("iso", "asme"):
+            dwg = wire(standard=standard)
+            lifted = dc.extent_in_coordinates(123.456, dwg)
+            assert dc.coordinates_to_extent(lifted, dwg) == pytest.approx(123.456)
+
+    def test_an_unread_standard_declines_both_directions_instead_of_guessing(self, wire):
+        dwg = wire(settings=False)
+        assert dc.extent_in_coordinates(100.0, dwg) is None
+        assert dc.coordinates_to_extent(100.0, dwg) is None
+
+    def test_a_standard_label_resolves_without_a_live_drawing(self):
+        # drawing_create sizes a custom sheet before the drawing exists - only the label is known
+        assert dc.extent_in_coordinates(25.4, standard="asme") == pytest.approx(1.0)
+        assert dc.coordinates_to_extent(1.0, standard="asme") == pytest.approx(25.4)
+        assert dc.extent_in_coordinates(100.0, standard="metric") is None
+
+    def test_a_live_drawing_takes_precedence_over_a_standard_label(self, wire):
+        dwg = wire(standard="asme")
+        assert dc.extent_in_coordinates(25.4, dwg, standard="iso") == pytest.approx(1.0)
+
+
 class TestNoPortraitTable:
     def test_the_table_is_the_two_measured_pairs(self):
         # Fusion answers "Portrait orientation is not supported for ISO A0 sheet size." and

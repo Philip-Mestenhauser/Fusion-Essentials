@@ -723,6 +723,15 @@ SHAPES = {
         "setupDestroying", "setupGroups", "setups", "temporaryFolder", "this", "thisown",
         "unitsManager", "workspaces",
     ],
+    "CAMAdditiveContainer": [
+        "allOperations", "attributes", "cast", "children", "classType", "copyAfter",
+        "copyBefore", "copyInto", "deleteMe", "duplicate", "error", "generatedDataCollection",
+        "hasError", "hasMissingReferences", "hasWarning", "isLightBulbOn", "isOptional", "isProtected",
+        "isSelected", "isSuppressed", "isSuppressible", "isValid", "isVisible", "messageLog",
+        "modifyUtility", "moveAfter", "moveBefore", "moveInto", "name", "noteIconColor",
+        "notes", "objectType", "operationId", "parameters", "parent", "parentSetup",
+        "removeReferences", "strategy", "this", "thisown", "warning",
+    ],
     "CAMFolder": [
         "activate", "allOperations", "attributes", "cast", "children", "classType",
         "copyAfter", "copyBefore", "copyInto", "createFromCAMTemplate", "createFromCAMTemplate2", "createFromTemplate",
@@ -748,6 +757,10 @@ SHAPES = {
         "cameraType", "cast", "classType", "create", "eye", "getExtents",
         "isFitView", "isSmoothTransition", "isValid", "objectType", "perspectiveAngle", "setExtents",
         "target", "this", "thisown", "upVector", "viewExtents", "viewOrientation",
+    ],
+    "ChildOperationList": [
+        "cast", "classType", "count", "isValid", "item", "itemByName",
+        "itemByOperationId", "objectType", "this", "thisown",
     ],
     "Circle3D": [
         "asNurbsCurve", "cast", "center", "classType", "copy", "createByCenter",
@@ -1132,6 +1145,15 @@ SHAPES = {
         "operationState", "parameters", "parent", "parentSetup", "referenceTool", "removeReferences",
         "setHoleSignatureXML", "strategy", "strategyType", "this", "thisown", "tool",
         "toolJson", "toolPreset", "toolPresetId", "warning",
+    ],
+    "OperationBase": [
+        "attributes", "cast", "classType", "copyAfter", "copyBefore", "copyInto",
+        "deleteMe", "duplicate", "error", "generatedDataCollection", "hasError", "hasMissingReferences",
+        "hasWarning", "isLightBulbOn", "isOptional", "isProtected", "isSelected", "isSuppressed",
+        "isSuppressible", "isValid", "isVisible", "messageLog", "modifyUtility", "moveAfter",
+        "moveBefore", "moveInto", "name", "noteIconColor", "notes", "objectType",
+        "operationId", "parameters", "parentSetup", "removeReferences", "strategy", "this",
+        "thisown", "warning",
     ],
     "PMIAnnotations": [
         "cast", "classType", "count", "holeThreadNotes", "importedDimensions", "importedFolders",

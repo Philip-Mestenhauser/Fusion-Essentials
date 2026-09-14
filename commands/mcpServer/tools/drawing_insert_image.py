@@ -53,16 +53,16 @@ def _off_sheet_error(dwg, sheet, px, py):
     """(refusal, unchecked_reason) for an image anchor: the refusal is non-empty only for an anchor
     measurably outside the sheet, unchecked_reason whenever the bound could not run at all and the
     caller must publish it. An image POSITION is standard-keyed (mm under ISO, in under ASME) while
-    Sheet.width/height are always mm, so the anchor converts through DOCUMENT_UNIT first."""
+    Sheet.width/height are always mm, so the anchor is lifted into mm through the shared inverse."""
     width = _common.measured(lambda: sheet.width)
     height = _common.measured(lambda: sheet.height)
     if width is None or height is None:
         return "", (f"sheet '{safe(lambda: sheet.name)}' does not report both a width and a height")
     unit = _drawing_common.coordinate_unit(dwg)
-    if unit is None:
+    x_mm = _drawing_common.coordinates_to_extent(px, dwg)
+    y_mm = _drawing_common.coordinates_to_extent(py, dwg)
+    if x_mm is None or y_mm is None:
         return "", "the drawing standard is unreadable, so the position's unit is unknown"
-    per_mm = _common.scale(unit) / _common.scale(_drawing_common.SHEET_EXTENT_UNIT)
-    x_mm, y_mm = px * per_mm, py * per_mm
     if 0 <= x_mm <= width and 0 <= y_mm <= height:
         return "", ""
     return (f"position ({px}, {py}) {unit} is {round(x_mm, 3)} x {round(y_mm, 3)} mm, off sheet "

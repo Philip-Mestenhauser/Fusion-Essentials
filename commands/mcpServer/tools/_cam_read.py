@@ -293,11 +293,11 @@ def _attach_setup_invalidation(rec, setup, cam=None):
 _SUPPRESSED_NOT_COMPARED = "suppressed_not_compared"
 
 _OPERATIONS_NOTE = (
-    "'empty_toolpath' marks a row that cuts nothing; state 'unread' means operationState did not "
-    "answer - re-read in Manufacture, not cam_generate. "
-    "'spindle_over_machine_max' compares tool_spindleSpeed against machine_spindle_max_rpm on "
-    "ACTIVE rows (a suppressed one reads spindle_check 'suppressed_not_compared'); null means a "
-    "side did not read; summary.spindle_over_machine_max_count counts those over.")
+    "'unread': no operationState read - re-read in Manufacture, not cam_generate. "
+    "'folder'/'container': what holds a row; 'other_nodes': base nodes - no operation, no "
+    "toolpath. 'spindle_over_machine_max': tool_spindleSpeed vs machine_spindle_max_rpm, null if "
+    "a side did not read; summary.spindle_over_machine_max_count counts them, and a suppressed "
+    "row reads spindle_check 'suppressed_not_compared'.")
 
 
 def get_cam_operations_handler(setup: str = "") -> dict:
@@ -319,7 +319,7 @@ def get_cam_operations_handler(setup: str = "") -> dict:
     try:
         for s in target_setups:
             machine_max = machine_spindle_max(safe(lambda s=s: s.machine))
-            ops, ops_truncated = _operations_in(s, machine_max, cam)
+            ops, ops_truncated, other_nodes = _operations_in(s, machine_max, cam)
             # The setup's own blockers ride into the readiness verdict below.
             blocked = blocked_setup_records([s])
             rec = {
@@ -328,6 +328,8 @@ def get_cam_operations_handler(setup: str = "") -> dict:
             "operations": ops,
             "operations_truncated": ops_truncated,
             }
+            if other_nodes:
+                rec["other_nodes"] = other_nodes    # absent = this setup holds none
             if machine_max is not None:
                 rec["machine_spindle_max_rpm"] = machine_max
             result_setups.append(rec)
@@ -437,10 +439,18 @@ def _operations_summary(op_records, setup_blocked=None) -> dict:
 
 
 
+def _other_node_rows(nodes) -> list:
+    """[{name, strategy, kind}] for the BASE nodes under a setup - where hole recognition and the
+    additive individual strategies land. They hold no toolpath, so they are neither counted as
+    operations nor read as a walk that came up short. A folder, pattern or container is not one."""
+    return [{"name": n.name, "strategy": safe(lambda n=n: n.obj.strategy), "kind": n.kind}
+            for n in nodes if n.kind == "base"]
+
+
 def _operations_in(setup_obj, machine_max=None, cam=None) -> tuple:
-    """(ops, truncated) - the operations under a setup with their folder breadcrumb, capped at
-    _MAX_ITEMS; truncated means INCOMPLETE (cap hit or the walk raised). Walks _walk_children,
-    which keeps the folder objects setup.allOperations drops."""
+    """(ops, truncated, other_nodes) - the operations under a setup with their container
+    breadcrumb, capped at _MAX_ITEMS, beside the browser nodes that are no operation; truncated
+    means INCOMPLETE (cap hit or the walk raised)."""
     ops = []
     truncated = False
     root = _setup_node(setup_obj)
@@ -468,15 +478,21 @@ def _operations_in(setup_obj, machine_max=None, cam=None) -> tuple:
     except Exception:
         # A row read that dies left an INCOMPLETE list - flagged, never passed off as the full read.
         truncated = True
-    return ops, truncated
+    return ops, truncated, _other_node_rows(nodes)
 
 
-def _folder_of(node):
-    """The folder/pattern an operation sits IN, off the walk's parent node; None directly under the
-    setup."""
-    if node is None or node.parent is None:
-        return None
-    return node.parent.name if node.parent.kind in ("folder", "pattern") else None
+# The payload key a row names its container under: a folder and a pattern both ride on 'folder',
+# and an additive container on 'container' - different browser objects, addressed differently.
+_PARENT_KEYS = {"folder": "folder", "pattern": "folder", "container": "container"}
+
+
+def _parent_key(node):
+    """(the payload key, the holder's name) for what an operation sits IN, off the walk's parent
+    node; (None, None) directly under the setup. A holder whose own name did not read publishes the
+    breadcrumb's unread MARKER: an absent key reads as 'this row sits directly under the setup',
+    which is the one thing it does not."""
+    key = _PARENT_KEYS.get(node.parent.kind) if (node is not None and node.parent) else None
+    return (key, _segment(node.parent.name)) if key else (None, None)
 
 
 def _operation_summary(op, machine_max=None, node=None, cam=None) -> dict:
@@ -532,9 +548,9 @@ def _operation_summary(op, machine_max=None, node=None, cam=None) -> dict:
         summary["requires"] = requires
     if node is not None:
         summary["path"] = node.path
-        folder = _folder_of(node)
-        if folder:
-            summary["folder"] = folder
+        key, holder = _parent_key(node)
+        if key:
+            summary[key] = holder
     # Two ops sharing one tool can run different presets, which the tool description cannot show.
     preset = safe(lambda: op.toolPreset)
     summary["preset"] = safe(lambda preset=preset: preset.name) if preset is not None else None

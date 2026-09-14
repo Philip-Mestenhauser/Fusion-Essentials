@@ -11,10 +11,10 @@ from ._common import safe
 
 MAP_BLURB = (
     "active_drawing(_document) - the Drawing gate every tool runs; SHEET_SIZE_MAP/"
-    "DIMENSION_STRATEGIES/ORIENTATION_MEMBERS/NO_PORTRAIT - member tables plus portrait "
-    "refusals; sheet_units/SHEET_EXTENT_UNIT/DOCUMENT_UNIT/coordinate_unit/"
-    "extent_in_coordinates - the three units, never mixed; enum_value + the *_label decoders; "
-    "resolve_sheet/sheet_listing/sheet_facts - sheet by name, 1-based index, state"
+    "DIMENSION_STRATEGIES/ORIENTATION_MEMBERS/NO_PORTRAIT - tables + portrait refusals; "
+    "sheet_units/SHEET_EXTENT_UNIT/DOCUMENT_UNIT/coordinate_unit/extent_in_coordinates/"
+    "coordinates_to_extent - 3 units, never mixed; enum_value + *_label decoders; "
+    "resolve_sheet/sheet_listing/sheet_facts - by name, 1-based index, state"
 )
 
 # Sheet.width/height are MILLIMETRES on every drawing, ISO and ASME alike (an ASME B sheet, 17 x 11
@@ -113,14 +113,34 @@ def coordinate_unit(dwg):
     return DOCUMENT_UNIT.get(standard_label(dwg))
 
 
-def extent_in_coordinates(value, dwg):
+def _length_unit(dwg, standard):
+    """The coordinate length unit dwg's own standard fixes, or DOCUMENT_UNIT[standard] before a
+    drawing exists yet (drawing_create, sizing a sheet it has not created); None when neither
+    resolves one."""
+    return coordinate_unit(dwg) if dwg is not None else DOCUMENT_UNIT.get(standard)
+
+
+def extent_in_coordinates(value, dwg=None, standard=None):
     """A Sheet.width/height number - SHEET_EXTENT_UNIT, always - in the unit COORDINATES land in.
-    Handed back unconverted when the standard does not read: the millimetre number is the only one
-    there is, and a guessed conversion would be a measurement nothing took."""
-    unit = coordinate_unit(dwg)
-    if unit is None or unit == SHEET_EXTENT_UNIT:
+    Pass dwg for a live drawing, or standard ('iso'/'asme') where none exists yet. None when the
+    standard cannot be read - each adopter decides its own policy for that case."""
+    unit = _length_unit(dwg, standard)
+    if unit is None:
+        return None
+    if unit == SHEET_EXTENT_UNIT:
         return value
     return value * _common.scale(SHEET_EXTENT_UNIT) * _common.CM_TO_UNIT[unit]
+
+
+def coordinates_to_extent(value, dwg=None, standard=None):
+    """The inverse of extent_in_coordinates: a coordinate-unit number lifted into SHEET_EXTENT_UNIT
+    (mm). Same dwg/standard contract, including the None-on-unread-standard return."""
+    unit = _length_unit(dwg, standard)
+    if unit is None:
+        return None
+    if unit == SHEET_EXTENT_UNIT:
+        return value
+    return value * _common.scale(unit) / _common.scale(SHEET_EXTENT_UNIT)
 
 
 # orientation key -> SheetOrientationTypes member.

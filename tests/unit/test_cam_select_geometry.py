@@ -986,6 +986,54 @@ class TestSketchSelection:
         assert res["isError"] is True and "sketches" in res["message"]
 
 
+class TestSketchScope:
+    """selection='sketch' takes the WHOLE sketch - every non-construction curve, text excluded -
+    so the note publishes that scope; resolved.curve_paths/curve_segments already carry the counts."""
+
+    def _apply(self, monkeypatch, prepare=None, **handler_kw):
+        install(cg, _sketch_design(MakeComp("Root", sketches=[make_sketch("Outline")])))
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        if prepare is not None:
+            pv = op.parameters.itemByName("contours").value
+            real_make = pv._cs._make
+            def _prepared(kind):
+                sel = real_make(kind)
+                prepare(sel)
+                return sel
+            pv._cs._make = _prepared
+        return cg.handler(operation="2D Contour1", selection="sketch", sketches=["Outline"],
+                          generate=False, **handler_kw)
+
+    def test_the_note_states_the_scope_and_the_remedy(self, monkeypatch):
+        out = _payload(self._apply(monkeypatch))
+        assert "non-construction curve" in out["note"]
+        assert "text alone is not selectable" in out["note"]
+        assert "sketch_delete_entity" in out["note"]
+
+    def test_a_non_sketch_note_carries_no_sketch_scope_clause(self, monkeypatch):
+        op = _curve_op(name="Face1")
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        out = _payload(cg.handler(operation="Face1", selection="face", handles=["f"],
+                                  generate=False))
+        assert "non-construction curve" not in out["note"]
+
+    def test_the_worst_composed_launched_note_fits_the_wire_budget(self, monkeypatch):
+        # the launched note is the longest base and the sketch-scope clause rides beside the op's
+        # own name and the cam_get_status pointer - test_prose_budget measures neither composition.
+        install(cg, _sketch_design(MakeComp("Root", sketches=[make_sketch("Outline")])))
+        op = _curve_op(name="Engrave FE Text Outline1")
+        cam = _CAM([_Setup([op])])
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        out = _payload(cg.handler(operation="Engrave FE Text Outline1", selection="sketch",
+                                  sketches=["Outline"]))
+        assert out["launched"] is True
+        assert "sketch_delete_entity" in out["note"]
+        assert len(out["note"]) <= 400, len(out["note"])
+
+
 # ── WHICH sketch / body the by-name reference resolved to ────────────────────
 
 class TestSelectedIdentityIsPublished:

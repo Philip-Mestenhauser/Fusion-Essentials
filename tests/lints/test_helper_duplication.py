@@ -42,6 +42,9 @@ _DENYLIST = {
     # sentence an agent reads on a refused create stops matching the one on a refused rename.
     "operation_name_clash": ("_cam_common", "def"),
     "setup_names": ("_cam_common", "def"),
+    # The rootless setup pool a position-sensitive resolve reads its ORDER off - a second copy is
+    # how the '<name>#<n>' address and the preceding-setup lookup come to count over different lists.
+    "setup_nodes": ("_cam_common", "def"),
     "op_state_tally": ("_cam_common", "def"),
     "op_state_facts": ("_cam_common", "def"),
     # The ONE hasToolpath tally over a program's held operations, keeping the unreadable flag apart
@@ -231,6 +234,11 @@ _DENYLIST = {
     "enum_value": ("_drawing_common", "def"),
     "standard_label": ("_drawing_common", "def"),
     "coordinate_unit": ("_drawing_common", "def"),
+    # The ONE sheet-extent <-> coordinate-unit conversion, both directions, keyed by a live drawing
+    # OR a bare standard label (drawing_create sizes a sheet before one exists). A second copy is
+    # how the mm<->unit factor drifts between insert_image's off-sheet bound and add_sketch's span.
+    "extent_in_coordinates": ("_drawing_common", "def"),
+    "coordinates_to_extent": ("_drawing_common", "def"),
     # The drawing tables and the DrawingDocument cast: the size<->standard pairing Fusion silently
     # ignores at creation and RAISES on at assignment, the strategy family, the unit a drawing's own
     # numbers are authored in, and the documentReferences-carrying cast. A per-tool copy is how one

@@ -139,6 +139,28 @@ def _summed(rows, label):
     return sum(numbers) if numbers else None
 
 
+def _convert_measurements(stats, factor):
+    """{label: value} with every 'Area'-named number scaled cm2 -> 'units'2 and every
+    'Volume'-named number scaled cm3 -> 'units'3 through `factor` - every other entry passes
+    through as arrangeStatistics reported it."""
+    out = {}
+    for name, value in stats.items():
+        power = 2 if "Area" in name else 3 if "Volume" in name else 0
+        usable = power and isinstance(value, (int, float)) and not isinstance(value, bool)
+        out[name] = round(value * (factor ** power), 6) if usable else value
+    return out
+
+
+def _measurement_units_clause(stats, units):
+    """The note fragment for which measurement kinds `stats` actually carries - 'Area' and/or
+    'Volume' named keys - or '' when no map holds either."""
+    has_area = any("Area" in name for _name, vals in stats for name in vals)
+    has_volume = any("Volume" in name for _name, vals in stats for name in vals)
+    parts = ([f"areas are in {units}^2"] if has_area else []) + (
+             [f"volumes in {units}^3"] if has_volume else [])
+    return f" 'statistics' {', '.join(parts)}." if parts else ""
+
+
 def _statistics(feature):
     """([(map name, {label: value})], arranged, unarranged) from arrangeStatistics. A top-level
     'statistics' map is the TOTAL and the counts come from it; 'envelopes'[i].'statistics' are its
@@ -250,6 +272,31 @@ def _faceless_shapes(names, occs):
         if not planar and complete:
             out.append(name)
     return out
+
+
+_GROUNDED_CODE = "ARRANGE_ITEM_GROUNDED"
+_PINNED_TEXT = "Pinned component"
+
+_PINNED_SHAPES = (
+    "{names} read isGroundToParent True - the platform refuses to arrange a pinned component with "
+    "move_originals=true. Nothing was created. Release each with "
+    "assembly_ground(ground_to_parent=false), or drop it from 'shapes'.")
+
+_PLATFORM_PINNED = (
+    "Arrange failed on a pinned component: {names}. Release it with "
+    "assembly_ground(ground_to_parent=false), or drop it from 'shapes'. Platform: {msg}")
+
+_PLATFORM_PINNED_UNNAMED = (
+    "Arrange failed{code_clause}: a shape it holds is pinned to its parent and the platform "
+    "names none of them. Release a pinned shape with assembly_ground(ground_to_parent=false), "
+    "or drop it from 'shapes'. Platform: {msg}")
+
+
+def _grounded_shapes(names, occs):
+    """The shapes among `names`/`occs` whose isGroundToParent READS True - a shape whose flag does
+    not read is not one of them, since a refusal rests on a positive read, never a guess."""
+    return [name for name, occ in zip(names, occs)
+            if safe(lambda o=occ: o.isGroundToParent) is True]
 
 
 def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_shape",
@@ -378,6 +425,14 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
             return error(_NO_PLANAR_FACE.format(
                 label=label, names=_common.named_with_remainder(faceless)))
 
+    # move_originals=true RELOCATES the named occurrences, and the platform refuses the whole
+    # arrange when one is pinned to its parent (measured isGroundToParent True). The copy path
+    # (move_originals=false) was not measured against a grounded shape, so this gate leaves it be.
+    if move_originals:
+        pinned = _grounded_shapes(resolved, occs)
+        if pinned:
+            return error(_PINNED_SHAPES.format(names=_common.named_with_remainder(pinned)))
+
     # Effect evidence read BEFORE the add: the solver can leave the named occurrences unmoved and
     # mint envelope copies instead, which only these two reads distinguish from a real nest.
     def _translation(o):
@@ -481,6 +536,15 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
         if _MISSING_FACE_CODE in msg:
             return error(_PLATFORM_MISSING_FACE.format(label=label, code=_MISSING_FACE_CODE,
                                                        msg=msg))
+        if _GROUNDED_CODE in msg or _PINNED_TEXT in msg:
+            pinned = _grounded_shapes(resolved, occs)
+            if pinned:
+                return error(_PLATFORM_PINNED.format(
+                    names=_common.named_with_remainder(pinned), msg=msg))
+            # Name the code only when the raise actually carried it - the measured create-path
+            # text ("3 : Pinned component cannot be arranged") never does.
+            code_clause = f" with '{_GROUNDED_CODE}'" if _GROUNDED_CODE in msg else ""
+            return error(_PLATFORM_PINNED_UNNAMED.format(code_clause=code_clause, msg=msg))
         return error(f"Arrange failed: {msg}")
     if not feature:
         return error(_common.no_feature_error(design, "Arrange"))
@@ -506,6 +570,7 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
                        "shapes at this spacing.")
 
     stats, stat_arranged, stat_unarranged = _statistics(feature)
+    stats = [(name, _convert_measurements(vals, out_factor)) for name, vals in stats]
     if stat_unarranged and not partial:
         return error(
             f"Arrange left {stat_unarranged} component(s) UNPLACED - its statistics read arranged "
@@ -532,7 +597,7 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
         note += (" The feature's arrangeStatistics did not read, so 'components_arranged' and "
                  "'components_unarranged' are null.")
     else:
-        note += " 'statistics' carries lengths in cm and areas in cm2."
+        note += _measurement_units_clause(stats, units)
         if stat_unarranged is None:
             note += (" It reported no 'Components Unarranged', so 'components_unarranged' is null "
                      "rather than zero.")

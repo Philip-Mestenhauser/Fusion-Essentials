@@ -141,7 +141,9 @@ from tests.fakes.cam import FakeCAMFolder, FakeCAMParameter, FakeCAMParameters  
 from tests.fakes.cam import FakeMachine, FakeOperation, FakePrintSetting, FakeSetup  # noqa: E402
 from tests.fakes.cam import (ADDITIVE_SETUP_SEEDS, FakeSetupInput, FakeSetups,  # noqa: E402
                              FakeTool, _InspMeasure, _InspPath)  # noqa: E402
+from tests.fakes.cam import _AdditiveContainer, _BaseNode, cam_cast  # noqa: E402
 from tests.fakes.cam import _InspPoint, _Strategy, make_cam, make_cam_parameters  # noqa: E402
+from tests.fakes.cam import operation_cast, underlying  # noqa: E402
 from tests.fakes.cam import make_gated_cam, make_inspection_cam, strategy_factory  # noqa: E402
 from tests.fakes.cam import resolved_path, wcs_params  # noqa: E402
 from tests.fakes.joints import CylindricalJointMotion, FakeAsBuiltJoint  # noqa: E402
@@ -221,11 +223,15 @@ def install_mock_adsk():
 
     # adsk.cam is needed by the CAM tools.
     cam = Mock()
-    # Tools cast raw collection items with adsk.cam.Operation.cast(op) and skip
-    # anything that casts to None. A bare Mock().cast returns a truthy Mock, which
-    # would mask that filter; make cast a pass-through so a test's fake op (or a
-    # real None) flows through unchanged.
-    cam.Operation.cast = Mock(side_effect=lambda x: x)
+    # The CAM tree walk classifies every child of a setup BY CAST, so each of these four answers
+    # for one kind of shared fake and None for the rest - a bare Mock().cast returns a truthy Mock,
+    # under which every child would classify as the first type tried. Each type is set with
+    # setattr, so it lands in vars(adsk.cam) and the snapshot/restore below reverts a test that
+    # reassigns one; an AUTO-created child Mock sits in _mock_children, which that restore misses.
+    cam.Operation = Mock(cast=Mock(side_effect=operation_cast))
+    for _member, _kind in (("CAMFolder", "folder"), ("CAMPattern", "pattern"),
+                           ("CAMAdditiveContainer", "container")):
+        setattr(cam, _member, Mock(cast=Mock(side_effect=cam_cast(_kind))))
 
     # adsk.drawing is needed by the drawing tools (drawing_create, drawing_export), which do
     # `import adsk.drawing` at module top - without it their import fails and the registry-wide

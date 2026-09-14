@@ -436,10 +436,11 @@ def handler(standard: str = "iso", units: str = "mm", content: str = "full", iso
         if w_mm <= 0 or h_mm <= 0:
             return error(f"custom_width_mm and custom_height_mm must be positive (got {w_mm} / {h_mm}).")
         # The inputs are millimetres; CustomSheetSize takes the DOCUMENT unit, which the standard
-        # fixes through the one shared table.
+        # fixes - through the same helper the sheet-extent bound converts with, keyed by standard
+        # label since no drawing exists yet to read coordinate_unit off.
         unit = _drawing_common.DOCUMENT_UNIT[std]
-        per_unit = _common.scale("mm") / _common.scale(unit)
-        custom_size = {"width": round(w_mm * per_unit, 6), "height": round(h_mm * per_unit, 6),
+        custom_size = {"width": round(_drawing_common.extent_in_coordinates(w_mm, standard=std), 6),
+                       "height": round(_drawing_common.extent_in_coordinates(h_mm, standard=std), 6),
                        "unit": unit, "zone_minimum": _CUSTOM_ZONES}
     elif custom_width_mm is not None or custom_height_mm is not None:
         return error("custom_width_mm/custom_height_mm only apply when sheet_size='custom'.")

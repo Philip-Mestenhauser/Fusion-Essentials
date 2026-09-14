@@ -293,13 +293,22 @@ class TestSheetBound:
                                                   "radius": 5000}]))
         assert "carries 5000.0" in msg and state.sketch._drawn == []
 
-    def test_an_unreadable_standard_keeps_the_millimetre_limit(self, wire):
-        # the extent is millimetres and the coordinate unit is the STANDARD's - with no standard to
-        # read there is no conversion to make, so the limit stays the number the sheet reports.
+    def test_an_unreadable_standard_runs_the_bound_loose_against_the_millimetre_limit(self, wire):
+        # with no standard to convert through, the bound runs against the raw millimetre number
+        # instead of being skipped - loose under ASME, but a coordinate this far out still stops
+        # the document's DXF export, so it stays refused rather than admitted.
         wire(size=_A3, extents=_EXTENT, standard="???")
         msg = error_message(dw.handler(geometry=[{"kind": "circle", "points": [[1e300, 0]],
                                                   "radius": 5}]))
         assert "to 4200.0" in msg and "taken as the standard's unit" in msg
+
+    def test_the_worst_composed_loose_bound_note_fits_the_wire_budget(self, wire):
+        # the loose-bound sentence plus the long-form units_said clause is the note's longest
+        # reach - pinned at the sweep's own sketch/sheet names, its measured worst case.
+        wire(size=_A3, extents=_EXTENT, standard="???", sheets=("SweepCloudSheet",),
+             landed_name="SweepCloudBlankSketch")
+        out = payload(dw.handler(geometry=[_CIRCLE]))
+        assert len(out["note"]) <= 400, (len(out["note"]), out["note"])
 
     def test_the_worst_composed_refusal_fits_the_wire_budget(self, wire):
         # the refusal is assembled at run time from the sheet and the unit, so test_prose_budget

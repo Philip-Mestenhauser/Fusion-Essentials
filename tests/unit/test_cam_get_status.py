@@ -284,6 +284,7 @@ class TestOrientationTriageRidesTheErrorItTriages:
 class TestStatusHandler:
     def setup_method(self):
         st._GENERATIONS.clear()
+        st._RELEASED.clear()
         st._HANDLE_SEQ[0] = 0
 
     # Entries carry the launch document's KEY (what register_future stamps) plus its name/urn (what
@@ -865,6 +866,121 @@ class TestStatusHandler:
         assert out["completed"] is True and "not a success verdict" in out["note"]
 
 
+class TestReleasedHandle:
+    """A completed handle answers its completed read once; the SAME poll again then says WHY it
+    misses - completion, elapsed and where to read the scope live - rather than the bare
+    unknown-handle sentence a key that never launched still gets."""
+
+    def setup_method(self):
+        st._GENERATIONS.clear()
+        st._RELEASED.clear()
+        st._HANDLE_SEQ[0] = 0
+
+    @pytest.fixture(autouse=True)
+    def _same_active_document(self, monkeypatch):
+        monkeypatch.setattr(st, "_active_identity", lambda: ("Doc", "urn:doc"))
+        monkeypatch.setattr(st, "document_key", lambda: "urn:doc")
+
+    def _readiness(self, **kw):
+        return TestStatusHandler._readiness(TestStatusHandler(), **kw)
+
+    def _entry(self, target="operation 'FaceTop'", target_name="FaceTop"):
+        return {"future": SimpleNamespace(isGenerationCompleted=True, numberOfOperations=1,
+                                          numberOfCompleted=1),
+                "target": target, "target_name": target_name, "started_at": 0.0, "total": 1,
+                "doc_name": "Doc", "doc_urn": "urn:doc", "doc_key": "urn:doc"}
+
+    def _stub_health(self, monkeypatch):
+        monkeypatch.setattr(st, "_document_ops", list)
+        monkeypatch.setattr(st, "_collect_op_health",
+                            lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
+                                                      "empty_rail": [], "nonfinite": []})
+
+    def test_a_completed_read_releases_the_entry_and_the_next_poll_names_it(self, monkeypatch):
+        # MEASURED: gen1 at 31 s answered completed:true, 1 valid once, then the next poll met a
+        # bare miss on a handle it was told to poll - this is the sentence that replaces it.
+        st._GENERATIONS["gen1"] = self._entry()
+        st._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(st._cam_common, "live_readiness",
+                            self._readiness(valid=1, errored=0, generating=0, total=1,
+                                            readiness="ready to post."))
+        self._stub_health(monkeypatch)
+        first = st.handler(handle="gen1")
+        assert first["isError"] is False
+        assert "gen1" not in st._GENERATIONS
+        res = st.handler(handle="gen1")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "completed at" in msg and "is released" in msg
+        assert "1 valid, 0 errored" in msg and "operation 'FaceTop'" in msg
+        assert "on document 'Doc'" in msg
+        assert "cam_get_status(target='FaceTop')" in msg
+
+    def test_a_switched_document_release_does_not_hand_a_wrong_document_remedy(self, monkeypatch):
+        # THE BITE: the handle completed under 'Doc', then a DIFFERENT document becomes active
+        # before the re-poll - the live-read remedy would silently read that wrong document.
+        st._GENERATIONS["gen1"] = self._entry()
+        st._HANDLE_SEQ[0] = 1
+        monkeypatch.setattr(st._cam_common, "live_readiness",
+                            self._readiness(valid=1, errored=0, generating=0, total=1,
+                                            readiness="ready to post."))
+        self._stub_health(monkeypatch)
+        st.handler(handle="gen1")                          # completes under 'Doc', releases
+        monkeypatch.setattr(st, "document_key", lambda: "urn:switched")
+        res = st.handler(handle="gen1")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "'Doc' is NOT the active document" in msg
+        assert "doc_activate 'Doc'" in msg
+        assert "cam_get_status(target=" not in msg
+
+    def test_an_unknown_handle_keeps_the_bare_miss(self):
+        res = st.handler(handle="gen99")
+        assert res["isError"] is True
+        assert "No generation with handle 'gen99'" in res["message"]
+        assert "is released" not in res["message"]
+
+    def test_the_21st_release_evicts_the_first(self, monkeypatch):
+        monkeypatch.setattr(st._cam_common, "live_readiness",
+                            self._readiness(valid=1, errored=0, generating=0, total=1,
+                                            readiness="ready to post."))
+        self._stub_health(monkeypatch)
+        for i in range(1, 22):
+            key = f"gen{i}"
+            st._GENERATIONS[key] = self._entry(target=f"operation 'Op{i}'", target_name=f"Op{i}")
+            st.handler(handle=key)
+        assert "gen1" not in st._RELEASED
+        assert "gen21" in st._RELEASED
+        assert len(st._RELEASED) == 20
+
+    def test_a_foreign_document_release_omits_the_counts(self, monkeypatch):
+        # A Future-alone branch (wrong document): the release carries tally None, and the sentence
+        # must not claim counts nothing read.
+        entry = self._entry()
+        entry["doc_urn"] = entry["doc_key"] = "urn:other"
+        entry["doc_name"] = "OtherDoc"
+        st._GENERATIONS["gen1"] = entry
+        st.handler(handle="gen1")             # completes via the Future-alone branch, releases
+        res = st.handler(handle="gen1")
+        assert res["isError"] is True
+        msg = res["message"]
+        assert "is released" in msg
+        assert "valid" not in msg and "errored" not in msg
+        # this launch document was never the active one either - the same switched-document wording
+        assert "'OtherDoc' is NOT the active document" in msg and "doc_activate 'OtherDoc'" in msg
+
+    def test_an_unreadable_tally_release_omits_the_counts(self, monkeypatch):
+        # The other Future-alone branch: live_readiness itself failed, so no tally exists to name.
+        st._GENERATIONS["gen1"] = self._entry()
+        monkeypatch.setattr(st._cam_common, "live_readiness",
+                            lambda: (None, "No CAM product in the active document."))
+        st.handler(handle="gen1")
+        res = st.handler(handle="gen1")
+        assert res["isError"] is True
+        assert "is released" in res["message"]
+        assert "valid" not in res["message"] and "errored" not in res["message"]
+
+
 class TestSameDocumentIdentity:
     """A never-saved document carries no lineage URN, and its NAME is not a substitute: measured
     live, two open never-saved documents both answer 'Untitled', so a name match is not evidence
@@ -1011,6 +1127,7 @@ class TestSameDocumentIdentity:
         # only over a launch document it can CONFIRM is active, so a saved-mid-generation document
         # gets its own health back instead of the Future-alone fallback.
         st._GENERATIONS.clear()
+        st._RELEASED.clear()
         monkeypatch.setattr(st, "_active_identity", lambda: ("Bracket", "urn:new"))
         monkeypatch.setattr(st, "document_key", lambda: "urn:new")
         self._active(monkeypatch, _DocHandle("doc-a"))
@@ -1036,6 +1153,7 @@ class TestSameDocumentIdentity:
 
     def test_latest_is_refused_when_the_launch_document_cannot_be_identified(self, monkeypatch):
         st._GENERATIONS.clear()
+        st._RELEASED.clear()
         monkeypatch.setattr(st, "_active_identity", lambda: ("Untitled", None))
         monkeypatch.setattr(st, "document_key", lambda: "unsaved:1")
         st._GENERATIONS["gen1"] = self._entry("Untitled", None)
@@ -1050,6 +1168,7 @@ class TestSameDocumentIdentity:
 
     def test_the_unidentifiable_refusal_is_worded_apart_from_the_foreign_document_one(self, monkeypatch):
         st._GENERATIONS.clear()
+        st._RELEASED.clear()
         monkeypatch.setattr(st, "_active_identity", lambda: ("Doc", "urn:doc"))
         monkeypatch.setattr(st, "document_key", lambda: "urn:doc")
         st._GENERATIONS["gen1"] = self._entry("OtherDoc", "urn:other", doc_urn="urn:other")
@@ -1062,6 +1181,7 @@ class TestSameDocumentIdentity:
         # What the key buys the 'latest' gate: a scratch-document launch is CONFIRMED as the active
         # one, so 'latest' answers over it instead of refusing for want of a readable identity.
         st._GENERATIONS.clear()
+        st._RELEASED.clear()
         monkeypatch.setattr(st, "_active_identity", lambda: ("Untitled", None))
         monkeypatch.setattr(st, "document_key", lambda: "unsaved:1")
         monkeypatch.setattr(st._cam_common, "live_readiness",
@@ -1084,6 +1204,7 @@ class TestSameDocumentIdentity:
         # the urn alone cannot confirm the launch and the tally is skipped entirely - no readiness
         # line at all. The per-instance key confirms it, so that document's own tally lands.
         st._GENERATIONS.clear()
+        st._RELEASED.clear()
         monkeypatch.setattr(st, "_active_identity", lambda: ("Untitled", None))
         monkeypatch.setattr(st, "document_key", lambda: "unsaved:1")
         st._GENERATIONS["gen1"] = self._entry("Untitled", "unsaved:1")
@@ -1104,6 +1225,7 @@ class TestSameDocumentIdentity:
         # THE BITE for this consumer: no tally may be attached over a document the call cannot
         # confirm - a wrong-document tally under this handle reads as this generation's own state.
         st._GENERATIONS.clear()
+        st._RELEASED.clear()
         monkeypatch.setattr(st, "_active_identity", lambda: ("Untitled", None))
         monkeypatch.setattr(st, "document_key", lambda: "unsaved:1")
         st._GENERATIONS["gen1"] = self._entry("Untitled", None)
@@ -1126,6 +1248,7 @@ class TestSameDocumentIdentity:
         # generation belongs to - a name nothing ever read. Every other test here launches from
         # 'Untitled', where a fabricated name is indistinguishable from a real one.
         st._GENERATIONS.clear()
+        st._RELEASED.clear()
         monkeypatch.setattr(st, "_active_identity", lambda: (None, None))
         monkeypatch.setattr(st, "document_key", lambda: None)
         st._GENERATIONS["gen1"] = {"future": SimpleNamespace(isGenerationCompleted=True,
@@ -1145,6 +1268,7 @@ class TestSameDocumentIdentity:
         # The document may well BE the active one - the call simply cannot tell. Saying it is not
         # active states a fact nothing read.
         st._GENERATIONS.clear()
+        st._RELEASED.clear()
         monkeypatch.setattr(st, "_active_identity", lambda: ("Untitled", None))
         monkeypatch.setattr(st, "document_key", lambda: "unsaved:1")
         st._GENERATIONS["gen1"] = self._entry("Untitled", None)
@@ -1157,6 +1281,7 @@ class TestSameDocumentIdentity:
         # the other side of the boundary: an identified, different document keeps its own wording
         # and its own remedy, so the two states stay distinguishable on the wire.
         st._GENERATIONS.clear()
+        st._RELEASED.clear()
         monkeypatch.setattr(st, "_active_identity", lambda: ("Doc", "urn:doc"))
         monkeypatch.setattr(st, "document_key", lambda: "urn:doc")
         st._GENERATIONS["gen1"] = self._entry("OtherDoc", "urn:other", doc_urn="urn:other")
@@ -1451,6 +1576,7 @@ class TestScopedHealthLists:
         # the handle path settles completion on the launch target's own ops (_handle_scope_state);
         # its health lists read that same set, and health_scope repeats the completion basis.
         st._GENERATIONS.clear()
+        st._RELEASED.clear()
         monkeypatch.setattr(st, "_active_identity", lambda: ("Doc", "urn:doc"))
         monkeypatch.setattr(st, "document_key", lambda: "urn:doc")
         self._cam(monkeypatch)
@@ -1578,6 +1704,7 @@ class TestOpLabelsRepeatedPath:
 class TestStatusLivePoll:
     def setup_method(self):
         st._GENERATIONS.clear()
+        st._RELEASED.clear()
         st._HANDLE_SEQ[0] = 0
 
     def _states(self, **kw):
@@ -1828,6 +1955,7 @@ class TestOneHandleOverSeveralFutures:
 
     def setup_method(self):
         st._GENERATIONS.clear()
+        st._RELEASED.clear()
         st._HANDLE_SEQ[0] = 0
 
     @pytest.fixture(autouse=True)

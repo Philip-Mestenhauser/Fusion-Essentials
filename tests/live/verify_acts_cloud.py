@@ -77,6 +77,7 @@ _DRAWING_RESTORED_PDF = DOWNLOAD_DIR + f"/drawing_restored_{_STAMP}.pdf"
 _DRAWING_SKETCH_DXF = DOWNLOAD_DIR + f"/drawing_sketch_readback_{_STAMP}.dxf"
 _DRAWING_BLANK_DXF = DOWNLOAD_DIR + f"/drawing_blank_sheet_{_STAMP}.dxf"
 _DRAWING_SKETCH_NAME = "SweepCloudSketch"
+_DRAWING_BLANK_SKETCH_NAME = "SweepCloudBlankSketch"
 _DRAWING_TWO_BEFORE_KEY = "drawing-two-before-" + _STAMP
 _DRAWING_TWO_AFTER_KEY = "drawing-two-after-" + _STAMP
 _DRAWING_POPULATED_KEY = "drawing-populated-" + _STAMP
@@ -1847,6 +1848,22 @@ def _sketch_landed(name, count):
     return check
 
 
+def _drawing_sketch_deleted(sketch_name, sheet_name):
+    """drawing_delete_sketch: the sheet's own sketch count fell by exactly one and the payload
+    names the sketch and sheet back, off the tool's own before/after read-back."""
+    def check(p):
+        return _measured(f"'{sketch_name}' deleted from sheet '{sheet_name}'",
+                         {"deleted": p.get("deleted"), "sketch": p.get("sketch"),
+                          "sheet": p.get("sheet"),
+                          "sketch_count_before": p.get("sketch_count_before"),
+                          "sketch_count": p.get("sketch_count")},
+                         p.get("deleted") is True and p.get("sketch") == sketch_name
+                         and p.get("sheet") == sheet_name
+                         and _num(p.get("sketch_count_before"))
+                         and p.get("sketch_count") == p["sketch_count_before"] - 1)
+    return check
+
+
 def _dxf_layer_entities(path, layer):
     """Every entity one DXF carries on `layer`, as (type, [(x, y), ...]) - None when the file will
     not read. A drawing-sketch curve exposes no geometry to the API, so this export is the only
@@ -1902,6 +1919,14 @@ def _sketch_readback(sketch_name, curves):
                           "landed": landed},
                          entities is not None and len(entities) == curves)
     return check
+
+
+def _blank_sheet_readback(p):
+    """drawing_export(dxf): the blank sheet's DXF carries neither the other sheet's sketch layer
+    nor the deleted sketch's OWN layer - the second is what proves the delete reached this export,
+    not merely the tool's own count read-back."""
+    return (_sketch_readback(_DRAWING_SKETCH_NAME, 0)(p)
+            and _sketch_readback(_DRAWING_BLANK_SKETCH_NAME, 0)(p))
 
 
 def _derived(source):
@@ -2690,10 +2715,19 @@ _CLOUD_DRAWING = [
      _sketch_readback(_DRAWING_SKETCH_NAME, 4), None),
     ("drawing_edit_sheet", {"action": "add", "new_name": "SweepCloudSheet"},
      _sheet_added("SweepCloudSheet"), None),
-    # The added sheet is the ACTIVE one now, so this export holds the blank sheet: the same DXF
-    # read as above finds NO entity on the sketch's layer, which is the add note's claim.
+    # drawing_delete_sketch: a sketch added then deleted on the blank sheet, its own count
+    # read-back (before - 1) proving the delete landed - the positive case beside the 1e300
+    # refusal row above, which never lets a bad coordinate reach the sheet at all.
+    ("drawing_add_sketch", {"name": _DRAWING_BLANK_SKETCH_NAME, "sheet_name": "SweepCloudSheet",
+                            "geometry": [{"kind": "circle", "points": [[10, 10]], "radius": 3}]},
+     _sketch_landed(_DRAWING_BLANK_SKETCH_NAME, 1), None),
+    ("drawing_delete_sketch", {"sketch": _DRAWING_BLANK_SKETCH_NAME, "sheet": "SweepCloudSheet"},
+     _drawing_sketch_deleted(_DRAWING_BLANK_SKETCH_NAME, "SweepCloudSheet"), None),
+    # The added sheet is the ACTIVE one now, so this export holds the blank sheet: neither the
+    # OTHER sheet's sketch layer nor the deleted sketch's OWN layer lands on it - the second is
+    # what proves the delete above reached this export, not just the tool's own count read-back.
     ("drawing_export", {"format": "dxf", "file_path": _DRAWING_BLANK_DXF},
-     _sketch_readback(_DRAWING_SKETCH_NAME, 0), None),
+     _blank_sheet_readback, None),
     ("drawing_get", {}, _sheets_answer, None),
     ("drawing_export", {"format": "pdf",
                         "file_path": DOWNLOAD_DIR + f"/sweep_drawing_{_STAMP}.pdf"},

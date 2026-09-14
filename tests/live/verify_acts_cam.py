@@ -2492,6 +2492,14 @@ def _generation_identity_probe(rows, setup, operation, max_polls=40, document_pi
                   f"handle={handle!r} and target={operation!r} settled; "
                   f"active routes observed={sorted(active_routes)}"):
         return False
+    # THE SPENT HANDLE: its completed read released it, so the next poll is a refusal that says so
+    # and names the target to read live - never the bare "no generation with handle" miss.
+    is_error, payload = call("cam_get_status", {"handle": handle})
+    text = str(payload)
+    if not judged("cam_get_status",
+                  is_error and "is released" in text and operation in text,
+                  f"spent handle {handle!r} re-polled: {text[:NOTE_MAX]}"):
+        return False
 
     current = ask("cam_get", {"include": ["operations"], "setup": setup})
     if current is None:

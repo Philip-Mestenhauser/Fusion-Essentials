@@ -5099,7 +5099,7 @@ ROWS = [
     {
         "id": "cam-children-tree",
         "claim": "Setup.children interleaves top-level Operations and folder objects whose type name is 'CAMFolder'; folder.allOperations and folder.children expose the folder's contents",
-        "encoded_in": "no fake: the tools walk _cam_common.CHILD_COLLECTIONS (operations/folders/patterns) and never read children, and tests/fakes/cam.py's FakeCAMFolder / FakeSetup carry no children member",
+        "encoded_in": "_cam_common._walk_children, the ONE tree walk, which reads `children` and classifies each child by cast; tests/fakes/cam.py's FakeCAMFolder / FakeSetup children property",
         "needs": "cam",
         "body": """
     cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
@@ -5118,6 +5118,186 @@ ROWS = [
           and folder.children.count == 1)
     emit(ok, "cam-children-tree: children=" + ", ".join(kinds) + " folder_type="
          + type(folder).__name__ + " folder_allops=" + str(folder.allOperations.count))
+""",
+    },
+    {
+        "id": "shape-cam-children",
+        "claim": ("Setup.children and CAMFolder.children are a ChildOperationList holding EVERY "
+                  "child of that parent - a SUPERSET of the three per-kind collections: its count "
+                  "is at least operations.count + folders.count + patterns.count, and equals that "
+                  "sum only on a parent holding no additive container and no base node (which is "
+                  "what the harness MeasureSetup and MeasureFolder are, so the equality is "
+                  "asserted here). shape-cam-additive-container measures the strict-superset "
+                  "half. Each child of such a parent casts as exactly ONE of Operation / "
+                  "CAMFolder / CAMPattern, and the walk order RESTRICTED to one kind equals that "
+                  "kind's own collection order - the fact cam_reorder's landing comparison rests "
+                  "on, since it reads the row off the walk and re-reads it off the collection. "
+                  "Measured separately on a scratch milling setup: children lists folders and "
+                  "operations INTERLEAVED in creation (browser) order, not operations-then-"
+                  "folders, while each per-kind collection keeps its own creation order"),
+        "encoded_in": ("_cam_common._walk_children (the ONE walk) and _child_kind (the cast order); "
+                       "cam_reorder._row_nodes vs _row_names; tests/fakes/cam.py "
+                       "FakeCAMFolder.children, which concatenates the fake's own three "
+                       "collections because a fake cannot know a browser order"),
+        "needs": "cam",
+        "body": """
+    cam, setup = cam_measure_setup()
+    if setup is None or not setup.folders.count:
+        emit(False, "shape-cam-children: the harness MeasureSetup (with MeasureFolder) is not here")
+        return
+    folder = setup.folders.item(0)
+    counts = [dump_shape("ChildOperationList", setup.children)]
+    counts.append(dump_shape("ChildOperationList", folder.children))
+    rows = []
+    single_cast = True
+    counts_match = True
+    order_match = True
+    for parent, label in ((setup, "setup"), (folder, "folder")):
+        kids = parent.children
+        declared = parent.operations.count + parent.folders.count + parent.patterns.count
+        names = []
+        walked = {"Operation": [], "CAMFolder": [], "CAMPattern": []}
+        for i in range(kids.count):
+            x = kids.item(i)
+            hits = [n for n, t in (("Operation", adsk.cam.Operation),
+                                   ("CAMFolder", adsk.cam.CAMFolder),
+                                   ("CAMPattern", adsk.cam.CAMPattern))
+                    if t.cast(x) is not None]
+            if len(hits) != 1:
+                single_cast = False
+            else:
+                walked[hits[0]].append(str(getattr(x, "name", None)))
+            names.append(str(getattr(x, "name", None)) + "[" + ",".join(hits) + "]")
+        # the per-kind SUBSEQUENCE: walk order restricted to one kind IS that collection's order
+        own = {"Operation": [o.name for o in parent.operations],
+               "CAMFolder": [f.name for f in parent.folders],
+               "CAMPattern": [p.name for p in parent.patterns]}
+        disagreed = [k for k in own if walked[k] != own[k]]
+        if disagreed:
+            order_match = False
+        # the harness parents hold no container and no base node, so children IS the three-sum here
+        if kids.count != declared:
+            counts_match = False
+        rows.append(label + ": children(" + str(kids.count) + ")=" + ", ".join(names)
+                    + " | three-collection(" + str(declared) + ")="
+                    + ", ".join(own["Operation"] + own["CAMFolder"] + own["CAMPattern"])
+                    + (" ORDER DIFFERS on " + ",".join(disagreed) if disagreed else ""))
+    emit(all(c > 0 for c in counts) and single_cast and counts_match and order_match,
+         "shape-cam-children: single-cast=" + str(single_cast) + " counts-match="
+         + str(counts_match) + " per-kind-order-match=" + str(order_match) + " || "
+         + " || ".join(rows))
+""",
+    },
+    {
+        "id": "shape-cam-additive-container",
+        "claim": ("An ADDITIVE setup keeps its orientation / support / analysis operations in "
+                  "adsk::cam::CAMAdditiveContainer nodes reachable through Setup.children ALONE. "
+                  "The container answers children, allOperations, name, strategy and parent, and "
+                  "RAISES on operations / folders / patterns / hasToolpath; it casts as "
+                  "OperationBase and never as Operation. Its held operation IS in "
+                  "setup.allOperations and is NOT in setup.operations, which is why a walk over "
+                  "the three per-kind collections cannot reach it. additive_individual_strategies "
+                  "lands a BARE OperationBase in children, whose shape is dumped beside the "
+                  "container's. The additive setup is created and deleted through the wire around "
+                  "the script: a library query inside a write-mode script kills the process"),
+        "encoded_in": ("_cam_common._child_kind's cast order and _cam_read._other_node_rows; "
+                       "tests/fakes/cam.py _AdditiveContainer and _BaseNode"),
+        "needs": "cam",
+        "wire_before": [("cam_create_setup", {"operation_type": "additive", "machine": "EOS|M 290",
+                                              "print_setting": "316L_040_FlexM291 1.00",
+                                              "name": "MeasureAdditive"})],
+        "wire_after": [("cam_delete", {"entity": "MeasureAdditive"})],
+        "body": """
+    cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType("CAMProductType"))
+    setup = cam.setups.itemByName("MeasureAdditive")
+    if setup is None:
+        emit(False, "shape-cam-additive-container: the wire-built 'MeasureAdditive' setup is not "
+             "here - inconclusive")
+        return
+    bare = None
+    for strategy in ("automatic_orientation", "additive_individual_strategies"):
+        opin = setup.operations.createInput(strategy)
+        opin.generationMode = adsk.cam.AutomaticGenerationModes.SkipGeneration
+        setup.operations.add(opin)
+    container = None
+    for i in range(setup.children.count):
+        x = setup.children.item(i)
+        if adsk.cam.CAMAdditiveContainer.cast(x) is not None:
+            container = x
+        elif adsk.cam.Operation.cast(x) is None:
+            bare = x
+    if container is None or not container.children.count:
+        emit(False, "shape-cam-additive-container: no CAMAdditiveContainer holding an "
+             "operation appeared in setup.children (container=" + str(container is not None)
+             + ", bare OperationBase=" + str(bare is not None) + ")")
+        return
+    held = container.children.item(0)
+    counts = [dump_shape("CAMAdditiveContainer", container)]
+    if bare is not None:
+        counts.append(dump_shape("OperationBase", bare))
+    raised = []
+    for member in ("operations", "folders", "patterns", "hasToolpath"):
+        try:
+            getattr(container, member)
+        except Exception:
+            raised.append(member)
+    as_base = adsk.cam.OperationBase.cast(container) is not None
+    as_op = adsk.cam.Operation.cast(container) is not None
+    in_all = any(setup.allOperations.item(i).name == held.name
+                 for i in range(setup.allOperations.count))
+    in_ops = any(setup.operations.item(i).name == held.name
+                 for i in range(setup.operations.count))
+    emit(all(c > 0 for c in counts) and bare is not None
+         and len(raised) == 4 and as_base and not as_op and in_all and not in_ops,
+         "shape-cam-additive-container: container '" + str(container.name) + "' strategy "
+         + str(container.strategy) + " parent " + str(container.parent) + " holds "
+         + str(container.children.count) + " (allOperations "
+         + str(container.allOperations.count) + "); raises on " + ",".join(raised)
+         + "; OperationBase=" + str(as_base) + " Operation=" + str(as_op)
+         + "; '" + str(held.name) + "' in setup.allOperations=" + str(in_all)
+         + " in setup.operations=" + str(in_ops)
+         + "; bare OperationBase=" + (str(bare.name) if bare is not None else "absent"))
+""",
+    },
+    {
+        "id": "cam-setup-read-identity",
+        "claim": ("Two reads of ONE setup off cam.setups hand back DISTINCT Python objects that "
+                  "compare EQUAL: `a is b` False, `a == b` True, `a != b` False, `a in [b]` True, "
+                  "and a read of a DIFFERENT setup compares unequal. hash(a) RAISES TypeError - "
+                  "the live wrapper defines equality and NO hash - so a setup is never a dict key "
+                  "or a set member. Identity across two walks answers nothing; a walk that must "
+                  "recognise a node again holds its own node or compares with =="),
+        "encoded_in": ("tests/fakes/cam.py _NodeRead / _SetupRead and _SetupsCollection, which "
+                       "hand back a fresh read per lookup so an `is` slip fails in the unit tests "
+                       "too; _cam_common.resolve_cam_node and cam_delete, which hold their node"),
+        "needs": "cam",
+        "body": """
+    cam, setup = cam_measure_setup()
+    if setup is None:
+        emit(False, "cam-setup-read-identity: the harness MeasureSetup is not here")
+        return
+    at = None
+    for i in range(cam.setups.count):
+        if cam.setups.item(i).name == setup.name:
+            at = i
+    other = cam.setups.add(cam.setups.createInput(adsk.cam.OperationTypes.MillingOperation))
+    try:
+        a = cam.setups.item(at)
+        b = cam.setups.item(at)
+        by_name = cam.setups.itemByName(setup.name)
+        hashed = "hashable"
+        try:
+            hash(a)
+        except TypeError as e:
+            hashed = "TypeError: " + str(e)[:40]
+        emit(a is not b and a == b and not (a != b) and a in [b] and by_name == a
+             and not (a == other) and hashed.startswith("TypeError"),
+             "cam-setup-read-identity: is=" + str(a is b) + " ==" + str(a == b)
+             + " !=" + str(a != b) + " in-list=" + str(a in [b])
+             + " itemByName==item=" + str(by_name == a)
+             + " ==another-setup=" + str(a == other) + " hash(a)=" + hashed)
+    finally:
+        other.deleteMe()
 """,
     },
     {
@@ -7118,6 +7298,17 @@ def _build_cam_world(scratch_handle):
     return None
 
 
+def _wire_calls(scratch_handle, calls):
+    """Run a row's wire calls in order against the scratch document; the first refusal's text, else
+    None. For the rig a script must not build: a library query inside a write-mode script kills the
+    Fusion process (measured), while the same query through a tool lands."""
+    for tool, arguments in calls or ():
+        is_error, payload = _scratch_call(scratch_handle, tool, arguments)
+        if is_error:
+            return tool + ": " + str(payload)[:160]
+    return None
+
+
 def _compose(row):
     box_line = ""
     if row.get("needs") == "cam":
@@ -7646,11 +7837,21 @@ def run_measurements(write_json, only=None):
                 status, detail = _measure_dxf_units(row, scratch)
                 payload = ""
             else:
-                script_args = {"script": _compose(row), "expect_document": scratch}
-                if row.get("read_only"):
-                    script_args["read_only"] = True
-                is_error, payload = call("sys_execute_script", script_args)
-                status, detail = _judge(row, is_error, payload)
+                # wire_before / wire_after: the row's rig built and taken down through the tools,
+                # around the one script that measures it.
+                payload = ""
+                before_err = _wire_calls(scratch, row.get("wire_before"))
+                if before_err:
+                    status, detail = "ERROR", "wire_before " + before_err
+                else:
+                    script_args = {"script": _compose(row), "expect_document": scratch}
+                    if row.get("read_only"):
+                        script_args["read_only"] = True
+                    is_error, payload = call("sys_execute_script", script_args)
+                    status, detail = _judge(row, is_error, payload)
+                after_err = _wire_calls(scratch, row.get("wire_after"))
+                if after_err:
+                    status, detail = "ERROR", detail + " | wire_after " + after_err
             if status == "PASS":
                 facts.update(row.get("facts_on_pass") or {})
                 facts.update(_fact_lines(payload))

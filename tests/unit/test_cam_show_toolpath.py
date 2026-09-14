@@ -132,8 +132,8 @@ class _IdlessRefetched(_Refetched):
 
 
 class _RefetchSetup:
-    """A setup whose .operations mints a fresh wrapper per fetch, as the live collection does -
-    which no shared fake models (FakeSetup holds one object per operation)."""
+    """A setup whose reads mint a fresh wrapper per fetch, as the live collection does - through
+    THIS file's own wrapper, so each test says what identity reads back off it."""
     def __init__(self, name, cells, is_active=True, wrapper=_Refetched):
         self.name = name
         self._cells = list(cells)
@@ -145,6 +145,10 @@ class _RefetchSetup:
     @property
     def operations(self):
         return _NamedCollection([self._wrapper(c) for c in self._cells])
+
+    @property
+    def children(self):
+        return self.operations       # the one list the tree walk reads; no folders or patterns
 
     def activate(self):
         self.isActive = True

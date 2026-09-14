@@ -170,7 +170,9 @@ class TestMove:
         holes = setup.folders.itemByName("Holes")
         assert setup.operations.itemByName("Face1") is None
         face = holes.operations.itemByName("Face1")
-        assert face is not None and face.moved_into is holes
+        # ==, not `is`: the destination the tool moved into is its own read of that folder out of
+        # the walk, and every node read is a DISTINCT object (measured).
+        assert face is not None and face.moved_into == holes
 
     def test_move_unknown_operation(self, monkeypatch):
         _install(monkeypatch)
@@ -207,7 +209,7 @@ class TestMove:
         out = _payload(cf.handler(action="move", setup="Setup1", folder="Outer",
                                   operations=["Inner"]))
         assert out["moved"] == 1
-        assert inner.moved_into is outer
+        assert inner.moved_into == outer
 
 
 class TestNestedFolderTargets:
@@ -219,7 +221,7 @@ class TestNestedFolderTargets:
         _payload(cf.handler(action="rename", setup="Setup1", folder="Inner", new_name="Finish"))
         out = _payload(cf.handler(action="move", setup="Setup1",
                                   folder="Finish", operations=["Face1"]))
-        assert inner.name == "Finish" and op.moved_into is inner and out["moved"] == 1
+        assert inner.name == "Finish" and op.moved_into == inner and out["moved"] == 1
 
     def test_duplicate_nested_destinations_refuse_before_move(self, monkeypatch):
         left, right, op = _Folder("Finish"), _Folder("Finish"), _Op("Face1")
@@ -233,7 +235,7 @@ class TestNestedFolderTargets:
         assert result["isError"] is True and left.name == right.name == "Finish"
         _payload(cf.handler(action="move", setup="Setup1", folder="Finish#2",
                             operations=["Face1"]))
-        assert op.moved_into is right
+        assert op.moved_into == right
 
 
 class _RefusingOp(_Op):
@@ -263,7 +265,7 @@ class TestMoveRefused:
                          operations=["Face1", "Locked1"])
         assert res["isError"] is True
         assert "Face1" in res["message"]       # names what moved before the refusal
-        assert moved_ok.moved_into is folder   # that earlier move actually took
+        assert moved_ok.moved_into == folder   # that earlier move actually took
 
 
 # ── the create and the move are READ BACK off the collection ─────────────────
