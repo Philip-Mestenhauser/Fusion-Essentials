@@ -62,6 +62,13 @@ ENUMS = {
         "Generic5AxisTableTable": 5,
         "GenericFFF": 6,
     },
+    "cam.MachiningMode": {
+        "Avoid_MachiningMode": 0,
+        "Machine_MachiningMode": 1,
+        "Gouge_MachiningMode": 2,
+        "Fixture_MachiningMode": 3,
+        "None_MachiningMode": 4,
+    },
     "cam.OperationStates": {
         "IsValidOperationState": 0,
         "IsInvalidOperationState": 1,

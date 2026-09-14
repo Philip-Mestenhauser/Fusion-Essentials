@@ -958,6 +958,15 @@ _CAM_STORY = [
      lambda c: {"operation": _RECOGNIZED_OP, "selection": "holes",
                 "handles": _ctx_get(c, "recognized_cbore_walls", "the recognized counterbore walls"),
                 "generate": False}, _selected_saved("recognized_cbore_walls"), None),
+    # THE SURFACE GROUP on a BASE-licence strategy: a drill carries checkSurfaceSelectionSets, so
+    # two faces land on a direct group of their own. This op is deleted on the next row.
+    # _surface_group_applied is defined below this list, so the predicate is built when it RUNS.
+    ("cam_select_geometry",
+     lambda c: {"operation": _RECOGNIZED_OP, "selection": "surface_group",
+                "handles": [_ctx_get(c, "step_top_face", "the stepped top"),
+                            _ctx_get(c, "boss_top", "the boss top")],
+                "machine_over_holes": True, "generate": False},
+     lambda p: _surface_group_applied(2, True, groups=3)(p), None),
     # _op_deleted is defined below this list, so the predicate is built when the step RUNS.
     ("cam_delete", {"entity": _RECOGNIZED_OP}, lambda p: _op_deleted(_RECOGNIZED_OP)(p), None),
     # THE RECOGNIZED POCKET, machined the same way: the FLOOR handle cam_find_pockets minted in the
@@ -2915,19 +2924,20 @@ def _surfaces_applied(count, target, param):
     return check
 
 
-def _surface_group_applied(count, over_holes):
+def _surface_group_applied(count, over_holes, groups=2):
     """cam_select_geometry(surface_group): what the applied group reads BACK - its own face count,
-    the machine-over-holes flag, and the group count the operation now holds. The op's OWN default
-    group is group 1, so a landed direct group makes that count 2."""
+    the machine-over-holes flag, and the group count the operation now holds. `groups` is that
+    count after ONE direct group lands: the operation's own groups come first, and they differ
+    by strategy - a corner reads 2, a drill reads 3 (both measured)."""
     def check(p):
         group = p.get("surface_group") or {}
         return _measured(f"{count} face(s) on a surface group reading machine_over_holes "
-                         f"{over_holes}",
+                         f"{over_holes}, {groups} groups on the operation",
                          {"selections": p.get("selections"), "surface_group": group,
                           "surface_group_count": p.get("surface_group_count")},
                          p.get("selections") == count and group.get("entities") == count
                          and group.get("machine_over_holes") is over_holes
-                         and p.get("surface_group_count") == 2)
+                         and p.get("surface_group_count") == groups)
     return check
 
 

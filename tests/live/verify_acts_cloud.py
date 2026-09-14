@@ -75,6 +75,7 @@ _DRAWING_UPDATE_BEFORE_PDF = DOWNLOAD_DIR + f"/drawing_update_before_{_STAMP}.pd
 _DRAWING_UPDATE_AFTER_PDF = DOWNLOAD_DIR + f"/drawing_update_after_{_STAMP}.pdf"
 _DRAWING_RESTORED_PDF = DOWNLOAD_DIR + f"/drawing_restored_{_STAMP}.pdf"
 _DRAWING_SKETCH_DXF = DOWNLOAD_DIR + f"/drawing_sketch_readback_{_STAMP}.dxf"
+_DRAWING_BLANK_DXF = DOWNLOAD_DIR + f"/drawing_blank_sheet_{_STAMP}.dxf"
 _DRAWING_SKETCH_NAME = "SweepCloudSketch"
 _DRAWING_TWO_BEFORE_KEY = "drawing-two-before-" + _STAMP
 _DRAWING_TWO_AFTER_KEY = "drawing-two-after-" + _STAMP
@@ -243,9 +244,10 @@ def _file_record(folder_path, complete=True):
 
 
 # The cloud finishes with a saved file on its own clock (its record reads is_complete False for
-# tens of seconds after the save answers), and both the drawing generator and a delete need it
-# finished. Bounded: the budget running out is reported as the state it last read, never as complete.
-_SETTLE_POLLS = 12
+# tens of seconds after the save answers, and past a full minute on a slow day - an uploaded
+# marker measured so), and both the drawing generator and a delete need it finished. Bounded:
+# the budget running out is reported as the state it last read, never as complete.
+_SETTLE_POLLS = 36
 _SETTLE_GAP_S = 5.0
 
 
@@ -979,14 +981,17 @@ def _sheets_answer(p):
 
 
 def _sheet_added(name):
-    """drawing_edit_sheet(add): the new sheet named, and the count read either side of the add."""
+    """drawing_edit_sheet(add): the new sheet named and ACTIVE, and the count read either side."""
     def check(p):
-        return _measured(f"sheet '{name}' added",
+        return _measured(f"sheet '{name}' added and now active",
                          {"added": p.get("added"), "sheet": p.get("sheet"),
                           "sheet_count": p.get("sheet_count"),
-                          "sheet_count_before": p.get("sheet_count_before")},
+                          "sheet_count_before": p.get("sheet_count_before"),
+                          "active_sheet": p.get("active_sheet"),
+                          "became_active": p.get("became_active")},
                          p.get("sheet") == name and _num(p.get("sheet_count_before"))
-                         and p.get("sheet_count") == p["sheet_count_before"] + 1)
+                         and p.get("sheet_count") == p["sheet_count_before"] + 1
+                         and p.get("became_active") is True and p.get("active_sheet") == name)
     return check
 
 
@@ -1228,9 +1233,12 @@ def _drawing_copy_delete_requested(p):
     return _measured("the copied sheet deletion was accepted once",
                      {"deleted": p.get("deleted"), "delete_accepted": p.get("delete_accepted"),
                       "verification": p.get("verification"), "sheet": p.get("sheet"),
-                      "sheet_count_before": p.get("sheet_count_before")},
+                      "sheet_count_before": p.get("sheet_count_before"),
+                      "active_sheet_still_reads": p.get("active_sheet_still_reads")},
                      p.get("sheet") == _DRAWING_COPY_SHEET
-                     and p.get("sheet_count_before") == 2 and (pending or immediate))
+                     and p.get("sheet_count_before") == 2 and (pending or immediate)
+                     # the listing lags: the sheet just deleted can still read as the active one
+                     and isinstance(p.get("active_sheet_still_reads"), str))
 
 
 def _drawing_original_settled(p, polls=_SETTLE_POLLS):
@@ -2666,6 +2674,11 @@ _CLOUD_DRAWING = [
      _drawing_reference_current("drawing_source_restored"), None),
     ("drawing_dimension", {"view": 0, "strategy": "baseline"}, _dimensioned, None),
     ("drawing_insert_image", {"image_path": MARKER_PNG, "x": 150, "y": 100}, _image_placed, None),
+    # A coordinate that size is refused before a sketch is added: one that lands stops the whole
+    # document's DXF export until it is deleted, and the read-back below is that export.
+    ("drawing_add_sketch", {"name": _DRAWING_SKETCH_NAME + "Far", "geometry": [
+        {"kind": "circle", "points": [[1e300, 0]], "radius": 5},
+    ]}, _refused("carries 1e+300", "DXF export", "Nothing was drawn"), None),
     ("drawing_add_sketch", {"name": _DRAWING_SKETCH_NAME, "geometry": [
         {"kind": "line", "points": [[0, 0], [30, 0], [30, 20]]},
         {"kind": "rectangle", "points": [[40, 5], [70, 25]]},
@@ -2677,6 +2690,10 @@ _CLOUD_DRAWING = [
      _sketch_readback(_DRAWING_SKETCH_NAME, 4), None),
     ("drawing_edit_sheet", {"action": "add", "new_name": "SweepCloudSheet"},
      _sheet_added("SweepCloudSheet"), None),
+    # The added sheet is the ACTIVE one now, so this export holds the blank sheet: the same DXF
+    # read as above finds NO entity on the sketch's layer, which is the add note's claim.
+    ("drawing_export", {"format": "dxf", "file_path": _DRAWING_BLANK_DXF},
+     _sketch_readback(_DRAWING_SKETCH_NAME, 0), None),
     ("drawing_get", {}, _sheets_answer, None),
     ("drawing_export", {"format": "pdf",
                         "file_path": DOWNLOAD_DIR + f"/sweep_drawing_{_STAMP}.pdf"},

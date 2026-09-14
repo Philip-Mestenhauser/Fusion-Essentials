@@ -35,6 +35,17 @@ _sheet_listing = _drawing_common.sheet_listing
 _sheet_facts = _drawing_common.sheet_facts
 
 
+def _active_clause(active, became):
+    """The ACTIVE-sheet sentence the add note composes, one per outcome of the activeSheet read."""
+    if became is True:
+        return ("It is the ACTIVE sheet now and no API activates a sheet, so this server cannot "
+                "switch back. A DXF export holds the active sheet only - export a sheet's DXF "
+                "before the next add.")
+    if became is False:
+        return f"The active sheet still reads '{active}'."
+    return "The active sheet did not read."
+
+
 def _do_add(dwg, new_name):
     sheets = safe(lambda: dwg.sheets)
     if sheets is None:
@@ -57,19 +68,27 @@ def _do_add(dwg, new_name):
         return error(f"Sheets.add returned a sheet but the drawing still holds {after} sheet(s) - "
                      "the add did not take.")
     facts = _sheet_facts(sheet)
+    # ONE activeSheet read: the property can return DIFFERENT sheets across close-together reads,
+    # so one read is what keeps active_sheet, became_active and the note one answer.
+    active = safe(lambda: dwg.activeSheet.name)
+    became = None if active is None else active == facts["name"]
     out = {
         "added": True,
         "sheet": facts["name"],
         "requested_name": want or None,
         "sheet_count_before": before,
         "sheet_count": after,
+        "active_sheet": active,
+        "became_active": became,
         "sheet_units": _drawing_common.sheet_units(dwg),
         "facts": facts,
         "sheets": _sheet_listing(dwg),
-        "note": ("Sheet added, inheriting its size and orientation from the ACTIVE sheet. "
-                 "'sheets' reports collection positions; export/PDF order is unavailable. "
-                 "Export all sheets and inspect the PDF before selecting a page range. "
-                 "Set its size with action='set_size', its shape with action='set_orientation'."),
+        "note": " ".join([
+            "Sheet added, inheriting its size and orientation from the ACTIVE sheet.",
+            _active_clause(active, became),
+            "'sheets' reports collection positions; export/PDF order is unavailable.",
+            "Set its size with action='set_size', its shape with action='set_orientation'.",
+        ]),
     }
     if want and facts["name"] != want:
         out["name_warning"] = (f"The sheet reports the name '{facts['name']}', not the requested "
@@ -139,11 +158,13 @@ def _do_delete(dwg, sheet):
         "sheet": name,
         "sheet_count_before": before,
         "sheet_count_still_reads": reads,
+        "active_sheet_still_reads": safe(lambda: dwg.activeSheet.name),
         "sheets_still_read": _sheet_listing(dwg),
         "note": ("Fusion accepted deletion (deleteMe=true); deleted=null until a later call confirms "
                  "removal. This cannot be undone. The count and 'sheets_still_read' are observations "
-                 "inside this call; neither is a verification. Re-read drawing_get in a later call. "
-                 "Collection positions do not establish PDF order."),
+                 "inside this call; neither is a verification. The listing LAGS a delete: drawing_get "
+                 "can name the deleted sheet as the active sheet a call later while a DXF export has "
+                 "moved on - re-read before trusting active_sheet."),
     })
 
 

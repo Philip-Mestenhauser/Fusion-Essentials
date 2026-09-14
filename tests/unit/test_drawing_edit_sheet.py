@@ -66,9 +66,9 @@ def sheet(name, size=_A3, orientation=_LAND, sketches_count=0, **knobs):
 def wire(monkeypatch):
     """Install a drawing document as the active document; return its live state."""
     def _install(sheets=None, standard="iso", units="mm", active=0, is_drawing=True,
-                 add_result="ok", modified=False, copy_activates=True, unreadable=()):
+                 add_result="ok", modified=False, activates=True, unreadable=()):
         objs = list(sheets or [sheet("Sheet1")])
-        collection = FakeSheets(objs, add_result=add_result, activates=copy_activates,
+        collection = FakeSheets(objs, add_result=add_result, activates=activates,
                                 unreadable=unreadable)
         document = make_drawing(sheets=collection, active=active, standard=standard, units=units,
                                is_modified=modified)
@@ -122,6 +122,47 @@ class TestAdd:
         assert out["sheet_units"] == "mm"
         assert state.drawing.activeSheet.name == "Detail"
 
+    def test_the_add_publishes_the_active_sheet_it_read(self, wire):
+        # an added sheet becomes the ACTIVE sheet and a DXF export holds only that sheet, so the
+        # caller who wanted the previous sheet's DXF has already lost it by this reply.
+        wire([sheet("Front")])
+        out = payload(es.handler(action="add", new_name="Detail"))
+        assert out["active_sheet"] == "Detail" and out["became_active"] is True
+        assert "It is the ACTIVE sheet now" in out["note"] and "DXF" in out["note"]
+
+    def test_the_verdict_is_the_read_not_the_requested_name(self, wire):
+        # the new sheet reports a name of its own and the activeSheet read agrees with THAT - a
+        # verdict compared against the REQUESTED name would call this add inactive.
+        wire([sheet("Front")], add_result="renamed")
+        out = payload(es.handler(action="add", new_name="Detail"))
+        assert out["active_sheet"] == "Detail (2)" and out["became_active"] is True
+        assert out["requested_name"] == "Detail"
+
+    def test_an_add_that_did_not_activate_names_the_sheet_that_stayed(self, wire):
+        wire([sheet("Front")], activates=False)
+        out = payload(es.handler(action="add", new_name="Detail"))
+        assert out["sheet"] == "Detail" and out["became_active"] is False
+        assert out["active_sheet"] == "Front" and "still reads 'Front'" in out["note"]
+        assert "ACTIVE sheet now" not in out["note"]
+
+    def test_an_active_sheet_that_does_not_read_gives_no_verdict(self, wire):
+        state = wire([sheet("Front")], activates=False)
+        state.drawing.activeSheet = None
+        out = payload(es.handler(action="add", new_name="Detail"))
+        assert out["active_sheet"] is None and out["became_active"] is None
+        assert "did not read" in out["note"] and "ACTIVE sheet now" not in out["note"]
+
+    def test_the_worst_composed_add_note_fits_the_wire_budget(self, wire):
+        # the note is assembled at run time from the activeSheet read, so test_prose_budget measures
+        # none of the three compositions - each is scored here against NOTE_BUDGET_CHARS.
+        stayed = {"activates": False}
+        for knobs, blank in (({}, False), (stayed, False), (stayed, True)):
+            state = wire([sheet("Front Elevation Of The Welded Frame Assembly")], **knobs)
+            if blank:
+                state.drawing.activeSheet = None
+            note = payload(es.handler(action="add", new_name="Detail"))["note"]
+            assert len(note) <= 400, (len(note), note)
+
     def test_a_duplicate_name_carries_the_platform_refusal(self, wire):
         # measured: Sheets.add with a name a sheet already holds RAISES - there is no dedupe
         state = wire([sheet("Front")])
@@ -168,7 +209,7 @@ class TestCopy:
     def test_the_facts_come_from_the_sheet_copy_returned(self, wire):
         # the object copy() handed back is the one to read - not whichever sheet the drawing
         # happens to report as active afterwards
-        wire([sheet("Front", size=_A2, sketches_count=1)], copy_activates=False)
+        wire([sheet("Front", size=_A2, sketches_count=1)], activates=False)
         out = payload(es.handler(action="copy", sheet="Front", new_name="Front Copy"))
         assert out["sheet"] == "Front Copy" and out["facts"]["name"] == "Front Copy"
 
@@ -203,6 +244,15 @@ class TestDelete:
         # publishing a list that looks like a post-delete state
         assert [s["name"] for s in out["sheets_still_read"]] == ["Front", "Detail"]
         assert state.sheets[1]._deleted is True
+
+    def test_delete_publishes_the_active_sheet_it_still_reads(self, wire):
+        # the sheet listing LAGS a delete: the sheet just deleted can still read as the active one,
+        # so the payload publishes that reading and the note says not to trust it.
+        wire([sheet("Front"), sheet("Detail")], active=1)
+        out = payload(es.handler(action="delete", sheet="Detail"))
+        assert out["active_sheet_still_reads"] == "Detail"
+        assert "LAGS a delete" in out["note"] and "re-read before trusting" in out["note"]
+        assert len(out["note"]) <= 400
 
     def test_refused_delete_is_an_error(self, wire):
         wire([sheet("Front"), sheet("Detail", delete_ok=False)])

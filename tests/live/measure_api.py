@@ -1465,6 +1465,20 @@ ROWS = [
 """,
     },
     {
+        "id": "enum-cam-machining-mode",
+        "claim": "adsk.cam.MachiningMode resolves and carries int members: the row dumps every one of them and passes on that, asserting nothing about which member means what or about what reads the family. The automatic enum sweep cannot see it - the name ends in none of the ...Types/...States/...Modes suffixes the scrape matches - so it is pinned here or nowhere, and no member value is spelled anywhere in the repo",
+        "encoded_in": "nothing yet - no tool resolves this family. tests/api_surface.py records the cam.MachineAvoidDirectSelection member machineMode, which is a name in the surface dump and not a measurement of what it takes",
+        "body": """
+    M = getattr(adsk.cam, "MachiningMode", None)
+    members = []
+    if M is not None:
+        dump_enum("cam.MachiningMode", M)
+        members = [n for n in dir(M) if not n.startswith("_") and isinstance(getattr(M, n), int)]
+    emit(bool(members), "enum-cam-machining-mode: " + str(len(members)) + " int member(s): "
+         + ",".join(sorted(members)))
+""",
+    },
+    {
         "id": "enum-distance-units-collides-with-factory",
         "claim": "DistanceUnits.MillimeterDistanceUnits == 0 AND a freshly created STLExportOptions reads unitType == 0 - the mm member IS the factory value, so a set-then-read-back of unitType cannot tell an assignment that took from one that never happened, and only for that member. What the file is actually written in is a SEPARATE row this one asserts nothing about: stl-export-unittype-is-sticky-session-state (this body creates an options object and never exports). The automatic enum sweep cannot see this family - its name ends in none of the ...Types/...States/...Modes suffixes the scrape matches - so it is pinned here or nowhere",
         "encoded_in": "_export.py STL_UNIT_MEMBERS + applied_pair (the pre-read this collision forces); mesh_export.py _apply_stl_units; design_export.py _configure_export_options; tests/unit/test_mesh_export.py + test_design_export.py collision fakes",

@@ -1903,7 +1903,7 @@ class TestResolveOperationOnePool:
         assert len(walks) == 1
 
 
-# â”€â”€ inspection results: the recorded probing measurements (cam_get(include=['inspection'])) â”€â”€â”€â”€â”€â”€â”€
+# ── inspection results: the recorded probing measurements (cam_get(include=['inspection'])) ───────
 #
 # The fakes live in conftest beside the other CAM fakes: _InspMeasure carries NO .name, because a
 # measure folder exposes none live.

@@ -412,7 +412,8 @@ class FakeSheets:
     plus createInput/add/itemByName. An ADD lands DIRECTLY AFTER the active sheet and a COPY lands
     LAST, so the export indices shift on an add, and a name a sheet already holds RAISES.
     `unreadable` names the sheets whose item() read throws; `add_result` is 'null' for an add that
-    returns nothing, 'no_growth' for one that never joins, 'renamed' for one reporting its own."""
+    returns nothing, 'no_growth' for one that never joins, 'renamed' for one reporting its own.
+    `activates` False is the collection whose landed sheet does NOT become the active one."""
     def __init__(self, sheets=(), add_result="ok", activates=True, unreadable=()):
         self._items = []
         self._drawing = None
@@ -427,7 +428,7 @@ class FakeSheets:
         self._items.insert(len(self._items) if at is None else at, sheet)
         sheet._sheets = self
         sheet._document = self._document
-        if activate and self._drawing is not None:
+        if activate and self._activates and self._drawing is not None:
             self._drawing.activeSheet = sheet
 
     @property
@@ -464,7 +465,7 @@ class FakeSheets:
             made._document = self._document
             return made
         at = self._items.index(active) + 1 if active in self._items else None
-        self._land(made, at=at, activate=self._activates)
+        self._land(made, at=at)
         return made
 
 

@@ -205,8 +205,11 @@ class TestRailTriageRidesTheEmptyToolpathDisclosure:
 
     def test_an_empty_rail_toolpath_publishes_the_triage_and_the_note_names_it(self, monkeypatch):
         payload, note = self._attach(monkeypatch, ["Swarf1"], ["Swarf1"])
+        # the note names the KEY and the payload row carries which operations - the count is not
+        # restated in prose the wire pays for on every poll.
         assert payload["empty_rail_toolpaths"] == ["Swarf1"]
-        assert "rail_triage" in note and "1 rail-driven" in note
+        assert "rail_triage" in note
+        assert "orientation_triage" not in note       # the pointer names only the keys present
 
     def test_the_triage_orders_the_empty_toolpath_suspects_as_measured(self, monkeypatch):
         # An upper-first pair and a wrong otherSide produce the SAME empty-toolpath signature, so
@@ -221,6 +224,58 @@ class TestRailTriageRidesTheEmptyToolpathDisclosure:
         payload, note = self._attach(monkeypatch, ["Contour1"], [])
         assert "rail_triage" not in payload and "rail_triage" not in note
         assert "empty_rail_toolpaths" not in payload
+
+
+class TestOrientationTriageRidesTheErrorItTriages:
+    """MEASURED on a milling setup whose Z is the world Z, drilling a hole across it: the generate
+    errors 'Cylindrical face not in tool orientation!', binding Z to that hole's face trades it for
+    'Selected face may not be safe for cutting at current tool orientation!', and flipping Z clears
+    both. The error is where an agent meets it, so the remedy is disclosed there."""
+
+    def _attach(self, monkeypatch, errors):
+        monkeypatch.setattr(st, "_collect_op_health",
+                            lambda ops, labels=None: {"warnings": [], "errors": errors,
+                                                      "empty": [], "empty_rail": []})
+        payload = {}
+        return payload, st._attach_op_health(payload, [], "document")
+
+    def test_an_orientation_error_publishes_the_triage_and_the_note_names_it(self, monkeypatch):
+        payload, note = self._attach(monkeypatch, [
+            {"name": "Drill1", "error": "Cylindrical face not in tool orientation!"}])
+        assert "orientation_triage" in note
+        assert "rail_triage" not in note              # the pointer names only the keys present
+        assert payload["operations_with_orientation_errors"] == ["Drill1"]
+        triage = payload["orientation_triage"]
+        # BOTH measured strings - read off the tuple the classifier matches on, so the prose and
+        # the match cannot drift apart - and the two-step remedy in the order that cleared them
+        assert all(measured in triage for measured in st._ORIENTATION_ERRORS)
+        assert triage.index("'z_axis'") < triage.index("wcs_orientation_flipZ")
+
+    @pytest.mark.parametrize("measured", st._ORIENTATION_ERRORS)
+    def test_either_measured_string_attaches_the_triage(self, monkeypatch, measured):
+        # the follow-on error is the one a caller meets after binding Z alone, so it must attach
+        # the triage exactly as the first one does.
+        payload, _note = self._attach(monkeypatch, [{"name": "Drill1", "error": measured}])
+        assert "orientation_triage" in payload
+
+    def test_a_native_prefix_on_the_measured_text_still_attaches(self, monkeypatch):
+        # Fusion prefixes some messages with a numeric code; the match is containment of the
+        # measured string, so a wrapped copy is still the fault it names.
+        payload, _note = self._attach(monkeypatch, [
+            {"name": "Drill1", "error": "3 : Cylindrical face not in tool orientation!"}])
+        assert "orientation_triage" in payload
+
+    def test_another_error_carries_no_orientation_triage(self, monkeypatch):
+        payload, note = self._attach(monkeypatch, [
+            {"name": "Rough1", "error": "Top height must not be below the bottom height"}])
+        assert "orientation_triage" not in payload and "orientation_triage" not in note
+
+    def test_a_phrase_the_measured_strings_do_not_carry_attaches_nothing(self, monkeypatch):
+        # THE BOUNDARY the tuple buys over a loose 'tool orientation' phrase: an unrelated error
+        # that happens to name the tool orientation is not one of the two measured faults.
+        payload, _note = self._attach(monkeypatch, [
+            {"name": "Swarf1", "error": "Tool orientation could not be computed for this pass."}])
+        assert "orientation_triage" not in payload
 
 
 # ── status_handler: guards, handle resolution, clamp, stall warning ─────────────────────────────────
@@ -245,9 +300,10 @@ class TestStatusHandler:
         assert res["isError"] is True and "gen1" in res["message"]
 
     def test_the_worst_composed_completed_note_fits_the_wire_budget(self, monkeypatch):
-        # the completed note is assembled at run time from five pieces, so test_prose_budget
+        # the completed note is assembled at run time from six pieces, so test_prose_budget
         # measures none of the compositions: the completion sentence, the per-op pointer, the
-        # repeated-name clause, the rail pointer and the count caveat all ride together.
+        # repeated-name clause, the rail pointer, the orientation pointer and the count caveat all
+        # ride together.
         readiness = st._cam_common.ready_verdict(
             "6 of 8 active ops valid", 2,
             {"name": "Bore Deep Holes", "warning": "Tool is too short for this operation."}, None)
@@ -265,14 +321,18 @@ class TestStatusHandler:
             SimpleNamespace(name="Rough clean", path="Roughing / Rough clean", obj=object()),
             SimpleNamespace(name="Rough clean", path="Finishing / Rough clean", obj=object())])
         monkeypatch.setattr(st, "_collect_op_health",
-                            lambda ops, labels=None: {"warnings": [], "errors": [],
-                                                      "empty": list(labels or []),
-                                                      "empty_rail": list(labels or [])})
+                            lambda ops, labels=None: {
+                                "warnings": [],
+                                "errors": [{"name": "Drill1",
+                                            "error": "Cylindrical face not in tool orientation!"}],
+                                "empty": list(labels or []),
+                                "empty_rail": list(labels or [])})
         out = _payload(st.handler(handle="gen1"))
         note = out["note"]
         # the unbounded verdict rides as its own key rather than inside the bounded note
         assert out["readiness"] == readiness and readiness not in note
         assert "'Setup / op' paths" in note and "rail_triage" in note
+        assert "orientation_triage" in note                 # both triage pointers armed at once
         assert "numberOfCompleted at THIS read" in note
         assert len(note) <= 400, len(note)      # test_prose_budget.NOTE_BUDGET_CHARS
 

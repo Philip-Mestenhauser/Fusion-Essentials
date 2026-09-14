@@ -29,6 +29,10 @@ _SLICES = ("operations", "strategies", "parameters", "tool", "references", "nc_p
            "tools", "library", "library_types", "machine", "machines", "print_settings",
            "templates", "inspection")
 
+# The slices that read CAMManager.libraryManager rather than the document's CAM product. A read of
+# these ALONE answers on a document that has never entered Manufacture, so it skips get_cam().
+_LIBRARY_SLICES = ("machines", "print_settings", "library_types")
+
 # The orientation slice's own names in include=. Any deep include omits that slice unless one of
 # these rides beside it, so a deep read carries what was asked for and not the default again.
 _DEFAULT_NAMES = ("default", "setups")
@@ -243,10 +247,8 @@ def _slice_machines(cam, vendor, machine_type):
 
 _PRINT_SETTINGS_NOTE = (
     "Pass a row's exact 'name' to cam_create_setup(operation_type='additive', print_setting=...); "
-    "'technology' narrows this listing. A row marked name_shared is one of SEVERAL rows of that "
-    "name and the resolver refuses it - two shipped settings can match on name, technology, id "
-    "and location, so those rows alone carry 'description', the one member separating them. 'id' "
-    "is not an address.")
+    "'technology' narrows this listing. A name_shared row has a twin the resolver refuses - only "
+    "its 'description' separates them. 'id' is not an address.")
 
 # Said where the filter matched nothing: the technologies are the platform's own, read back off the
 # settings, so an empty listing names them instead of leaving the caller to guess a spelling.
@@ -263,9 +265,8 @@ def _slice_print_settings(cam, technology, max_results):
         return None, error(err)
     note = _PRINT_SETTINGS_NOTE
     if truncated:
-        note += (" The listing was CAPPED and name_shared is read over the listed rows only, so a "
-                 "twin past the cap leaves its row unmarked - narrow with 'technology', or raise "
-                 "max_results.")
+        note += (" The listing was CAPPED, so name_shared is read over the listed rows only - "
+                 "narrow with 'technology', or raise max_results.")
     out = {"print_settings": rows, "count": len(rows), "truncated": truncated}
     if (technology or "").strip() and not rows:
         seen = _cc.print_setting_technologies()
@@ -735,8 +736,7 @@ def _slice_tool(cam, operation, preset, setup="", units="mm"):
 
 # ── the router ─────────────────────────────────────────────────────────────────────────────────────
 
-_VALIDITY_NOTE = ("Readable from any workspace; operation validity is trustworthy only in the "
-                  "Manufacture workspace.")
+_VALIDITY_NOTE = "Readable from any workspace; operation validity only in Manufacture."
 
 
 def handler(include=None, setup: str = "", operation: str = "", preset: str = "",
@@ -759,12 +759,14 @@ def handler(include=None, setup: str = "", operation: str = "", preset: str = ""
         return error("'parameter_names', 'include_unavailable' and 'unavailable_offset' apply only "
                      "with include=['parameters'].")
 
-    cam, cerr = get_cam()
-    if not cam:
-        return error(cerr)
-
     deep = [s for s in inc if s in _SLICES]
     want_default = not deep or any(s in _DEFAULT_NAMES for s in inc)
+    cam = None
+    if want_default or any(s not in _LIBRARY_SLICES for s in deep):
+        cam, cerr = get_cam()
+        if not cam:
+            return error(cerr)
+
     out = {}
     if want_default:
         out, serr = _slice_setups(cam, setup)
@@ -845,10 +847,8 @@ def handler(include=None, setup: str = "", operation: str = "", preset: str = ""
     remaining = [s for s in _SLICES if s not in inc]
     lines = []
     if want_default and remaining:
-        lines.append("Setups orientation slice. Pull deeper with include=" + str(remaining) +
-                     ". Scope then deepen: include=['operations'] ('setup' filters) -> "
-                     "include=['parameters'] or ['tool'] with 'operation'=<name> for one op's "
-                     "settings/tool -> 'preset'=<name> for a preset's feeds/speeds.")
+        lines.append("Setups orientation. Deeper: include=" + str(remaining) +
+                     "; 'setup' scopes, 'operation' drills ['parameters'] / ['tool'].")
     if want_default or "operations" in inc:
         lines.append(_VALIDITY_NOTE)
     if lines:

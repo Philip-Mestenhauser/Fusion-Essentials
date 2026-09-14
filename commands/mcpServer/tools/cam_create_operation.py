@@ -148,9 +148,9 @@ _INSPECT_SURFACE = "inspect_surface"
 # On an empty inspectSurfacePositions: appendPoint answers False, and neither .value nor .values
 # takes an assignment that reads back.
 _INSPECT_POINTS_NOTE = (
-    " Its first inspection point is UI-only: on an empty inspectSurfacePositions, appendPoint "
-    "answered False, and assigning a face to .value or points to .values read back 0 - place the "
-    "first point in Fusion.")
+    " Its first inspection point is UI-only: on an empty inspectSurfacePositions appendPoint "
+    "answered False and assigning to .value or .values read back 0 - place the first point in "
+    "Fusion.")
 
 # The subtractive next step names a cutting tool and a geometry selection; an operation created off
 # an isAdditiveStrategy row was handed neither, so it gets its own sentence.
@@ -164,17 +164,14 @@ _CORNER = "corner"
 # reference and cuts once restMaterialFromJob reads true, with no geometry selection at all.
 _CORNER_NEXT = (
     "It rest-machines: with no reference it errors 'No valid reference tool nor valid reference "
-    "stock model'. restMaterialFromJob is its one rest input reading editable - set it true with "
-    "cam_edit_operation, then cam_generate.")
+    "stock model'. Set restMaterialFromJob true with cam_edit_operation, then cam_generate.")
 
 # The two parameters an operation's tool axis is read off. multiAxisMachiningType says how many axes
 # the op runs on; toolAxisMode says what decides the axis. Neither is fixed by the strategy name.
 _MACHINING_TYPE_PARAM = "multiAxisMachiningType"
 _TOOL_AXIS_MODE_PARAM = "toolAxisMode"
 
-_TOOL_AXIS_NOTE = (
-    " Its tool axis is read off its OWN parameters, published here as tool_axis - the strategy name "
-    "does not fix it.")
+_TOOL_AXIS_NOTE = " tool_axis reads off this operation, not off the strategy name."
 
 
 def _axis_row(op, name):
@@ -313,15 +310,11 @@ _BLOCKED_STRATEGY = (
     "pick one cam_get(include=['strategies'], setup='{setup}') reads as allowed.")
 
 # An unreadable entitlement flag is not a blocked strategy, so no refusal is fabricated from it.
-_UNCHECKED_ENTITLEMENT = (
-    " The strategy's isGenerationAllowed did not read, so no entitlement pre-flight ran - this "
-    "operation may never generate.")
+_UNCHECKED_ENTITLEMENT = " isGenerationAllowed did not read - no pre-flight ran."
 
 # An unreadable VOCABULARY is not an empty one either: with no rows to check against, createInput
 # accepting the strategy is the only gate that ran, and both pre-flights are reported as skipped.
-_UNCHECKED_VOCABULARY = (
-    " The setup's compatibleStrategies did not read, so neither the compatibility nor the "
-    "entitlement pre-flight ran.")
+_UNCHECKED_VOCABULARY = " compatibleStrategies did not read - no pre-flight ran."
 
 # Names a setup OFFERS, each reading isGenerationAllowed true, that operations.add does NOT land:
 # it answers with a name while the setup's operation count stays where it was. Value = what does
@@ -339,15 +332,12 @@ def _not_an_operation_clause(strategy) -> str:
     remedy = _NOT_AN_OPERATION.get(strategy)
     return f" '{strategy}' is not an operation: {remedy}." if remedy else ""
 
-# MEASURED on a milling setup whose Z is the world Z, drilling a hole across it: the generate errors
-# on the ORIENTATION, binding Z to that hole's face trades it for a SECOND orientation error, and
-# flipping Z clears both. The heights read isEditable true, so they are not what refuses.
+# A drilling cycle's top/bottom heights read isEditable true, so they are not what refuses a hole
+# off the setup's Z - the tool orientation is.
 _DRILLING_AXIS_NOTE = (
-    " A drilling cycle cuts along the SETUP's Z: a hole off that Z errored 'Cylindrical face not "
-    "in tool orientation!', and binding Z to that face traded it for 'Selected face may not be "
-    "safe for cutting at current tool orientation!'. Both cleared after "
-    "cam_edit_setup(wcs={'z_axis': <that face handle>}) then "
-    "cam_edit_setup(parameters={'wcs_orientation_flipZ': 'true'}), before selecting the holes.")
+    " A drilling cycle cuts along the SETUP's Z: a hole off it errored 'Cylindrical face not in "
+    "tool orientation!'. Aim it with cam_edit_setup(wcs={'z_axis': <face>}) and "
+    "wcs_orientation_flipZ.")
 
 
 def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
@@ -520,10 +510,7 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
         "note": "Operation created. " + ("" if generate else
                 _ADDITIVE_NEXT if toolless else
                 _CORNER_NEXT if strategy == _CORNER else
-                "No toolpath yet: select the geometry it cuts with cam_select_geometry, THEN compute "
-                "it (cam_generate, or generate=true here). Generating before the geometry is "
-                "selected leaves it reading valid with a selection WARNING and no toolpath "
-                "(measured on a 2D Contour)."),
+                "No toolpath yet: cam_select_geometry for its geometry, then cam_generate."),
     }
     if mode_note:
         # The read-back is published only when it DISAGREED: absent = generationMode read back
@@ -556,9 +543,8 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
             # hasToolpath/isToolpathValid read this early are STALE (the generation is async) -
             # reporting them here would report a false negative, so they are deliberately omitted.
             result["generation_handle"] = handle
-            result["note"] = ("Operation created; toolpath generation started (async). Poll it with "
-                              f"cam_get_status(handle='{handle}'), or confirm with "
-                              "cam_get(include=['operations']) once generation completes.")
+            result["note"] = ("Operation created; toolpath generation started (async) - poll "
+                              f"cam_get_status(handle='{handle}').")
 
     # After the generate arm, which REPLACES the note: the axis rule is what a drilling cycle is
     # aimed by, whichever arm wrote the sentence before it.

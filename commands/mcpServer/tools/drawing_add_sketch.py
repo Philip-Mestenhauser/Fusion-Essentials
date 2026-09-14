@@ -142,6 +142,28 @@ def _plan(geometry):
     return entries, expected, None
 
 
+# A drawing sketch accepts any finite coordinate, and one far outside the sheet can stop the whole
+# document's DXF export until that sketch is deleted - so the sheet's own extent bounds the request.
+_SPAN_LIMIT_MULTIPLE = 10
+
+
+def _bounded(entries, limit, unit, sheet_text):
+    """The refusal for the first coordinate or circle radius past `limit`, or None when all fit."""
+    for i, (kind, points, radius) in enumerate(entries):
+        values = [v for point in points for v in point]
+        if kind == "circle":
+            values.append(radius)
+        for value in values:
+            if abs(value) > limit:
+                return (f"geometry[{i}] ('{kind}') carries {value}, far outside {sheet_text}. This "
+                        f"call bounds every coordinate and radius to {limit}, "
+                        f"{_SPAN_LIMIT_MULTIPLE} times the sheet's longer side; coordinates are "
+                        f"taken as {unit}. A coordinate far outside the sheet can stop this "
+                        "document's DXF export - then no file is written until that sketch is "
+                        "deleted, though PDF still exports. Nothing was drawn.")
+    return None
+
+
 def _p2(xy):
     """A drawing-sketch point: Point2D in the drawing's own length units, never scaled to cm."""
     return adsk.core.Point2D.create(xy[0], xy[1])
@@ -205,6 +227,20 @@ def handler(geometry=None, sheet_name: str = "", name: str = "") -> dict:
         return error(sheet_error)
     on_sheet = safe(lambda: sheet.name)
 
+    coordinate_unit = _drawing_common.coordinate_unit(dwg)
+    extent = _drawing_common.sheet_facts(sheet)
+    width, height = extent["width"], extent["height"]
+    # An extent that does not read is no sheet to measure against: the bound is skipped, not guessed.
+    if width is not None and height is not None and max(width, height) > 0:
+        span = _SPAN_LIMIT_MULTIPLE * max(width, height)
+        refusal = _bounded(entries,
+                           round(_drawing_common.extent_in_coordinates(span, dwg), 3),
+                           coordinate_unit or "the standard's unit",
+                           f"the {extent['sheet_size'] or 'custom-size'} sheet, "
+                           f"{width} x {height} {_drawing_common.SHEET_EXTENT_UNIT}")
+        if refusal:
+            return error(refusal)
+
     sketches = safe(lambda: sheet.sketches)
     if sketches is None:
         return error(f"Sheet '{on_sheet}' exposes no sketches collection - cannot add a sketch to it.")
@@ -258,7 +294,6 @@ def handler(geometry=None, sheet_name: str = "", name: str = "") -> dict:
     # The coordinates the factories were handed are in the STANDARD's length unit; sheet_units is
     # the separate dimension display unit and does not move them.
     units = _drawing_common.sheet_units(dwg)
-    coordinate_unit = _drawing_common.coordinate_unit(dwg)
     units_said = (coordinate_unit if coordinate_unit
                   else "the standard's own length unit (mm under ISO, in under ASME)")
     return ok({

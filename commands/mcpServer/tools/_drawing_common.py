@@ -11,10 +11,10 @@ from ._common import safe
 
 MAP_BLURB = (
     "active_drawing(_document) - the Drawing gate every tool runs; SHEET_SIZE_MAP/"
-    "DIMENSION_STRATEGIES/ORIENTATION_MEMBERS/NO_PORTRAIT - key -> member tables plus the "
-    "portrait refusals; sheet_units/SHEET_EXTENT_UNIT/DOCUMENT_UNIT/coordinate_unit - the three "
-    "units, never mixed; enum_value + the *_label decoders; resolve_sheet/"
-    "sheet_listing/sheet_facts - sheet by name, 1-based index, state"
+    "DIMENSION_STRATEGIES/ORIENTATION_MEMBERS/NO_PORTRAIT - member tables plus portrait "
+    "refusals; sheet_units/SHEET_EXTENT_UNIT/DOCUMENT_UNIT/coordinate_unit/"
+    "extent_in_coordinates - the three units, never mixed; enum_value + the *_label decoders; "
+    "resolve_sheet/sheet_listing/sheet_facts - sheet by name, 1-based index, state"
 )
 
 # Sheet.width/height are MILLIMETRES on every drawing, ISO and ASME alike (an ASME B sheet, 17 x 11
@@ -111,6 +111,16 @@ def coordinate_unit(dwg):
     independently, so standard='iso' with units='inch' takes coordinates in millimetres while its
     dimensions display in inches, and labelling a coordinate with sheet_units is wrong by 25.4x."""
     return DOCUMENT_UNIT.get(standard_label(dwg))
+
+
+def extent_in_coordinates(value, dwg):
+    """A Sheet.width/height number - SHEET_EXTENT_UNIT, always - in the unit COORDINATES land in.
+    Handed back unconverted when the standard does not read: the millimetre number is the only one
+    there is, and a guessed conversion would be a measurement nothing took."""
+    unit = coordinate_unit(dwg)
+    if unit is None or unit == SHEET_EXTENT_UNIT:
+        return value
+    return value * _common.scale(SHEET_EXTENT_UNIT) * _common.CM_TO_UNIT[unit]
 
 
 # orientation key -> SheetOrientationTypes member.

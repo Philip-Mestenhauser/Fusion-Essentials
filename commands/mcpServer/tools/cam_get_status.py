@@ -28,6 +28,26 @@ _RAIL_TRIAGE = (
     "passes), then the tool's flute length. 'Invalid contours.' instead means the feed is "
     "structurally wrong: one rail, closed rails, or two rails resolved as one chain.")
 
+# The two strings an orientation fault announces itself with; neither names the setup as the thing
+# to change, which is what the triage below adds. The error text is matched against THESE, not
+# against a loose phrase another fault could carry.
+_ORIENTATION_ERRORS = ("Cylindrical face not in tool orientation!",
+                       "Selected face may not be safe for cutting at current tool orientation!")
+
+
+def _is_orientation_error(text) -> bool:
+    """Whether one errored operation's message is one of the two measured orientation faults."""
+    said = (text or "").strip().lower()
+    return any(measured.lower() in said for measured in _ORIENTATION_ERRORS)
+
+
+_ORIENTATION_TRIAGE = (
+    "A drilling cycle cuts along the SETUP's Z unless its own tool orientation overrides it "
+    "(overrideToolView). A hole off that Z errored 'Cylindrical face not in tool orientation!'; "
+    "binding Z to that face alone gave 'Selected face may not be safe for cutting at current tool "
+    "orientation!'. Both clear with cam_edit_setup(wcs={'z_axis': <hole face>}), then "
+    "wcs_orientation_flipZ='true'.")
+
 
 def _collect_op_health(ops, labels=None):
     """{"warnings": [{name, warning}], "errors": [{name, error}], "empty": [name],
@@ -144,14 +164,20 @@ def _attach_op_health(payload: dict, nodes, scope_label: str) -> str:
     payload["health_scope"] = scope_label      # WHICH operations the three lists above describe
     shared = (" Repeated names show as 'Setup / op' paths, then by position."
               if any(label != n.name for label, n in zip(labels, nodes)) else "")
-    rails = ""
+    # A triage rides the disclosure of the thing it triages, and only over the operations whose
+    # own reading names it. The note names the KEYS; the rows beside them carry the counts.
+    triage = []
     if health["empty_rail"]:
-        # The triage rides the disclosure of the thing it triages, and only for the operations it
-        # describes - the ones carrying the rail-pair drive parameter.
         payload["empty_rail_toolpaths"] = health["empty_rail"]
         payload["rail_triage"] = _RAIL_TRIAGE
-        rails = f" {len(health['empty_rail'])} rail-driven - see rail_triage."
-    return shared + rails
+        triage.append("rail_triage")
+    oriented = [row["name"] for row in health["errors"]
+                if _is_orientation_error(row.get("error"))]
+    if oriented:
+        payload["operations_with_orientation_errors"] = oriented
+        payload["orientation_triage"] = _ORIENTATION_TRIAGE
+        triage.append("orientation_triage")
+    return shared + (" Triage: " + ", ".join(triage) + "." if triage else "")
 
 
 def handler(handle: str = "", target: str = "", include_operations: bool = True) -> dict:
@@ -342,7 +368,7 @@ def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
     # so the payload cannot pair a scoped tally with document-wide warning rows.
     health_note = _attach_op_health(payload, health_ops(), basis) if include_operations else ""
     payload["note"] = ("Generation complete. " + _COMPLETED_MEANS
-                       + " cam_get(include=['operations']) for per-op detail."
+                       + " cam_get(include=['operations']) for detail."
                        + health_note + count_caveat + _cam_common.settled_clause(live))
 
     # Generation finished - drop the registry entry so it does not leak across the session.
@@ -454,7 +480,7 @@ def _status_live(target: str, include_operations: bool) -> dict:
     # The lead states the verdict this read actually settled on - not "nothing is generating", which
     # is false exactly when settled_clause below names operations whose flag still reads true.
     payload["note"] = ("No operation in scope has generating left to do. " + _COMPLETED_MEANS
-                       + " cam_get(include=['operations']) for per-op detail." + health_note
+                       + " cam_get(include=['operations']) for detail." + health_note
                        + _cam_common.settled_clause(live))
     return ok(payload)
 

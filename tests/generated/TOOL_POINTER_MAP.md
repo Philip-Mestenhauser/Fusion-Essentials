@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 191  |  **description breadcrumbs:** 278  |  **note/error breadcrumbs:** 619
+**Tools:** 191  |  **description breadcrumbs:** 279  |  **note/error breadcrumbs:** 620
   |  **guidance smells flagged:** 8
 ## Blindspots to engineer
 
@@ -419,7 +419,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Machine created and re-resolved through the query cam_edit_setup assigns from - the same read the cam_get(include=['machines']) catalog is built on. Assign it: cam_edit_setup(setup=..., machine='')...
 
 ### `cam_create_operation`
-- No toolpath yet: select the geometry it cuts with cam_select_geometry, THEN compute it (cam_generate, or generate=true here). Generating before the geometry is selected leaves it reading valid with...
+- No toolpath yet: cam_select_geometry for its geometry, then cam_generate.
 - ' isn't compatible with setup '
 - The setup offers no compatible strategies at all.
 - operations.add returned no operation.
@@ -429,8 +429,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' but the setup's operation count did not increase (
 - after) - the operation did not land.
 - Operation created but toolpath generation errored:
-- Operation created; toolpath generation started (async). Poll it with cam_get_status(handle='
-- '), or confirm with cam_get(include=['operations']) once generation completes.
+- Operation created; toolpath generation started (async) - poll cam_get_status(handle='
 - ' reads isAdditiveStrategy true, and this tool assigns no cutting tool to one, so nothing was created. Drop 'tool_scope', 'tool_library_url' and 'tool_index' and retry.
 - ' but Operation.tool reads back null - it carries no cutting tool and cannot generate. Assign one with cam_edit_operation(tool_scope/tool_library_url, tool_index), or remove it with cam_delete.
 - ' but Operation.tool reads
@@ -439,20 +438,19 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide a tool reference: 'tool_scope=document' + 'tool_index', OR 'tool_library_url' + 'tool_index' (from cam_edit_tools).
 - Could not assign the tool to a '
 - Provide 'tool_index' (with 'tool_scope=document' for this doc's library, or 'tool_library_url' for a shared one) - both from cam_edit_tools.
-- Its first inspection point is UI-only: on an empty inspectSurfacePositions, appendPoint answered False, and assigning a face to .value or points to .values read back 0 - place the first point in Fu...
+- Its first inspection point is UI-only: on an empty inspectSurfacePositions appendPoint answered False and assigning to .value or .values read back 0 - place the first point in Fusion.
 - Its strategy reads isAdditiveStrategy true, so this call assigned no cutting tool. Read what it carries with cam_get(include=['parameters'], operation=...), then cam_generate.
-- It rest-machines: with no reference it errors 'No valid reference tool nor valid reference stock model'. restMaterialFromJob is its one rest input reading editable - set it true with cam_edit_opera...
+- It rest-machines: with no reference it errors 'No valid reference tool nor valid reference stock model'. Set restMaterialFromJob true with cam_edit_operation, then cam_generate.
 - Strategy '' needs a PROBE and the requested tool reads tool_type , so nothing was created. A face mill on a probing strategy generated with 'Tool (face mill) is not supported for the strategy.' Tak...
 - operation(s) already answer to ''. Operation.name dedupes rather than refusing, so it would land as something like '1' - a name nothing asked for. Pick one no operation carries; cam_get(include=['o...
 - Strategy '{strategy}' reads isGenerationAllowed false in setup '{setup}', so nothing was created. Creating it would have SUCCEEDED and then never generated, carrying no toolpath and no error or war...
 - hole recognition picks holes for a drilling cycle - create 'drill' (or 'bore') and aim it with cam_select_geometry(selection='holes')
-- A drilling cycle cuts along the SETUP's Z: a hole off that Z errored 'Cylindrical face not in tool orientation!', and binding Z to that face traded it for 'Selected face may not be safe for cutting...
+- A drilling cycle cuts along the SETUP's Z: a hole off it errored 'Cylindrical face not in tool orientation!'. Aim it with cam_edit_setup(wcs={'z_axis': <face>}) and wcs_orientation_flipZ.
 - Strategy '' reads isAdditiveStrategy true, and this tool assigns no cutting tool to one, so nothing was created. Drop 'tool_scope', 'tool_library_url' and 'tool_index' and retry.
 - operations.add returned '' but the setup's operation count could not be read  the add, so the operation's landing is UNCONFIRMED. Re-read the setup with cam_get(include=['operations']).
 - operations.add returned '' but the setup's operation count did not increase ( before,  after) - the operation did not land.
 - Created operation '' in setup '' but Operation.tool reads back null - it carries no cutting tool and cannot generate. Assign one with cam_edit_operation(tool_scope/tool_library_url, tool_index), or...
 - Created operation '' in setup '' but Operation.tool reads , which does not name the requested  - it carries a tool this call did not ask for. Re-assign it with cam_edit_operation(tool_scope/tool_li...
-- Operation created; toolpath generation started (async). Poll it with cam_get_status(handle=''), or confirm with cam_get(include=['operations']) once generation completes.
 
 ### `cam_create_setup`
 - No active design. Open or create a document first (see doc_new).
@@ -654,9 +652,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not strip the simulation model from '
 - Could not set WCS mode '
 - Could not enable fixtures on setup '
-- A row marked name_in_both_locations shares its name with the OTHER location's copy: the name addresses two machines, an assignment by it reaches the local one, and a setup reading that machine name...
-- Pass a machine's exact 'name' to cam_edit_setup(machine=...); machine_type='milling' narrows past the additive printers. Assigning a simulation_ready machine can be REFUSED - machine_strip_simulati...
-- The listing was CAPPED, and name_in_both_locations is read over the listed rows only - a copy past the cap is not marked. Narrow with vendor/machine_type, or raise max_results, before reading an un...
+- A row marked name_in_both_locations names TWO machines and an assignment by it reaches the local one - delete that copy to reach the shipped one.
+- Pass a machine's exact 'name' to cam_edit_setup(machine=...); machine_type='milling' narrows past the additive printers.
+- The listing was CAPPED, so name_in_both_locations is read over the listed rows only - a copy past the cap is not marked.
 - 'wcs' must be an object like {'origin': <handle-or-JO>, 'z_axis': <handle>} - a find_geometry handle or a Joint Origin per axis you want to bind.
 - wcs.: a Joint Origin can bind the WCS ORIGIN only - the platform rejects one as an axis. Bind z_axis/x_axis to a face (its normal) or a straight edge via a find_geometry handle; to center a WCS on ...
 - '' cannot be an empty list - clearing that setup selection is unsupported by this tool. Omit the field to leave it unchanged, or pass one or more bodies or occurrences to replace it.
@@ -794,8 +792,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Counted {found} referenced component(s) among the entries the {setups} setup(s) SELECT DIRECTLY - named in the top-level setups[] slice as selected_models / fixtures / stock_solids - only an entry ...
 - the model/fixture/stock entries each setup selects directly, and of those only the ones that are themselves referenced components
 - references_truncated is set on at least one setup, so even that selected-entry census is incomplete - a selection list would not read, or its cap was hit.
-- Pass a row's exact 'name' to cam_create_setup(operation_type='additive', print_setting=...); 'technology' narrows this listing. A row marked name_shared is one of SEVERAL rows of that name and the ...
-- The listing was CAPPED and name_shared is read over the listed rows only, so a twin past the cap leaves its row unmarked - narrow with 'technology', or raise max_results.
+- Pass a row's exact 'name' to cam_create_setup(operation_type='additive', print_setting=...); 'technology' narrows this listing. A name_shared row has a twin the resolver refuses - only its 'descrip...
+- The listing was CAPPED, so name_shared is read over the listed rows only - narrow with 'technology', or raise max_results.
 - Only a row carrying editable false refuses a write - cam_edit_operation and cam_edit_setup reject one by name before applying anything; a row with no editable key read isEditable True, and null mea...
 - A row's 'choices' are the values that parameter's own getChoices() answers - the only expressions it takes; pass one of them verbatim.
 - {n} more parameter(s) did not read visible+enabled and are NOT listed (hidden_count). A row behind a switch reads isEnabled FALSE until that switch is on, and cam_edit_operation writes such a row a...
@@ -807,7 +805,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - 'dimensions' is what Operation.tool reads now in 'units': cutter, shoulder, shaft and both gauge lengths, null where the tool has no such parameter.
 - '{name}' names {n} presets on this tool, so every match is returned under presets_sharing_name keyed by its index on the tool - the name alone does not pick one. Omit 'preset' for the preset_names ...
 - This tool carries no presets at all, so '' names none. cam_edit_tools(action='add_preset') authors one on a library tool.
-- Setups orientation slice. Pull deeper with include=. Scope then deepen: include=['operations'] ('setup' filters) -> include=['parameters'] or ['tool'] with 'operation'=<name> for one op's settings/...
 
 ### `cam_get_status`
 - No generation with handle '
@@ -815,7 +812,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - 'latest' resolves to handle '
 - ', which is not registered - a generation is dropped from the registry once it completes. Active handles:
 - . Omit 'handle' to read the ACTIVE document's live state, or pass 'target' (a setup/operation name) to read an inline generation by name.
-- cam_get(include=['operations']) for per-op detail.
+- cam_get(include=['operations']) for detail.
 - No operation in scope has generating left to do.
 - Still generating in the background - check again later.
 - Generation complete (
@@ -825,6 +822,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' is still incomplete - check again later with cam_get_status(handle='
 - '). 'readiness' carries the next step.
 - A rail-driven toolpath that generates VALID but EMPTY ('No passes to link.') names no wrong input - check otherSide, then the rail order (lower-rail-first is the order that produced passes), then t...
+- A drilling cycle cuts along the SETUP's Z unless its own tool orientation overrides it (overrideToolView). A hole off that Z errored 'Cylindrical face not in tool orientation!'; binding Z to that f...
 - Not complete, and BLOCKED - 'readiness' carries the verdict and live_states.samples the first errored item. Waiting will NOT complete an errored item: fix it, then re-run cam_generate. cam_get(incl...
 - Not complete. WARNING: nothing is actively generating yet out-of-date ops remain - 'readiness' names what this installation will not generate at all. cam_get(include=['operations']) shows why.
 - completed=true means no operation in scope has generating left to do - not a success verdict. 'readiness' is the verdict.
@@ -1912,6 +1910,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - , which the drawing STANDARD fixes; sheet_units controls dimension display only.
 - curve(s) by its own collection count.
 - Could not add a sketch to sheet '
+- geometry[] ('') carries , far outside . This call bounds every coordinate and radius to ,  times the sheet's longer side; coordinates are taken as . A coordinate far outside the sheet can stop this...
 - A point near a drawing view's curve can land on that curve instead, and nothing here reads a landed coordinate back - check placement with drawing_export.
 - Deleting sketch '' is NOT CONFIRMED: deleteMe answered  and sheet '' would not report its sketch count. Read drawing_get for sheet '' before drawing on it again
 - Sketch '' on sheet '' holds  curve(s) by its own collection count.  Coordinates were taken as , which the drawing STANDARD fixes; sheet_units controls dimension display only.
@@ -1985,7 +1984,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - The active document is not a drawing, so it has no sheets. Open the drawing (doc_open by file_id) and make it active, then retry.
 - Provide 'sheet_size' - the preset size to give the sheet.
 - Provide 'orientation' - landscape or portrait.
-- Sheet added, inheriting its size and orientation from the ACTIVE sheet. 'sheets' reports collection positions; export/PDF order is unavailable. Export all sheets and inspect the PDF before selectin...
+- Sheet added, inheriting its size and orientation from the ACTIVE sheet.
+- 'sheets' reports collection positions; export/PDF order is unavailable.
+- Set its size with action='set_size', its shape with action='set_orientation'.
 - The drawing's sheets could not be read - cannot add a sheet.
 - Sheets.add returned nothing - no sheet was added.
 - Sheets.add returned a sheet but the drawing still holds
@@ -2028,6 +2029,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' - Fusion did not tidy the sheet.
 - Tidy up reported success for '
 - ' but the document is still unmodified - nothing on the sheet changed.
+- It is the ACTIVE sheet now and no API activates a sheet, so this server cannot switch back. A DXF export holds the active sheet only - export a sheet's DXF before the next add.
 - Sheet.copy returned nothing for ''; its effect is unverified. The drawing may still be updating asynchronously. Re-read drawing_get before retrying, to avoid a duplicate copy.
 - Sheet.copy returned '' but the sheet count still reads  (before ); its effect is unverified. Nothing was rolled back. Re-read drawing_get before retrying.
 - '' is the only sheet this drawing holds () - refusing to delete it. Add a sheet first (action='add'), then delete this one.

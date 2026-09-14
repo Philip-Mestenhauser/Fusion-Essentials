@@ -786,17 +786,26 @@ class TestReadMachines:
         res = ces.read_machines()
         assert res["isError"] is True and "machine library" in res["message"]
 
-    def test_note_carries_the_measured_strip_clause(self, monkeypatch):
-        # The note's strip advice states what the strip is MEASURED to preserve - the spindle
-        # maximum and axis ranges reading back through Setup.machine. The two absent phrases are
-        # the blanket claims no measurement backs: that the API refuses EVERY simulation_ready
-        # machine, and that posting/kinematics are unaffected.
+    def test_the_listing_leaves_the_strip_teaching_to_the_refusal_that_fires(self, monkeypatch):
+        # The strip trap is taught once, in the assignment refusal that meets it
+        # (test_sim_ready_refusal_error_names_the_flag pins the measured sentence there).
         _install_machine_lib(monkeypatch, [_machine("Haas", "VF-2")])
         note = _payload(ces.read_machines())["note"]
-        assert "read back unchanged through Setup.machine" in note
-        assert "refuses assigning any" not in note
-        assert "posting/kinematics" not in note
+        assert "cam_edit_setup(machine=...)" in note      # the next step this read is for
+        assert "machine_strip_simulation" not in note
         assert "name_in_both_locations" not in note      # no listed name is shared here
+
+    def test_the_worst_composed_note_fits_the_wire_budget(self, monkeypatch):
+        # the note is assembled at run time, so test_prose_budget measures none of the
+        # compositions: a shared name and a capped listing ride together the moment one of two
+        # colliding copies falls past the cap.
+        _install_machine_lib(monkeypatch, [_machine("Haas", "VF-2", "Haas VF-2")],
+                             [_machine("Haas", "VF-2", "Haas VF-2"),
+                              _machine("Haas", "VF-9", "Haas VF-9")])
+        out = _payload(ces.read_machines(max_results=2))
+        assert out["truncated"] is True
+        assert any(r.get("name_in_both_locations") for r in out["machines"])
+        assert len(out["note"]) <= 400, len(out["note"])   # test_prose_budget.NOTE_BUDGET_CHARS
 
     def test_a_name_both_libraries_hold_earns_the_collision_sentence(self, monkeypatch):
         # The catalog marks the pair; this read is what tells the caller the name addresses two

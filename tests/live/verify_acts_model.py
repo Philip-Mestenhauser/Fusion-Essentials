@@ -552,6 +552,15 @@ def _combine_case_rows(case, rectangles, before, after):
          _new_document, (owned, _recall(owned, lambda p: p["document_handle"]))),
         ("doc_get", {}, _combine_owned_active(owned), None),
     ]
+    if case == "complete":
+        # This scratch document never enters Manufacture, so the CAM-product refusal and the
+        # library listing that needs no such product make a discriminating PAIR on it: the machine
+        # catalog hangs off CAMManager.libraryManager, which the document does not own.
+        rows += [
+            ("cam_get", {}, _refused("no CAM"), None),
+            ("cam_get", {"include": ["machines"], "vendor": "Haas", "machine_type": "milling"},
+             lambda p: p.get("machines", {}).get("count", 0) > 0 and "setups" not in p, None),
+        ]
     for i, (x1, x2) in enumerate(rectangles):
         rows += [
             ("sketch_create",

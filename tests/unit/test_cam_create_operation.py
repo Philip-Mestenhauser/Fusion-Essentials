@@ -1022,7 +1022,7 @@ class TestToolAxisDisclosure:
         # quotes still on is not a value any later call can pass back.
         assert out["tool_axis"]["machining_type"]["value"] == "three_axis"
         assert out["tool_axis"]["tool_axis_mode"]["value"] == "vertical"
-        assert "tool_axis" in out["note"] and "the strategy name does not fix it" in out["note"]
+        assert "tool_axis" in out["note"] and "not off the strategy name" in out["note"]
 
     def test_an_operation_carrying_neither_parameter_publishes_no_tool_axis(self, monkeypatch):
         # a 2D or turning op has no tool-axis controls at all - an empty block would read as an op
@@ -1048,7 +1048,7 @@ class TestToolAxisDisclosure:
         assert out["tool_axis"]["machining_type"]["value"] == "three_axis"
         # absent, never null: the operation has no such parameter at all
         assert "tool_axis_mode" not in out["tool_axis"]
-        assert "the strategy name does not fix it" not in out["note"]
+        assert "not off the strategy name" not in out["note"]
 
 
 class TestCornerRestNote:
@@ -1064,7 +1064,7 @@ class TestCornerRestNote:
         assert "restMaterialFromJob" in out["note"]
         # it REPLACES the geometry-selection next step, which a corner does not take - so the
         # composed note stays inside the wire budget instead of carrying both.
-        assert "select the geometry it cuts" not in out["note"]
+        assert "cam_select_geometry" not in out["note"]
 
     def test_the_rest_input_rides_the_generate_arm_too(self, monkeypatch):
         # generate=true REPLACES the note, and a corner with no reference is exactly what that
@@ -1079,7 +1079,7 @@ class TestCornerRestNote:
         out = _payload(cco.handler(setup="Setup1", strategy="face",
                                    tool_library_url="u", tool_index=0))
         assert "restMaterialFromJob" not in out["note"]
-        assert "select the geometry it cuts" in out["note"]
+        assert "cam_select_geometry" in out["note"]
 
 
 class TestStrategyEntitlement:
@@ -1250,6 +1250,37 @@ class TestComposedWireLength:
         out = _payload(cco.handler(setup="Setup1", strategy="mystery",
                                    tool_library_url="u", tool_index=0))
         assert len(out["note"]) <= self._BUDGET, out["note"]
+
+    def test_every_optional_fragment_armed_at_once_fits_the_budget(self, monkeypatch):
+        # The composition a typical call never shows: a DRILLING strategy whose isGenerationAllowed
+        # would not read, landing on an operation that carries both tool-axis parameters - so the
+        # axis rule, the tool_axis sentence and the skipped pre-flight all ride one note. Both arms
+        # are measured because generate=true REPLACES the head sentence.
+        def _armed(strategy, **flags):
+            cam = _install(monkeypatch, strategies=(
+                _Strategy(strategy, allowed=None, isMillingStrategy=True, **flags),))
+            cam.setups.item(0).operations.op_class = _AxisOperation
+            return cam
+
+        _armed("drill", isDrillingStrategy=True)
+        held = _payload(cco.handler(setup="Setup1", strategy="drill",
+                                    tool_library_url="u", tool_index=0))
+        for piece in ("SETUP's Z", "tool_axis", "isGenerationAllowed did not read"):
+            assert piece in held["note"], piece
+        assert len(held["note"]) <= self._BUDGET, len(held["note"])
+
+        _armed("drill", isDrillingStrategy=True)
+        launched = _payload(cco.handler(setup="Setup1", strategy="drill", generate=True,
+                                        tool_library_url="u", tool_index=0))
+        assert "generation started" in launched["note"] and "SETUP's Z" in launched["note"]
+        assert len(launched["note"]) <= self._BUDGET, len(launched["note"])
+
+        # the other arm that appends a second next-step sentence to a launched create
+        _armed("corner")
+        corner = _payload(cco.handler(setup="Setup1", strategy="corner", generate=True,
+                                      tool_library_url="u", tool_index=0))
+        assert "restMaterialFromJob" in corner["note"] and "tool_axis" in corner["note"]
+        assert len(corner["note"]) <= self._BUDGET, len(corner["note"])
 
     def test_the_blocked_strategy_refusal_fits_the_budget_with_long_names(self, monkeypatch):
         # the refusal interpolates the strategy name once and the setup name twice, so the longest

@@ -17,10 +17,18 @@ import types
 import pytest
 
 import adsk  # the mock package conftest installed at import time
+import live_api_facts
 from conftest import (FakeDrawingSketch, FakeDrawingSketches, FakeSheet, error_message, load_tool,
                       make_drawing, make_drawing_session, payload)
 
 dw = load_tool("drawing_add_sketch")
+
+_A3 = live_api_facts.ENUMS["drawing.SheetSizes"]["A3ISOSheetSize"]
+_B = live_api_facts.ENUMS["drawing.SheetSizes"]["BASMESheetSize"]
+
+# sheet size -> the landscape (width, height) a sheet derives, in MILLIMETRES on every drawing: an
+# ASME B sheet is 17 x 11 inches and reads 431.8 x 279.4 while its coordinates are inches.
+_EXTENT = {_A3: (420.0, 297.0), _B: (431.8, 279.4)}
 
 
 def _point(x, y):
@@ -31,10 +39,12 @@ def _point(x, y):
 @pytest.fixture
 def wire(monkeypatch):
     def _install(sheets=("Sheet1",), active=0, units="mm", is_drawing=True, landed_name=None,
-                 no_sketches=False, standard="iso", delete_ok=True, count_raises=False):
+                 no_sketches=False, standard="iso", delete_ok=True, count_raises=False,
+                 size=None, extents=None):
         sketch = FakeDrawingSketch(delete_ok=delete_ok)
-        objs = [FakeSheet(n, sketches=FakeDrawingSketches(sketch, landed_name=landed_name,
-                                                          count_raises=count_raises))
+        objs = [FakeSheet(n, size=size, extents=extents,
+                          sketches=FakeDrawingSketches(sketch, landed_name=landed_name,
+                                                       count_raises=count_raises))
                 for n in sheets]
         if no_sketches:
             for sheet in objs:
@@ -232,6 +242,80 @@ class TestPlanFirst:
     def test_empty_geometry_is_refused(self, wire):
         wire()
         assert "non-empty list" in error_message(dw.handler(geometry=[]))
+
+
+# ── the sheet's own extent bounds the coordinates ────────────────────────────
+
+class TestSheetBound:
+    def test_a_coordinate_far_off_the_sheet_is_refused_before_a_sketch_is_added(self, wire):
+        state = wire(size=_A3, extents=_EXTENT)
+        msg = error_message(dw.handler(geometry=[{"kind": "circle", "points": [[1e300, 0]],
+                                                  "radius": 5}]))
+        assert "geometry[0] ('circle') carries 1e+300" in msg
+        assert "a3 sheet" in msg and "420.0 x 297.0 mm" in msg and "4200.0" in msg
+        assert "DXF export" in msg and "PDF still exports" in msg
+        assert state.sheets[0].sketches._requested == []     # nothing was added to the sheet
+        assert state.sketch._drawn == []
+
+    def test_the_bound_admits_its_own_limit_and_refuses_one_step_past_it(self, wire):
+        # a point well off the sheet is legitimate, so the bound sits at ten times the longer side
+        # and bites only past it - the exact limit lands.
+        state = wire(size=_A3, extents=_EXTENT)
+        at_limit = [{"kind": "circle", "points": [[2100, 0]], "radius": 5},
+                    {"kind": "circle", "points": [[4200.0, 0]], "radius": 5}]
+        past = [{"kind": "circle", "points": [[4200.001, 0]], "radius": 5}]
+        assert payload(dw.handler(geometry=at_limit))["curves_landed"] == 2
+        assert "4200.001" in error_message(dw.handler(geometry=past))
+        assert len(state.sketch._drawn) == 2                 # the refused call drew nothing
+
+    def test_an_inch_standard_converts_the_limit_out_of_millimetres(self, wire):
+        # an ASME B sheet reads 431.8 x 279.4 MILLIMETRES while its coordinates are INCHES: a limit
+        # left in millimetres would be 4318 and would admit this 4000 in point.
+        wire(size=_B, extents=_EXTENT, standard="asme")
+        msg = error_message(dw.handler(geometry=[{"kind": "circle", "points": [[4000, 0]],
+                                                  "radius": 5}]))
+        assert "170.0" in msg and "taken as in" in msg and "431.8 x 279.4 mm" in msg
+        assert payload(dw.handler(geometry=[{"kind": "circle", "points": [[100, 0]],
+                                             "radius": 5}]))["curves_landed"] == 1
+
+    def test_the_bound_reaches_a_negative_y_on_a_line(self, wire):
+        # every axis of every point of every kind is bounded: a signed test, a first-point-only
+        # walk, or a circles-only guard each lets this one through.
+        state = wire(size=_A3, extents=_EXTENT)
+        msg = error_message(dw.handler(geometry=[
+            {"kind": "line", "points": [[0, 0], [0, -4200.001]]}]))
+        assert "geometry[0] ('line') carries -4200.001" in msg
+        assert state.sheets[0].sketches._requested == [] and state.sketch._drawn == []
+
+    def test_a_circle_radius_is_bounded_like_a_coordinate(self, wire):
+        state = wire(size=_A3, extents=_EXTENT)
+        msg = error_message(dw.handler(geometry=[{"kind": "circle", "points": [[0, 0]],
+                                                  "radius": 5000}]))
+        assert "carries 5000.0" in msg and state.sketch._drawn == []
+
+    def test_an_unreadable_standard_keeps_the_millimetre_limit(self, wire):
+        # the extent is millimetres and the coordinate unit is the STANDARD's - with no standard to
+        # read there is no conversion to make, so the limit stays the number the sheet reports.
+        wire(size=_A3, extents=_EXTENT, standard="???")
+        msg = error_message(dw.handler(geometry=[{"kind": "circle", "points": [[1e300, 0]],
+                                                  "radius": 5}]))
+        assert "to 4200.0" in msg and "taken as the standard's unit" in msg
+
+    def test_the_worst_composed_refusal_fits_the_wire_budget(self, wire):
+        # the refusal is assembled at run time from the sheet and the unit, so test_prose_budget
+        # measures none of the three compositions - each is scored here against NOTE_BUDGET_CHARS.
+        far = [{"kind": "circle", "points": [[1e300, 0]], "radius": 5}]
+        for size, standard in ((_A3, "iso"), (_B, "asme"), (_A3, "???")):
+            wire(size=size, extents=_EXTENT, standard=standard)
+            msg = error_message(dw.handler(geometry=far))
+            assert len(msg) <= 400, (standard, len(msg), msg)
+
+    def test_a_sheet_whose_extent_does_not_read_bounds_nothing(self, wire):
+        # width and height are the whole basis of the bound - with neither readable there is no
+        # sheet to measure against, and _plan's finite-value refusal is what still stands.
+        state = wire()
+        out = payload(dw.handler(geometry=[{"kind": "circle", "points": [[1e300, 0]], "radius": 5}]))
+        assert out["curves_landed"] == 1 and len(state.sketch._drawn) == 1
 
 
 # ── which sheet ──────────────────────────────────────────────────────────────

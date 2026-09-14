@@ -77,6 +77,14 @@ class TestDefaultSlice:
         out = _payload(cg.handler())
         assert "include=" in out["note"]
 
+    def test_the_worst_composed_router_note_fits_the_wire_budget(self, stub_slices):
+        # the router's note is assembled at run time from the advertising line (carrying the whole
+        # remaining slice list) and the validity caveat, so test_prose_budget measures neither. A
+        # _cam_read slice note rides AHEAD of this one and is that module's own budget.
+        out = _payload(cg.handler())
+        assert "operations" in out["note"] and "Manufacture" in out["note"]   # both pieces armed
+        assert len(out["note"]) <= 400, len(out["note"])   # test_prose_budget.NOTE_BUDGET_CHARS
+
 
 class TestIncludeSlices:
     @pytest.mark.parametrize("slice_name,key", [
@@ -845,6 +853,22 @@ class TestLibrarySlice:
         assert err is None and out["technologies_seen"] == ["FFF", "MJF", "SLM"]
         assert "'DLP'" in out["note"] and "FFF" in out["note"]
 
+    def test_the_worst_composed_print_settings_note_fits_the_wire_budget(self, monkeypatch):
+        # the two optional clauses are MUTUALLY EXCLUSIVE - an empty filtered listing is never
+        # truncated - so both compositions are measured, not one guessed worst case.
+        monkeypatch.setattr(cg._cc, "print_setting_catalog",
+                            lambda technology, max_results: ([{"name": "x"}], True, None))
+        capped, _err = cg._slice_print_settings(object(), "", 0)
+        assert capped["truncated"] is True
+        assert len(capped["note"]) <= 400, len(capped["note"])   # NOTE_BUDGET_CHARS
+        monkeypatch.setattr(cg._cc, "print_setting_catalog",
+                            lambda technology, max_results: ([], False, None))
+        monkeypatch.setattr(cg._cc, "print_setting_technologies",
+                            lambda: [f"TECH{i}" for i in range(12)])
+        empty, _e2 = cg._slice_print_settings(object(), "DLP", 0)
+        assert "technologies_seen" in empty
+        assert len(empty["note"]) <= 400, len(empty["note"])
+
     def test_an_unfiltered_empty_listing_does_not_name_a_technology(self, monkeypatch):
         # the boundary: with no 'technology' asked for there is no spelling to correct, so the
         # sentence stays off and the extra library read is never paid for.
@@ -894,6 +918,63 @@ class TestLibrarySlice:
                                 or {"isError": False, "content": [{"type": "text", "text": "{}"}]}))
         cg._slice_templates(object(), "", "", 0)
         assert seen == {"location": "cloud", "max_depth": 4}
+
+
+class TestLibrarySlicesNeedNoCamProduct:
+    """The machines / print_settings / library_types slices read CAMManager.libraryManager, not the
+    document's CAM product - so a read of THOSE ALONE answers on a document that never entered
+    Manufacture, and the CAM refusal still stands for everything else."""
+
+    @pytest.fixture
+    def no_cam(self, monkeypatch):
+        """get_cam patched to refuse, counting every call - the spy the skip is proven by."""
+        calls = []
+        monkeypatch.setattr(cg, "get_cam",
+                            lambda: calls.append(1) or (None, "This document has no CAM "
+                                                        "(Manufacture) product yet."))
+        return calls
+
+    def test_machines_answers_without_a_cam_product(self, monkeypatch, no_cam):
+        ces = load_tool("cam_edit_setup")
+        monkeypatch.setattr(ces, "read_machines",
+                            lambda vendor, machine_type: {
+                                "isError": False,
+                                "content": [{"type": "text", "text": json.dumps(
+                                    {"count": 1, "machines": [{"name": "Haas VF-2"}]})}]})
+        out = _payload(cg.handler(include=["machines"], vendor="Haas"))
+        assert out["machines"]["count"] == 1 and "setups" not in out
+        assert no_cam == []                      # get_cam was never reached
+
+    def test_print_settings_answers_without_a_cam_product(self, monkeypatch, no_cam):
+        monkeypatch.setattr(cg._cc, "print_setting_catalog",
+                            lambda technology, max_results: (
+                                [{"name": "HP - MJF", "technology": "MJF"}], False, None))
+        out = _payload(cg.handler(include=["print_settings"]))
+        assert out["print_settings"]["count"] == 1 and "setups" not in out
+        assert no_cam == []
+
+    def test_library_types_answers_without_a_cam_product(self, monkeypatch, no_cam):
+        ctl = load_tool("cam_edit_tools")
+        monkeypatch.setattr(ctl, "_build_type_map", lambda: {"drill": ("u", 0)})
+        out = _payload(cg.handler(include=["library_types"]))
+        assert out["library_types"]["types"] == ["drill"]
+        assert no_cam == []
+
+    def test_a_document_slice_beside_a_library_one_still_refuses(self, monkeypatch, no_cam):
+        # THE BOUNDARY: 'operations' reads the document's CAM product, so the mixed request keeps
+        # the refusal - answering the machines half would hand back a partial read as a whole one.
+        res = cg.handler(include=["machines", "operations"])
+        assert res["isError"] is True and "CAM" in error_message(res)
+        assert no_cam == [1]
+
+    def test_the_default_orientation_still_refuses(self, monkeypatch, no_cam):
+        res = cg.handler()
+        assert res["isError"] is True and "CAM" in error_message(res)
+
+    def test_the_default_token_beside_a_library_slice_still_refuses(self, monkeypatch, no_cam):
+        # 'default' IS the setups orientation, which is the document's - naming it keeps the refusal.
+        res = cg.handler(include=["default", "machines"])
+        assert res["isError"] is True and "CAM" in error_message(res)
 
 
 class TestDeepZoom:
