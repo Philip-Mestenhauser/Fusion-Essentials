@@ -25,7 +25,7 @@ _ROWS_MAX = 200        # the ceiling: every row crosses the wire, so max_results
 _SCOPE_KINDS = ("setup", "folder", "pattern", "operation")   # what checkToolpath accepts as its target
 # op_primary_state's whole vocabulary: one mutually-exclusive bucket per operation.
 _STATE_NAMES = ("valid", "out_of_date", "no_toolpath", "error", "suppressed", "generating",
-                "unread")
+                "nonfinite", "unread")
 _EMPTY_NAMES_CAP = 5     # how many empty-setup names the note spells out; the count is always exact
 _EMPTY_OP_NAMES_CAP = 10   # how many empty-toolpath operations measured names; its count is exact
 
@@ -94,11 +94,12 @@ def _classify(cam, ops, cap):
 _FALLBACK = "per-setup fallback"
 _OP_FALLBACK = "per-operation fallback"
 _EMPTY_SCOPE = "empty scope"
+_ACTIVE_ONLY = "per-active-operation check"
 
 # The paths whose verdict is THIS TOOL's own AND over the operations it counted. Everywhere else
 # 'passed' is CAM's own check, which include_suppressed does not narrow: checkToolpath answers False
 # for a setup whose only non-valid operation is SUPPRESSED, and for that operation asked directly.
-_TOOL_SCOPED_VERDICT = (_OP_FALLBACK, _EMPTY_SCOPE)
+_TOOL_SCOPED_VERDICT = (_OP_FALLBACK, _EMPTY_SCOPE, _ACTIVE_ONLY)
 
 
 def _verdict_counts(checked, tally_counts):
@@ -144,6 +145,19 @@ def _document_verdict(cam):
                                     f"raised {second}.")
 
 
+def _active_verdict(cam, ops, label):
+    """(verdict, checked, err) over the ACTIVE operations alone - taken wherever suppressed ones
+    were excluded from the tally, since neither CAM check narrows with that flag. A scope whose
+    every operation is suppressed has none left to ask."""
+    if not ops:
+        return True, _EMPTY_SCOPE, None
+    try:
+        return _and_children(cam, ops), _ACTIVE_ONLY, None
+    except Exception as raised:
+        return None, None, (f"The toolpath validity check failed for {label}: the per-operation "
+                            f"check over its active operations raised {raised}.")
+
+
 def _scoped_verdict(cam, target, ops, label, scope_is_empty):
     """(verdict, checked, err) for ONE named setup/folder/pattern/operation: checkToolpath on the
     target, falling back to the AND over the operations under it. `scope_is_empty` marks a target
@@ -163,17 +177,15 @@ def _scoped_verdict(cam, target, ops, label, scope_is_empty):
                                 f"raised {first}; the per-operation fallback raised {second}.")
 
 
-def _suppressed_clause(checked, suppressed_excluded, include_suppressed) -> str:
-    """The clause for the suppressed operations the tally left out, naming whether 'passed' counted
-    them anyway - the one condition under which the two numbers cover different sets."""
+def _suppressed_clause(suppressed_excluded, include_suppressed) -> str:
+    """The clause naming the suppressed operations this read left out of both its numbers - '' where
+    none was suppressed, or where they were counted."""
     if include_suppressed or not suppressed_excluded:
         return ""
-    if checked in _TOOL_SCOPED_VERDICT:
-        return f"{suppressed_excluded} suppressed op(s) excluded from the tally."
-    return f"{suppressed_excluded} suppressed op(s) excluded from the tally, counted by 'passed'."
+    return f"{suppressed_excluded} suppressed op(s) excluded from the tally and from 'passed'."
 
 
-def _note(passed, label, states, rows, truncated, basis, checked, suppressed_excluded,
+def _note(passed, label, states, rows, truncated, basis, suppressed_excluded,
           include_suppressed, empty_setups, empty_ops=()):
     """What this read observed and the next step - one clause per condition that changes how the
     payload's own numbers read; every other fact rides as the key that carries it."""
@@ -185,11 +197,14 @@ def _note(passed, label, states, rows, truncated, basis, checked, suppressed_exc
     else:
         parts = [f"{label}: the validity check {verdict}; {outside} of {total} counted op(s) "
                  "outside valid (measured.not_valid)."]
-    parts.append(_suppressed_clause(checked, suppressed_excluded, include_suppressed))
+    parts.append(_suppressed_clause(suppressed_excluded, include_suppressed))
     if empty_ops:
         # These sit INSIDE states['valid'], so no number in the payload separates them.
         parts.append(f"{len(empty_ops)} counted op(s) read valid and cut nothing "
                      "(measured.empty_toolpaths).")
+    if states.get("nonfinite"):
+        parts.append(f"{states['nonfinite']} counted op(s) read a toolpath whose motion is NOT A "
+                     "NUMBER - CAM's own check calls them valid; 'passed' does not.")
     if truncated:
         parts.append(f"not_valid capped at {len(rows)} - raise max_results.")
     if basis != "manufacture_verified":
@@ -210,30 +225,35 @@ def handler(scope: str = "", max_results: int = _ROWS_CAP,
     if serr:
         return error(serr)
 
-    # ONE split feeds the tally, the rows and the per-operation fallback's AND. CAM's own check
-    # paths are not narrowed by it; tolerance_used.verdict_counts says which of the two answered.
+    # ONE split feeds the tally, the rows and the verdict: where it EXCLUDES suppressed operations,
+    # the verdict is taken over that same set, since neither CAM check narrows with the flag.
     include_suppressed = bool(include_suppressed)
     active_ops, suppressed = _split_suppressed(raw_ops)
     ops = raw_ops if include_suppressed else active_ops
     suppressed_excluded = 0 if include_suppressed else suppressed
 
-    if target is None:
+    empty_setups = []
+    if suppressed_excluded:
+        verdict, checked, verr = _active_verdict(cam, ops, label)
+    elif target is None:
         verdict, checked, empty_setups, verr = _document_verdict(cam)
-        if verr:
-            return error(verr)
     else:
-        empty_setups = []
         # The empty-scope answer keys on the RAW census - a suppression filter must not be able to
         # manufacture an empty scope.
         verdict, checked, verr = _scoped_verdict(cam, target, ops, label, not raw_ops)
-        if verr:
-            return error(verr)
+    if verr:
+        return error(verr)
     if not isinstance(verdict, bool):
         return error(f"The toolpath validity check returned {type(verdict).__name__} for {label}, "
                      "not a true/false verdict - there is no verdict to report.")
 
     states, rows, truncated, empty_ops = _classify(
         cam, ops, clamp_rows(max_results, _ROWS_CAP, _ROWS_MAX))
+    # CAM's own check reads a path whose motion is not a number as VALID; a post on it fails, so
+    # the verdict is demoted on the tally's nonfinite rows, and the note says which check said what.
+    nonfinite = states.get("nonfinite", 0)
+    if verdict and nonfinite:
+        verdict = False
     basis = validity_basis()
     tally_counts = "all_operations" if include_suppressed else "active_operations"
     return ok({
@@ -259,7 +279,7 @@ def handler(scope: str = "", max_results: int = _ROWS_CAP,
                            "tally_counts": tally_counts,
                            "verdict_counts": _verdict_counts(checked, tally_counts),
                            "validity_basis": basis},
-        "note": _note(verdict, label, states, rows, truncated, basis, checked,
+        "note": _note(verdict, label, states, rows, truncated, basis,
                       suppressed_excluded, include_suppressed, empty_setups, empty_ops),
     })
 

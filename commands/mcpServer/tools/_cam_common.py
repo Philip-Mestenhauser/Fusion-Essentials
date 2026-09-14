@@ -356,6 +356,16 @@ def operation_nodes(cam):
     return [n for n in walk_cam_tree(cam) if n.kind == "operation"]
 
 
+def nc_program_nodes(cam):
+    """Every NC program as a CamNode of kind 'nc_program' - they hang off cam.ncPrograms, outside
+    the setup tree walk_cam_tree covers, and carry no setup or parent."""
+    out = []
+    for p in iter_collection(safe(lambda: cam.ncPrograms)):
+        nm = safe(lambda p=p: p.name)
+        out.append(CamNode(p, "nc_program", nm, None, _segment(nm), None))
+    return out
+
+
 def op_labels(nodes):
     """What each operation row is NAMED by: its own name, or - where several rows in this list share
     that name - its 'Setup / ... / op' path, plus the row's POSITION where that path repeats too.
@@ -513,6 +523,32 @@ def owning_setup(node):
     return None
 
 
+# What each write path would LAND instead, and so the scope its clash census reads. MEASURED: the
+# create goes through operations.add, which dedupes DOCUMENT-WIDE to '<name> (2)'; the rename sets
+# Operation.name, which dedupes inside one setup and takes a twin in another setup exactly.
+CREATE_DEDUPE = ("a create dedupes across the whole document to '{want} (2)', a name nothing asked "
+                 "for; pick a name no operation carries")
+RENAME_DEDUPE = ("Operation.name dedupes rather than refusing, so it would land as something like "
+                 "'{want}1' - a name nothing asked for. Pick one no operation in this setup "
+                 "carries; a twin in another setup is accepted")
+
+
+def operation_name_clash(pool, want, current="", dedupe=RENAME_DEDUPE):
+    """The refusal for a name an operation in `pool` already answers to, else None. `pool` is the
+    scope the CALLING path dedupes over - operation_nodes(cam) for a create, tree_nodes(setup) for
+    a rename - and `dedupe` says what that path would land instead; `current` never clashes."""
+    want = (want or "").strip()
+    if not want or want.lower() == (current or "").strip().lower():
+        return None
+    taken = [n for n in pool
+             if n.kind == "operation" and (n.name or "").lower() == want.lower()]
+    if not taken:
+        return None
+    where = named_with_remainder(sorted({n.setup for n in taken if n.setup}))
+    return (f"{len(taken)} operation(s) already answer to '{want}' (in setup '{where}'): "
+            + dedupe.format(want=want) + ". cam_get(include=['operations']) lists them.")
+
+
 def find_setup(cam, name):
     """(setup, available_names, error) for the unique Setup named `name` - the error is
     resolve_cam_node's own refusal text, which callers return verbatim."""
@@ -625,18 +661,50 @@ def counts_as_warning(facts: dict) -> bool:
 # The three knobs cam.getMachiningTime takes: feed scale percent, rapid feed cm/s, tool change s.
 _TIME_PROBE_ARGS = (100.0, 10.58, 1.5)
 
+# machiningTime is an int64 MICROSECOND counter in seconds, and a path whose motion did not compute
+# reads it SATURATED: 2**63 / 1e6 = 9223372036854.775 s, a FINITE float an isfinite gate misses.
+_SATURATED_TIME_S = 2 ** 63 / 1e6
+
+
+def _read_nonfinite(getter) -> bool:
+    """Whether a number READ as NaN or an infinity - one that did not read at all is no measurement
+    and is not one either."""
+    value = safe(getter)
+    return isinstance(value, float) and not math.isfinite(value)
+
+
+def saturated_time(seconds) -> bool:
+    """Whether a machining time that READ is the saturated counter rather than a duration - a second
+    under it, so the comparison does not rest on the last bit of a float."""
+    return seconds is not None and seconds >= _SATURATED_TIME_S - 1.0
+
+
+def time_reading(mt):
+    """(seconds, nonfinite) for ONE MachiningTime: the seconds as a MEASUREMENT - None where they
+    did not read, read non-finite or read the saturated counter - and whether this reading says the
+    motion is not a number. MEASURED together: the counter saturates while both distances read
+    NaN."""
+    seconds = measured(lambda: mt.machiningTime)
+    saturated = saturated_time(seconds)
+    nonfinite = bool(saturated or _read_nonfinite(lambda: mt.machiningTime)
+                     or _read_nonfinite(lambda: mt.feedDistance)
+                     or _read_nonfinite(lambda: mt.rapidDistance))
+    return (None if saturated else seconds), nonfinite
+
 # A Manual NC operation carries no toolpath by construction, reading state IsValid (0) with
 # hasToolpath False - the empty class's own flag shape. Its op.strategy reads exactly 'manual'.
 _MANUAL_NC_STRATEGY = "manual"
 
 
 def _machining_time(cam, op, state, has_toolpath):
-    """The seconds cam.getMachiningTime estimates for ONE operation, None where it was not read."""
+    """(seconds, nonfinite) for ONE operation - the seconds None where they were not read or read
+    the band, and nonfinite True where this reading says the motion is not a number."""
     # getMachiningTime raises on an operation holding no toolpath, and costs a platform
     # computation, so it runs only where the flags already say one generated.
     if cam is None or state != 0 or has_toolpath is not True:
-        return None
-    return measured(lambda: cam.getMachiningTime(op, *_TIME_PROBE_ARGS).machiningTime)
+        return None, False
+    mt = safe(lambda: cam.getMachiningTime(op, *_TIME_PROBE_ARGS))
+    return (None, False) if mt is None else time_reading(mt)
 
 
 def op_state_facts(op, cam=None) -> dict:
@@ -647,6 +715,7 @@ def op_state_facts(op, cam=None) -> dict:
     # read_flag keeps True/False/None apart: a coerced False on an unreadable flag would invent
     # the generated-but-empty state is_empty_toolpath reads off this pair.
     has_toolpath = read_flag(lambda: op.hasToolpath)
+    seconds, nonfinite = _machining_time(cam, op, state, has_toolpath)
     return {
         "name": safe(lambda: op.name),
         "strategy": safe(lambda: op.strategy),
@@ -658,7 +727,8 @@ def op_state_facts(op, cam=None) -> dict:
         "generating_progress": safe(lambda: op.generatingProgress),
         "has_toolpath": has_toolpath,
         "is_toolpath_valid": read_flag(lambda: op.isToolpathValid),
-        "machining_time": _machining_time(cam, op, state, has_toolpath),
+        "machining_time": seconds,
+        "nonfinite_toolpath": nonfinite,
     }
 
 
@@ -690,18 +760,21 @@ def toolpath_present_tally(ops):
     return present, unread
 
 
-def op_state_tally(ops) -> dict:
-    """The operation lifecycle tally, with unread states and generating/warning overlays."""
+def op_state_tally(ops, cam=None) -> dict:
+    """The operation lifecycle tally, with unread states and generating/warning overlays. `cam`
+    buys the nonfinite bucket - the reading that separates a valid toolpath from one whose motion
+    is not a number; without it those ops count valid, as every other flag reads them."""
     valid = ood = errored = generating = suppressed = unread = warnings = total = 0
     generating_settled = 0
     active = None
     op_sample = None
     warning_sample = None
+    nonfinite_names = []
     for raw in (ops or []):
         op = adsk.cam.Operation.cast(raw)
         if op is None:
             continue
-        facts = op_state_facts(op)
+        facts = op_state_facts(op, cam)
         total += 1
         if counts_as_warning(facts):
             warnings += 1                            # OVERLAY: the op still lands in a bucket below
@@ -714,7 +787,10 @@ def op_state_tally(ops) -> dict:
             continue
         state = facts["operation_state"]
         if state == 0:
-            valid += 1
+            if facts["nonfinite_toolpath"]:
+                nonfinite_names.append(facts["name"] or _UNREAD_SEGMENT)
+            else:
+                valid += 1
         elif state == 2:
             suppressed += 1
         elif state in (1, 3):
@@ -731,6 +807,7 @@ def op_state_tally(ops) -> dict:
     return {"valid": valid, "out_of_date": ood, "errored": errored, "generating": generating,
             "generating_settled": generating_settled,
             "suppressed": suppressed, "unread": unread, "warnings": warnings, "total": total,
+            "nonfinite": len(nonfinite_names), "nonfinite_names": nonfinite_names,
             "active": active, "op_sample": op_sample, "warning_sample": warning_sample}
 
 
@@ -914,6 +991,35 @@ def unfinished_verdict(measure: str, ops, unsettled: int = 0) -> str:
             "cam_generate for the rest.")
 
 
+# What an errored item of each kind blocks, in the order errored_verdict counts them. MEASURED: an
+# NC program reading hasError blocked only its own re-post - a post to another program name landed
+# in the same session - while an errored setup or operation blocks what it holds.
+_ERROR_BLOCKS = (("setup", "those setups will not post"),
+                 ("NC program", "those programs will not re-post; other posts land"),
+                 ("operation", "those operations will not post"))
+
+
+def errored_verdict(setups: int, programs: int, operations: int) -> str:
+    """The readiness verdict for the errored items in scope, naming what each KIND blocks - only
+    the kinds actually present."""
+    return "BLOCKER: " + " ".join(
+        f"{n} {kind}(s) have errors - {blocks}."
+        for n, (kind, blocks) in zip((setups, programs, operations), _ERROR_BLOCKS) if n)
+
+
+# MEASURED on a turning path whose feed and rapid distances read NaN: the post stopped with this.
+# The one home - every surface that names a nonfinite path ends on this sentence.
+NONFINITE_POST = "The post failed 'Number to be formatted is not a number (NaN)' on such a path."
+
+
+def nonfinite_verdict(measure: str, names) -> str:
+    """The readiness verdict for operations whose toolpath motion is not a number - they read
+    IsValid with a toolpath, so nothing else in the tally demotes them."""
+    return (f"BLOCKER: {measure}; {len(names)} operation(s) read a toolpath whose motion is NOT A "
+            f"NUMBER: {named_with_remainder(names)}. " + NONFINITE_POST
+            + " Change what they cut and regenerate before posting.")
+
+
 def live_readiness():
     """(signal, None) or (None, reason) - the CAM readiness signal for the active document: the op
     tally, the setup- and NC-program-level errors, setups_blocked, one sample per level, and the
@@ -924,7 +1030,7 @@ def live_readiness():
     samples = {"op": None, "setup": None, "program": None, "warning": None}
     try:
         ops = walk_operations(cam)
-        tally = op_state_tally(ops)
+        tally = op_state_tally(ops, cam)
         samples["op"] = tally["op_sample"]
         samples["warning"] = tally["warning_sample"]
         setups_errored = 0
@@ -947,18 +1053,16 @@ def live_readiness():
         return None, str(e)
     valid, ood, errored = tally["valid"], tally["out_of_date"], tally["errored"]
     warned = tally["warnings"]
-    active_total = valid + ood + errored          # active = everything not suppressed
+    nonfinite = tally["nonfinite"]
+    active_total = valid + ood + errored + nonfinite   # active = everything not suppressed
     unsettled = unsettled_count(tally)
     unread = tally["unread"]
     measure = (f"{valid} of {active_total} active ops valid" if active_total else
                f"{tally['total']} operation(s) in scope")
     if errored or setups_errored or programs_errored:
-        readiness = ("BLOCKER: "
-                     + ", ".join(b for b in [
-                         f"{setups_errored} setup(s)" if setups_errored else "",
-                         f"{programs_errored} NC program(s)" if programs_errored else "",
-                         f"{errored} operation(s)" if errored else ""] if b)
-                     + " have errors - the job will not post until fixed.")
+        readiness = errored_verdict(setups_errored, programs_errored, errored)
+    elif nonfinite:
+        readiness = nonfinite_verdict(measure, tally["nonfinite_names"])
     elif unread:
         readiness = unread_verdict(measure, unread, unsettled, ood)
     elif active_total and valid == active_total:
@@ -969,7 +1073,7 @@ def live_readiness():
         readiness = "no active operations to assess."
     return {"valid": valid, "out_of_date": ood, "errored": errored, "generating": tally["generating"],
             "generating_settled": tally["generating_settled"],
-            "suppressed": tally["suppressed"], "unread": unread,
+            "suppressed": tally["suppressed"], "unread": unread, "nonfinite": nonfinite,
             "warnings": warned, "total": tally["total"],
             "active": tally["active"],
             "setups_errored": setups_errored, "programs_errored": programs_errored,
@@ -979,8 +1083,8 @@ def live_readiness():
 
 def op_primary_state(facts: dict) -> str:
     """The ONE lifecycle bucket an op falls in, priority-ordered so each op counts once: suppressed
-    (flag) > error > generating > suppressed (state) > no_toolpath > out_of_date > valid, and
-    'unread' where operationState answered nothing. A warning is an OVERLAY, counted separately."""
+    (flag) > error > generating > suppressed (state) > no_toolpath > out_of_date > nonfinite >
+    valid, and 'unread' where operationState answered nothing. A warning is an OVERLAY."""
     if facts["is_suppressed"]:
         return "suppressed"
     if facts["has_error"]:
@@ -999,7 +1103,9 @@ def op_primary_state(facts: dict) -> str:
     if state == 1:
         return "out_of_date"
     if state == 0:
-        return "valid"
+        # A path whose own motion is not a number reads IsValid with a toolpath to show. The signal
+        # only exists where the facts were taken WITH the CAM product, so this cannot widen.
+        return "nonfinite" if facts.get("nonfinite_toolpath") else "valid"
     # operationState reads None where the property RAISED, and every value it answers IS a state, so
     # anything else is no lifecycle answer at all.
     return _UNREAD_STATE
@@ -1379,18 +1485,30 @@ def machine_catalog(vendor: str = "", machine_type: str = "", max_results: int =
 
     _walk_machine_locations(lib, vendor, "", visit)
     mark_shared_names(rows, "name_in_both_locations")
+    # Two DISTINCT machines can read one description, which is the row's 'name'. Keyed on
+    # vendor|model, so ONE machine listed in both libraries stays out of it - the location flag
+    # above is that row's answer, and vendor|model would not tell those two apart.
+    mark_shared_names(rows, "description_shared", by="identity")
     return rows, total[0] > len(rows), None
 
 
+# How mark_shared_names counts a name's carriers: distinct LOCATION (one machine in two libraries),
+# any second ROW (the print settings), or a second vendor|model IDENTITY (two different machines).
+_SHARED_NAME_KEYS = {
+    "location": lambda i, r: r["location"],
+    "row": lambda i, r: i,
+    "identity": lambda i, r: ((r.get("vendor") or "").lower(), (r.get("model") or "").lower()),
+}
+
+
 def mark_shared_names(rows, flag, by="location"):
-    """Flag every listed row under `flag` whose NAME another listed row carries - by='location'
-    counts distinct locations (the machine catalog), by='row' any second row (the print settings,
-    where two shipped entries share one). Read over the LISTED rows, so a twin past a cap is
+    """Flag every listed row under `flag` whose NAME another listed row carries, counted by the
+    _SHARED_NAME_KEYS discriminator `by` names. Read over the LISTED rows, so a twin past a cap is
     unmarked."""
+    key = _SHARED_NAME_KEYS[by]
     seen = {}
     for i, r in enumerate(rows):
-        seen.setdefault((r["name"] or "").lower(), set()).add(
-            r["location"] if by == "location" else i)
+        seen.setdefault((r["name"] or "").lower(), set()).add(key(i, r))
     for r in rows:
         if len(seen[(r["name"] or "").lower()]) > 1:
             r[flag] = True                       # absent = one listed row carries this name
@@ -1764,6 +1882,70 @@ def resolve_print_setting(name, description=""):
     return hits[0][0], hits[0][1], None
 
 
+# ── the SURFACE GROUPS on an operation - the reader its writer and the compare share ─────────────
+
+# The read an operation's own parameter list is pulled with - what a refusal names a parameter to.
+PARAM_READ = "cam_get(include=['parameters'], operation=<name>)"
+
+# A CadMachineAvoidGroupsParameterValue holds one group per set of faces the toolpath treats alike.
+AVOID_GROUPS_PARAM = "checkSurfaceSelectionSets"
+
+# How the toolpath treats a group's faces. adsk.cam.MachiningMode spells its members
+# '<Key>_MachiningMode'; the mode a FRESH group reads varies by strategy (corner and three_plus_two
+# answered Machine, blend answered Gouge), so it is read back and never assumed.
+MACHINE_MODE_MEMBERS = {"avoid": "Avoid_MachiningMode", "machine": "Machine_MachiningMode",
+                        "gouge": "Gouge_MachiningMode", "fixture": "Fixture_MachiningMode",
+                        "none": "None_MachiningMode"}
+
+
+def machine_mode_value(key):
+    """The MachiningMode member one friendly key names, or None where this build carries neither
+    the family nor that member (getattr on the enum, never a hand-coded int)."""
+    family = getattr(adsk.cam, "MachiningMode", None)
+    return getattr(family, MACHINE_MODE_MEMBERS[key], None) if family is not None else None
+
+
+def machine_mode_key(value):
+    """The friendly key one MachiningMode value spells, or the value itself where no member of this
+    build answers it - never a fabricated name."""
+    if value is None:
+        return None
+    return next((k for k in MACHINE_MODE_MEMBERS if machine_mode_value(k) == value), value)
+
+
+def group_record(group):
+    """{entities, machine_over_holes, machine_mode} read off ONE surface group, or None where the
+    group did not read back - the read-back an applied claim rests on, and the row a compare diffs.
+    A parameter-driven DEFAULT group answers machine_mode while its machineOverHoles setter raises."""
+    if group is None:
+        return None
+    return {"entities": safe(lambda: len(list(group.value))),
+            "machine_over_holes": read_flag(lambda: group.machineOverHoles),
+            "machine_mode": machine_mode_key(safe(lambda: group.machineMode))}
+
+
+def avoid_groups(op, writable=True):
+    """(parameter value, groups collection, None) for the operation's surface groups, or
+    (None, None, error) - an operation that carries no such parameter, or whose own copy does not
+    read isEditable true, is refused rather than handed a group nothing would read. A READ passes
+    writable=False: a set that will not take a write still answers what it holds."""
+    name = safe(lambda: op.name)
+    p = safe(lambda: op.parameters.itemByName(AVOID_GROUPS_PARAM))
+    if p is None:
+        return None, None, (f"Operation '{name}' has no '{AVOID_GROUPS_PARAM}' parameter, so it "
+                            f"takes no surface groups. {PARAM_READ} lists what it does carry.")
+    if writable and safe(lambda: p.isEditable) is not True:
+        return None, None, (f"Operation '{name}' carries '{AVOID_GROUPS_PARAM}' but it did not "
+                            "read isEditable true, so no surface group is offered on it. Group "
+                            "these faces in the Fusion UI instead.")
+    pv = safe(lambda: p.value)
+    groups = safe(lambda: pv.getMachineAvoidGroups()) if pv is not None else None
+    if groups is None:
+        return None, None, (f"Operation '{name}' would not hand back its surface groups "
+                            "(getMachineAvoidGroups did not read), so none was added.")
+    return pv, groups, None
+
+
 # ── CAM LIBRARY folder walks - the ONE traversal the tool / post / template libraries share ──────
 # All three expose one shape off a LibraryLocations root url: childFolderURLs nests, and the leaves
 # read per kind (childAssetURLs, childTemplates). An unbounded cloud-tree walk hangs the add-in.
@@ -1854,14 +2036,22 @@ def asset_leaf_keys(url):
     return keys
 
 
+def unique_by_url(items, seen=None):
+    """`items` with each asset URL ONCE - the ONE identity decision every library read de-dupes on,
+    since a library lists one asset under two folder paths. `seen` carries that identity ACROSS
+    calls (a folder-by-folder walk); an item is a url object or the string a listing stringified."""
+    seen = set() if seen is None else seen
+    out = []
+    for item in items:
+        key = str(asset_key(item))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
 def assets_named(assets, wanted):
     """The assets one of whose names - leafName as stored, or its stem - EXACTLY matches
     (case-insensitively) one of `wanted`, deduped by url."""
-    keys, hits = set(), []
-    for a in assets:
-        if asset_leaf_keys(a) & wanted:
-            key = asset_key(a)
-            if key not in keys:
-                keys.add(key)
-                hits.append(a)
-    return hits
+    return unique_by_url([a for a in assets if asset_leaf_keys(a) & wanted])

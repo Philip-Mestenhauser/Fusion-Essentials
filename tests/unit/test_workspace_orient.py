@@ -630,6 +630,51 @@ class TestCam:
         out = self._orient(monkeypatch, [FakeOp(True, name="Cut")], machining_times={"Cut": 9.66})
         assert "unread_state_operations" not in out["cam"]
 
+    def test_a_toolpath_whose_motion_is_not_a_number_is_counted_named_and_pointed_at(
+            self, monkeypatch):
+        # MEASURED on a groove that generated with NaN feed/rapid distances: its machining time
+        # read the saturated int64 counter while the flags read a finished, valid cut - so this
+        # orient reported "toolpaths look generated" over a job whose post fails on the NaN.
+        out = self._orient(monkeypatch, [FakeOp(True, name="G01 Single groove"),
+                                         FakeOp(True, name="Cut")],
+                           machining_times={"G01 Single groove": 9223372036854.775,
+                                            "Cut": 9.241742})
+        cam = out["cam"]
+        assert cam["nonfinite_toolpath_operations"] == 1
+        assert cam["nonfinite_toolpaths"] == ["G01 Single groove"]
+        assert cam["empty_toolpath_operations"] == 0      # a different class, not this one
+        pointer = out["pointers"]["cam"]
+        assert "toolpaths look generated" not in pointer
+        assert "MOTION IS NOT A NUMBER" in pointer and "G01 Single groove" in pointer
+        assert "Number to be formatted is not a number (NaN)" in pointer
+
+    def test_the_worst_composed_nonfinite_pointer_fits_the_wire_budget(self, monkeypatch):
+        # The clause is assembled at run time - count, capped names with the overflow marked, the
+        # post's own failure text, the parked tail and the incomplete-census tail - so
+        # test_prose_budget measures none of it. Long real operation names, a suppressed operation
+        # and an unreadable one put every piece on at once.
+        ops = [FakeOp(True, name=f"Op {i} - Finishing WCS1 Vise Left") for i in range(9)]
+        ops.append(FakeOperation("Parked", has_toolpath=False, suppressed=True,
+                                 operation_state=self._STATES.SuppressedOperationState))
+        ops.append(FakeOperation("Unread", has_toolpath=False, state_readable=False))
+        out = self._orient(monkeypatch, ops,
+                           machining_times={op.name: 9223372036854.775 for op in ops[:9]})
+        cam = out["cam"]
+        assert cam["nonfinite_toolpath_operations"] == 9
+        assert len(cam["nonfinite_toolpaths"]) == wo._NONFINITE_NAME_CAP
+        pointer = out["pointers"]["cam"]
+        assert f"(first {wo._NONFINITE_NAME_CAP} of 9)" in pointer and "...." not in pointer
+        assert "suppressed" in pointer and "did not read" in pointer     # both tails on
+        assert len(pointer) <= 400, len(pointer)    # test_prose_budget.NOTE_BUDGET_CHARS
+
+    def test_a_job_whose_times_all_read_carries_no_nonfinite_bucket(self, monkeypatch):
+        # the other side: the key rides only where one was found, so a zero cannot read as a
+        # checked-and-clean claim on every job that never met the state.
+        out = self._orient(monkeypatch, [FakeOp(True, name="Cut")],
+                           machining_times={"Cut": 9.241742})
+        assert "nonfinite_toolpath_operations" not in out["cam"]
+        assert "toolpaths look generated" in out["pointers"]["cam"]
+
     def test_the_pointer_names_the_empty_toolpaths(self, monkeypatch):
         out = self._orient(monkeypatch, [FakeOp(True, name="Cut"),
                                          FakeOp(False, name="Rest Finishing")])

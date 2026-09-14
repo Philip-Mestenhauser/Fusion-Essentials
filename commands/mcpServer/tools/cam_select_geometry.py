@@ -11,11 +11,11 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import (CM_TO_UNIT, named_with_remainder, ok, error, read_flag, safe, scale,
-                      set_verified)
-from ._cam_common import (SWARF_CONTOURS_PARAM, enumeration_remedy, expression_error, get_cam,
-                          matched_quoting, resolve_cam_node, register_future,
-                          strategy_generation_allowed, unquote_expression)
+from ._common import CM_TO_UNIT, named_with_remainder, ok, error, safe, scale, set_verified
+from ._cam_common import (MACHINE_MODE_MEMBERS, PARAM_READ, SWARF_CONTOURS_PARAM, avoid_groups,
+                          enumeration_remedy, expression_error, get_cam, group_record,
+                          machine_mode_value, matched_quoting, owning_setup, resolve_cam_node,
+                          register_future, strategy_generation_allowed, unquote_expression)
 from . import _inputs
 from . import _sketch_detail
 
@@ -47,9 +47,12 @@ _DRIVE_CURVES_PARAM = "curves"                       # drive curves, where no co
 # turning_trace's own drive input, MEASURED as a CadContours2dParameterValue - the same class as
 # 'contours', so the curve builder applies to it unchanged.
 _MODEL_CONTOUR_PARAM = "modelContour"
+# blend's own drive curves, MEASURED as a CadContours2dParameterValue: a blend op carries
+# machiningBoundarySel too, so this drive param is probed BEFORE the boundary.
+_BLEND_CURVES_PARAM = "blend_curves"
 _CURVE_PARAM_CANDIDATES = ("contours", "pockets", SWARF_CONTOURS_PARAM, _DEBURR_EDGE_PARAM,
-                           _DRIVE_CURVES_PARAM, _MACHINING_BOUNDARY_PARAM, _MODEL_CONTOUR_PARAM,
-                           "stockContours")
+                           _DRIVE_CURVES_PARAM, _BLEND_CURVES_PARAM, _MACHINING_BOUNDARY_PARAM,
+                           _MODEL_CONTOUR_PARAM, "stockContours")
 
 # A selection on the 3D machining boundary is INERT while boundaryMode holds its default
 # 'silhouette' - the op machines the silhouette surface set instead. boundaryMode is a CAM STRING
@@ -69,6 +72,14 @@ _SWARF_MODE_CONTOURS = "contours"
 _TOOL_AXIS_MODE_PARAM = "toolAxisMode"
 _TOOL_AXIS_SELECTION = "manual"
 
+# A probe op reads its faces off the model or off the STOCK, and probe_mode is the CAM string
+# parameter that decides which - 'selection-model' (its default) or 'selection-stock'.
+_PROBE_MODE_PARAM = "probe_mode"
+_PROBE_MODEL_MODE = "selection-model"
+_PROBE_STOCK_MODE = "selection-stock"
+_PROBE_MODEL_PARAM = "probe_selection"
+_PROBE_STOCK_PARAM = "probe_stock_selection"
+
 # The select-and-engage table: selection param -> (mode param, value, the noun the errors use,
 # payload key prefix). A selection landing on one of these is applied AND its mode engaged in the
 # same call, whichever family the parameter belongs to.
@@ -79,6 +90,8 @@ _ENGAGE_MODE = {
                            "swarf rail pair", "swarf"),
     "machiningDirections": (_TOOL_AXIS_MODE_PARAM, _TOOL_AXIS_SELECTION,
                             "tool-axis orientations", "tool_axis"),
+    _PROBE_MODEL_PARAM: (_PROBE_MODE_PARAM, _PROBE_MODEL_MODE, "model probing faces", "probe"),
+    _PROBE_STOCK_PARAM: (_PROBE_MODE_PARAM, _PROBE_STOCK_MODE, "stock probing faces", "probe"),
 }
 
 # swarfContours is a RAIL PAIR, not one contour: two rails fed to a single CurveSelection are walked
@@ -88,16 +101,20 @@ _RAIL_PAIR_PARAMS = (SWARF_CONTOURS_PARAM,)
 _RAILS_REQUIRED = 2
 _RAILS_ORDER = "as passed - the LOWER rail must be first"
 
+# The drive parameters needing TWO references. blend's pair is not a rail pair - neither curve is
+# lower or upper - so is_open keeps its default there.
+_PAIR_REQUIRED_PARAMS = (SWARF_CONTOURS_PARAM, _BLEND_CURVES_PARAM)
+
 # Parameters whose references are read as SEPARATE curves, so each seeds its own CurveSelection.
 # MEASURED on morph: two rim circles fed to ONE selection walk into a single path and the operation
 # reports 'No passes to link'; the same pair as one selection EACH cut 77.7 s of toolpath.
-_PER_REFERENCE_PARAMS = (SWARF_CONTOURS_PARAM, _DRIVE_CURVES_PARAM)
+_PER_REFERENCE_PARAMS = (SWARF_CONTOURS_PARAM, _DRIVE_CURVES_PARAM, _BLEND_CURVES_PARAM)
 
 # The DIRECT (B) family: per selection kind, the parameter name(s) whose CadObjectParameterValue
 # takes a CAD-object list on .value, probed in order. 'holes' carries two spellings - DRILL
 # 'holeFaces', BORE/CIRCULAR 'circularFaces'.
 _DIRECT_PARAM = {_HOLES: ("holeFaces", "circularFaces"), _GROOVE: ("grooves",),
-                 _THREAD: ("threadFaces",), _PROBE: ("probe_selection",),
+                 _THREAD: ("threadFaces",), _PROBE: (_PROBE_MODEL_PARAM,),
                  _ORIENTATION: ("machiningDirections",), _CHAMFER: ("chamfers",)}
 
 # What each direct kind is for - the refusal an operation carrying none of its parameters gets.
@@ -149,10 +166,17 @@ SIDE_TYPE = _inputs.Choice("side_type", list(_SIDE_TYPE))
 SURFACE_TARGET = _inputs.Choice("surface_target", list(_SURFACE_TARGET_PARAM),
                                 description="Defaults to drive.")
 
-# The surface-GROUP parameter: a CadMachineAvoidGroupsParameterValue holding one group per set of
-# faces the toolpath treats alike. The operation's own default group is parameter-driven and its
-# machineOverHoles setter raises, so a caller's faces go on a direct group of their own.
-_AVOID_GROUPS_PARAM = "checkSurfaceSelectionSets"
+# The operation's own default surface group is parameter-driven and its machineOverHoles setter
+# raises, so a caller's faces go on a direct group of their own. The group parameter, the machining
+# modes and the group reader are the shared substrate a compare reads through too.
+MACHINE_MODE = _inputs.Choice("machine_mode", list(MACHINE_MODE_MEMBERS))
+
+# The analytic stock-face names probe_stock_selection takes: box stock answers the first six,
+# cylinder and tube stock Top / Bottom / Outside / Inside. Set case-insensitively; the read-back is
+# the analytic spelling whatever case was written ('top' reads back 'Top').
+_STOCK_FACE_NAMES = ("Top", "Bottom", "Left", "Right", "Front", "Back", "Outside", "Inside")
+_STOCK_SHAPES = ("Box stock answers Top / Bottom / Left / Right / Front / Back; cylinder and tube "
+                 "stock answer Top / Bottom / Outside / Inside.")
 
 # pocket_recognition search criteria -> the PocketRecognitionSelection property each sets.
 _POCKET_FILTER_LENGTHS = (("min_hole_diameter", "minimumHoleDiameter"),
@@ -178,6 +202,8 @@ _KNOB_SELECTIONS = {"is_open": (_CHAIN,), "reverted": (_CHAIN,),
                     "min_diameter": (_HOLES,), "max_diameter": (_HOLES,),
                     "surface_target": (_SURFACES,),
                     "machine_over_holes": (_SURFACE_GROUP,),
+                    "machine_mode": (_SURFACE_GROUP,),
+                    "stock_faces": (_PROBE,),
                     # 'component' SCOPES the by-name geometry input a kind reads; on a handle-driven
                     # kind it narrows nothing, so it is refused there like any absent property.
                     "component": (_SKETCH,) + _BODY_SELECTIONS}
@@ -227,8 +253,6 @@ _BLOCKED_GENERATE = (
 # An unreadable flag is not a blocked strategy, so no refusal is fabricated from it.
 _ENTITLEMENT_UNREAD = " isGenerationAllowed did not read - no entitlement pre-flight."
 
-# The read that shows a parameter's own expression - what an enumeration refusal sends the caller to.
-_PARAM_READ = "cam_get(include=['parameters'], operation=<name>)"
 
 
 # ── input guards ─────────────────────────────────────────────────────────────
@@ -591,15 +615,17 @@ def _selected_labels(selection, entities):
     return []
 
 
-def _engage_mode(op, mode_param, want, subject):
+def _engage_mode(op, mode_param, want, subject, landed=True):
     """(mode_read_back, whether this call added the quotes, None) or (None, False, error) - set the
-    mode that decides whether the operation READS the selection just applied, so it is not left
-    inert."""
+    mode that decides whether the operation READS this selection, so it is not left inert. `landed`
+    says whether a selection was applied BEFORE this ran - the direct family engages first, so its
+    refusals must not claim a selection that was never made."""
+    lead = (f"The selection landed on the operation's {subject}, but "
+            if landed else "Nothing was selected - this call engages the mode first, and ")
     p = safe(lambda: op.parameters.itemByName(mode_param))
     if p is None:
-        return None, False, (
-            f"The selection landed on the operation's {subject}, but the operation has no "
-            f"'{mode_param}' parameter, so this call cannot confirm the {subject} is "
+        return None, False, lead + (
+            f"the operation has no '{mode_param}' parameter, so the {subject} cannot be confirmed "
             f"engaged - set {mode_param} in the Fusion UI, or re-check that the strategy is "
             "the one you meant.")
     before = safe(lambda: p.expression)
@@ -609,28 +635,27 @@ def _engage_mode(op, mode_param, want, subject):
     try:
         p.expression = written                         # MUTATION
     except Exception as e:
-        return None, False, (
-            f"Could not set {mode_param}='{want}' to engage the {subject}: {e}. The "
-            f"selection is NOT confirmed engaged - set {mode_param}='{want}' with "
-            "cam_edit_operation, then regenerate."
-            + enumeration_remedy(str(e), written, _PARAM_READ, p))
+        return None, False, lead + (
+            f"{mode_param}='{want}' could not be set to engage the {subject}: {e}. Set "
+            f"{mode_param}='{want}' with cam_edit_operation, then retry."
+            + enumeration_remedy(str(e), written, PARAM_READ, p))
     after = safe(lambda: p.expression)
     if after is None:
-        return None, False, (
+        return None, False, lead + (
             f"{mode_param} cannot be read back after being set to '{want}', so the "
             f"{subject} engagement is UNCONFIRMED - re-read the operation with "
             "cam_get(include=['operations']).")
     eval_err, _warn = expression_error(p)
     if eval_err:
-        return None, False, (
+        return None, False, lead + (
             f"{mode_param} was set to '{want}' and reads back '{after}', but the parameter "
             f"reports '{eval_err}' - the {subject} is not engaged.")
     if unquote_expression(after) != want:
         shown = unquote_expression(after)
-        return None, False, (
-            f"Setting {mode_param}='{want}' did not take - it reads back '{shown}' (it held "
-            f"'{unquote_expression(before)}'), so the selected {subject} is NOT engaged - "
-            f"set {mode_param}='{want}' with cam_edit_operation, then regenerate.")
+        return None, False, lead + (
+            f"setting {mode_param}='{want}' did not take - it reads back '{shown}' (it held "
+            f"'{unquote_expression(before)}'), so the {subject} is NOT engaged - "
+            f"set {mode_param}='{want}' with cam_edit_operation, then retry.")
     return unquote_expression(after), quoted, None
 
 
@@ -646,6 +671,19 @@ def _rail_groups(name, entities, knobs):
     if rail_knobs.get("is_open") is None:
         rail_knobs["is_open"] = True
     return [[e] for e in entities], rail_knobs
+
+
+def _pair_refusal(name, given):
+    """The refusal for a drive parameter needing TWO references and handed fewer - each states the
+    generate result measured on that parameter, so the caller knows what it prevented."""
+    if name in _RAIL_PAIR_PARAMS:
+        return (f"'{name}' is a RAIL PAIR - {given} reference(s) were passed and it needs "
+                f"{_RAILS_REQUIRED}, the LOWER rail first. One contour makes the operation "
+                "report 'Invalid contours.' at generate, while two applied lower-rail-first "
+                "produced passes.")
+    return (f"'{name}' takes a PAIR of drive curves - {given} reference(s) were passed and it "
+            f"needs {_RAILS_REQUIRED}, one CurveSelection each. Fewer makes the operation report "
+            "'Incorrect number of drive curves' at generate.")
 
 
 def _apply_curve(op, selection, entities, knobs, factor, units, extra, explicit_groups=None,
@@ -671,9 +709,12 @@ def _apply_curve(op, selection, entities, knobs, factor, units, extra, explicit_
                          "read isEditable true, so no selection kind is offered for them.")
         if not tails:
             tails.append(" It carries none of the selection parameters this call routes either - "
-                         f"read what it does carry with {_PARAM_READ}.")
+                         f"read what it does carry with {PARAM_READ}.")
         return None, (f"Operation '{safe(lambda: op.name)}' has no curve-selection parameter "
                       f"(looked for {', '.join(_CURVE_PARAM_CANDIDATES)}).{''.join(tails)}")
+    # WHICH parameter the probe order chose - an op carrying a drive param AND a machining boundary
+    # reads the same counts either way, and only this says which one is driving.
+    extra["selection_param"] = name
     pv = p.value
     cs = safe(lambda: pv.getCurveSelections())
     if cs is None:
@@ -685,11 +726,8 @@ def _apply_curve(op, selection, entities, knobs, factor, units, extra, explicit_
                      else (explicit_groups, knobs))
     # Ahead of every line below: getCurveSelections() hands back a DETACHED collection, so nothing
     # reaches the operation until applyCurveSelections and a refusal here performs no work.
-    if name in _RAIL_PAIR_PARAMS and len(groups) < _RAILS_REQUIRED:
-        return None, (f"'{name}' is a RAIL PAIR - {len(groups)} reference(s) were passed and it needs "
-                      f"{_RAILS_REQUIRED}, the LOWER rail first. One contour makes the operation "
-                      "report 'Invalid contours.' at generate, while two applied lower-rail-first "
-                      "produced passes.")
+    if name in _PAIR_REQUIRED_PARAMS and len(groups) < _RAILS_REQUIRED:
+        return None, _pair_refusal(name, len(groups))
     safe(lambda: cs.clear())
     builder = _CURVE_BUILDER[selection]
     for group in groups:
@@ -787,50 +825,81 @@ def _set_object_set(nm, p, entities, noun):
     back = safe(lambda: list(pv.value))
     if back is None:
         return None, (f"{nm} cannot be read back after {len(wanted)} {noun}(s) were assigned, so "
-                      f"the selection is UNCONFIRMED - re-read the operation with {_PARAM_READ}.")
+                      f"the selection is UNCONFIRMED - re-read the operation with {PARAM_READ}.")
     if len(back) != len(wanted):
         return None, (f"Setting {nm} did not take - {len(wanted)} {noun}(s) were assigned and the "
                       f"operation reads back {len(back)}.")
     return len(back), None
 
 
+def _not_editable(op_name, listed, selection):
+    """The refusal for a set the operation CARRIES but will not let a write reach."""
+    return (f"Operation '{op_name}' carries {listed} but it did not read isEditable true, so the "
+            f"'{selection}' selection is not offered on it. Select this geometry in the Fusion UI, "
+            "or use an operation whose set reads editable.")
+
+
 def _apply_direct(op, selection, entities, extra):
     """(count, None) or (None, error) - mechanism (B): land the entities on the first SETTABLE
-    parameter this kind names, then engage the mode that decides whether the operation reads it."""
+    parameter this kind names, the mode that decides whether the operation reads it engaged first.
+    MEASURED: a probe's two sets SWAP isEditable with probe_mode, so a set carrying a mode is read
+    for editability only AFTER that mode is engaged."""
     name = safe(lambda: op.name)
     blocked = []
     for nm in _DIRECT_PARAM[selection]:
         p = safe(lambda nm=nm: op.parameters.itemByName(nm))
         if p is None:
             continue
-        # A set reading isEditable false silently drops the write, so it is refused before the
-        # assignment rather than reported through the read-back as a count that did not take.
-        if safe(lambda p=p: p.isEditable) is not True:
+        # A set with NO mode of its own is gated here: isEditable false silently drops the write.
+        # One WITH a mode is gated below instead, because engaging that mode is what flips it.
+        if nm not in _ENGAGE_MODE and safe(lambda p=p: p.isEditable) is not True:
             blocked.append(nm)
             continue
         extra["selection_param"] = nm
-        count, err = _set_object_set(nm, p, entities, _HANDLE_REQUIRE[selection])
-        if err:
-            return None, err
+        held = _mode_held(op, nm)
         merr = _engage_direct_mode(op, nm, extra)
-        return (None, merr) if merr else (count, None)
+        if merr:
+            return None, merr
+        if safe(lambda p=p: p.isEditable) is not True:
+            return None, _mode_retained(nm, _not_editable(name, f"'{nm}'", selection), held)
+        count, err = _set_object_set(nm, p, entities, _HANDLE_REQUIRE[selection])
+        return (None, _mode_retained(nm, err, held)) if err else (count, None)
     if blocked:
-        return None, (f"Operation '{name}' carries {named_with_remainder(blocked)} but it did not "
-                      f"read isEditable true, so the '{selection}' selection is not offered on it. "
-                      "Select this geometry in the Fusion UI, or use an operation whose set reads "
-                      "editable.")
+        return None, _not_editable(name, named_with_remainder(blocked), selection)
     return None, (f"Operation '{name}' carries none of "
                   f"{', '.join(_DIRECT_PARAM[selection])} - the '{selection}' selection is for "
                   f"{_DIRECT_MISS[selection]}.")
 
 
+def _mode_held(op, nm):
+    """What the mode parameter for `nm` reads BEFORE this call engages it, or None - what says
+    whether a later refusal left a CHANGED mode behind or none at all."""
+    if nm not in _ENGAGE_MODE:
+        return None
+    p = safe(lambda: op.parameters.itemByName(_ENGAGE_MODE[nm][0]))
+    return None if p is None else unquote_expression(safe(lambda: p.expression) or "")
+
+
+def _mode_retained(nm, err, held):
+    """`err` with what this call left on the mode parameter - the mode it CHANGED, or that it
+    already read the wanted value and changed nothing there."""
+    if nm not in _ENGAGE_MODE:
+        return err
+    mode_param, want, _subject, _key = _ENGAGE_MODE[nm]
+    if held == want:
+        return f"{err} {mode_param} already read '{want}', so this call changed nothing there."
+    return (f"{err} {mode_param} was set to '{want}' (it held '{held}') before this failure and "
+            "REMAINS on the operation.")
+
+
 def _engage_direct_mode(op, nm, extra):
     """The error for a direct-family selection whose mode could not be engaged, or None - the same
-    select-and-engage step the curve family runs, so orientations are not left inert."""
+    select-and-engage step the curve family runs, so orientations are not left inert. It runs
+    BEFORE the write here, so nothing is selected when it refuses."""
     if nm not in _ENGAGE_MODE:
         return None
     mode_param, want, subject, key = _ENGAGE_MODE[nm]
-    mode, quoted, merr = _engage_mode(op, mode_param, want, subject)
+    mode, quoted, merr = _engage_mode(op, mode_param, want, subject, landed=False)
     if merr:
         return merr
     extra[f"{key}_engaged"] = True
@@ -838,6 +907,106 @@ def _engage_direct_mode(op, nm, extra):
     if quoted:
         extra.setdefault("quoted", []).append(mode_param)
     return None
+
+
+def _stock_face_names(raw):
+    """(the analytic stock-face names, None) or (None, error) - each entry matched
+    case-insensitively against the analytic names, which is the spelling the set reads back in
+    whatever case was written. () when nothing was passed."""
+    if raw in (None, "", []):
+        return (), None
+    if not isinstance(raw, list) or any(not isinstance(n, str) or not n.strip() for n in raw):
+        return None, "'stock_faces' must be a nonempty list of stock face names."
+    canon = {n.lower(): n for n in _STOCK_FACE_NAMES}
+    names, unknown = [], []
+    for n in raw:
+        key = n.strip().lower()
+        if key not in canon:
+            unknown.append(n)
+        elif canon[key] not in names:
+            names.append(canon[key])
+    if unknown:
+        return None, (f"'stock_faces' has no name(s) {', '.join(unknown)} - it takes "
+                      f"{', '.join(_STOCK_FACE_NAMES)}. " + _STOCK_SHAPES)
+    return tuple(names), None
+
+
+def _set_stock_faces(op, p, names, extra):
+    """(count, None) or (None, error) - put the analytic names on the probe's stock selection and
+    read them back off it. isEditable is read AFTER the mode was engaged - the two probe sets swap
+    it with probe_mode - and stockFaceNames is the whole read-back, the parameter's own expression
+    staying 'false' even when the names are set."""
+    name = safe(lambda: op.name)
+    if safe(lambda: p.isEditable) is not True:
+        return None, (f"Operation '{name}' carries '{_PROBE_STOCK_PARAM}' but it did not read "
+                      "isEditable true after probe_mode was engaged, so stock_faces is not offered "
+                      "on it. Select the stock faces in the Fusion UI instead.")
+    pv = safe(lambda: p.value)
+    if pv is None:
+        return None, f"Could not read the operation's '{_PROBE_STOCK_PARAM}' parameter value."
+    try:
+        pv.stockFaceNames = list(names)       # MUTATION
+    except Exception as e:
+        return None, f"Could not set {_PROBE_STOCK_PARAM}: {e}"
+    back = safe(lambda: [str(n) for n in pv.stockFaceNames])
+    if back is None:
+        return None, (f"stockFaceNames cannot be read back after {len(names)} name(s) were "
+                      f"assigned, so the selection is UNCONFIRMED - re-read with {PARAM_READ}.")
+    landed = {n.lower() for n in back}
+    missing = [n for n in names if n.lower() not in landed]
+    if missing:
+        return None, (f"The stock selection did not take {named_with_remainder(missing)} - it "
+                      f"reads back {named_with_remainder(back) or '(none)'}. " + _STOCK_SHAPES)
+    extra["selection_param"] = _PROBE_STOCK_PARAM
+    extra["stock_faces"] = back
+    return len(back), None
+
+
+# The setup stock modes whose stock carries the analytic faces stockFaceNames addresses. Under any
+# other mode ('solid' and 'previoussetup' measured) the names are accepted and read back EMPTY.
+_STOCK_MODE_PARAM = "job_stockMode"
+_STOCK_ANALYTIC_MODES = ("fixedbox", "default", "fixedcylinder", "relativecylinder", "fixedtube",
+                         "relativetube")
+
+
+def _stock_mode_refusal(setup, op_name):
+    """The refusal for a setup whose stock has no analytic faces, else None - '' where the mode
+    did not read, so an unread mode falls through to the read-back gate rather than a guess."""
+    if setup is None:
+        return None
+    p = safe(lambda: setup.parameters.itemByName(_STOCK_MODE_PARAM))
+    if p is None:
+        return None
+    # A fresh setup's expression is a FORMULA over job_type, so the evaluated value is the mode;
+    # the expression is read only where the value does not answer a string.
+    value = safe(lambda: p.value.value)
+    mode = value if isinstance(value, str) else unquote_expression(safe(lambda: p.expression) or "")
+    if not mode or mode.lower() in _STOCK_ANALYTIC_MODES:
+        return None
+    return (f"Operation '{op_name}' sits in setup '{safe(lambda: setup.name)}', whose "
+            f"{_STOCK_MODE_PARAM} reads '{mode}' - that stock carries no analytic faces, so "
+            "stock_faces read back empty. Nothing was changed. Give the setup a box, cylinder or "
+            "tube stock (cam_edit_setup stock_mode), or pass model face handles instead.")
+
+
+def _apply_probe_stock(op, names, extra, setup=None):
+    """(count, None) or (None, error) - engage the probe's STOCK mode, then set the face names. The
+    parameter's PRESENCE and the setup's stock mode are read first (neither depends on the mode),
+    so an operation that cannot probe the stock is refused before probe_mode is touched."""
+    p = safe(lambda: op.parameters.itemByName(_PROBE_STOCK_PARAM))
+    if p is None:
+        return None, (f"Operation '{safe(lambda: op.name)}' has no '{_PROBE_STOCK_PARAM}' "
+                      "parameter, so it cannot probe the stock. Nothing was changed - drop "
+                      "stock_faces and pass model face handles instead.")
+    refusal = _stock_mode_refusal(setup, safe(lambda: op.name))
+    if refusal:
+        return None, refusal
+    held = _mode_held(op, _PROBE_STOCK_PARAM)
+    merr = _engage_direct_mode(op, _PROBE_STOCK_PARAM, extra)
+    if merr:
+        return None, merr
+    count, err = _set_stock_faces(op, p, names, extra)
+    return (None, _mode_retained(_PROBE_STOCK_PARAM, err, held)) if err else (count, None)
 
 
 def _surface_params(op):
@@ -900,36 +1069,6 @@ def _apply_surfaces(op, faces, target, extra):
     return count, None
 
 
-def _avoid_groups(op):
-    """(parameter value, groups collection, None) for the operation's surface groups, or
-    (None, None, error) - an operation that carries no such parameter, or whose own copy does not
-    read isEditable true, is refused rather than handed a group nothing would read."""
-    name = safe(lambda: op.name)
-    p = safe(lambda: op.parameters.itemByName(_AVOID_GROUPS_PARAM))
-    if p is None:
-        return None, None, (f"Operation '{name}' has no '{_AVOID_GROUPS_PARAM}' parameter, so it "
-                            f"takes no surface groups. {_PARAM_READ} lists what it does carry.")
-    if safe(lambda: p.isEditable) is not True:
-        return None, None, (f"Operation '{name}' carries '{_AVOID_GROUPS_PARAM}' but it did not "
-                            "read isEditable true, so no surface group is offered on it. Group "
-                            "these faces in the Fusion UI instead.")
-    pv = safe(lambda: p.value)
-    groups = safe(lambda: pv.getMachineAvoidGroups()) if pv is not None else None
-    if groups is None:
-        return None, None, (f"Operation '{name}' would not hand back its surface groups "
-                            "(getMachineAvoidGroups did not read), so none was added.")
-    return pv, groups, None
-
-
-def _group_record(group):
-    """{entities, machine_over_holes} read off ONE applied group, or None where the group did not
-    read back - the read-back the applied claim rests on."""
-    if group is None:
-        return None
-    return {"entities": safe(lambda: len(list(group.value))),
-            "machine_over_holes": read_flag(lambda: group.machineOverHoles)}
-
-
 # MEASURED: a collection fetched BEFORE the add does not follow a later commit - it kept its own
 # count while the operation went to 2 - so re-applying it is what takes the added group off again.
 _GROUP_RESTORED = (" The group this call added was taken back off - the operation reads the {n} "
@@ -957,11 +1096,11 @@ def _restore_groups(pv, previous, entities, wanted):
             else _GROUP_NOT_RESTORED.format(held=held))
 
 
-def _apply_surface_group(op, faces, over_holes, extra):
+def _apply_surface_group(op, faces, over_holes, mode_key, extra):
     """(count, None) or (None, error) - put `faces` on a NEW surface group of the operation and read
     the applied collection back. Nothing reaches the operation until applyMachineAvoidGroups, so
     every refusal above it leaves the operation as it was found."""
-    pv, groups, gerr = _avoid_groups(op)
+    pv, groups, gerr = avoid_groups(op)
     if gerr:
         return None, gerr
     # A SECOND fetch, kept as the operation holds it NOW: re-applying it is what undoes the add,
@@ -985,15 +1124,27 @@ def _apply_surface_group(op, faces, over_holes, extra):
             # option, and the operation's own default group is one that does not.
             return None, (f"machine_over_holes is not offered on this group: {e}. Nothing was "
                           "applied - drop machine_over_holes and retry.")
+    if mode_key is not None:
+        value = machine_mode_value(mode_key)
+        if value is None:
+            return None, (f"machine_mode='{mode_key}' is not available in this Fusion build - "
+                          "adsk.cam.MachiningMode carries no such member. Nothing was applied.")
+        try:
+            group.machineMode = value
+        except Exception as e:
+            return None, (f"machine_mode is not offered on this group: {e}. Nothing was applied - "
+                          "drop machine_mode and retry.")
     try:
         pv.applyMachineAvoidGroups(groups)     # MUTATION
     except Exception as e:
-        return None, f"applyMachineAvoidGroups failed: {e}"
+        return None, (f"applyMachineAvoidGroups failed: {e}. Nothing was applied - drop "
+                      "machine_mode, then machine_over_holes, and retry to find which of them "
+                      "this strategy refuses at the commit.")
     applied = safe(lambda: pv.getMachineAvoidGroups())
     after = safe(lambda: applied.count) if applied is not None else None
     if after is None:
         return None, ("The surface groups could not be read back after applyMachineAvoidGroups, so "
-                      f"the group is UNCONFIRMED - re-read the operation with {_PARAM_READ}.")
+                      f"the group is UNCONFIRMED - re-read the operation with {PARAM_READ}.")
     # Every gate below runs on a COMMITTED collection, so each one puts the group back and says so.
     if after != before + 1:
         if after > before:
@@ -1002,7 +1153,7 @@ def _apply_surface_group(op, faces, over_holes, extra):
                           + _restore_groups(pv, previous, None, len(faces)))
         return None, (f"The surface group did not land - the operation held {before} group(s) "
                       f"before applyMachineAvoidGroups and reads {after} after.")
-    rec = _group_record(safe(lambda: applied.item(after - 1)))
+    rec = group_record(safe(lambda: applied.item(after - 1)))
     if rec is None or rec["entities"] is None:
         return None, ("The applied surface group would not read back its faces, so the selection is "
                       "UNCONFIRMED." + _restore_groups(pv, previous, None, len(faces)))
@@ -1013,6 +1164,10 @@ def _apply_surface_group(op, faces, over_holes, extra):
     if over_holes is not None and rec["machine_over_holes"] is not bool(over_holes):
         return None, (f"The surface group reads machine_over_holes {rec['machine_over_holes']!r} "
                       f"after {bool(over_holes)} was set - it did not take."
+                      + _restore_groups(pv, previous, rec["entities"], len(faces)))
+    if mode_key is not None and rec["machine_mode"] != mode_key:
+        return None, (f"The surface group reads machine_mode {rec['machine_mode']!r} after "
+                      f"'{mode_key}' was set - it did not take."
                       + _restore_groups(pv, previous, rec["entities"], len(faces)))
     extra["surface_group"] = rec
     extra["surface_group_count"] = after
@@ -1064,7 +1219,7 @@ def _set_height_param(op, param_name, value):
         p.expression = written            # ChoiceParameterValue takes the choice string
     except Exception as e:
         return None, False, (f"Could not set {param_name}='{value}': {e}"
-                             + enumeration_remedy(str(e), written, _PARAM_READ, p))
+                             + enumeration_remedy(str(e), written, PARAM_READ, p))
     after = safe(lambda: p.expression)
     if after is None:
         return None, False, (f"{param_name} cannot be read back after being set to '{value}', so "
@@ -1123,7 +1278,8 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
             loop_type: str = None, side_type: str = None, pocket_filter=None,
             min_diameter: float = None, max_diameter: float = None,
             surface_target: str = None,
-            machine_over_holes: bool = None,
+            machine_over_holes: bool = None, machine_mode: str = None,
+            stock_faces=None,
             top_mode: str = None, top_offset: str = None,
             bottom_mode: str = None, bottom_offset: str = None,
             units: str = "mm", generate: bool = True,
@@ -1151,10 +1307,10 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
     scope = (component or "").strip()
     knobs = {"is_open": is_open, "reverted": reverted, "pocket_filter": pocket_filter or None,
              "min_diameter": min_diameter, "max_diameter": max_diameter,
-             "machine_over_holes": machine_over_holes,
+             "machine_over_holes": machine_over_holes, "stock_faces": stock_faces or None,
              "component": scope or None}
     for kind, raw in ((LOOP_TYPE, loop_type), (SIDE_TYPE, side_type),
-                      (SURFACE_TARGET, surface_target)):
+                      (SURFACE_TARGET, surface_target), (MACHINE_MODE, machine_mode)):
         if raw is None:
             knobs[kind.name] = None
             continue
@@ -1165,6 +1321,15 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
     kerr = _knob_guard(selection, knobs)
     if kerr:
         return error(kerr)
+    stock_names, serr = _stock_face_names(stock_faces)
+    if serr:
+        return error(serr)
+    given = [key for key, raw in (("handles", handles), ("bodies", bodies), ("sketches", sketches))
+             if raw not in (None, "", [])]
+    if stock_names and given:
+        return error(f"stock_faces names the STOCK's own analytic faces, so it takes no model "
+                     f"geometry - {', '.join(given)} was passed beside it. Pass stock_faces alone, "
+                     "or drop it and select model faces with 'handles'.")
 
     units_key = (units or "mm").strip().lower()
     factor = scale(units_key)
@@ -1179,9 +1344,12 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
         return error(oerr)
     op = node.obj
 
-    entities, herr = _resolve_geometry(selection, handles, bodies, sketches, scope)
-    if herr:
-        return error(herr)
+    # The stock route names faces the STOCK carries, so there is no model geometry to resolve.
+    entities = []
+    if not stock_names:
+        entities, herr = _resolve_geometry(selection, handles, bodies, sketches, scope)
+        if herr:
+            return error(herr)
 
     explicit_groups = None
     flat_chain = False
@@ -1248,7 +1416,11 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
     # engage below appends to the same list. Absent means each request was written as it was sent.
     extra = {"quoted": wrapped} if wrapped else {}
     if selection == _SURFACE_GROUP:
-        count, aerr = _apply_surface_group(op, entities, machine_over_holes, extra)
+        count, aerr = _apply_surface_group(op, entities, machine_over_holes,
+                                           knobs.get("machine_mode"), extra)
+        record = None if aerr else {"selections": count}
+    elif stock_names:
+        count, aerr = _apply_probe_stock(op, stock_names, extra, owning_setup(node))
         record = None if aerr else {"selections": count}
     elif selection in _DIRECT_PARAM:
         count, aerr = _apply_direct(op, selection, faces, extra)
@@ -1344,6 +1516,10 @@ tool = (
     .add_input_property(*SURFACE_TARGET.as_property())
     .add_input_property("machine_over_holes", {"type": "boolean",
             "description": "surface_group: cut across the group's holes/pockets."})
+    .add_input_property(*MACHINE_MODE.as_property())
+    .add_input_property("stock_faces", {"type": "array",
+            "items": {"type": "string", "enum": list(_STOCK_FACE_NAMES)},
+            "description": "probe: the STOCK's faces, instead of handles."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("top_mode", {"type": "string", "description": "e.g. 'from stock top'."})
     .add_input_property("top_offset", {"type": "string"})

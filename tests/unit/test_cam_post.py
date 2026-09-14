@@ -227,7 +227,9 @@ def _CAM(setups, writes=True, returns=True, existing=(), missing=(),
     def _do_post(program):
         cam.posted.append(program)
         folder = _unq(program.parameters.itemByName("nc_program_output_folder").expression)
-        name = _unq(program.parameters.itemByName("nc_program_name").expression)
+        # named from the program NUMBER where one is set, else from the program's own listing name:
+        # a create whose program_name is not a number leaves the number parameter alone.
+        name = _unq(program.parameters.itemByName("nc_program_name").expression) or program.name
         if writes == "failed":
             # a failed post leaves only a '.failed' stub in the output folder (the real error is in
             # the post log, elsewhere) and postProcess returns False.
@@ -298,6 +300,14 @@ def _write_cps(tmp_path, name="fanuc.cps"):
     p = tmp_path / name
     p.write_text("// a fake post config\n")
     return p
+
+
+# Real-length Windows post folders and the sweep's own export dir: the composed refusals are
+# measured against THESE, since a tmp_path fixture's short names never reach the budget.
+_PERSONAL_POSTS = "C:/Users/machinist/AppData/Roaming/Autodesk/Fusion 360 CAM/Posts"
+_GENERIC_POSTS = ("C:/Users/machinist/AppData/Local/Autodesk/webdeploy/production/"
+                  "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678/Applications/CAM360/Posts")
+_SWEEP_EXPORT_DIR = "C:/Users/machinist/AppData/Local/Temp/eval_sweep_exports"
 
 
 def _install(monkeypatch, cam, valid=1):
@@ -385,6 +395,98 @@ class TestPostResolution:
         data = _payload(cp.handler(post="generic fanuc", output_folder=str(out), program_name="1"))
         assert data["posted"] is True
         assert data["post_config"].endswith("generic fanuc.cps")
+
+    def test_a_path_under_a_missing_folder_is_refused_naming_the_post_that_carries_the_name(
+            self, monkeypatch, tmp_path):
+        # A directory part is an ADDRESS: resolving it by BASENAME posted the installed .cps the
+        # caller never named, with only post_config hinting at the substitution.
+        posts = tmp_path / "posts"
+        posts.mkdir()
+        _write_cps(posts, "fanuc.cps")
+        cam = _CAM([_Setup("S1", [_Op("Face1")])])
+        cam.personalPostFolder = str(posts)
+        _install(monkeypatch, cam)
+        res = cp.handler(post=str(tmp_path / "no-such-folder" / "fanuc.cps"),
+                         output_folder=str(tmp_path), program_name="1")
+        assert res["isError"] is True
+        assert "no-such-folder/fanuc.cps' does not exist" in res["message"]
+        assert str(posts).replace("\\", "/") + "/fanuc.cps" in res["message"]
+        assert "Nothing was posted" in res["message"]
+        assert cam.posted == [] and cam.ncPrograms.count == 0    # refused before any program
+
+    def test_a_path_that_exists_resolves_exactly_as_given(self, monkeypatch, tmp_path):
+        cps = _write_cps(tmp_path)
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])]))
+        path, err = cp._resolve_local_cps(cam, str(cps))
+        assert err is None and path == str(cps).replace("\\", "/")
+
+    def test_a_missing_path_whose_name_is_nowhere_says_so(self, monkeypatch, tmp_path):
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])]))
+        path, err = cp._resolve_local_cps(cam, str(tmp_path / "gone" / "ghost.cps"))
+        assert path is None
+        assert "No post folder holds a 'ghost.cps' either" in err
+        assert "Nothing was posted" in err
+        # the folder paths are the BARE-name refusal's job: naming them here overran the wire budget
+        assert "C:/nonexistent/generic" not in err
+
+    def test_both_missing_path_refusals_fit_the_wire_budget_on_real_folders(self, monkeypatch):
+        # the refusal is assembled at run time, so test_prose_budget measures none of it: the
+        # sweep's own asked path beside a real Windows post-folder pair is the worst case.
+        cam = _CAM([_Setup("S1", [_Op("Face1")])])
+        cam.personalPostFolder, cam.genericPostFolder = _PERSONAL_POSTS, _GENERIC_POSTS
+        asked = _SWEEP_EXPORT_DIR + "/no-such-folder/haas.cps"
+        monkeypatch.setattr(cp.os.path, "isfile", lambda p: False)
+        _none, nowhere = cp._resolve_local_cps(cam, asked)
+        monkeypatch.setattr(cp.os.path, "isfile", lambda p: p == _PERSONAL_POSTS + "/haas.cps")
+        _none2, named = cp._resolve_local_cps(cam, asked)
+        for err in (nowhere, named):
+            assert len(err) <= 400, (len(err), err)   # test_prose_budget.NOTE_BUDGET_CHARS
+        # the folder PAIR is what overran the budget on a real install, so the "nowhere" branch
+        # names neither; the bare-name refusal under it is where a caller reads them.
+        assert _PERSONAL_POSTS not in nowhere and _GENERIC_POSTS not in nowhere, nowhere
+        assert "No post folder holds" in nowhere and "carries that file name" in named
+        assert named.count(_PERSONAL_POSTS) == 1     # the ONE remedy path this branch does name
+
+
+class TestProgramNumber:
+    """The parameter SPELLED nc_program_name holds the program NUMBER; the listing name is what
+    'program_name' addresses, and a fanuc post refuses a non-numeric number."""
+
+    def test_a_numeric_program_name_seeds_the_number_on_a_create(self, monkeypatch, tmp_path):
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])]))
+        data = _payload(cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
+                                   program_name="1001"))
+        prog = cam.ncPrograms.item(0)
+        assert data["program_number"] == "1001"
+        assert _unq(prog.parameters.itemByName("nc_program_name").expression) == "1001"
+
+    def test_a_non_numeric_name_leaves_the_number_alone_and_says_so(self, monkeypatch, tmp_path):
+        # a listing name written into the NUMBER is what a fanuc post refuses out of hand
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])]))
+        data = _payload(cp.handler(post=str(_write_cps(tmp_path)), output_folder=str(tmp_path),
+                                   program_name="BRACKET-1001"))
+        prog = cam.ncPrograms.item(0)
+        assert "nc_program_name" not in data["params_applied"]
+        assert _unq(prog.parameters.itemByName("nc_program_name").expression) != "BRACKET-1001"
+        assert data["program_number"] == ""          # what the parameter reads, not the name
+        # the remedy rides the 'program_name' INPUT, not every post's note: the composed note is
+        # already near its cap once a membership clause joins it.
+        assert "cam_set_nc_comment(set_number=...)" in cp.tool.to_dict()[
+            "inputSchema"]["properties"]["program_name"]["description"]
+        assert len(data["note"]) <= 400, len(data["note"])
+
+    def test_a_reconfigure_never_rewrites_the_number(self, monkeypatch, tmp_path):
+        # the number a machinist set survives a re-scope - 'program_name' is the listing address,
+        # and a renamed program would otherwise have its name written into its number
+        cam = _install(monkeypatch, _CAM([_Setup("S1", [_Op("Face1")])], existing=["BRACKET-1001"]))
+        cam.ncPrograms.item(0).parameters.itemByName("nc_program_name").expression = "'1001'"
+        data = _payload(cp.handler(scope="S1", post=str(_write_cps(tmp_path)),
+                                   output_folder=str(tmp_path), program_name="BRACKET-1001",
+                                   overwrite=True))
+        assert data["program_reused"] is True and data["program_number"] == "1001"
+        assert "nc_program_name" not in data["params_applied"]
+        assert _unq(cam.ncPrograms.item(0).parameters.itemByName(
+            "nc_program_name").expression) == "1001"
 
 
 # -- post_scope: cloud/hub team post library -----------------------------------

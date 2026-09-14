@@ -257,13 +257,13 @@ _CENSUS_MILL = [
      lambda c: {"setup": HUB_MILL_SETUP, "strategy": "hole_recognition", "name": "HoleRecognition",
                 "tool_scope": "document",
                 "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _FLAT_AT},
-     _refused("did not land", "is not an operation", "cam_select_geometry(selection='holes')"),
+     _refused("is not an operation", "cam_select_geometry(selection='holes')"),
      None),
     ("cam_create_operation",
      lambda c: {"setup": HUB_MILL_SETUP, "strategy": "folder", "name": "StrategyFolder",
                 "tool_scope": "document",
                 "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _FLAT_AT},
-     _refused("did not land", "cam_edit_folders"), None),
+     _refused("'folder' is not an operation", "cam_edit_folders"), None),
 ] + _creates(HUB_MILL_SETUP, _WHOLE_MODEL, "hub_tool_base") + [
     # THE POCKET FLOOR: the flange pocket's arc slot, 12 mm wide on the bolt circle - a slot-shaped
     # closed contour, which is the shape the slot family wants and the bracket had none of (SLOT-1).

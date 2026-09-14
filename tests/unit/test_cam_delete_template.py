@@ -50,7 +50,8 @@ class _TmplLib:
 
     ``tree`` maps a folder key ('' = the root) to the templates childTemplates lists there;
     ``assets`` is a list of (leafName, template-or-None, folder_key) the asset walk lists and
-    templateAtURL loads from. ``delete_mode`` picks the outcome deleteAsset reports and leaves
+    templateAtURL loads from - a TUPLE of folder keys lists that ONE asset under each of them, its
+    address being the first. ``delete_mode`` picks the outcome deleteAsset reports and leaves
     behind: 'ok', 'false', 'raise', 'keeps_asset' (the walk still lists it), 'keeps_loading'
     (the walk drops it but the url still loads a template) or 'walk_deepens' (the delete lands, but
     the folder tree grows past the walk's depth bound so the read-back cannot finish).
@@ -69,11 +70,15 @@ class _TmplLib:
         self._root_reads = 0
         self.deleted = []
         self.stored = {}
+        self.listed = {}
         self.asset_urls = []
         for entry in assets:
             leaf, tmpl = entry[0], entry[1]
-            u = _TmplUrl(leaf, entry[2] if len(entry) > 2 else "")
+            where = entry[2] if len(entry) > 2 else ""
+            folders = list(where) if isinstance(where, tuple) else [where]
+            u = _TmplUrl(leaf, folders[0])
             self.asset_urls.append(u)
+            self.listed[u.toString()] = folders
             self.stored[u.toString()] = tmpl
 
     def urlByLocation(self, loc):
@@ -101,7 +106,7 @@ class _TmplLib:
 
     def childAssetURLs(self, url):
         key = self._key(url)
-        return [u for u in self.asset_urls if u._folder == key]
+        return [u for u in self.asset_urls if key in self.listed.get(u.toString(), [])]
 
     def templateAtURL(self, url):
         return self.stored.get(url.toString())
@@ -109,6 +114,7 @@ class _TmplLib:
     def importTemplate(self, template, dest_url):
         u = _TmplUrl(template.name + ".f3dhsm-template", self._key(dest_url))
         self.stored[u.toString()] = template
+        self.listed[u.toString()] = [self._key(dest_url)]
         self.asset_urls.append(u)
         self.tree.setdefault(self._key(dest_url), []).append(template)
         return u
@@ -189,7 +195,17 @@ class TestDeleteTemplateGuards:
         res = ct.handler(name="GyroTmpl", confirm_name="GyroTmpl")
         assert res["isError"] is True
         assert "ambiguous" in res["message"] and "Nothing was deleted" in res["message"]
+        assert "template_url" in res["message"]          # the input this tool actually carries
         assert lib.deleted == []
+
+    def test_one_asset_listed_under_two_folders_is_ONE_template(self, tlib):
+        # MEASURED: the Local library lists a saved template under the root AND under its own
+        # folder, both listings carrying the SAME asset url. That is one template, not two.
+        t, a = _one(folder=("", "Mills"))
+        lib = tlib(tree={"": [t], "Mills": [t]}, assets=[a], folders=["Mills"])
+        out = _payload(ct.handler(name="GyroTmpl", confirm_name="GyroTmpl"))
+        assert out["deleted"] is True and out["local_assets_remaining"] == 0
+        assert lib.deleted == ["template://local/GyroTmpl.f3dhsm-template"]
 
     def test_a_confirm_name_mismatch_is_refused_naming_both(self, tlib):
         # the search matches case-insensitively, the confirmation does NOT: the caller confirms the
@@ -258,6 +274,7 @@ class TestDeleteTemplateGuards:
         assert res["isError"] is True
         assert "names 2 assets" in res["message"] and "refusing to guess" in res["message"]
         assert "template://local/Mills/GyroTmpl.f3dhsm-template" in res["message"]
+        assert "template_url=" in res["message"]         # the remedy is an input that exists
         assert lib.deleted == []
 
     def test_an_incomplete_asset_walk_refuses_the_delete(self, tlib):
@@ -391,3 +408,66 @@ class TestDeleteTemplateEffect:
         res = ct.handler(name="GyroTmpl", confirm_name="GyroTmpl")
         assert res["isError"] is True
         assert "UNCONFIRMED" in res["message"] and "no longer resolves" in res["message"]
+
+
+_ONE_URL = "template://local/GyroTmpl.f3dhsm-template"
+
+
+class TestDeleteTemplateByUrl:
+    """template_url addresses ONE asset, so no name has to be shown unique first. confirm_name is
+    checked against the name the template at that url answers to, and the post-delete read-back
+    searches for the URL the delete was aimed at."""
+
+    def test_a_name_and_a_url_together_are_refused(self, tlib):
+        t, a = _one()
+        lib = tlib(tree={"": [t]}, assets=[a])
+        res = ct.handler(name="GyroTmpl", confirm_name="GyroTmpl", template_url=_ONE_URL)
+        assert res["isError"] is True and "not both" in res["message"]
+        assert lib.deleted == []
+
+    def test_a_url_no_local_asset_carries_is_refused(self, tlib):
+        t, a = _one()
+        lib = tlib(tree={"": [t]}, assets=[a])
+        res = ct.handler(confirm_name="GyroTmpl", template_url="template://local/Other")
+        assert res["isError"] is True
+        assert "No asset at 'template://local/Other'" in res["message"]
+        assert lib.deleted == []
+
+    def test_a_confirm_name_that_is_not_the_addressed_template_is_refused(self, tlib):
+        # case-SENSITIVE, against the name the url's own template answers to
+        t, a = _one()
+        lib = tlib(tree={"": [t]}, assets=[a])
+        res = ct.handler(confirm_name="gyrotmpl", template_url=_ONE_URL)
+        assert res["isError"] is True
+        assert "Name mismatch" in res["message"] and "confirm_name='GyroTmpl'" in res["message"]
+        assert lib.deleted == []
+
+    def test_the_url_route_deletes_the_asset_two_folders_listed(self, tlib):
+        # ONE asset listed under two folder paths; its url is its identity. The read-back is
+        # searched by that url, so it covers exactly what was deleted.
+        t, a = _one(folder=("", "Mills"))
+        lib = tlib(tree={"": [t], "Mills": [t]}, assets=[a], folders=["Mills"])
+        out = _payload(ct.handler(confirm_name="GyroTmpl", template_url=_ONE_URL))
+        assert out["deleted"] is True and out["template"] == "GyroTmpl"
+        assert out["url"] == _ONE_URL and out["location"] == "local"
+        assert out["loads_after_delete"] is False and out["local_assets_remaining"] == 0
+        assert lib.deleted == [_ONE_URL]
+
+    def test_an_asset_still_listed_at_that_url_after_a_true_delete_is_an_error(self, tlib):
+        t, a = _one()
+        tlib(tree={"": [t]}, assets=[a], delete_mode="keeps_asset")
+        res = ct.handler(confirm_name="GyroTmpl", template_url=_ONE_URL)
+        assert res["isError"] is True
+        assert "still lists 'GyroTmpl.f3dhsm-template'" in res["message"]
+
+    def test_a_sibling_asset_of_the_same_name_is_left_alone(self, tlib):
+        # the url picks ONE of two same-named assets - the other must survive, or the url route is
+        # just the by-name route with a longer argument.
+        t, a = _one()
+        lib = tlib(tree={"": [t]},
+                   assets=[a, ("GyroTmpl.f3dhsm-template", _Tmpl("GyroTmpl"), "Mills")],
+                   folders=["Mills"])
+        out = _payload(ct.handler(confirm_name="GyroTmpl", template_url=_ONE_URL))
+        assert out["deleted"] is True and out["local_assets_remaining"] == 1
+        assert [u.toString() for u in lib.asset_urls] == [
+            "template://local/Mills/GyroTmpl.f3dhsm-template"]

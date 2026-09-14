@@ -16,8 +16,8 @@ import adsk.fusion
 import pytest
 
 from conftest import (
-    BRepFace, MakeComp, _NamedCollection, assert_no_active_design, install, load_tool, make_design,
-    make_occurrence, make_sketch, payload as _payload,
+    BRepBody, BRepFace, MakeComp, _NamedCollection, assert_no_active_design, install, load_tool,
+    make_design, make_occurrence, make_sketch, payload as _payload,
 )
 
 ar = load_tool("model_arrange")
@@ -770,6 +770,109 @@ class TestSettings:
 
 # ── honesty: failed/absent mutation must surface as isError, never a false ok ─
 # (the paths test_model_mirror.py / test_model_shell.py treat as mandatory)
+
+_SPHERE_ST = adsk.core.SurfaceTypes.SphereSurfaceType
+_PLANE_ST = adsk.core.SurfaceTypes.PlaneSurfaceType
+
+
+def _shape_with(path, *surface_types):
+    """One arranged occurrence whose body carries a face of each surface type - what the 2D
+    pre-flight walks each shape for."""
+    leaf = path.split("+")[-1].split(":")[0]
+    body = BRepBody(name=leaf + "Body",
+                    faces=[BRepFace(SimpleNamespace(surfaceType=st)) for st in surface_types])
+    return make_occurrence(path=path, component=SimpleNamespace(name=leaf),
+                           transform2=SimpleNamespace(translation=_vec()), bodies=[body])
+
+
+def _install_shapes(*occurrences):
+    """A root holding `occurrences` plus one boundary sketch - the world a 2D nest is called in."""
+    af = FakeArrangeFeatures()
+    root = _component("Root", [_sketch("Boundary")], occurrences, af)
+    return _wire(make_design(comp=root), af)
+
+
+class TestPlanarFacePreflight:
+    """MEASURED on one SPHERE among eight tray parts: both 2D solvers failed the whole arrange with
+    ARRANGE_ERROR_MISSING_FACE, naming no shape and leaving no feature in the timeline, the seven
+    others nested under both, and the 3D solver packed the sphere. So both 2D gates name what the
+    walk READ - no face of these reads a plane - and leave the whole-feature claim to the platform
+    sentence; a surface body or a torus is unmeasured and neither wording speaks for it."""
+
+    @pytest.mark.parametrize("solver", ["true_shape", "rectangular"])
+    def test_a_shape_with_no_planar_face_is_refused_before_the_add(self, solver):
+        _, af = _install_shapes(_shape_with("Ball:1", _SPHERE_ST),
+                                _shape_with("Pad:1", _PLANE_ST, _SPHERE_ST))
+        res = ar.handler(boundary_sketch="Boundary", shapes="Ball:1,Pad:1", solver=solver)
+        assert res["isError"] is True
+        assert "Ball:1" in res["message"] and "Pad:1" not in res["message"]
+        assert f"solver='{solver}'" in res["message"] and "solver='3d'" in res["message"]
+        assert af.added is False                        # refused BEFORE the feature was created
+
+    def test_the_3d_solver_packs_the_same_shape(self):
+        _, af = _install_shapes(_shape_with("Ball:1", _SPHERE_ST))
+        out = _payload(ar.handler(shapes="Ball:1", solver="3d", envelope_plane="xy",
+                                  envelope_length=200, envelope_width=200, envelope_height=100))
+        assert out["arranged"] is True and af.added is True
+
+    def test_only_the_faceless_shapes_are_named(self):
+        _, af = _install_shapes(
+            _shape_with("Ball:1", _SPHERE_ST),
+            _shape_with("Pad:1", _PLANE_ST),
+            _shape_with("Blob:1", _SPHERE_ST, adsk.core.SurfaceTypes.TorusSurfaceType))
+        res = ar.handler(boundary_sketch="Boundary", shapes="Ball:1,Pad:1,Blob:1")
+        assert res["isError"] is True
+        assert "Ball:1" in res["message"] and "Blob:1" in res["message"]
+        assert "Pad:1" not in res["message"] and af.added is False
+
+    def test_a_sub_assembly_shape_is_judged_by_the_bodies_one_level_down(self):
+        parent = make_occurrence(path="Sub:1", component=SimpleNamespace(name="Sub"),
+                                 transform2=SimpleNamespace(translation=_vec()),
+                                 children=[_shape_with("Sub:1+Ball:1", _SPHERE_ST)])
+        _, af = _install_shapes(parent)
+        res = ar.handler(boundary_sketch="Boundary", shapes="Sub:1")
+        assert res["isError"] is True and "Sub:1" in res["message"] and af.added is False
+
+    def test_a_shape_exposing_no_body_refuses_nothing(self):
+        # Nothing was read to judge it by, and refusing on that would block a nest the platform
+        # takes - the platform's own error still covers the case.
+        _, af = _install_shapes(_occ("Sub:1"))
+        out = _payload(ar.handler(boundary_sketch="Boundary", shapes="Sub:1"))
+        assert out["arranged"] is True and af.added is True
+
+    def test_a_face_whose_geometry_will_not_read_is_no_verdict(self):
+        # A surface type that did not answer is not a non-planar face: collapsing the two would
+        # refuse a nest on a read that never happened.
+        _, af = _install_shapes(_shape_with("Ball:1", None))
+        out = _payload(ar.handler(boundary_sketch="Boundary", shapes="Ball:1"))
+        assert out["arranged"] is True and af.added is True
+
+    def test_an_occurrence_whose_children_will_not_read_is_no_verdict(self):
+        # The walk could not see the whole shape, so the bodies it DID read are not the whole
+        # answer - the platform's own refusal covers what this walk could not reach.
+        body = BRepBody(name="SubBody",
+                        faces=[BRepFace(SimpleNamespace(surfaceType=_SPHERE_ST))])
+        occ = make_occurrence(path="Sub:1", component=SimpleNamespace(name="Sub"),
+                              transform2=SimpleNamespace(translation=_vec()), bodies=[body],
+                              raises_on={"childOccurrences": "children unreadable"})
+        _, af = _install_shapes(occ)
+        out = _payload(ar.handler(boundary_sketch="Boundary", shapes="Sub:1"))
+        assert out["arranged"] is True and af.added is True
+
+    def test_the_platform_missing_face_error_is_worded_like_the_pre_flight(self):
+        # A body the walk could not read still meets the platform's refusal, which names no shape -
+        # and by then the feature is gone from the timeline, so that path says so.
+        _, af = _install_shapes(_occ("Sub:1"))
+
+        def _boom(inp):
+            raise RuntimeError("3 : Arrange1 / Compute Failed // ARRANGE_ERROR_MISSING_FACE - "
+                               "Missing planar face: cannot arrange these items.")
+
+        af.add = _boom
+        res = ar.handler(boundary_sketch="Boundary", shapes="Sub:1")
+        assert res["isError"] is True and "ARRANGE_ERROR_MISSING_FACE" in res["message"]
+        assert "gone from the timeline" in res["message"] and "solver='3d'" in res["message"]
+
 
 class TestHonesty:
     def test_add_returning_none_is_error(self):

@@ -935,33 +935,51 @@ class TestReadStrategies:
 
 
 class TestNamesThatAreNotOperations:
-    """MEASURED: hole_recognition and folder read isGenerationAllowed TRUE and operations.add over
-    either answers with a name while the setup's operation count does not move. That COUNT is what
-    refuses - the table only names what does the job instead, so a build where one of them starts
-    landing creates it rather than meeting a refusal that outlived its measurement."""
+    """MEASURED: hole_recognition, folder and additive_individual_strategies read
+    isGenerationAllowed TRUE and operations.add over each answers a name while the operation count
+    stays - landing a folder, a CAMHoleRecognition and a bare OperationBase in Setup.children, none
+    of them in operations/allOperations. The name is refused before the add; the count gate
+    behind it still catches a real fault."""
 
-    def _empty_add(self, monkeypatch, strategy):
+    def _refused_before_add(self, monkeypatch, strategy):
         cam = _install(monkeypatch, strategies=("face", strategy))
-        _with_operations(cam, _DeafOperations)
-        return cco.handler(setup="Setup1", strategy=strategy,
-                           tool_library_url="u", tool_index=0, generate=False)
+        setup = cam.setups.item(0)
+        res = cco.handler(setup="Setup1", strategy=strategy,
+                          tool_library_url="u", tool_index=0, generate=False)
+        return res, setup
+
+    def test_folder_is_refused_with_nothing_added(self, monkeypatch):
+        res, setup = self._refused_before_add(monkeypatch, "folder")
+        assert res["isError"] is True and "cam_edit_folders" in res["message"]
+        assert "'folder' is not an operation" in res["message"]
+        # the spy: add() records every input it was handed, so an empty list is "never called"
+        assert setup.operations.modes_at_add == [] and setup.operations.added == []
 
     def test_hole_recognition_points_at_the_drilling_cycle_and_its_selection(self, monkeypatch):
-        res = self._empty_add(monkeypatch, "hole_recognition")
-        assert res["isError"] is True and "did not land" in res["message"]
+        res, setup = self._refused_before_add(monkeypatch, "hole_recognition")
+        assert res["isError"] is True
         assert "'hole_recognition' is not an operation" in res["message"]
         assert "cam_select_geometry(selection='holes')" in res["message"]
+        assert setup.operations.modes_at_add == []
 
-    def test_folder_points_at_the_tool_that_makes_one(self, monkeypatch):
-        res = self._empty_add(monkeypatch, "folder")
-        assert res["isError"] is True and "cam_edit_folders" in res["message"]
+    def test_the_additive_family_row_points_at_the_strategy_listing(self, monkeypatch):
+        res, setup = self._refused_before_add(monkeypatch, "additive_individual_strategies")
+        assert res["isError"] is True
+        assert "'additive_individual_strategies' is not an operation" in res["message"]
+        assert "cam_get(include=['strategies']" in res["message"]
+        assert setup.operations.modes_at_add == []
 
-    def test_a_real_strategy_that_does_not_land_gets_no_category_clause(self, monkeypatch):
-        # the boundary: a 'face' that failed to land is a FAULT, not a category error, and telling
-        # its caller to reach for another tool would send it away from a real bug.
-        res = self._empty_add(monkeypatch, "face")
+    def test_a_real_strategy_that_does_not_land_is_still_caught_by_the_count(self, monkeypatch):
+        # the boundary: a 'face' that failed to land is a FAULT, not a category error - it reaches
+        # the add, and the count either side of it is what refuses.
+        cam = _install(monkeypatch, strategies=("face",))
+        setup = _with_operations(cam, _DeafOperations)
+        res = cco.handler(setup="Setup1", strategy="face",
+                          tool_library_url="u", tool_index=0, generate=False)
+        # 'did not land' is the post-add gate's own sentence, so the add WAS reached here
         assert res["isError"] is True and "did not land" in res["message"]
         assert "is not an operation" not in res["message"]
+        assert setup.operations.count == 0
 
 
 class TestDrillingAxisNote:
@@ -1448,9 +1466,9 @@ class TestName:
         assert "named 'Op1'" in out["rename_warning"]
 
     def test_a_name_an_operation_already_answers_to_is_refused_before_the_add(self, monkeypatch):
-        # Operation.name DEDUPES rather than refusing ('Face1' taken -> 'Face11', measured), so a
-        # taken name would land as one the caller never asked for. It is refused before the create,
-        # through the same check the rename arm runs - and nothing is added.
+        # MEASURED: operations.add DEDUPES rather than refusing, landing '<name> (2)', so a taken
+        # name would land as one the caller never asked for. Refused before the create, and
+        # nothing is added.
         cam = _install(monkeypatch)
         cam.setups.item(0).operations.add(
             cam.setups.item(0).operations.createInput("face"))          # an operation named 'Op1'
@@ -1458,8 +1476,22 @@ class TestName:
                           name="Op1")
         assert res["isError"] is True
         assert "already answer to 'Op1'" in res["message"]
-        assert "dedupes rather than refusing" in res["message"]
+        assert "'Op1 (2)'" in res["message"]
         assert cam.setups.item(0).operations.count == 1                 # nothing was created
+
+    def test_a_name_another_setup_holds_is_refused_too_naming_that_setup(self, monkeypatch):
+        # MEASURED: the CREATE dedupes across the WHOLE DOCUMENT ('ProbeFace' in another setup ->
+        # 'ProbeFace (2)'), unlike the rename, which takes a cross-setup twin exactly. So the
+        # create's census is document-wide and its refusal names the setup holding the twin.
+        cam = _install(monkeypatch, setups=("Setup1", "Setup2"))
+        first = cam.setups.item(0).operations
+        first.add(first.createInput("face"))                            # an operation named 'Op1'
+        res = cco.handler(setup="Setup2", strategy="face", tool_library_url="u",
+                          tool_index=0, name="Op1")
+        assert res["isError"] is True
+        assert "already answer to 'Op1' (in setup 'Setup1')" in res["message"]
+        assert "across the whole document to 'Op1 (2)'" in res["message"]
+        assert cam.setups.item(1).operations.count == 0                 # nothing was added
 
     def test_the_ops_own_auto_name_requested_back_is_not_a_self_dedupe(self, monkeypatch):
         # Measured: writing onto an operation the name it ALREADY reads dedupes it against ITSELF

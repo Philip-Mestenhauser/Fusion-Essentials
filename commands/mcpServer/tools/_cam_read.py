@@ -14,8 +14,8 @@ from ._cam_common import (_SETUP_BLOCKER_REMEDY, _segment, _setup_node, _walk_ch
                           blocked_setup_records, clamp_rows, counts_as_warning, first_line, get_cam,
                           is_empty_toolpath, machine_label, machine_limits, machine_spindle_max,
                           op_primary_state, op_state_facts, operations_under, ready_verdict,
-                          resolve_cam_node, setup_blockers, setups, spindle_check,
-                          stock_mode_name, toolpath_present_tally, validity_basis)
+                          resolve_cam_node, setup_blockers, setups, spindle_check, stock_mode_name,
+                          time_reading, toolpath_present_tally, validity_basis)
 
 MAP_BLURB = (
     "the per-slice READ cores behind cam_get(include=[...]) - get_cam_setups_handler, "
@@ -192,7 +192,7 @@ def get_cam_setups_handler(setup: str = "") -> dict:
             "operation_count": safe(lambda: s.allOperations.count, 0),
             "folder_count": safe(lambda: s.folders.count, 0),
             })
-            _attach_setup_invalidation(setups[-1], s)
+            _attach_setup_invalidation(setups[-1], s, cam)
             # Names the list that is null because its property raised, so the null does not read as
             # "none selected".
             unreadable = [key for key, names in (("selected_models", models), ("fixtures", fixtures),
@@ -241,6 +241,9 @@ def _op_blocked_by(summary):
         # No lifecycle state read, so 'ready to post' cannot be claimed for this row either.
         blocked.append("state_unread")
         requires = dict(_UNREAD_REQUIRES)
+    if summary.get("state") == "nonfinite":
+        # It reads IsValid with a toolpath, so every other flag on this row says it is postable.
+        blocked.append("toolpath_nonfinite")
     if summary.get("tool") is None:
         blocked.append("tool_unselected")  # real refusal: "Toolpath requires tool to be selected"
     if summary.get("is_out_of_date"):
@@ -249,9 +252,10 @@ def _op_blocked_by(summary):
     return blocked, requires
 
 
-def _attach_setup_invalidation(rec, setup):
+def _attach_setup_invalidation(rec, setup, cam=None):
     """Add op_states (the terse per-state tally), invalidation_reasons and machine_out_of_date to
-    one setup record, in ONE walk of its operations."""
+    one setup record, in ONE walk of its operations. `cam` buys the nonfinite bucket - without it
+    a path whose motion is not a number counts under 'valid' here."""
     tally = {}
     warnings = 0
     reasons = []
@@ -261,7 +265,7 @@ def _attach_setup_invalidation(rec, setup):
             op = adsk.cam.Operation.cast(o)
             if op is None:
                 continue
-            facts = op_state_facts(op)
+            facts = op_state_facts(op, cam)
             st = op_primary_state(facts)
             tally[st] = tally.get(st, 0) + 1
             if facts["has_warning"]:
@@ -353,6 +357,8 @@ _EXCEPTION_REMEDY = {
     "state_unread": "re-read with cam_get in the Manufacture workspace",
     "tool_unselected": "cam_edit_operation assigns a tool",
     "operation_error": "cam_get(include=['operations']) has the error text",
+    "toolpath_nonfinite": ("a 'nonfinite' row's motion read NaN and will not post - change what it "
+                           "cuts and regenerate"),
 }
 
 
@@ -397,8 +403,9 @@ def _operations_summary(op_records, setup_blocked=None) -> dict:
             if warning_sample is None:
                 warning_sample = {"name": r.get("name"), "warning": first_line(r.get("warning"))}
         has_err = bool(r.get("has_error"))
-        # A toolpath reads valid while its op carries an error, so good-to-post needs BOTH flags.
-        if r.get("toolpath_valid") and not has_err:
+        # A toolpath reads valid while its op carries an error - and while its own motion is not a
+        # number - so good-to-post needs the flags AND the bucket.
+        if r.get("toolpath_valid") and not has_err and st != "nonfinite":
             valid_active += 1
         blocked = list(r.get("blocked_by") or [])
         if has_err and "operation_error" not in blocked:
@@ -708,24 +715,26 @@ def _op_collection(ops):
 
 _TIME_OP_CAP = 200    # one getMachiningTime call per op; bound the per-turn cost on a large job
 
+# The knobs ride 'assumptions', the exclusions ride their own keys; the one fact no key states is
+# that the two totals are different calls and do not reconcile.
 _TIME_NOTE = (
-    "Estimate at 100% feed, 10.58 cm/s rapid, 1.5 s tool changes. Suppressed operations are left "
-    "out and counted in excluded_suppressed. Per-operation figures do not sum to their setup "
-    "total: machining_time_seconds is ONE call over the whole collection, and "
-    "operations_time_sum_seconds sums the per-operation calls over operations_time_summed rows. "
-    "A row marked empty_toolpath carries no time figure.")
+    "Per-operation figures do not sum to their setup total: machining_time_seconds is ONE call "
+    "over the whole collection, and operations_time_sum_seconds sums the per-operation calls over "
+    "operations_time_summed rows.")
 
 
 def _op_time_rows(cam, ops, args, factor) -> tuple:
-    """(rows, truncated) - one getMachiningTime call per operation carrying a valid toolpath,
-    distances scaled out of CM; an EMPTY-toolpath op is named rather than timed."""
+    """(rows, truncated, nonfinite ops) - one getMachiningTime call per operation carrying a valid
+    toolpath, distances scaled out of CM; an EMPTY-toolpath op is named rather than timed, and one
+    whose reading is not a number is marked rather than published as a figure."""
     rows = []
+    unreadable = []
     for op in ops:
         facts = op_state_facts(op)
         if not (is_empty_toolpath(facts) or safe(lambda op=op: op.isToolpathValid, False)):
             continue
         if len(rows) >= _TIME_OP_CAP:      # bounds EVERY row, timed or named
-            return rows, True
+            return rows, True, unreadable
         if is_empty_toolpath(facts):
             rows.append({"operation": facts["name"], "empty_toolpath": True})
             continue
@@ -734,7 +743,14 @@ def _op_time_rows(cam, ops, args, factor) -> tuple:
         except Exception as e:
             rows.append({"operation": safe(lambda op=op: op.name), "error": str(e)})
             continue
-        timed = dict(facts, machining_time=measured(lambda: mt.machiningTime))
+        seconds, nonfinite = time_reading(mt)
+        if nonfinite:
+            # The figure this row would have carried is the saturated counter, not a duration.
+            unreadable.append(op)
+            rows.append({"operation": facts["name"], "machining_time_seconds": None,
+                         "nonfinite": True})
+            continue
+        timed = dict(facts, machining_time=seconds)
         if is_empty_toolpath(timed):
             rows.append({"operation": facts["name"], "empty_toolpath": True})
             continue
@@ -742,30 +758,28 @@ def _op_time_rows(cam, ops, args, factor) -> tuple:
                      "machining_time_seconds": measured(lambda: mt.machiningTime, 1.0, 1),
                      "feed_distance": measured(lambda: mt.feedDistance, factor, 1),
                      "rapid_distance": measured(lambda: mt.rapidDistance, factor, 1)})
-    return rows, False
+    return rows, False, unreadable
 
 
 # Said only where a setup row actually carries the key - a job whose every setup totalled would
 # otherwise be handed a sentence about a state nothing in the payload is in.
 _TOTAL_UNAVAILABLE_NOTE = (
-    " A setup carrying setup_total_unavailable is one whose whole-collection getMachiningTime "
-    "RAISED - that key is the platform's message, its per-operation rows were read one at a time, "
-    "and operations_with_errors names its operations reading hasError true. It adds nothing to "
-    "total_machining_time_seconds, which is a PARTIAL: total_excludes_setups names every setup "
-    "left out of it.")
+    " setup_total_unavailable is the platform's message from a whole-collection call that RAISED; "
+    "that setup is out of total_machining_time_seconds, and total_excludes_setups names it.")
 
 
-def _op_time_block(cam, ops, args, factor) -> dict:
-    """The per-operation half of a setup row: the rows, their sum and how many were summed. This
-    sum is NOT the setup total - that is one call over the whole collection."""
-    rows, truncated = _op_time_rows(cam, ops, args, factor)
+def _op_time_block(cam, ops, args, factor) -> tuple:
+    """(the per-operation half of a setup row, the operations whose reading is not a number): the
+    rows, their sum and how many were summed. This sum is NOT the setup total - that is one call
+    over the whole collection - and a nonfinite row carries no figure, so it enters neither."""
+    rows, truncated, unreadable = _op_time_rows(cam, ops, args, factor)
     timed = [r["machining_time_seconds"] for r in rows
              if isinstance(r.get("machining_time_seconds"), (int, float))]
     block = {"operations": rows, "operations_time_sum_seconds": round(sum(timed), 1),
              "operations_time_summed": len(timed)}
     if truncated:
         block["operations_truncated"] = True
-    return block
+    return block, unreadable
 
 
 def _errored_op_names(ops) -> list:
@@ -773,14 +787,14 @@ def _errored_op_names(ops) -> list:
     return [safe(lambda o=o: o.name) for o in ops if safe(lambda o=o: o.hasError, False)]
 
 
-def _per_operation_only(cam, label, ops, suppressed, args, factor, exc) -> dict:
-    """The setup row for a whole-collection getMachiningTime that RAISED: every per-operation
-    reading it could still take, the platform's message as setup_total_unavailable, and the
-    operations reading hasError true beside them."""
+def _per_operation_only(label, ops, suppressed, block, exc) -> dict:
+    """The setup row for a whole-collection getMachiningTime that RAISED: the per-operation readings
+    it could still take, the platform's message as setup_total_unavailable, and the operations
+    reading hasError true beside them."""
     rec = {"setup": label, "excluded_suppressed": suppressed,
            "setup_total_unavailable": str(exc),
            "operations_with_errors": _errored_op_names(ops)}
-    rec.update(_op_time_block(cam, ops, args, factor))
+    rec.update(block)
     return rec
 
 
@@ -824,47 +838,72 @@ def get_machining_time_handler(setup: str = "", units: str = "mm") -> dict:
                          "out-of-date or ungenerated. Run cam_generate (in the Manufacture "
                          "workspace), then retry."})
             continue
-        collection, added = _op_collection(ops)
-        if collection is None or added < len(ops):
+        # The per-operation pass runs FIRST: an operation whose own reading is not a number
+        # saturates the whole-collection figure too (measured), so it is held out of the collection
+        # and named instead.
+        block, unreadable = _op_time_block(cam, ops, args, factor)
+        timed_ops = [op for op in ops if not any(op is bad for bad in unreadable)]
+        held_out = [safe(lambda o=o: o.name) for o in unreadable]
+        if not timed_ops:
+            results.append(dict({"setup": label, "excluded_suppressed": suppressed,
+                                 "machining_time_seconds": None,
+                                 "total_excludes_operations": held_out}, **block))
+            continue
+        collection, added = _op_collection(timed_ops)
+        if collection is None or added < len(timed_ops):
             results.append({"setup": label, "excluded_suppressed": suppressed,
                 "error": f"Could not build the operation collection to time: {added} of "
-                         f"{len(ops)} unsuppressed operations went in."})
+                         f"{len(timed_ops)} unsuppressed operations went in."})
             continue
         try:
             mt = cam.getMachiningTime(collection, *args)
-            secs = safe(lambda: mt.machiningTime, 0.0) or 0.0
-            grand += secs
+            # Every figure below goes through measured(): a NaN reaches json.dumps as a bare NaN
+            # token no strict parser takes, and the saturated counter reads as 292 thousand years.
+            secs, nonfinite = time_reading(mt)
+            if secs is not None:
+                grand += round(secs, 1)
             rec = {
         "setup": label,
-            "machining_time_seconds": round(secs, 1),
-            "machining_time_hms": _hms(secs),
-            "feed_time_seconds": round(safe(lambda: mt.totalFeedTime, 0.0) or 0.0, 1),
-            "rapid_time_seconds": round(safe(lambda: mt.totalRapidTime, 0.0) or 0.0, 1),
-            "tool_changes": safe(lambda: mt.toolChangeCount, 0),
+            "machining_time_seconds": None if secs is None else round(secs, 1),
+            "feed_time_seconds": measured(lambda: mt.totalFeedTime, 1.0, 1),
+            "rapid_time_seconds": measured(lambda: mt.totalRapidTime, 1.0, 1),
+            "tool_changes": counted(lambda: mt.toolChangeCount),
             "feed_distance": measured(lambda: mt.feedDistance, factor, 1),
             "rapid_distance": measured(lambda: mt.rapidDistance, factor, 1),
             "timed_operations": added,
             "excluded_suppressed": suppressed,
             }
+            if secs is not None:
+                rec["machining_time_hms"] = _hms(secs)
+            if nonfinite:
+                # absent = the collection's own figure was a measurement
+                rec["nonfinite"] = True
+            if held_out:
+                # absent = every operation in the setup could be timed into the figure
+                rec["total_excludes_operations"] = held_out
             # The per-op sum disagrees with the aggregate above, so both are published and neither
             # is derived from the other.
-            rec.update(_op_time_block(cam, ops, args, factor))
+            rec.update(block)
             results.append(rec)
         except Exception as e:
             # The whole-collection call raises where any operation in the setup is ERRORED, which
             # would hide every good per-operation reading behind one message.
-            results.append(_per_operation_only(cam, label, ops, suppressed, args, factor, e))
+            results.append(_per_operation_only(label, ops, suppressed, block, e))
 
-    # A setup whose own total raised contributes nothing to the grand total while its per-operation
-    # rows ARE published, so the document figure is named as the partial it is.
-    excluded = [r["setup"] for r in results if "setup_total_unavailable" in r]
+    # A setup whose own total raised, or read as no number at all, contributes nothing to the grand
+    # total while its per-operation rows ARE published - so the document figure names the partial.
+    excluded = [r["setup"] for r in results
+                if "setup_total_unavailable" in r or r.get("machining_time_seconds") is None]
+    # The clause rides the KEY it describes, never the exclusion list: a setup can be left out of
+    # the total for three different reasons, and its own row says which.
+    unavailable = any("setup_total_unavailable" in r for r in results)
     payload = {
             "setup_count": len(results),
         "total_machining_time_seconds": round(grand, 1),
         "total_machining_time_hms": _hms(grand),
         "setups": results,
         "units": unit,
-    "note": _TIME_NOTE + (_TOTAL_UNAVAILABLE_NOTE if excluded else ""),
+    "note": _TIME_NOTE + (_TOTAL_UNAVAILABLE_NOTE if unavailable else ""),
     "assumptions": {"feed_scale_percent": feed_scale,
             "rapid_feed_cm_per_s": rapid_feed,
             "tool_change_seconds": tool_change},

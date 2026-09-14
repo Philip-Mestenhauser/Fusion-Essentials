@@ -11,7 +11,7 @@ from ._common import ok, error, safe
 # The shared CAM substrate: the ONE bounded library folder walk (and its collect-the-assets
 # projection), plus the ONE leafName-or-stem asset matcher every library DELETE addresses its
 # target with - the same reads cam_delete_machine resolves on.
-from ._cam_common import asset_leaf_keys, library_children, walk_library_folders
+from ._cam_common import asset_leaf_keys, library_children, unique_by_url, walk_library_folders
 from . import _inputs
 
 app = adsk.core.Application.get()
@@ -144,22 +144,23 @@ def _asset_index(lib, folder_url):
     return urls, by_name
 
 
-def _folder_templates(lib, folder_url, by_name):
+def _folder_templates(lib, folder_url, by_name, seen=None):
     """(rows, collided) for one folder - [(name, template, url_or_None)] keyed on the ASSET a name
-    resolves to, so two arrivals of ONE asset become one row (counted in `collided`) while a name
-    ONE asset does not answer keeps every arrival."""
-    rows, seen, collided = [], set(), 0
+    resolves to, so two arrivals of ONE asset become one row (counted in `collided`). A `seen` set
+    passed in carries that identity ACROSS folders; a name ONE asset does not answer keeps every
+    arrival, so two DISTINCT urls stay two rows."""
+    seen = set() if seen is None else seen
+    rows, collided = [], 0
     for t in library_children(lib, folder_url, "childTemplates"):
         name = safe(lambda t=t: t.name)
         urls = by_name.get((name or "").lower()) or []
         # One asset answering the name IS this row's identity. Several (or none) leave the arrivals
-        # unidentified, and two unidentified arrivals are not shown to be one template.
+        # unidentified, and two unidentified arrivals are not shown to be one template. The shared
+        # url identity is what decides an arrival was already listed.
         url = urls[0] if len(urls) == 1 else None
-        if url is not None and url in seen:
+        if url is not None and not unique_by_url([url], seen):
             collided += 1
             continue
-        if url is not None:
-            seen.add(url)
         rows.append((name, t, url))
     return rows, collided
 
@@ -176,10 +177,15 @@ def _walk_library(lib, folder_url, depth, max_depth, counter):
     # A CAMTemplate carries no url of its own, so the folder's child ASSET urls are the only address
     # cam_apply_template(template_url=...) can be given - carried here beside each template.
     asset_urls, by_name = _asset_index(lib, folder_url)
-    templates, collided = _folder_templates(lib, folder_url, by_name)
-    # Position pairs a template with its asset where NO name in the folder resolved one and the two
-    # lists are the same length (measure_api row cam-template-asset-index-alignment).
-    by_position = len(templates) == len(asset_urls) and not any(u for _n, _t, u in templates)
+    # The seen set rides the counter, so it spans the WHOLE walk: the Local library lists a saved
+    # template under the root AND under its own folder, both rows carrying the same asset url.
+    templates, collided = _folder_templates(lib, folder_url, by_name,
+                                            counter.setdefault("seen", set()))
+    # Position pairs a template with its asset where NO name in the folder resolved one, nothing
+    # was dropped here and the two lists are the same length (measure_api row
+    # cam-template-asset-index-alignment) - a drop leaves the two lists no longer index-for-index.
+    by_position = (len(templates) == len(asset_urls) and not collided
+                   and not any(u for _n, _t, u in templates))
     for i, (tname, t, url) in enumerate(templates):
         if counter["n"] >= _MAX_NODES:
             counter["truncated"] = True
@@ -237,16 +243,17 @@ def _find_template_by_name(lib, location, name):
 
     want = name.lower()
     seen_names = []
+    seen_urls = set()     # one ASSET is one candidate, whichever folder path reached it
     matches = []          # (template, containing-folder display name)
 
     # The shared bounded folder walk; the LEAF op (read this folder's templates, record every name,
     # keep the matches) is this search's own.
     def visit(folder_url):
-        # _folder_templates collapses two arrivals of ONE asset, so a listing that hands the same
-        # template back twice resolves; a name TWO assets in the folder answer stays two rows here
-        # and is refused below.
+        # _folder_templates collapses arrivals of ONE asset across the whole walk, so a library
+        # listing the same template under the root and under its folder resolves; a name TWO
+        # DISTINCT assets answer stays two rows and is refused below.
         _urls, by_name = _asset_index(lib, folder_url)
-        for tn, t, _url in _folder_templates(lib, folder_url, by_name)[0]:
+        for tn, t, _url in _folder_templates(lib, folder_url, by_name, seen_urls)[0]:
             if tn:
                 seen_names.append(tn)
             if tn and tn.lower() == want:

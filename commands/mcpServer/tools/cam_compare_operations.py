@@ -4,14 +4,19 @@
 """cam_compare_operations - diff two operations' CAM parameters (a relational read over two named ops,
 not a domain disclosure, so it stays its own tool rather than a cam_get slice)."""
 
+from collections import Counter
+
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 import adsk.cam
 
-from ._common import CM_TO_UNIT, iter_collection, ok, error, safe
-from ._cam_common import (STRATEGY_PAIR_NOTE, clamp_rows, get_cam, op_settled, op_state_facts,
-                          resolve_cam_node, strategy_pair)
+from ._common import CM_TO_UNIT, iter_collection, native_identity, ok, error, read_flag, safe
+# The surface-group reader and its per-group record come from the SUBSTRATE, not from the tool that
+# writes them, so this read and that write cannot drift apart.
+from ._cam_common import (AVOID_GROUPS_PARAM, STRATEGY_PAIR_NOTE, avoid_groups, clamp_rows,
+                          get_cam, group_record, op_settled, op_state_facts, resolve_cam_node,
+                          strategy_pair)
 from . import _inputs
 # The selection parameter tables and the loop/side vocabularies themselves, from the one place
 # cam_select_geometry routes and spells them.
@@ -65,20 +70,35 @@ _OBJECT_SET_PARAMS = tuple(dict.fromkeys(
 _ENUM_PROPS = ("loopType", "sideType", "extensionType", "extensionMethod")
 
 _SELECTION_ROWS_CAP = 20   # one row per selection; a chain-per-contour op grows this with the model
+_ENTITY_BASES_CAP = 100    # one basis per selected entity; a surface set grows this with the model
+
+# The basis published for an entity that answered native_identity - the only reading a claim about
+# the geometry may rest on; the other basis a row can carry is a bounding-box centre.
+_NATIVE_BASIS = "native identity"
+
+# Said of a row whose two selections BOTH read a native identity per entity and whose identities do
+# not match - the only reading that supports a claim about the geometry.
+_PICKS_DIFFER = "the selected entities resolve to different geometry"
+
+# Said on a 0/0 answer whose entity readings stopped at their bound: the sets past it were never
+# compared, so the match is not established.
+_TRUNCATED_PICKS_NOTE = (
+    " 0 differences, and entity_bases_truncated names the set(s) whose entity readings stopped at "
+    "the first {cap} - what those sets hold past that bound was not compared, so they are NOT "
+    "shown to match. Narrow the compare to the operations' own parameters instead.")
 
 # Said only on a 0/0 answer where geometry WAS read - the one a caller reads as 'these are the same'.
 _NOTHING_DIFFERED_NOTE = (
     " 0 differences is what these reads OPENED matching: the parameter expressions, each selection "
-    "set's counts, and the per-selection properties in geometry_properties_read. WHICH edges, "
-    "faces or bodies those counts are OF is not read here, and a property no selection answered is "
-    "not compared - open both operations in Fusion to compare the picks themselves.")
+    "set's counts and entity readings, and the surface groups' flags and modes. A property no "
+    "selection answered is not compared.")
 
 # The other 0/0: no selection parameter on either operation answered, so the geometry counts are 0
 # because nothing was read, not because the two match.
 _NO_GEOMETRY_NOTE = (
     " NO selection set answered on either operation - neither carries one this read reaches, or the "
-    "reads did not answer. So nothing here compares what the two CUT, whatever the parameter rows "
-    "say; the geometry counts are absent evidence, not agreement.")
+    "reads did not answer. The geometry counts are absent evidence about what the two CUT, not "
+    "agreement.")
 
 
 # The refusal while either named operation is still generating. The geometry half below reads the
@@ -171,17 +191,23 @@ def handler(operation_a: str = "", operation_b: str = "",
 
     # The GEOMETRY half: two ops can carry identical parameters and cut different material, because
     # what is selected lives on the selection objects, not in the parameter expressions.
-    geom_a, geom_b = _geometry_facts(op_a, inv), _geometry_facts(op_b, inv)
+    geom_a, picks_a = _geometry_facts(op_a, inv)
+    geom_b, picks_b = _geometry_facts(op_b, inv)
     geometry_differences = []
     geometry_same = 0
     for k in sorted(set(geom_a) | set(geom_b)):
         a, b = geom_a.get(k), geom_b.get(k)
-        if a == b:
+        verdict = (_picks_verdict(picks_a.get(k) or [], picks_b.get(k) or [])
+                   if k in geom_a and k in geom_b else None)
+        if a == b and verdict is None:
             geometry_same += 1
-        else:
-            geometry_differences.append({"parameter": k,
-                                         "operation_a": a if k in geom_a else "(not present)",
-                                         "operation_b": b if k in geom_b else "(not present)"})
+            continue
+        row = {"parameter": k,
+               "operation_a": a if k in geom_a else "(not present)",
+               "operation_b": b if k in geom_b else "(not present)"}
+        if verdict:
+            row["entity_verdict"] = verdict
+        geometry_differences.append(row)
 
     pair_a, pair_b = strategy_pair(op_a), strategy_pair(op_b)
     out = {
@@ -213,10 +239,23 @@ def handler(operation_a: str = "", operation_b: str = "",
     if not (geom_a or geom_b):
         out["note"] += _NO_GEOMETRY_NOTE
     elif not total and not geometry_differences:
-        # The other zero: the sets were read and MATCHED.
+        # The other zero: the sets were read and MATCHED - unless a reading stopped at its bound,
+        # which no difference row carries here because none is emitted.
+        capped = _capped_sets(geom_a, geom_b)
         out["geometry_properties_read"] = list(_SELECTION_PROPS)
-        out["note"] += _NOTHING_DIFFERED_NOTE
+        if capped:
+            out["entity_bases_truncated"] = capped
+            out["note"] += _TRUNCATED_PICKS_NOTE.format(cap=_ENTITY_BASES_CAP)
+        else:
+            out["note"] += _NOTHING_DIFFERED_NOTE
     return ok(out)
+
+
+def _capped_sets(*sides):
+    """The selection parameters whose entity readings stopped at _ENTITY_BASES_CAP on either side -
+    what a 0/0 answer has to disclose, since it emits no row to carry the flag."""
+    return sorted({k for facts in sides for k, v in facts.items()
+                   if isinstance(v, dict) and v.get("entity_bases_truncated")})
 
 
 def _operation_params(op):
@@ -253,15 +292,52 @@ def _selection_row(sel, inv):
     return row
 
 
+def _box_centre(entity, inv):
+    """One entity's bounding-box centre in the CALLER's units (`inv` is cm -> those units), or
+    None - the fallback reading where no identity answers. It names a PLACE, not an entity."""
+    box = safe(lambda: entity.boundingBox)
+    centre = safe(lambda: tuple(
+        round((getattr(box.minPoint, a) + getattr(box.maxPoint, a)) / 2.0 * inv, 6)
+        for a in ("x", "y", "z")))
+    return None if centre is None else f"box{centre}"
+
+
+def _entity_reading(entity, inv):
+    """(what this entity IS for comparison, the basis a row publishes for it) - native_identity,
+    the PHYSICAL-entity key this repo compares on: it normalizes an occurrence PROXY through
+    nativeObject, whose token differs from the proxy's, and pairs that token with its source
+    document, which two x-refs' byte-identical tokens would otherwise merge."""
+    ident = native_identity(entity)
+    if ident is not None:
+        return ident, _NATIVE_BASIS
+    centre = _box_centre(entity, inv)
+    return (centre, centre) if centre is not None else (None, "unread")
+
+
+def _picks_verdict(a_reads, b_reads):
+    """The sentence a difference row states about WHICH entities the two selections hold, or None
+    where the readings establish nothing - unequal counts are a difference of their own, and a
+    centroid reading names a place, so only identities on BOTH sides support the claim. The two
+    identity MULTISETS are compared, so a shared entity cannot cover an unshared one."""
+    if not a_reads or len(a_reads) != len(b_reads):
+        return None
+    if {b for _v, b in a_reads} | {b for _v, b in b_reads} != {_NATIVE_BASIS}:
+        return None
+    if Counter(v for v, _b in a_reads) == Counter(v for v, _b in b_reads):
+        return None
+    return _PICKS_DIFFER
+
+
 def _curve_facts(p, inv):
     """What ONE curve-selection parameter holds: the counts cam_select_geometry reads back off an
-    applied selection, plus each selection's own answered properties. None when it does not read."""
+    applied selection, which entities those counts are OF, and each selection's own answered
+    properties. None when it does not read."""
     pv = safe(lambda: p.value)
     cs = safe(lambda: pv.getCurveSelections()) if pv is not None else None
     if cs is None:
-        return None
+        return None, None
     count = safe(lambda: cs.count, 0) or 0
-    rows, paths, segments, entities = [], 0, 0, 0
+    rows, picked, paths, segments = [], [], 0, 0
     for i in range(count):
         sel = safe(lambda i=i: cs.item(i))
         if sel is None:
@@ -274,38 +350,63 @@ def _curve_facts(p, inv):
             segments += sum((safe(lambda q=q: q.count, 0) or 0) for q in out)
         value = safe(lambda sel=sel: list(sel.value))
         if value is not None:
-            entities += len(value)
+            picked.extend(value)
         if len(rows) < _SELECTION_ROWS_CAP:
             rows.append(_selection_row(sel, inv))
     facts = {"selections": count, "curve_paths": paths, "curve_segments": segments,
-             "entities": entities, "properties": rows}
+             "entities": len(picked), "properties": rows}
     if count > len(rows):
         facts["properties_truncated"] = True   # absent = every selection's row is here
-    return facts
+    return facts, picked
 
 
 def _object_set_facts(p, _inv):
-    """What ONE direct/surface set parameter holds: how many CAD objects, or None where the list
-    did not read."""
+    """What ONE direct/surface set parameter holds: how many CAD objects and which ones, or None
+    where the list did not read."""
     pv = safe(lambda: p.value)
     value = safe(lambda: list(pv.value)) if pv is not None else None
-    return None if value is None else {"entities": len(value)}
+    return (None, None) if value is None else ({"entities": len(value)}, value)
+
+
+def _surface_group_facts(op):
+    """What the operation's SURFACE GROUPS hold: how many, whether the set would take a WRITE, and
+    per group its face count, over-holes flag and machining mode - the same reader
+    cam_select_geometry writes through, with its write gate off. A set refusing a write still
+    answers what it holds, so only an operation carrying no such parameter reads None here."""
+    _pv, groups, gerr = avoid_groups(op, writable=False)
+    count = None if gerr else safe(lambda: groups.count)
+    if count is None:
+        return None
+    p = safe(lambda: op.parameters.itemByName(AVOID_GROUPS_PARAM))
+    return {"groups": count, "editable": read_flag(lambda: p.isEditable),
+            "rows": [group_record(safe(lambda i=i: groups.item(i))) for i in range(count)]}
 
 
 def _geometry_facts(op, inv):
-    """{parameter name: what that selection parameter holds} for every geometry-selection parameter
-    this operation carries - read through the same properties cam_select_geometry writes."""
-    facts = {}
+    """({parameter: what that selection parameter holds}, {parameter: the reading per selected
+    entity}) for every geometry-selection parameter this operation carries - read through the same
+    properties cam_select_geometry writes. The readings are the cross-operation compare's, and each
+    entity's own BASIS is published so a fallback is never mistaken for an identity."""
+    facts, picks = {}, {}
     for names, reader in ((_CURVE_PARAM_CANDIDATES, _curve_facts),
                           (_OBJECT_SET_PARAMS, _object_set_facts)):
         for nm in names:
             p = safe(lambda nm=nm: op.parameters.itemByName(nm))
             if p is None:
                 continue
-            record = reader(p, inv)
-            if record is not None:
-                facts[nm] = record
-    return facts
+            record, entities = reader(p, inv)
+            if record is None:
+                continue
+            entities = list(entities or [])
+            reads = [_entity_reading(e, inv) for e in entities[:_ENTITY_BASES_CAP]]
+            record["entity_bases"] = [b for _v, b in reads]
+            if len(entities) > _ENTITY_BASES_CAP:
+                record["entity_bases_truncated"] = True   # absent = every entity is read here
+            facts[nm], picks[nm] = record, reads
+    groups = _surface_group_facts(op)
+    if groups is not None:
+        facts[AVOID_GROUPS_PARAM] = groups
+    return facts, picks
 
 
 def _op_tool_desc(op):

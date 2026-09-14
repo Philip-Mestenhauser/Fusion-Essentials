@@ -167,12 +167,13 @@ class TestScopedFallback:
 
     def _wire_raising_target(self, wire, setup, target, op_verdicts=None):
         """A CAM whose checkToolpath raises for `target` only; anything else answers from
-        `op_verdicts` (by name), or True."""
+        `op_verdicts` (by name), or True. The target is told apart by ==, never by identity: a setup
+        read out of cam.setups is a new wrapper per read (measured)."""
         cam = wire(_cam(setup))
 
         def check(obj):
             cam.checked.append(obj)
-            if obj is target:
+            if obj == target:
                 raise _INPUT_IS_NULL
             return True if op_verdicts is None else op_verdicts[obj.name]
 
@@ -229,15 +230,16 @@ class TestScopedFallback:
         assert cam.checked == [setup]                   # nothing else was asked in its place
         assert "no operations counted" in out["note"] and "over an empty set" in out["note"]
 
-    def test_a_scope_whose_only_operations_are_suppressed_still_reports_the_raise(self, wire):
-        # The empty-scope answer keys on the RAW census, not the suppression filter: this setup
-        # HOLDS an operation, so a raise on it is a raise - not an empty set to answer vacuously.
+    def test_a_scope_whose_only_operations_are_suppressed_asks_nothing(self, wire):
+        # The suppression filter left no active operation to judge, so the target is never asked -
+        # its raise is not reached, and the count the payload publishes says what was left out.
         setup = FakeSetup("Parked", ops=[FakeOperation("Off", operation_state=2, suppressed=True)])
         cam = self._wire_raising_target(wire, setup, setup)
-        res = mod.handler(scope="Parked")
-        assert res["isError"] is True
-        assert "setup 'Parked'" in res["message"] and "3 : input is null" in res["message"]
-        assert cam.checked == [setup]
+        out = _payload(mod.handler(scope="Parked"))
+        assert out["passed"] is True and out["checked"] == "empty scope"
+        assert out["measured"]["suppressed_excluded"] == 1
+        assert cam.checked == []
+        assert "no operations counted" in out["note"]
 
     def test_an_operation_target_has_nothing_narrower_and_reports_the_raise(self, wire):
         op = FakeOperation("Drill1")
@@ -295,7 +297,7 @@ class TestVerdictAndBreakdown:
         assert out["passed"] is True
         assert out["measured"]["states"] == {"valid": 2, "out_of_date": 0, "no_toolpath": 0,
                                              "error": 0, "suppressed": 0, "generating": 0,
-                                             "unread": 0, "total": 2}
+                                             "nonfinite": 0, "unread": 0, "total": 2}
         assert out["measured"]["not_valid"] == []
         assert "the validity check passed; 0 of 2 counted op(s) outside valid" in out["note"]
 
@@ -329,7 +331,7 @@ class TestVerdictAndBreakdown:
         ]
         assert out["measured"]["states"] == {"valid": 1, "out_of_date": 1, "no_toolpath": 1,
                                              "error": 1, "suppressed": 1, "generating": 0,
-                                             "unread": 0, "total": 5}
+                                             "nonfinite": 0, "unread": 0, "total": 5}
         assert out["measured"]["not_valid_truncated"] is False
         assert "cam_generate regenerates the out-of-date ops." in out["note"]
 
@@ -391,6 +393,24 @@ class TestDisagreement:
         assert "the validity check passed; 1 of 2 counted op(s) outside valid" in out["note"]
         assert out["tolerance_used"]["validity_basis"]
 
+    def test_a_toolpath_whose_motion_is_not_a_number_counts_outside_valid(self, wire):
+        # MEASURED: the groove generated IsValid with a toolpath, and its machining time read the
+        # platform's int64 band - so the tally counted it valid while the post failed on the NaN.
+        wire(_cam(FakeSetup("S1", ops=[FakeOperation("Cut"), FakeOperation("Groove1")]),
+                  verdict=True, machining_times={"Cut": 4.19, "Groove1": 9223372036854.8}))
+        out = _payload(mod.handler())
+        assert out["measured"]["states"]["valid"] == 1
+        assert out["measured"]["states"]["nonfinite"] == 1
+        assert out["measured"]["not_valid"] == [{"operation": "Groove1", "state": "nonfinite"}]
+        # and it is NOT the empty class: that one cut nothing, this one has no readable duration
+        assert out["measured"]["empty_toolpath_count"] == 0
+        assert "1 of 2 counted op(s) outside valid" in out["note"]
+        # MEASURED: CAM's checkToolpath answers True on such a path while the post fails on it,
+        # so the verdict is demoted on the tally and the note names the disagreement.
+        assert out["passed"] is False
+        assert "1 counted op(s) read a toolpath whose motion is NOT A NUMBER" in out["note"]
+        assert "'passed' does not" in out["note"]
+
     def test_a_finished_operation_under_a_raised_flag_counts_valid(self, wire):
         # MEASURED across one regeneration: isGenerating stayed true for 1.1 s AFTER the Future
         # completed, over an operation reading state 0 with its toolpath. Bucketing that as
@@ -401,7 +421,7 @@ class TestDisagreement:
         out = _payload(mod.handler())
         assert out["measured"]["states"] == {"valid": 1, "out_of_date": 0, "no_toolpath": 0,
                                              "error": 0, "suppressed": 0, "generating": 0,
-                                             "unread": 0, "total": 1}
+                                             "nonfinite": 0, "unread": 0, "total": 1}
         assert out["measured"]["not_valid"] == []
 
     def test_an_operation_with_work_left_under_the_flag_still_counts_generating(self, wire):
@@ -488,7 +508,7 @@ class TestSuppressedScoping:
         out = _payload(mod.handler())
         assert out["measured"]["states"] == {"valid": 1, "out_of_date": 1, "no_toolpath": 0,
                                              "error": 0, "suppressed": 0, "generating": 0,
-                                             "unread": 0, "total": 2}
+                                             "nonfinite": 0, "unread": 0, "total": 2}
         assert out["measured"]["not_valid"] == [{"operation": "Bore", "state": "out_of_date"}]
         assert out["measured"]["suppressed_excluded"] == 3
         assert out["tolerance_used"]["tally_counts"] == "active_operations"
@@ -555,7 +575,7 @@ class TestSuppressedScoping:
 
         def check(obj):
             cam.checked.append(obj)
-            if obj is setup:
+            if obj == setup:                    # a setup read is a new wrapper per read
                 raise _INPUT_IS_NULL
             return obj.name != "Park1"
 
@@ -563,27 +583,53 @@ class TestSuppressedScoping:
         assert _payload(mod.handler(scope="Template"))["passed"] is True
         assert _payload(mod.handler(scope="Template", include_suppressed=True))["passed"] is False
 
-    def test_the_verdict_is_declared_wider_than_the_tally_on_cams_own_check(self, wire):
+    def test_an_excluded_suppression_narrows_the_verdict_to_the_counted_set(self, wire):
         # MEASURED on 2705.1.4: CAM.checkToolpath answers False for a setup whose only non-valid
-        # operation is suppressed. So 'passed' is NOT the active-operation verdict the tally
-        # describes, and the payload must not let the two be read as one number.
-        wire(_cam(self._template(), verdict=False))
-        out = _payload(mod.handler())
-        assert out["tolerance_used"]["tally_counts"] == "active_operations"
-        assert out["tolerance_used"]["verdict_counts"] == "all_operations"
-        assert "3 suppressed op(s) excluded from the tally, counted by 'passed'." in out["note"]
-
-    def test_the_fallback_verdict_is_declared_as_narrow_as_the_tally(self, wire):
-        # the ONE path where the split really does control the verdict: this tool's own AND. Here
-        # verdict_counts follows the tally and the disclosure sentence must NOT appear.
+        # operation is suppressed - so asking it would report a failure over operations the tally
+        # deliberately left out. The active operations are asked one at a time instead.
         setup = FakeSetup("Template", ops=[FakeOperation("Face1"),
                                            FakeOperation("Park1", operation_state=2,
                                                          suppressed=True)])
+        cam = wire(_cam(setup, verdict=False, setup_verdicts={"Template": False, "Face1": True,
+                                                              "Park1": False}))
+        out = _payload(mod.handler(scope="Template"))
+        assert out["passed"] is True                       # the one ACTIVE operation is valid
+        assert cam.checked == [setup.operations.item(0)]   # the setup itself was never asked
+        assert out["checked"] == "per-active-operation check"
+        assert out["tolerance_used"]["tally_counts"] == "active_operations"
+        assert out["tolerance_used"]["verdict_counts"] == "active_operations"
+        assert "1 suppressed op(s) excluded from the tally and from 'passed'." in out["note"]
+
+    def test_counting_the_suppressed_operations_takes_cams_own_verdict(self, wire):
+        # the other side of the same job: include_suppressed=true puts them back in the tally, and
+        # the verdict is CAM's own check over the scope - which counts them too.
+        setup = FakeSetup("Template", ops=[FakeOperation("Face1"),
+                                           FakeOperation("Park1", operation_state=2,
+                                                         suppressed=True)])
+        cam = wire(_cam(setup, verdict=False))
+        out = _payload(mod.handler(scope="Template", include_suppressed=True))
+        assert out["passed"] is False
+        assert cam.checked == [setup] and out["checked"] == "checkToolpath"
+        assert out["tolerance_used"]["verdict_counts"] == "all_operations"
+
+    def test_a_scope_with_nothing_suppressed_still_takes_cams_own_verdict(self, wire):
+        # the boundary the flag alone would get wrong: with NO suppressed operation there is no
+        # narrowing to do, so the scope is asked ONCE rather than walked operation by operation.
+        setup = FakeSetup("Template", ops=[FakeOperation("Face1")])
+        cam = wire(_cam(setup, verdict=False))
+        out = _payload(mod.handler(scope="Template"))
+        assert cam.checked == [setup] and out["checked"] == "checkToolpath"
+        assert out["passed"] is False
+
+    def test_the_fallback_still_answers_when_the_target_raises(self, wire):
+        # nothing suppressed, so the narrowing branch is not taken - the raise on the target is what
+        # falls back to the operations under it.
+        setup = FakeSetup("Template", ops=[FakeOperation("Face1")])
         cam = wire(_cam(setup))
 
         def check(obj):
             cam.checked.append(obj)
-            if obj is setup:
+            if obj == setup:                    # a setup read is a new wrapper per read
                 raise _INPUT_IS_NULL
             return True
 
@@ -591,7 +637,6 @@ class TestSuppressedScoping:
         out = _payload(mod.handler(scope="Template"))
         assert out["checked"] == "per-operation fallback"
         assert out["tolerance_used"]["verdict_counts"] == "active_operations"
-        assert "counted by 'passed'" not in out["note"]
 
     def test_no_verdict_scope_sentence_when_nothing_was_excluded(self, wire):
         # the sentence exists to separate two DIFFERENT sets; with no suppressed operations there
@@ -702,8 +747,8 @@ class TestTheComposedNoteFitsTheWireBudget:
     of the compositions - and every piece it does not carry has a payload key that does."""
 
     def _worst(self, wire, scope_name):
-        # every clause at once: a long scope label, suppressed operations the tally dropped while
-        # CAM's own check kept them, empty toolpaths inside states['valid'], a capped row list, an
+        # every clause at once: a long scope label, suppressed operations dropped from both the
+        # tally and the verdict, empty toolpaths inside states['valid'], a capped row list, an
         # unverified basis and operations left to generate.
         ops = [FakeOperation("Empty1", has_toolpath=False),
                FakeOperation("Empty2", has_toolpath=False)]
@@ -715,7 +760,7 @@ class TestTheComposedNoteFitsTheWireBudget:
     def test_every_clause_at_once_fits_the_wire_budget(self, wire):
         out = self._worst(wire, "Op 2 - Finishing WCS1 Vise Left")
         note = out["note"]
-        assert "3 suppressed op(s) excluded from the tally, counted by 'passed'." in note
+        assert "3 suppressed op(s) excluded from the tally and from 'passed'." in note
         assert "2 counted op(s) read valid and cut nothing" in note
         assert "not_valid capped at 1" in note and "Enter Manufacture" in note
         assert "cam_generate regenerates" in note
@@ -724,11 +769,11 @@ class TestTheComposedNoteFitsTheWireBudget:
     def test_the_clauses_it_does_not_carry_are_keys_that_do(self, wire):
         # the cut sentences are not lost facts: each names a key still on the payload.
         out = self._worst(wire, "Roughing")
-        assert out["checked"] == "checkToolpath"                     # which path answered
+        assert out["checked"] == "per-active-operation check"        # which path answered
         assert out["measured"]["states"]["unread"] == 0              # the unread bucket
         assert out["measured"]["empty_toolpaths"] == ["Empty1", "Empty2"]
         assert out["measured"]["empty_setups"] == []
-        assert out["tolerance_used"]["verdict_counts"] == "all_operations"
+        assert out["tolerance_used"]["verdict_counts"] == "active_operations"
         assert out["tolerance_used"]["validity_basis"] == "unverified_design_workspace"
 
 

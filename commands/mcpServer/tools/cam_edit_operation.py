@@ -10,13 +10,13 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import CM_TO_UNIT, apply_rename, ok, error, safe, read_flag
-from ._cam_common import (get_cam, enumeration_remedy, expression_error, matched_quoting,
-                          op_primary_state, op_state_facts, parse_parameters, resolve_cam_node,
-                          tool_dimensions, unquote_expression, validity_basis)
+from ._cam_common import (NONFINITE_POST, PARAM_READ, get_cam, enumeration_remedy,
+                          expression_error, matched_quoting, op_primary_state, op_state_facts,
+                          operation_name_clash, owning_setup, parse_parameters, resolve_cam_node,
+                          tool_dimensions, tree_nodes, unquote_expression, validity_basis)
 from ._cam_presets import resolve_operation_preset
-from .cam_create_operation import (_NO_INDEX, _doc_tool_at, _names_the_same_tool,
-                                   _operation_name_clash, _tool_at, _tool_facts,
-                                   index_request_error, tool_index_of)
+from .cam_create_operation import (_NO_INDEX, _doc_tool_at, _names_the_same_tool, _tool_at,
+                                   _tool_facts, index_request_error, tool_index_of)
 # The selection spellings themselves, from the one table cam_select_geometry routes them by.
 from .cam_select_geometry import _DIRECT_PARAM, _HOLES
 
@@ -293,15 +293,14 @@ def _applied_clause(parts):
     return f" ({'. '.join(parts)}.)" if parts else ""
 
 
-_PARAM_READ = "cam_get(include=['parameters'], operation=...)"
-
-_PARAM_NOTE = ("Parameters set. changed[].value is evaluated and may lag; changed[].after plus "
+_PARAM_NOTE =("Parameters set. changed[].value is evaluated and may lag; changed[].after plus "
                "the evaluation gate confirm the write.")
 
 
-def _parameter_state_note(op) -> str:
-    """The operation lifecycle state observed after parameter writes."""
-    state = op_primary_state(op_state_facts(op))
+def _parameter_state_note(op, cam) -> str:
+    """The operation lifecycle state observed after parameter writes. `cam` buys the nonfinite
+    reading - without the CAM product no machining time is read and that bucket cannot answer."""
+    state = op_primary_state(op_state_facts(op, cam))
     if state == "unread":
         return ("operationState did not answer after the edit; re-read with "
                 "cam_get(include=['operations']) in the Manufacture workspace.")
@@ -317,6 +316,11 @@ def _parameter_state_note(op) -> str:
         return "The operation is generating - poll cam_get_status before another edit or launch."
     if state == "suppressed":
         return "The operation reads suppressed; no generation is needed while it stays parked."
+    if state == "nonfinite":
+        # The bucket op_primary_state answers ahead of valid: the path reads IsValid with a toolpath
+        # and its own motion is not a number, which no other flag on the row demotes.
+        return ("The operation reads a toolpath whose motion is NOT A NUMBER. " + NONFINITE_POST
+                + " Change what it cuts and regenerate before posting.")
     return ("The operation reads error; cam_get(include=['operations']) carries the fault to fix "
             "before generation.")
 
@@ -326,7 +330,7 @@ _UNLOCKED_NOTE = ("changed[].unlocked_here means another requested row made it e
 
 _LOCKED_REFUSAL = (
     "Operation '{operation}' does not accept a write to: {names} (isEditable reads False on each"
-    "{after}). {applied} cam_get(include=['parameters'], operation=...) marks each refusing row "
+    "{after}). {applied} " + PARAM_READ + " marks each refusing row "
     "editable false; set a row it does not mark.")
 
 # What this call did to the operation before the refusal, claiming only what the restore RE-READ.
@@ -367,11 +371,16 @@ def _restored_clause(changed, resolved) -> str:
     return _WROTE_THEN_RESTORED.format(n=len(changed))
 
 
+# The operation's tool IS the document-library entry: a flute count edited there read back on the
+# operation running it at once, and its toolpath went out of date.
+_TOOL_DIMENSION_REMEDY = (
+    "A cutting-TOOL dimension is edited on the document-library entry this operation runs - "
+    "cam_edit_tools(action='edit', scope='document') - which it reads at once, leaving the "
+    "toolpath out of date.")
+
 _LOCKED_REMEDY = (
     " A row another parameter in the SAME call unlocks is written after it - deburr's "
-    "numberOfStepovers reads editable once doMultiplePasses is true. For a cutting-TOOL dimension, "
-    "a cam_edit_tools edit reaches only operations created AFTER it - re-assign this one with "
-    "cam_edit_operation(tool_scope, tool_index).")
+    "numberOfStepovers reads editable once doMultiplePasses is true. " + _TOOL_DIMENSION_REMEDY)
 
 
 def _suppression_note(rec, name):
@@ -431,7 +440,7 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
     # after the parameters, and a call refused here has changed nothing.
     if want_rename:
         current_name = safe(lambda: op.name) or operation
-        clash = _operation_name_clash(cam, want_rename, current_name)
+        clash = operation_name_clash(tree_nodes(owning_setup(node)), want_rename, current_name)
         if clash:
             return error(clash)
         # A rename onto the name it already reads writes nothing (see _rename), so it provokes
@@ -456,7 +465,7 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
             resolved[name] = p
     if missing:
         return error(f"Operation '{operation}' has no parameter(s): {', '.join(missing)}. "
-                     "cam_get(include=['parameters'], operation=...) lists the rows Fusion SHOWS "
+                     f"{PARAM_READ} lists the rows Fusion SHOWS "
                      "and counts the rest as hidden_count: a row behind a switch reads isEnabled "
                      "false and is absent from that list, yet still lands when the switch rides "
                      "the SAME call - so a name missing from that list is not the refusal, and a "
@@ -543,7 +552,7 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
         except Exception as e:
             return error(f"Could not set '{name}' = '{expr}' on '{operation}': {e}. "
                           f"(Already applied: {', '.join(c['name'] for c in changed) or 'none'}.)"
-                          + enumeration_remedy(str(e), written, _PARAM_READ, p)
+                          + enumeration_remedy(str(e), written, PARAM_READ, p)
                           + _applied_clause(pre_landed))
         # Read the parameter BACK for its evaluation state: the platform stores an unresolvable
         # expression silently (.expression echoes it, .value.value reads a finite 0.0) - only .error
@@ -602,13 +611,11 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
         if eval_failures:
             remedy = ("(An operation expression must reference existing parameters and resolve to "
                       "a value - check names and units.)")
-            remedy += next((c for c in (enumeration_remedy(why, written_of[n], _PARAM_READ,
+            remedy += next((c for c in (enumeration_remedy(why, written_of[n], PARAM_READ,
                                                            resolved[n])
                                         for n, _e, why in eval_failures) if c), "")
         elif no_takes:
-            remedy = ("(For a cutting-TOOL dimension, a cam_edit_tools edit reaches only operations "
-                      "created AFTER it - re-assign this one with cam_edit_operation(tool_scope, "
-                      "tool_index).)")
+            remedy = "(" + _TOOL_DIMENSION_REMEDY + ")"
         else:
             remedy = "(Re-read the operation with cam_get(include=['operations']).)"
         failed_clause = (f" {len(restore_failed)} did NOT come back and the operation is left "
@@ -628,7 +635,7 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
     out.update(pre_records)
     notes = list(pre_notes)
     if changed:
-        notes.append(_PARAM_NOTE + " " + _parameter_state_note(op))
+        notes.append(_PARAM_NOTE + " " + _parameter_state_note(op, cam))
     if any(c.get("unchanged") for c in changed):
         notes.append(_UNCHANGED_NOTE)
     if any(c.get("unlocked_here") for c in changed):

@@ -19,7 +19,8 @@ from conftest import (FakeAppearance, FakeAppearances, FakeUnitsManager,
                       FakeMotionLink, FakeMotionLinks, FakePoint, FakeRigidGroup, FakeRigidGroups,
                       FakeSelection, FakeSetups, FakeTimeline, FakeTimelineObject, FakeTool,
                       FakeUserParameter, FakeVector3D,
-                      FakeUserParameters, MakeComp, _MotionLimits, make_cam_parameters,
+                      FakeSetup,
+                      FakeUserParameters, MakeComp, _MotionLimits, make_cam, make_cam_parameters,
                       make_data_tree,
                       make_design, make_joint, make_document_world, make_occurrence, make_sketch,
                       make_sketch_curve, make_timeline)
@@ -292,6 +293,22 @@ class TestJointMotionWorld:
 
 
 class TestCamJobWorld:
+    def test_a_setup_read_twice_is_a_new_wrapper_that_compares_equal_and_has_no_hash(self):
+        # MEASURED on one live setup read twice: `is` False, `==` True, `==` another setup False,
+        # and hash() RAISES - the wrapper defines equality and no hash. A fake handing back ONE
+        # object instead lets a resolver comparing identity across two walks pass here and fail
+        # live, which is exactly the defect this shape exists to catch.
+        cam = make_cam(FakeSetup("Turn"), FakeSetup("Mill"))
+        first, second, other = cam.setups.item(0), cam.setups.item(0), cam.setups.item(1)
+        assert first is not second and first == second and not (first != second)
+        assert first != other and not (first == other)
+        assert first in [second]                     # membership runs on ==, and answers
+        with pytest.raises(TypeError):
+            hash(first)
+        # and it is one setup behind both reads: a write through the first is read back by the next
+        first.stockMode = "PreviousSetupStock"
+        assert cam.setups.item(0).stockMode == "PreviousSetupStock"
+
     def test_a_setup_created_through_the_input_joins_the_walk_with_what_it_was_given(self):
         setups = FakeSetups()
         machine = FakeMachine(description="Haas VF-2", vendor="Haas", model="VF-2")
@@ -300,7 +317,9 @@ class TestCamJobWorld:
         job.models = ["Body1"]
         job.machine = machine
         made = setups.add(job)
-        assert setups.itemByName("Op1 Setup") is made
+        # == , not `is`: a setup read out of the collection is a NEW wrapper per read, the way a
+        # live one is - the create's own return is the only object the caller holds onto.
+        assert setups.itemByName("Op1 Setup") == made
         assert setups._added[0].machine is machine and setups._added[0].models == ["Body1"]
 
     def test_a_tool_parameter_publishes_its_payload_through_the_second_value_hop(self):

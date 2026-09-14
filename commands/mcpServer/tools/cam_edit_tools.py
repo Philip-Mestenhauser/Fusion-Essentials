@@ -12,7 +12,8 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import CM_TO_UNIT, iter_collection, named_with_remainder, ok, error, safe
+from ._common import (CM_TO_UNIT, iter_collection, named_with_remainder, ok, error, read_flag,
+                      safe)
 from ._cam_common import (get_cam, expression_error, library_assets, quote_expression,
                           tool_dimension_value)
 from ._cam_presets import (_apply_preset_values, _persist_preset_change, _persisted_preset_names,
@@ -127,9 +128,11 @@ class _Target:
             self._persist_fn()
 
     def operations_by_tool(self, tool):
+        """The names of the operations running `tool`, or None where operationsByTool did not
+        answer - an unread list is not an empty one."""
         ops = self._ops_fn(tool) if self._ops_fn else None
         if ops is None:
-            return []
+            return None
         # OperationVector is index/len accessible, not a Python list
         out = []
         try:
@@ -498,7 +501,40 @@ def _do_list_types():
 # a 10 mm cutter standing on the sample's 12 mm shoulder.
 _P_SHOULDER_DIAMETER = "tool_shoulderDiameter"
 _P_DIAMETER = "tool_diameter"
+_P_NOZZLE_DIAMETER = "tool_nozzleDiameter"
 _SHANK_EPSILON_CM = 1e-6
+# MEASURED on five shipped samples: neither a column's presence nor its value nor its editability
+# says what a type is sized on - a waterjet's tool_diameter reads 0.0 and EDITABLE, a mill's
+# tool_nozzleDiameter is present and not, an insert's tool_diameter reads a positive 9.525 mm.
+_SIZE_FIELD_BY_FAMILY = (("tool_isJet", _P_NOZZLE_DIAMETER),
+                         ("tool_isMill", _P_DIAMETER),
+                         ("tool_isDrill", _P_DIAMETER),
+                         ("tool_isTurning", None),
+                         # No depositing type ships in the sample libraries, so this row is
+                         # UNSAMPLED - it refuses rather than guessing a size row for that family.
+                         ("tool_isDepositing", None))
+# The name fragments a tool's own dimension rows carry, matched over the names it answers - the
+# rows an agent edits where the 'diameter' override has none to write.
+_SIZE_WORDS = ("diameter", "height", "length", "pitch", "radius", "size", "thickness", "width")
+
+_FAMILY_HAS_NO_SIZE_ROW = (
+    "'{diameter}' was not applied and nothing was added: this tool reads {flag} true, and a "
+    "'diameter' override writes only the cutting diameter (tool_isMill/tool_isDrill) or the "
+    "nozzle (tool_isJet). The shipped turning insert is sized on tool_insertSize and "
+    "tool_cuttingWidth, not on the tool_diameter it also reads. Rows this tool holds whose name "
+    "spells a size: {rows}. Set one with action='edit'.")
+
+_NO_FAMILY_FLAG = (
+    "'{diameter}' was not applied and nothing was added: every one of {flags} reads false on this "
+    "tool and its '{dia}' does not read isEditable true, so no row here reads as the size it cuts "
+    "at and the override was not guessed at. action='parameters' lists every row it holds; set "
+    "the size row with action='edit'.")
+
+_FLAGS_DID_NOT_READ = (
+    "'{diameter}' was not applied and nothing was added: {flags} did not read on this tool, so "
+    "which row carries its size is unknown and the override was not guessed at. A tool copied "
+    "from a library whose entries carry no family flags is sized with action='edit' instead - "
+    "action='parameters' lists every row it holds.")
 
 
 def _dia_value(tool, pname):
@@ -508,33 +544,97 @@ def _dia_value(tool, pname):
     return tool_dimension_value(p, 1.0)
 
 
+def _family_flag(tool, pname):
+    """What `tool` reads for one family flag - its value, which MEASURED answers a real bool on
+    every shipped sample; None where the row is absent or read no bool, which is no verdict."""
+    p = safe(lambda: tool.parameters.itemByName(pname))
+    value = safe(lambda: p.value.value) if p is not None else None
+    return value if isinstance(value, bool) else None
+
+
+def _unread_flags(tool):
+    """The family flags that did not READ on this tool - an absent or unreadable flag is no
+    verdict, and a tool carrying none of them is not the probe the fallback below exists for."""
+    return [flag for flag, _field in _SIZE_FIELD_BY_FAMILY if _family_flag(tool, flag) is None]
+
+
+def _editable(tool, pname):
+    """Whether `tool` reads `pname` isEditable true. Editability is NOT relevance - a waterjet's
+    cutting diameter reads editable and is not the row it cuts at - so this is asked only once the
+    family flags have answered nothing at all."""
+    p = safe(lambda: tool.parameters.itemByName(pname))
+    return p is not None and read_flag(lambda: p.isEditable) is True
+
+
+def _size_field(tool):
+    """(the parameter a 'diameter' override writes on THIS tool, the family flag that decided) -
+    the field is None where that family is sized on neither row. MEASURED: the shipped probe reads
+    all five flags FALSE and its cutting diameter is the stylus, so a tool every flag answers false
+    on falls back to that row where it reads editable; a flag that did not read answers nothing."""
+    for flag, field in _SIZE_FIELD_BY_FAMILY:
+        if _family_flag(tool, flag) is True:
+            return field, flag
+    if _unread_flags(tool):
+        return None, None
+    return (_P_DIAMETER if _editable(tool, _P_DIAMETER) else None), None
+
+
+def _size_row_names(tool):
+    """The names of this tool's parameters that spell a size - the rows action='edit' reaches where
+    the 'diameter' override has no row to write for the family the tool reads."""
+    names = [safe(lambda p=p: p.name) for p in iter_collection(safe(lambda: tool.parameters))]
+    return [n for n in names if n and any(w in n.lower() for w in _SIZE_WORDS)]
+
+
 def _apply_diameter(tool, diameter):
-    """Set tool_diameter, then make tool_shoulderDiameter follow it - but only where the sample
-    sized its shoulder to its own cutter AND the shoulder did not move with the write. A shoulder
-    holding a FORMULA over tool_diameter follows on its own, and a literal set over it would cut
-    that relationship."""
-    p = safe(lambda: tool.parameters.itemByName(_P_DIAMETER))
+    """(the parameter the override was written to, error) - the size row this tool's own FAMILY
+    FLAG picks, with tool_shoulderDiameter following a CUTTER write where the sample sized its
+    shoulder to its own cutter and the shoulder did not move with the write (a shoulder holding a
+    FORMULA over tool_diameter follows on its own, and a literal set would cut that relationship)."""
+    field, flag = _size_field(tool)
+    if field is None and flag is not None:
+        return None, _FAMILY_HAS_NO_SIZE_ROW.format(
+            diameter=diameter, flag=flag,
+            rows=named_with_remainder(_size_row_names(tool)) or "(none)")
+    if field is None:
+        unread = _unread_flags(tool)
+        if unread:
+            return None, _FLAGS_DID_NOT_READ.format(diameter=diameter,
+                                                    flags=named_with_remainder(unread))
+        return None, _NO_FAMILY_FLAG.format(
+            diameter=diameter, dia=_P_DIAMETER,
+            flags=", ".join(f for f, _field in _SIZE_FIELD_BY_FAMILY))
+    p = safe(lambda: tool.parameters.itemByName(field))
     if p is None:
-        return ("The tool has no 'tool_diameter' parameter - the requested diameter override "
-                "cannot apply.")
-    was_d, was_s = _dia_value(tool, _P_DIAMETER), _dia_value(tool, _P_SHOULDER_DIAMETER)
+        return None, (f"This tool reads {flag} true but carries no '{field}' parameter, so the "
+                      f"requested diameter '{diameter}' has no row to write.")
+    was_d, was_s = _dia_value(tool, field), _dia_value(tool, _P_SHOULDER_DIAMETER)
+    held = safe(lambda: p.expression)
     p.expression = str(diameter)
-    now_d = _dia_value(tool, _P_DIAMETER)
-    if (was_d is None or was_s is None or now_d is None
+    # The write is gated for BOTH rows: an expression that did not MOVE and is not the request is
+    # the swallowed write. Compared to what it HELD, never only to the request - the store may keep
+    # a request in its own spelling, which would read as a failure it is not.
+    landed = safe(lambda: p.expression)
+    if landed is None or (landed == held and landed != str(diameter)):
+        return None, (f"Set '{field}' to '{diameter}' on this tool but it reads back {landed!r} - "
+                      "the size did not land, and the tool was not added.")
+    now_d = _dia_value(tool, field)
+    if (field != _P_DIAMETER or was_d is None or was_s is None or now_d is None
             or abs(was_s - was_d) > _SHANK_EPSILON_CM):
-        return None                       # a stepped sample, or a size that would not read
+        return field, None        # a nozzle row, a stepped sample, or a size that would not read
     if _followed(_dia_value(tool, _P_SHOULDER_DIAMETER), now_d):
-        return None                       # the shoulder tracked the write by itself
+        return field, None                # the shoulder tracked the write by itself
     sp = safe(lambda: tool.parameters.itemByName(_P_SHOULDER_DIAMETER))
     try:
         sp.expression = str(diameter)
     except Exception as e:
-        return f"Set tool_diameter to {diameter} but the shoulder would not follow it: {e}."
+        return None, f"Set tool_diameter to {diameter} but the shoulder would not follow it: {e}."
     if not _followed(_dia_value(tool, _P_SHOULDER_DIAMETER), now_d):
-        return (f"Set tool_diameter to {diameter} on a plain-shank sample but its shoulder "
-                f"diameter read back {_dia_value(tool, _P_SHOULDER_DIAMETER)!r} against a cutter "
-                f"of {now_d!r} (cm) - the shoulder did not follow, and the tool was not added.")
-    return None
+        return None, (f"Set tool_diameter to {diameter} on a plain-shank sample but its shoulder "
+                      f"diameter read back {_dia_value(tool, _P_SHOULDER_DIAMETER)!r} against a "
+                      f"cutter of {now_d!r} (cm) - the shoulder did not follow, and the tool was "
+                      "not added.")
+    return field, None
 
 
 def _followed(shoulder, diameter):
@@ -543,24 +643,25 @@ def _followed(shoulder, diameter):
 
 
 def _build_entry(ref):
-    """(tool, None) or (None, error) for one add entry - {from_type} clones a sample of that
-    geometry type, {library_url, index} copies an existing tool, and description / diameter /
-    product_id / vendor / holder / presets are applied over it."""
+    """(tool, the parameter a 'diameter' override was written to, None) or (None, None, error) for
+    one add entry - {from_type} clones a sample of that geometry type, {library_url, index} copies
+    an existing tool, and description / diameter / product_id / vendor / holder / presets are
+    applied over it."""
     if not isinstance(ref, dict):
-        return None, f"Each add_tools entry must be an object; got {ref!r}."
+        return None, None, f"Each add_tools entry must be an object; got {ref!r}."
 
     # 1) get the SOURCE tool (by type-clone or by reference)
     if ref.get("from_type"):
         src, serr = _sample_for_type(ref["from_type"])
         if serr:
-            return None, serr
+            return None, None, serr
     elif ref.get("library_url") is not None and ref.get("index") is not None:
         src, serr = _source_tool(ref.get("library_url"), ref.get("index"))
         if serr:
-            return None, serr
+            return None, None, serr
     else:
-        return None, (f"Entry {ref!r} needs 'from_type' (clone a sample of that type) or "
-                      "'library_url'+'index' (copy an existing tool).")
+        return None, None, (f"Entry {ref!r} needs 'from_type' (clone a sample of that type) or "
+                            "'library_url'+'index' (copy an existing tool).")
 
     # 2) optional holder to ASSIGN (resolve before mutating). PRESENCE gates, not truthiness: an
     # empty {} holder ref is a malformed request, which a truthy gate ships as the sample's holder.
@@ -568,26 +669,27 @@ def _build_entry(ref):
     if ref.get("holder") is not None:
         hd, herr = _holder_json(ref["holder"])
         if herr:
-            return None, herr
+            return None, None, herr
         holder_json = hd
 
     # 3) build via JSON: clone source, apply overrides + holder
     d = safe(lambda: _json_loads(src.toJson()))
     if not isinstance(d, dict):
-        return None, "Could not read the source tool's JSON."
+        return None, None, "Could not read the source tool's JSON."
     if ref.get("description"):
         d["description"] = str(ref["description"])
     if holder_json is not None:
         d["holder"] = holder_json
     tool = safe(lambda: _tool_from_json(_json_dumps(d)))
     if tool is None:
-        return None, "Could not create the tool from JSON."
-    # diameter override (after creation, on the param). A missing parameter means the requested
-    # override cannot apply - error instead of adding the tool without it.
+        return None, None, "Could not create the tool from JSON."
+    # diameter override (after creation, on the param). A type holding no size row the override can
+    # write is refused here, before the add - a write to a row the type ignores lands nothing.
+    sized_field = None
     if ref.get("diameter") is not None:
-        derr = _apply_diameter(tool, ref["diameter"])
+        sized_field, derr = _apply_diameter(tool, ref["diameter"])
         if derr:
-            return None, derr
+            return None, None, derr
 
     # 3b) product_id / vendor are real tool parameters but NOT part of createFromJson's schema,
     # which drops those keys silently - so they are applied as quoted-string expressions after
@@ -599,31 +701,33 @@ def _build_entry(ref):
         val = str(val)
         p = safe(lambda pname=pname: tool.parameters.itemByName(pname))
         if p is None:
-            return None, f"The tool has no '{pname}' parameter - the requested {field} cannot apply."
+            return None, None, (f"The tool has no '{pname}' parameter - the requested {field} "
+                                "cannot apply.")
         try:
             p.expression = _quote(val)
         except Exception as e:
-            return None, f"Could not set {pname} = {val!r}: {e}."
+            return None, None, f"Could not set {pname} = {val!r}: {e}."
         eerr, _ = expression_error(p)
         if eerr:
-            return None, f"Set {pname} but it failed to evaluate: {eerr}."
+            return None, None, f"Set {pname} but it failed to evaluate: {eerr}."
         landed = safe(lambda p=p: p.value.value)
         if landed != val:
-            return None, (f"Set {pname}'s expression but it read back {landed!r} instead of "
-                          f"{val!r} - the {field} did not land.")
+            return None, None, (f"Set {pname}'s expression but it read back {landed!r} instead of "
+                                f"{val!r} - the {field} did not land.")
 
     # 4) presets - same rule: a preset that cannot be created or populated is an error, not a skip
     for ps in (ref.get("presets") or []):
         serr = _preset_spec_error(ps)
         if serr:
-            return None, serr
+            return None, None, serr
         preset = safe(lambda: tool.presets.add())
         if preset is None:
-            return None, "Could not add a preset to the tool - the requested presets were not applied."
+            return None, None, ("Could not add a preset to the tool - the requested presets were "
+                                "not applied.")
         perr = _apply_preset_values(preset, ps)
         if perr:
-            return None, perr
-    return tool, None
+            return None, None, perr
+    return tool, sized_field, None
 
 
 # Said only where a sized row's shoulder does NOT match its cutter: that sample is a stepped tool
@@ -645,16 +749,29 @@ def _stepped(row):
     return dia is not None and shoulder is not None and dia != shoulder
 
 
-def _sized_rows(add_tools, built):
-    """One row per entry that asked for a 'diameter', carrying what the built tool READS BACK for
-    its cutter and its shoulder - the pair that says whether the shank followed the override."""
+def _sized_rows(target, add_tools, built, fields, assigned):
+    """One row per entry that asked for a 'diameter': 'sized_field' names the parameter the size was
+    written to, 'reread_expression' what the library read AGAIN holds there and 'diameter_mm' the
+    number the built object reads, plus the shoulder on a cutter write. The re-read is located by
+    the tool NUMBER this call assigned - a persist may reorder the library - and is null without it."""
+    sized = [isinstance(ref, dict) and ref.get("diameter") is not None for ref in add_tools]
+    if not any(sized):
+        return []                     # no size was written, so no library is re-read for one
     rows = []
-    for i, (ref, tool) in enumerate(zip(add_tools, built)):
-        if not isinstance(ref, dict) or ref.get("diameter") is None:
+    numbers = target.stored_tool_numbers() or []
+    for i, (ref, tool, field) in enumerate(zip(add_tools, built, fields)):
+        if not sized[i]:
             continue
-        rows.append({"entry": i,
-                     "diameter_mm": _mm(_dia_value(tool, _P_DIAMETER)),
-                     "shoulder_diameter_mm": _mm(_dia_value(tool, _P_SHOULDER_DIAMETER))})
+        number = assigned[i] if i < len(assigned) else None
+        # A number the re-read library holds ONCE addresses one tool; missing or repeated, nothing
+        # here identifies the tool this entry added, so the row publishes null rather than a guess.
+        at = numbers.index(number) if numbers.count(number) == 1 else None
+        row = {"entry": i, "sized_field": field,
+               "reread_expression": target.reread_param(at, field) if at is not None else None,
+               "diameter_mm": _mm(_dia_value(tool, field))}
+        if field == _P_DIAMETER:
+            row["shoulder_diameter_mm"] = _mm(_dia_value(tool, _P_SHOULDER_DIAMETER))
+        rows.append(row)
     return rows
 
 
@@ -666,11 +783,13 @@ def _do_add(target, add_tools):
                      "'holder':{library_url,index}, 'presets':[...].")
     # build ALL entries before adding any (no partial write on an error)
     built = []
+    sized_fields = []
     for ref in add_tools:
-        t, terr = _build_entry(ref)
+        t, field, terr = _build_entry(ref)
         if terr:
             return error(terr)
         built.append(t)
+        sized_fields.append(field)
     # Auto-assign a FREE tool_number to each new tool. A cloned sample keeps the sample's number, so
     # two adds would collide and cam_post refuses duplicate tool numbers; hand out the next free one
     # (skipping every number already in the library, and each one just assigned in this call).
@@ -711,13 +830,17 @@ def _do_add(target, add_tools):
                 return error(f"Auto-assigned tool number(s) {missing} but the library re-read from "
                              f"its url holds numbers {stored_numbers} - the assignment did not "
                              "reach the stored library.")
-    sized = _sized_rows(add_tools, built)
+    sized = _sized_rows(target, add_tools, built, sized_fields, assigned)
+    # What the NOTE is worded from is whether a library read-back answered at all - a sized row's
+    # own re-read counts, and it answers for a document target too. The storage verdict above is a
+    # different question and keeps its own key.
+    no_reread = in_memory_only and not any(r["reread_expression"] is not None for r in sized)
     out = {"added": len(built), "tool_count": len(target.tools),
            "assigned_tool_numbers": assigned,
            # the honest basis of the numbers above: the stored library agreed, or nothing but the
            # in-memory tools was checked (always the case for a document target)
            "verified_in_memory_only": in_memory_only,
-           "note": (_persist_note(target, "Tools added", in_memory_only)
+           "note": (_persist_note(target, "Tools added", no_reread)
                     + f" Auto-assigned free tool number(s) {assigned} (next free per tool, so "
                     "multiple adds do not collide - cam_post refuses duplicate tool numbers).")}
     if sized:
@@ -829,18 +952,34 @@ def _do_edit(target, tool_index, parameters):
     # or this is the document library, whose read-back shows presence only.
     in_memory_only = target.is_document or stored is None
     note = _persist_note(target, "Tool edited", stored is None)
+    # WHICH operations this edit reached, read rather than asserted: the document library is the one
+    # that holds operations, and operationsByTool is what names them.
+    reached = target.operations_by_tool(tool) if target.is_document else None
     if target.is_document:
-        note += " " + _OP_TOOL_COPY_NOTE
+        note += " " + _reach_note(reached)
     out = {"edited": len(changed), "tool": tool_index, "changed": changed,
            "verified_in_memory_only": in_memory_only,
            "note": note}
+    if reached:
+        out["invalidated_operations"] = reached
     if warnings:
         out["warnings"] = warnings
     return ok(out)
 
 
-_OP_TOOL_COPY_NOTE = ("Operations already created keep their own copy of this tool - "
-                      "cam_edit_operation(tool_scope, tool_index) re-assigns one.")
+_CLOUD_FORK = ("A tool taken from a cloud or hub library is a fork here and never follows the "
+               "cloud entry.")
+
+
+def _reach_note(names):
+    """The sentence a DOCUMENT-library edit carries: what operationsByTool answered for this entry,
+    and the fork a cloud tool becomes here."""
+    if names is None:
+        return "operationsByTool did not answer, so what this edit reached was not read. " + _CLOUD_FORK
+    if not names:
+        return "operationsByTool names no operation running this entry. " + _CLOUD_FORK
+    return (f"operationsByTool names {len(names)} operation(s) running this entry - "
+            "'invalidated_operations' lists them; regenerate them with cam_generate. " + _CLOUD_FORK)
 
 
 def _persist_note(target, act, in_memory_only):
@@ -938,6 +1077,10 @@ def _do_where_used(target, tool_index):
         return error(f"Provide a valid 'tool' index (0..{len(tools) - 1}).")
     tool = tools[tool_index]
     ops = target.operations_by_tool(tool)
+    if ops is None:
+        return error(f"operationsByTool did not answer for the tool at index {tool_index}, so "
+                     "which operations run it is UNKNOWN - that is not 'used by none'. Re-read the "
+                     "library with action='list' and retry.")
     return ok({"tool": tool_index, "description": _tp(tool, "tool_description"),
                "operation_count": len(ops), "operations": ops,
                "note": "Operations that use this tool." if ops else "This tool is not used by any operation."})

@@ -325,6 +325,10 @@ def _xref_health(doc):
 
 _EMPTY_NAME_CAP = 8
 
+# Fewer: the nonfinite clause carries the post's own failure text beside its names, and the whole
+# pointer is one budgeted sentence.
+_NONFINITE_NAME_CAP = 3
+
 
 # The walk builds its parent chain top-down, so it is acyclic; the cap only stops a hand-built node
 # whose chain loops from spinning the climb below.
@@ -344,8 +348,8 @@ def _op_breadcrumb(node):
     return node.path
 
 
-def _empty_labels(rows):
-    """The discriminator each empty operation is told apart by, one for one over `rows`
+def _walk_labels(rows):
+    """The discriminator each listed operation is told apart by, one for one over `rows`
     ([(name, path, position)]) - the breadcrumb, plus this read's own walk POSITION where two rows
     share even that. A row whose path did not read gets '', and told_apart keeps its plain name."""
     per_path = {}
@@ -364,9 +368,9 @@ def _empty_labels(rows):
 
 def _cam_summary(doc):
     """(has_cam, {setups, total_operations, ungenerated_operations, errored_operations,
-    suppressed_operations, empty_toolpath_operations, unread_state_operations?, empty_toolpaths?,
-    operations_unread?}) WITHOUT switching to Manufacture, each op bucketed once through
-    op_primary_state - including 'unread', the op whose operationState did not answer."""
+    suppressed_operations, empty_toolpath_operations, unread_state_operations?,
+    nonfinite_toolpath_operations?, empty_toolpaths?, operations_unread?}) WITHOUT switching to
+    Manufacture, each op bucketed once through op_primary_state."""
     # MEASURED: a missing hasToolpath is NOT "needs generating" - a suppressed op has none by
     # design, and a generated op can finish with an EMPTY toolpath (state IsValid, isToolpathValid
     # true, hasToolpath false), which is why is_empty_toolpath is also handed the CAM product.
@@ -379,6 +383,7 @@ def _cam_summary(doc):
     unread = 0
     unread_unknown = 0
     empty_rows = []
+    nonfinite_rows = []
     position = 0
     for s in _common.iter_collection(setups):
         walked = 0
@@ -400,6 +405,9 @@ def _cam_summary(doc):
                 # operationState did not answer for this op - it is in no lifecycle bucket, and
                 # counting it as generated would read as a clean job.
                 unread_state += 1
+            elif state == "nonfinite":
+                # It generated and reads valid, so nothing else here separates it from a cut.
+                nonfinite_rows.append((facts["name"], _op_breadcrumb(node), position))
             elif _cam_common.is_empty_toolpath(facts):
                 empty += 1
                 empty_rows.append((facts["name"], _op_breadcrumb(node), position))
@@ -418,10 +426,15 @@ def _cam_summary(doc):
         # Present only where one was found: a zero here would read as a checked-and-clean claim
         # on every job that never met the state.
         out["unread_state_operations"] = unread_state
+    if nonfinite_rows:
+        # Present only where one was found, like the unread bucket above.
+        out["nonfinite_toolpath_operations"] = len(nonfinite_rows)
+        out["nonfinite_toolpaths"] = _common.told_apart(
+            _walk_labels(nonfinite_rows))[:_NONFINITE_NAME_CAP]
     if empty_rows:
         # told_apart judges over EVERY empty operation and the cap is applied after, so a listed
         # name that repeats only outside the cap is still replaced by its own breadcrumb.
-        out["empty_toolpaths"] = _common.told_apart(_empty_labels(empty_rows))[:_EMPTY_NAME_CAP]
+        out["empty_toolpaths"] = _common.told_apart(_walk_labels(empty_rows))[:_EMPTY_NAME_CAP]
     # Present only when the census is INCOMPLETE, so the counts above are never read as a full
     # tally of a job whose operations did not all answer.
     if unread:
@@ -431,10 +444,23 @@ def _cam_summary(doc):
     return True, out
 
 
+def _named_or_stop(cam, names_key, count_key) -> str:
+    """': a, b (first 2 of 5).' for one of the pointer's capped name lists, or a bare '.' where no
+    name read. The cap is stated as a clause rather than a trailing ellipsis, which ran into the
+    sentence's own full stop as '....'"""
+    listed = [n for n in (cam.get(names_key) or []) if n]
+    if not listed:
+        return "."
+    names = ", ".join(listed)
+    if len(listed) < cam[count_key]:
+        names += f" (first {len(listed)} of {cam[count_key]})"
+    return f": {names}."
+
+
 def _cam_pointer(cam):
     """The cam pointer's state clause - what to do next about the toolpaths, ERRORED ops first,
-    then ungenerated, then generated-but-empty, then parked. An incomplete census never reads as a
-    clean bill."""
+    then ungenerated, then nonfinite, then generated-but-empty, then parked. An incomplete census
+    never reads as a clean bill."""
     if not cam:
         return "toolpaths look generated."
     unread = (cam.get("operations_unread") or cam.get("setups_with_unreadable_operation_count")
@@ -448,15 +474,15 @@ def _cam_pointer(cam):
         return f"{cam['ungenerated_operations']} operation(s) need generating." + incomplete
     parked = (f" {cam['suppressed_operations']} suppressed."
               if cam.get("suppressed_operations") else "")
+    if cam.get("nonfinite_toolpath_operations"):
+        return (f"{cam['nonfinite_toolpath_operations']} operation(s) generated a toolpath whose "
+                "MOTION IS NOT A NUMBER"
+                + _named_or_stop(cam, "nonfinite_toolpaths", "nonfinite_toolpath_operations")
+                + " " + _cam_common.NONFINITE_POST + parked + incomplete)
     if cam.get("empty_toolpath_operations"):
-        listed = [n for n in (cam.get("empty_toolpaths") or []) if n]
-        names = ", ".join(listed)
-        # the names are capped; say so with a clause rather than a trailing ellipsis, which ran
-        # into the sentence's own full stop as '....'
-        if names and len(listed) < cam["empty_toolpath_operations"]:
-            names += f" (first {len(listed)} of {cam['empty_toolpath_operations']})"
         return (f"toolpaths are generated; {cam['empty_toolpath_operations']} produced an EMPTY "
-                f"toolpath (nothing to cut)" + (f": {names}." if names else ".")
+                "toolpath (nothing to cut)"
+                + _named_or_stop(cam, "empty_toolpaths", "empty_toolpath_operations")
                 + parked + incomplete)
     if unread:
         return ("the operation census is incomplete - some operations did not read." + parked)

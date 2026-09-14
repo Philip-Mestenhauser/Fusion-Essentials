@@ -173,7 +173,7 @@ class TestCollectOpHealth:
         # the size-0 end of the scope contract: a scope holding nothing reports nothing, rather
         # than falling back to some wider set.
         assert st._collect_op_health([]) == {"warnings": [], "errors": [], "empty": [],
-                                              "empty_rail": []}
+                                              "empty_rail": [], "nonfinite": []}
 
     def test_only_a_rail_driven_empty_toolpath_earns_the_rail_row(self, monkeypatch):
         # the triage names otherSide, the rail order and the flute length - inputs a 2D contour has
@@ -199,7 +199,8 @@ class TestRailTriageRidesTheEmptyToolpathDisclosure:
     def _attach(self, monkeypatch, empty, empty_rail):
         monkeypatch.setattr(st, "_collect_op_health",
                             lambda ops, labels=None: {"warnings": [], "errors": [],
-                                                      "empty": empty, "empty_rail": empty_rail})
+                                                      "empty": empty, "empty_rail": empty_rail,
+                                                      "nonfinite": []})
         payload = {}
         return payload, st._attach_op_health(payload, [], "document")
 
@@ -235,7 +236,7 @@ class TestOrientationTriageRidesTheErrorItTriages:
     def _attach(self, monkeypatch, errors):
         monkeypatch.setattr(st, "_collect_op_health",
                             lambda ops, labels=None: {"warnings": [], "errors": errors,
-                                                      "empty": [], "empty_rail": []})
+                                                      "empty": [], "empty_rail": [], "nonfinite": []})
         payload = {}
         return payload, st._attach_op_health(payload, [], "document")
 
@@ -326,7 +327,8 @@ class TestStatusHandler:
                                 "errors": [{"name": "Drill1",
                                             "error": "Cylindrical face not in tool orientation!"}],
                                 "empty": list(labels or []),
-                                "empty_rail": list(labels or [])})
+                                "empty_rail": list(labels or []),
+                                "nonfinite": []})
         out = _payload(st.handler(handle="gen1"))
         note = out["note"]
         # the unbounded verdict rides as its own key rather than inside the bounded note
@@ -385,7 +387,7 @@ class TestStatusHandler:
         monkeypatch.setattr(st, "_document_ops", list)
         monkeypatch.setattr(st, "_collect_op_health",
                             lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
-                                                      "empty_rail": []})
+                                                      "empty_rail": [], "nonfinite": []})
 
     def test_latest_resolves_to_last_handle(self, monkeypatch):
         st._GENERATIONS["gen1"] = self._completed_entry()
@@ -503,7 +505,7 @@ class TestStatusHandler:
         st._HANDLE_SEQ[0] = 1
         monkeypatch.setattr(st._cam_common, "live_readiness",
                             self._readiness(errored=1, generating=2, total=3,
-                                            readiness="BLOCKER: 1 operation(s) have errors - the job will not post until fixed.",
+                                            readiness="BLOCKER: 1 operation(s) have errors - those operations will not post.",
                                             samples={"op": {"name": "Rough to Model Top",
                                                             "error": "Top height must not be below the bottom height"},
                                                      "setup": None, "program": None}))
@@ -531,7 +533,7 @@ class TestStatusHandler:
         st._HANDLE_SEQ[0] = 1
         monkeypatch.setattr(st._cam_common, "live_readiness",
                             self._readiness(valid=1, out_of_date=1, generating=1, total=2, setups_errored=1,
-                                            readiness="BLOCKER: 1 setup(s) have errors - the job will not post until fixed.",
+                                            readiness="BLOCKER: 1 setup(s) have errors - those setups will not post.",
                                             samples={"op": None, "program": None,
                                                      "setup": {"name": "Op1", "error": "WCS orientation is invalid"}}))
         out = _payload(st.handler(handle="gen1"))
@@ -743,7 +745,7 @@ class TestStatusHandler:
         monkeypatch.setattr(st._cam_common, "live_readiness", self._readiness(**states))
         monkeypatch.setattr(st, "_collect_op_health",
                             lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
-                                                      "empty_rail": []})
+                                                      "empty_rail": [], "nonfinite": []})
 
     def test_a_bare_read_answers_about_the_active_document_not_a_registered_handle(self, monkeypatch):
         # THE BITE: a stale handle of another (here, no-longer-active) document sits in the registry
@@ -1018,7 +1020,7 @@ class TestSameDocumentIdentity:
         monkeypatch.setattr(st, "_document_ops", list)
         monkeypatch.setattr(st, "_collect_op_health",
                             lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
-                                                      "empty_rail": []})
+                                                      "empty_rail": [], "nonfinite": []})
         entry = self._entry("Untitled", "unsaved:1")
         entry["doc"] = _DocHandle("doc-a")
         st._GENERATIONS["gen1"] = entry
@@ -1068,7 +1070,7 @@ class TestSameDocumentIdentity:
         monkeypatch.setattr(st, "_document_ops", list)
         monkeypatch.setattr(st, "_collect_op_health",
                             lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
-                                                      "empty_rail": []})
+                                                      "empty_rail": [], "nonfinite": []})
         st._GENERATIONS["gen1"] = self._entry("Untitled", "unsaved:1")
         st._HANDLE_SEQ[0] = 1
         out = _payload(st.handler(handle="latest"))
@@ -1093,7 +1095,7 @@ class TestSameDocumentIdentity:
         monkeypatch.setattr(st, "_document_ops", list)
         monkeypatch.setattr(st, "_collect_op_health",
                             lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
-                                                      "empty_rail": []})
+                                                      "empty_rail": [], "nonfinite": []})
         out = _payload(st.handler(handle="gen1"))
         assert out["live_states"]["out_of_date"] == 1
         assert "0 of 1 active ops valid" in out["readiness"]
@@ -1197,7 +1199,7 @@ class TestScopedReadinessWarningVerdict:
         monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
         monkeypatch.setattr(st, "_collect_op_health",
                             lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
-                                                      "empty_rail": []})
+                                                      "empty_rail": [], "nonfinite": []})
         return _payload(st.handler(target="Roughing"))
 
     def test_the_tally_carries_the_warning_count_and_its_sample(self, monkeypatch):
@@ -1256,7 +1258,7 @@ class TestScopedReadinessSetupBlockers:
         monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
         monkeypatch.setattr(st, "_collect_op_health",
                             lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
-                                                      "empty_rail": []})
+                                                      "empty_rail": [], "nonfinite": []})
         return _payload(st.handler(target=target))
 
     def test_a_machine_less_setup_never_reads_ready_to_post_however_valid_its_ops(self, monkeypatch):
@@ -1357,7 +1359,8 @@ class TestScopedHealthLists:
         # three buckets are different sizes, so a count reading the wrong list is a wrong number.
         self._cam(monkeypatch)
         out = _payload(st.handler(target="Roughing"))
-        assert out["counts"] == {"with_warnings": 2, "with_errors": 1, "empty_toolpaths": 3}
+        assert out["counts"] == {"with_warnings": 2, "with_errors": 1, "empty_toolpaths": 3,
+                                 "nonfinite_toolpaths": 0}
         assert out["counts"]["with_warnings"] == len(out["operations_with_warnings"])
         assert out["counts"]["with_errors"] == len(out["operations_with_errors"])
         assert out["counts"]["empty_toolpaths"] == len(out["empty_toolpaths"])
@@ -1403,7 +1406,8 @@ class TestScopedHealthLists:
         # exceeds its bucket's DISTINCT-name count (5 / 2 / 4), so a count that deduplicated by
         # name - which would drop a real operation on any job reusing a name across setups - reads
         # short here rather than passing.
-        assert out["counts"] == {"with_warnings": 6, "with_errors": 3, "empty_toolpaths": 5}
+        assert out["counts"] == {"with_warnings": 6, "with_errors": 3, "empty_toolpaths": 5,
+                                 "nonfinite_toolpaths": 0}
         assert out["live_states"]["warnings"] == out["counts"]["with_warnings"]
 
     def test_a_document_read_says_it_named_the_repeats_by_path(self, monkeypatch):
@@ -1440,7 +1444,8 @@ class TestScopedHealthLists:
         assert out["live_states"]["total"] == 3
         assert self._names(out["operations_with_warnings"]) == ["Contour20"]
         assert out["empty_toolpaths"] == ["Rough clean", "Rough clean 2"]
-        assert out["counts"] == {"with_warnings": 1, "with_errors": 0, "empty_toolpaths": 2}
+        assert out["counts"] == {"with_warnings": 1, "with_errors": 0, "empty_toolpaths": 2,
+                                 "nonfinite_toolpaths": 0}
 
     def test_a_scoped_handle_read_lists_only_its_launch_targets_operations(self, monkeypatch):
         # the handle path settles completion on the launch target's own ops (_handle_scope_state);
@@ -1460,7 +1465,8 @@ class TestScopedHealthLists:
         assert out["health_scope"] == out["completion_basis"] == "setup 'Roughing'"
         assert self._names(out["operations_with_warnings"]) == ["Rough to Model Top",
                                                                 "Rough adaptive"]
-        assert out["counts"] == {"with_warnings": 2, "with_errors": 1, "empty_toolpaths": 3}
+        assert out["counts"] == {"with_warnings": 2, "with_errors": 1, "empty_toolpaths": 3,
+                                 "nonfinite_toolpaths": 0}
 
     def test_an_incomplete_scoped_read_publishes_no_health_lists(self, monkeypatch):
         # nothing is claimed about a scope still computing - the lists (and the scope name that
@@ -1679,7 +1685,7 @@ class TestStatusLivePoll:
                                             readiness="3 of 3 active ops valid - ready to post."))
         monkeypatch.setattr(st, "_collect_op_health",
                             lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
-                                                      "empty_rail": []})
+                                                      "empty_rail": [], "nonfinite": []})
         out = _payload(st.handler())
         assert out["completed"] is True and out["handle"] is None
 
@@ -1692,7 +1698,7 @@ class TestStatusLivePoll:
                                             readiness="0 of 34 active ops valid - run cam_generate to finish the rest."))
         monkeypatch.setattr(st, "_collect_op_health",
                             lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
-                                                      "empty_rail": []})
+                                                      "empty_rail": [], "nonfinite": []})
         out = _payload(st.handler())
         assert out["completed"] is True
         assert "not a success verdict" in out["note"]
@@ -1704,7 +1710,7 @@ class TestStatusLivePoll:
         monkeypatch.setattr(st._cam_common, "get_cam", lambda: (object(), None))
         monkeypatch.setattr(st._cam_common, "live_readiness",
                             self._readiness(errored=1, generating=1, total=2,
-                                            readiness="BLOCKER: 1 operation(s) have errors - the job will not post until fixed.",
+                                            readiness="BLOCKER: 1 operation(s) have errors - those operations will not post.",
                                             samples={"op": {"name": "Bad Op", "error": "broken"},
                                                      "setup": None, "program": None}))
         out = _payload(st.handler())
@@ -1790,6 +1796,32 @@ class TestStatusNamesAToolpathThatGeneratedEmpty:
         assert out["empty_toolpaths"] == [] and out["counts"]["empty_toolpaths"] == 0
 
 
+class TestStatusNamesAToolpathWhoseMotionIsNotANumber:
+    """MEASURED on a single-groove turning path: it generated with operationState IsValid and
+    hasToolpath true while its feed and rapid distances read NaN and its machining time read the
+    int64 maximum - so every flag the readiness line reads called it a finished, postable cut."""
+
+    def _out(self, monkeypatch, times):
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        cam = _FakeCAM([_setup("S1", [_op("Groove1"), _op("Cut")])], machining_times=times)
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        return _payload(st.handler(target="S1"))
+
+    def test_the_verdict_drops_it_from_valid_and_names_it(self, monkeypatch):
+        out = self._out(monkeypatch, {"Groove1": 9223372036854.8, "Cut": 4.193083})
+        assert out["live_states"]["valid"] == 1 and out["live_states"]["nonfinite"] == 1
+        assert out["readiness"].startswith("BLOCKER:") and "Groove1" in out["readiness"]
+        assert out["nonfinite_toolpaths"] == ["Groove1"]
+        assert out["counts"]["nonfinite_toolpaths"] == 1
+
+    def test_a_job_whose_times_all_read_as_durations_keeps_its_plain_verdict(self, monkeypatch):
+        # the discriminator: same flags, same shape, times that are measurements.
+        out = self._out(monkeypatch, {"Groove1": 12.0, "Cut": 4.193083})
+        assert out["live_states"]["valid"] == 2 and out["live_states"]["nonfinite"] == 0
+        assert out["nonfinite_toolpaths"] == [] and not out["readiness"].startswith("BLOCKER:")
+
+
 class TestOneHandleOverSeveralFutures:
     """A split launch registers several Futures under ONE handle, so the poll settles on all of
     them: one still running keeps the handle open, and the counts are the sum."""
@@ -1831,7 +1863,7 @@ class TestOneHandleOverSeveralFutures:
         monkeypatch.setattr(st, "_document_ops", list)
         monkeypatch.setattr(st, "_collect_op_health",
                             lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
-                                                      "empty_rail": []})
+                                                      "empty_rail": [], "nonfinite": []})
         out = _payload(st.handler(handle="gen1"))
         assert out["completed"] is True
         assert out["operations_total"] == 5 and out["operations_completed"] == 5

@@ -13,8 +13,8 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import apply_rename, counted, named_with_remainder, ok, error, read_flag, safe
-from ._cam_common import (choice_expressions, get_cam, find_setup, operation_nodes,
-                          register_future, setups, unquote_expression)
+from ._cam_common import (CREATE_DEDUPE, choice_expressions, get_cam, find_setup, operation_nodes,
+                          operation_name_clash, register_future, setups, unquote_expression)
 # _read_tool_number is the one tool_number read; _tp is the one tool-parameter value read.
 from .cam_edit_tools import _read_tool_number, _tp
 
@@ -211,22 +211,6 @@ def _probe_tool_refusal(strategy, tool):
             "(cam_edit_tools(action='list', scope='fusion')).")
 
 
-def _operation_name_clash(cam, want, current=""):
-    """The refusal for a name operations already answer to, shared by the create and the rename.
-    None when the name is free, empty, or already the caller's own (`current`)."""
-    want = (want or "").strip()
-    if not want or want.lower() == (current or "").strip().lower():
-        return None
-    taken = [n for n in operation_nodes(cam) if (n.name or "").lower() == want.lower()]
-    if not taken:
-        return None
-    # Measured: Operation.name DEDUPES silently rather than refusing - 'Face1' with one taken lands
-    # 'Face11', with no separator - so a taken name is refused here instead of landing unasked-for.
-    return (f"{len(taken)} operation(s) already answer to '{want}'. Operation.name dedupes rather "
-            f"than refusing, so it would land as something like '{want}1' - a name nothing asked "
-            "for. Pick one no operation carries; cam_get(include=['operations']) lists them.")
-
-
 # An OperationStrategy's classification flags, wire key -> API property. A strategy answers several
 # of them, so they are published as read. The short spellings (is2D, isDrilling) are not members of
 # cam.OperationStrategy and read as nothing at all.
@@ -316,21 +300,28 @@ _UNCHECKED_ENTITLEMENT = " isGenerationAllowed did not read - no pre-flight ran.
 # accepting the strategy is the only gate that ran, and both pre-flights are reported as skipped.
 _UNCHECKED_VOCABULARY = " compatibleStrategies did not read - no pre-flight ran."
 
-# Names a setup OFFERS, each reading isGenerationAllowed true, that operations.add does NOT land:
-# it answers with a name while the setup's operation count stays where it was. Value = what does
-# the job instead. The count read is what refuses; this table only names the remedy.
+# Names a setup OFFERS that operations.add answers for while the operation count stays: MEASURED,
+# 'folder' lands a folder, hole_recognition a CAMHoleRecognition and individual strategies a bare
+# OperationBase - each in Setup.children, none in operations/allOperations. Value = the remedy.
 _NOT_AN_OPERATION = {
     "hole_recognition": ("hole recognition picks holes for a drilling cycle - create 'drill' (or "
                          "'bore') and aim it with cam_select_geometry(selection='holes')"),
     "folder": "a CAM folder is created and filled by cam_edit_folders",
+    "additive_individual_strategies": ("pick the additive family you want from "
+                                       "cam_get(include=['strategies'], setup=...)"),
 }
 
 
-def _not_an_operation_clause(strategy) -> str:
-    """What to reach for instead, for a name that is not an operation - '' for every other
-    strategy, whose empty landing is a fault rather than a category error."""
+def _not_an_operation_refusal(strategy):
+    """The refusal for a name that is not an operation, or None for every other strategy - whose
+    empty landing is a fault rather than a category error. It fires BEFORE the add, because what
+    that add lands sits outside the collections the landing gate counts."""
     remedy = _NOT_AN_OPERATION.get(strategy)
-    return f" '{strategy}' is not an operation: {remedy}." if remedy else ""
+    if not remedy:
+        return None
+    return (f"Strategy '{strategy}' is not an operation, so nothing was created: operations.add "
+            "answers with a name while the setup's operation count stays where it was. Instead, "
+            f"{remedy}.")
 
 # A drilling cycle's top/bottom heights read isEditable true, so they are not what refuses a hole
 # off the setup's Z - the tool orientation is.
@@ -361,6 +352,12 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
         return error(f"Strategy '{strategy}' isn't compatible with setup '{setup}'. "
                      + (f"Compatible: {named_with_remainder([r['name'] for r in rows])}."
                         if rows else "The setup offers no compatible strategies at all."))
+
+    # Before the tool arm and the add: these names are refused on the NAME, since what one of them
+    # creates is not what the landing gate below can see.
+    category = _not_an_operation_refusal(strategy)
+    if category:
+        return error(category)
 
     # tool: document library (by index) or a shared library (by url + index) - skipped whole for a
     # row reading isAdditiveStrategy true. A strategy whose vocabulary did not read still asks for
@@ -396,9 +393,11 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
         if perr:
             return error(perr)
 
-    # The name is refused BEFORE the add, through the same check the rename arm runs: a deduped
-    # name would otherwise land silently and the caller would address the operation by the wrong one.
-    clash = _operation_name_clash(cam, name)
+    # Refused BEFORE the add, over the WHOLE DOCUMENT: operations.add dedupes across it to
+    # '<name> (2)', so a name another setup carries lands as one nobody asked for. The rename arm
+    # scans its own setup instead - Operation.name takes a cross-setup twin exactly.
+    clash = (operation_name_clash(operation_nodes(cam), name, dedupe=CREATE_DEDUPE)
+             if (name or "").strip() else None)          # no name, no walk and no collision
     if clash:
         return error(clash)
 
@@ -467,7 +466,7 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
     if ops_after <= ops_before:
         return error(f"operations.add returned '{safe(lambda: op.name)}' but the setup's operation "
                      f"count did not increase ({ops_before} before, {ops_after} after) - the "
-                     "operation did not land." + _not_an_operation_clause(strategy))
+                     "operation did not land.")
 
     # The operation has landed, so a declined name is a DISCLOSURE, not a failed create - the
     # payload publishes the name Operation.name reads back either way.

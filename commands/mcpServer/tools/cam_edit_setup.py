@@ -11,12 +11,13 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import apply_rename, ok, error, read_flag, safe
+from ._common import apply_rename, named_with_remainder, ok, error, read_flag, safe
 # The machine catalog read + the by-name machine resolver are the shared CAM substrate's (one home,
 # so cam_get's catalog, this assignment and cam_create_machine's reachability gate cannot drift).
-from ._cam_common import (STOCK_MODES, get_cam, find_setup, enumeration_remedy, expression_error,
+from ._cam_common import (STOCK_MODES, _setup_node, get_cam, enumeration_remedy, expression_error,
                           machine_catalog, machine_label, matched_quoting, parse_parameters,
-                          resolve_machine, stock_mode_member, stock_mode_name, unquote_expression)
+                          resolve_cam_node, resolve_machine, setups, stock_mode_member,
+                          stock_mode_name, unquote_expression)
 from .cam_create_setup import setup_name_clash
 from . import _inputs
 
@@ -39,6 +40,77 @@ _PARAM_READ = "cam_get(include=['parameters'], setup=...)"
 # The stock the setup machines from: Setup.stockMode is the knob this input assigns.
 _STOCK_MODE = _inputs.Choice("stock_mode", options=list(STOCK_MODES), required=False)
 
+# The mode that takes the stock a PRECEDING setup left behind - so the first setup in cam.setups
+# has none to take.
+_PREVIOUS_SETUP = "previous_setup"
+
+
+def _resolve_setup(cam, name):
+    """(the resolved setup node, the cam.setups walk it was resolved IN, refusal) - one walk, so a
+    caller can take the node's position in it. resolve_cam_node also answers the '<name>#<n>'
+    address its own ambiguity refusal hands out, which is how one of two setups sharing a name is
+    reached at all."""
+    nodes = [_setup_node(s) for s in setups(cam)]
+    node, err = resolve_cam_node(cam, name, kinds=("setup",), label="setup", nodes=nodes)
+    return node, nodes, err
+
+
+def _preceding_setup(node, nodes):
+    """(the name of the setup before `node`, None), or (None, refusal) where it is the FIRST. The
+    position is the node's own index in the walk it was RESOLVED in - the same objects, so an
+    ordinal address reaches its own predecessor and not another setup's."""
+    at = next((i for i, n in enumerate(nodes) if n is node), None)
+    if at is None:
+        return None, None
+    if at == 0:
+        listed = [n.name or "(unnamed)" for n in nodes]
+        return None, (f"'{listed[0]}' is the first setup - previous_setup stock needs a setup "
+                      f"before it, and nothing was written. The order is: "
+                      f"{named_with_remainder(listed)}.")
+    return nodes[at - 1].name, None
+
+
+# The setup's job-type row. MEASURED: assigning a mill-turn machine to a MILLING setup left
+# job_type 'turning' and Setup.operationType 1 with nothing said, and writing the row back restored
+# it with the machine kept and the existing toolpath still valid.
+_JOB_TYPE_PARAM = "job_type"
+
+
+def _job_type_reading(target):
+    """(the raw job_type expression, Setup.operationType) as the setup reads them now - the
+    expression is None where the setup carries no such row."""
+    p = safe(lambda: target.parameters.itemByName(_JOB_TYPE_PARAM))
+    return (safe(lambda: p.expression) if p is not None else None,
+            safe(lambda: target.operationType))
+
+
+def _keep_job_type(target, before, label):
+    """Put the job-type row back where a machine assignment moved it: (the reading, None) when it
+    moved and the restore read back, (None, None) when it did not move, (None, refusal) when the
+    restore did not take - `label` names the machine that moved it."""
+    expr, _was_type = before
+    moved_expr, moved_type = _job_type_reading(target)
+    if expr is None or moved_expr == expr:
+        return None, None
+    p = safe(lambda: target.parameters.itemByName(_JOB_TYPE_PARAM))
+    refused = ""
+    if p is not None:
+        try:
+            p.expression = expr                  # MUTATION - the row the caller never asked to move
+        except Exception as e:
+            refused = f" ({e})"
+    now_expr, now_type = _job_type_reading(target)
+    if now_expr != expr:
+        return None, (f"Machine '{label}' landed on setup '{safe(lambda: target.name)}' and moved "
+                      f"its job_type to '{unquote_expression(moved_expr)}' (Setup.operationType "
+                      f"{moved_type}); putting it back did not take{refused}. Set it with "
+                      f"cam_edit_setup(parameters={{'job_type': \"{expr}\"}}), or assign a machine "
+                      "of this setup's own kind. Nothing in this call was rolled back.")
+    return {"job_type": unquote_expression(expr), "operation_type": now_type,
+            "machine_set_it_to": unquote_expression(moved_expr),
+            "machine_operation_type": moved_type}, None
+
+
 # WCS geometry-binding, {key: (mode_param, mode_value, cad_param, handle-requirement)}: each key
 # drives one CadObjectParameterValue plus the choice-mode it needs. A bound WCS follows that
 # geometry, so a design edit moving it invalidates the ops.
@@ -53,11 +125,16 @@ _WCS_HANDLE = _inputs.GeometryHandle("wcs_handle", require="any")
 _WCS_JO = _inputs.JointOriginRef("wcs_jo")
 
 
-# Said only where two listed rows share a name. A row's identity is description/vendor/model and
-# both copies read the same triple, so nothing here tells them apart.
+# Said only where two listed rows read one 'name'. description_shared is two DIFFERENT machines, so
+# their 'vendor|model' tells them apart; name_in_both_locations is ONE machine in two libraries,
+# which nothing tells apart - so each flag earns its own sentence.
 _SHARED_NAME_NOTE = (
-    " A row marked name_in_both_locations names TWO machines and an assignment by it reaches the "
-    "local one - delete that copy to reach the shipped one.")
+    " description_shared: another listed row reads that 'name' - pass its 'vendor|model'.")
+_BOTH_LOCATIONS_NOTE = (
+    " name_in_both_locations: both libraries hold it; an assignment reaches the local one.")
+_CAPPED_NOTE = (
+    " The listing was CAPPED - both flags read the listed rows only; raise max_results or narrow "
+    "by vendor.")
 
 
 def _object_collection():
@@ -71,15 +148,16 @@ def read_machines(vendor: str = "", machine_type: str = "", max_results: int = 1
     rows, truncated, err = machine_catalog(vendor, machine_type, max_results)
     if err:
         return error(err)
-    note = ("Pass a machine's exact 'name' to cam_edit_setup(machine=...); machine_type='milling' "
+    note = ("Pass a row's exact 'name' to cam_edit_setup(machine=...); machine_type='milling' "
             "narrows past the additive printers.")
-    if any(r.get("name_in_both_locations") for r in rows):
+    if any(r.get("description_shared") for r in rows):
         note += _SHARED_NAME_NOTE
+    if any(r.get("name_in_both_locations") for r in rows):
+        note += _BOTH_LOCATIONS_NOTE
     if truncated:
-        # The flag is computed over the LISTED rows, so a collision whose other copy fell past the
-        # cap carries no mark at all - said here rather than left to read as 'no collisions'.
-        note += (" The listing was CAPPED, so name_in_both_locations is read over the listed rows "
-                 "only - a copy past the cap is not marked.")
+        # Both flags are computed over the LISTED rows, so a twin past the cap carries no mark at
+        # all - said here rather than left to read as 'no collisions'.
+        note += _CAPPED_NOTE
     return ok({"machines": rows, "count": len(rows), "truncated": truncated, "note": note})
 
 
@@ -198,10 +276,12 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
     if cerr:
         return error(cerr)
     # The resolver's own refusal is returned verbatim: it is the one place that knows whether the
-    # name was ABSENT or AMBIGUOUS, and only it can say which.
-    target, _names, serr = find_setup(cam, setup)
-    if not target:
+    # name was ABSENT or AMBIGUOUS, and only it can say which. Its walk is kept: an order-sensitive
+    # mode below needs the resolved setup's POSITION in the list it was matched against.
+    node, setup_nodes, serr = _resolve_setup(cam, setup)
+    if not node:
         return error(serr)
+    target = node.obj
 
     # ── validate EVERYTHING before applying anything (no half-edited setup) ──
     if want_rename:
@@ -239,6 +319,12 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
         if berr:
             return error(f"{arg}: {berr}")
         resolved_bodies[arg] = bodies
+
+    predecessor = None
+    if want_stock_mode == _PREVIOUS_SETUP:
+        predecessor, pserr = _preceding_setup(node, setup_nodes)
+        if pserr:
+            return error(pserr)
 
     resolved_machine = None
     if want_machine:
@@ -347,6 +433,9 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
                          f"Setup.stockMode now reads '{applied}'.")
         result["stock_mode_set"] = applied
         result["was_stock_mode"] = was
+        if predecessor is not None:
+            # absent = another mode, or the position or the predecessor's own name did not read
+            result["previous_setup_name"] = predecessor
 
     for arg, bodies in resolved_bodies.items():
         attr, key = _BODY_COLLECTIONS[arg]
@@ -378,6 +467,7 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
 
     if resolved_machine is not None:
         m_obj, m_label = resolved_machine
+        job_before = _job_type_reading(target)
         if machine_strip_simulation:
             # Measured on ONE simulation-ready library machine (Fusion 2705.1.4): Setup.machine
             # refused it, and stripping the simulation model from the TRANSIENT resolved copy (the
@@ -403,6 +493,12 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
             return error(f"Machine assignment did not take on setup '{setup}': set '{m_label}' but the "
                          f"setup now reports '{applied}'.")
         result["machine_set"] = applied
+        kept, jerr = _keep_job_type(target, job_before, applied)
+        if jerr:
+            return error(jerr)
+        if kept is not None:
+            # absent = the assignment left the setup's job type where it found it
+            result["job_type_kept"] = kept
 
     if resolved_wcs:
         wcs_set = {}

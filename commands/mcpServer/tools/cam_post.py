@@ -33,10 +33,10 @@ RETURNS = [
 
 _UNITS_CHOICE = _inputs.Choice("units", options=["document", "inch", "mm"], default="document")
 
-# NC-program output parameters live on the NCProgramInput/NCProgram CAMParameters collection - the
-# UI's Name / Comment / Output-folder fields - not on the .cps post OPTIONS in .postParameters.
-# Every set below is read back, so the applied value is reported rather than assumed.
-_P_NAME = "nc_program_name"
+# NC-program output parameters live on the NCProgramInput/NCProgram CAMParameters collection, not on
+# the .cps post OPTIONS in .postParameters; every set below is read back. The parameter SPELLED
+# nc_program_name holds the program NUMBER - the listing name is NCProgram.name, what itemByName takes.
+_P_NUMBER = "nc_program_name"
 _P_COMMENT = "nc_program_comment"
 _P_FOLDER = "nc_program_output_folder"
 _P_OPEN_EDITOR = "nc_program_openInEditor"
@@ -63,25 +63,39 @@ def _post_library():
     return safe(lambda: adsk.cam.CAMManager.get().libraryManager.postLibrary)
 
 
+def _post_folder_paths(personal, generic, base):
+    """The '<post folder>/<name>.cps' paths a BARE post name resolves against, personal first."""
+    return [folder.replace("\\", "/").rstrip("/") + "/" + base
+            for folder in (personal, generic) if folder]
+
+
 def _resolve_local_cps(cam, post):
-    """Resolve a LOCAL 'post' to a full .cps path that exists on disk. Accepts a full path to a .cps
-    file, or a bare name resolved against the personal then the installed (generic) post folder.
+    """Resolve a LOCAL 'post' to a full .cps path that exists on disk: a bare name against the
+    personal then the installed (generic) post folder, a path with a DIRECTORY part as written.
     Returns (path, None) or (None, error)."""
     post = post.replace("\\", "/")
     stem = post if post.lower().endswith(".cps") else post + ".cps"
     personal = safe(lambda: cam.personalPostFolder)
     generic = safe(lambda: cam.genericPostFolder)
-    candidates = []
-    if os.path.isabs(post) or "/" in post:
-        candidates.append(stem)                       # treat as a path as given
     base = os.path.basename(stem)
-    for folder in (personal, generic):
-        if folder:
-            candidates.append(folder.replace("\\", "/").rstrip("/") + "/" + base)
-    for c in candidates:
+    folders = _post_folder_paths(personal, generic, base)
+    if os.path.isabs(post) or "/" in post:
+        # A directory part is an ADDRESS, not a hint: falling back to the same basename in a post
+        # folder posts a .cps the caller never named, and only post_config shows the substitution.
+        if safe(lambda: os.path.isfile(stem), False):
+            return stem, None
+        instead = next((c for c in folders if safe(lambda c=c: os.path.isfile(c), False)), None)
+        # The folder paths stay OUT of this branch: they are long enough to blow the wire budget,
+        # and the bare-name refusal below names them for the caller this remedy sends there.
+        remedy = (f" '{instead}' carries that file name - pass that path, or the bare name '{base}'."
+                  if instead else
+                  f" No post folder holds a '{base}' either - pass the bare name to see where it "
+                  "was looked for.")
+        return None, f"Post config '{stem}' does not exist.{remedy} Nothing was posted."
+    for c in folders:
         if safe(lambda c=c: os.path.isfile(c), False):
             return c, None
-    return None, (f"Post config not found for '{post}'. Tried: {', '.join(candidates) or '(none)'}. "
+    return None, (f"Post config not found for '{post}'. Tried: {', '.join(folders) or '(none)'}. "
                   f"Provide a full .cps path, or a post name in the personal ({personal}) or installed "
                   f"({generic}) post folder. post_scope=fusion resolves the same name against the posts "
                   "this installation ships; cloud/hub against a deployed team post.")
@@ -267,11 +281,11 @@ def _stored_str_param(params, name):
     return _unquote(safe(lambda: p.expression))
 
 
-def _apply_output_params(params, program_name, out_dir, comment, units_key):
+def _apply_output_params(params, number, out_dir, comment, units_key):
     """Apply the NC-program output parameters onto a CAMParameters collection (an NCProgramInput's or an
-    existing NCProgram's). Returns (applied, unresolved, unit_note): applied is {param: read_back_value},
-    unresolved is the list of expected params this program did not expose, unit_note is a human string
-    when the requested output units did not apply (else None)."""
+    existing NCProgram's); `number` is the program NUMBER to write, or None to leave the one the
+    program holds. Returns (applied, unresolved, unit_note): applied is {param: read_back_value},
+    unresolved the expected params this program did not expose, unit_note why units did not apply."""
     applied = {}
     unresolved = []
 
@@ -281,7 +295,8 @@ def _apply_output_params(params, program_name, out_dir, comment, units_key):
         else:
             applied[name] = result
 
-    record(_P_NAME, _set_str_param(params, _P_NAME, str(program_name).strip()))
+    if number is not None:
+        record(_P_NUMBER, _set_str_param(params, _P_NUMBER, number))
     # Point the program at the folder the file-landed gate watches (forward slashes: robust in the
     # Fusion expression parser on every platform).
     record(_P_FOLDER, _set_str_param(params, _P_FOLDER, out_dir.replace("\\", "/")))
@@ -522,7 +537,8 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
         return error(cerr)
 
     if not (program_name or "").strip():
-        return error("Provide 'program_name' - the NC Program name or number (some posts require a number).")
+        return error("Provide 'program_name' - the NC Program's listing NAME; an existing program "
+                     "of that name is reused.")
     prog_name = str(program_name).strip()
 
     # Parsed before the reuse check: a 'setups' list IS a scope, so it decides as-is mode alongside
@@ -632,18 +648,22 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
         # serves both the assignment and the membership read-back below.
         scope_items = _operations_collection(cam, targets)
         requested_ops = _expand_ops(scope_items)
+        # The number a CREATE seeds from program_name, and only when the name IS one: a fanuc post
+        # refuses a non-numeric program number, and a RECONFIGURE never rewrites the number a
+        # machinist set - the listing name is what 'program_name' addresses.
+        new_number = prog_name if prog_name.isdigit() else None
         try:
             if reused:
                 program = existing
                 program.operations = scope_items
                 program.postConfiguration = post_config
-                applied, unresolved, unit_note = _apply_output_params(program.parameters, prog_name,
+                applied, unresolved, unit_note = _apply_output_params(program.parameters, None,
                                                                       out_dir, program_comment, units_key)
             else:
                 nc_input = cam.ncPrograms.createInput()
                 nc_input.displayName = prog_name
                 nc_input.operations = scope_items
-                applied, unresolved, unit_note = _apply_output_params(nc_input.parameters, prog_name,
+                applied, unresolved, unit_note = _apply_output_params(nc_input.parameters, new_number,
                                                                       out_dir, program_comment, units_key)
                 program = cam.ncPrograms.add(nc_input)
                 program.postConfiguration = post_config
@@ -746,6 +766,11 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
             "post_scope": post_scope_key,
             "units": units_key,
             "params_applied": applied,
+            # What the post will EMIT as the program number, read off the parameter either way -
+            # written here only on a create seeded from an all-digit program_name, so a caller
+            # meets the remedy on the 'program_name' input rather than in every post's note.
+            "program_number": (applied[_P_NUMBER] if _P_NUMBER in applied
+                               else _stored_str_param(program.parameters, _P_NUMBER)),
         })
         result.update(membership)
         if kind == "setups":
@@ -798,7 +823,7 @@ tool = (
     .add_input_property(_POST_SCOPE_CHOICE.name, _POST_SCOPE_CHOICE.schema())
     .add_input_property("output_folder", {"type": "string"})
     .add_input_property("program_name", {"type": "string",
-            "description": "An existing program with this name is reused."})
+            "description": "The program's listing name; an existing one is reused. The NUMBER a post emits is set by cam_set_nc_comment(set_number=...)."})
     .add_input_property(_UNITS_CHOICE.name, _UNITS_CHOICE.schema())
     .add_input_property("program_comment", {"type": "string"})
     .add_input_property("overwrite", {"type": "boolean"})

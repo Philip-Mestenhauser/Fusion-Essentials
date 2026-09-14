@@ -99,6 +99,15 @@ class TestFindTemplateByName:
         template, hint = ct._find_template_by_name(lib, "cloud", "Drill")
         assert template is None and "ambiguous" in hint
 
+    def test_one_asset_listed_under_two_folders_resolves(self):
+        # MEASURED on the Local library: one saved template is listed under the root AND under its
+        # own folder, both listings carrying the SAME asset url - one template, not an ambiguity.
+        lib = FakeLib("root", {"root": (["Gyro"], ["sub"]), "sub": (["Gyro"], [])})
+        lib.childAssetURLs = lambda folder_url: [_Url("lib://root/Gyro.f3dhsm-template")]
+        template, hint = ct._find_template_by_name(lib, "cloud", "Gyro")
+        assert template is not None and template.name == "Gyro"
+        assert hint is None
+
 
 # ── _walk_library: asset-URL matching + depth limit + node cap ──────────────────────────────────────
 # The string parse in _asset_url_for is a classic silent-wrong-string risk: it must pair a template
@@ -197,6 +206,39 @@ class TestWalkLibrary:
                                                          "lib://root/DRILL.f3dhsm-template"]
         assert all(t["url_basis"] == "folder_position" for t in node["templates"])
         assert "templates_collided" not in node
+
+    def test_one_asset_listed_in_two_folders_is_one_row(self):
+        # the Local library's own shape: the saved template is listed under the root AND under its
+        # folder, both rows carrying the same asset url. Two rows would publish one template twice
+        # and refuse its name as ambiguous everywhere it is resolved.
+        tree = {"root": (["Gyro"], ["sub"], ["lib://root/Gyro.f3dhsm-template"]),
+                "sub": (["Gyro"], [], ["lib://root/Gyro.f3dhsm-template"])}
+        node = ct._walk_library(_WalkLib(tree), _Url("root"), 0, 4, {"n": 0, "truncated": False})
+        assert [t["url"] for t in node["templates"]] == ["lib://root/Gyro.f3dhsm-template"]
+        assert node["folders"][0]["templates"] == []
+        assert node["folders"][0]["templates_collided"] == 1
+
+    def test_a_dropped_row_holds_the_rest_back_from_position_pairing(self):
+        # the folder lists a template already seen under the root AND one no leafName names. With
+        # the duplicate dropped the two lists are the same length again, and pairing by INDEX would
+        # hand the surviving template the dropped one's asset url.
+        tree = {"root": (["Gyro"], ["sub"], ["lib://root/Gyro.f3dhsm-template"]),
+                "sub": (["Gyro", "Bore"], [], ["lib://root/Gyro.f3dhsm-template"])}
+        node = ct._walk_library(_WalkLib(tree), _Url("root"), 0, 4, {"n": 0, "truncated": False})
+        sub = node["folders"][0]
+        assert [t["name"] for t in sub["templates"]] == ["Bore"]
+        assert sub["templates"][0]["url"] is None
+        assert "url_basis" not in sub["templates"][0]
+        assert sub["templates_collided"] == 1
+
+    def test_two_distinct_assets_in_two_folders_stay_two_rows(self):
+        # the boundary the walk-wide keying must not cross: two DISTINCT urls are two templates.
+        tree = {"root": (["Gyro"], ["sub"], ["lib://root/Gyro.f3dhsm-template"]),
+                "sub": (["Gyro"], [], ["lib://sub/Gyro.f3dhsm-template"])}
+        node = ct._walk_library(_WalkLib(tree), _Url("root"), 0, 4, {"n": 0, "truncated": False})
+        assert [t["url"] for t in node["templates"]] == ["lib://root/Gyro.f3dhsm-template"]
+        assert [t["url"] for t in node["folders"][0]["templates"]] == [
+            "lib://sub/Gyro.f3dhsm-template"]
 
     def test_descends_and_reports_nested_templates(self):
         tree = {"root": ([], ["sub"], []), "sub": (["Deep"], [], [])}

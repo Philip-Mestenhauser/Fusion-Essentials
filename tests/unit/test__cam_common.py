@@ -363,6 +363,18 @@ class TestErroredOpNeverReadsValid:
         drill = next(e for e in summary["exceptions"] if e["name"] == "Drill1")
         assert "operation_error" in drill["blocked_by"]
 
+    def test_a_nonfinite_toolpath_reads_the_same_bucket_in_both(self, install,
+                                                                operation_cast_passthrough):
+        # THE BITE: the setups slice walked its operations with no CAM product, so the operation
+        # whose machining time reads the saturated counter counted 'valid' on every bare cam_get()
+        # while the operations slice beside it called it nonfinite.
+        install(FakeCAM([FakeSetup("Setup1", ops=[FakeOperation("Cut"), FakeOperation("Groove1")])],
+                        machining_times={"Cut": 9.241742, "Groove1": 9223372036854.775}))
+        op_states = _payload(cr.get_cam_setups_handler())["setups"][0]["op_states"]
+        summary = _payload(cr.get_cam_operations_handler())["setups"][0]["summary"]
+        assert op_states == {"valid": 1, "nonfinite": 1}
+        assert summary["states"] == op_states           # no response contradicts itself
+
     def test_a_generating_op_reads_generating_in_both(self, install, operation_cast_passthrough):
         # the priority order is the row's too: generating outranks the stale operationState, so the
         # summary cannot bucket an op as out_of_date while op_states calls it generating.
@@ -765,6 +777,135 @@ class TestOpStateFactsMachiningTime:
         assert cam.machining_time_calls[0][1] == (100.0, 10.58, 1.5)
 
 
+def _nan_time_cam(seconds=60.0, feed=float("nan"), rapid=float("nan")):
+    """A CAM product whose per-operation MachiningTime carries the two DISTANCES beside the seconds
+    - the shared fake answers seconds alone, and the nonfinite reading needs all three."""
+    cam = make_cam()
+    cam.getMachiningTime = lambda op, *knobs: SimpleNamespace(
+        machiningTime=seconds, feedDistance=feed, rapidDistance=rapid)
+    return cam
+
+
+# The exact readings off 'G01 Single groove baseline' and the healthy 'GR01 Groove rough baseline'
+# on the C3 turning document: machiningTime is an int64 MICROSECOND counter, saturated on the one
+# whose motion did not compute, with both distances NaN beside it.
+_SATURATED = 9223372036854.775
+_HEALTHY_S, _HEALTHY_FEED, _HEALTHY_RAPID = 9.241742, 4.171371193221231, 18.54000015258789
+
+
+class TestNonfiniteToolpath:
+    """MEASURED on a single-groove and a part-off turning path: both generated with operationState
+    IsValid and hasToolpath true while their feed and rapid distances read NaN and the machining
+    time read the saturated counter. The post then failed on the NaN."""
+
+    def _op(self, name="Groove1"):
+        return FakeOperation(name, has_toolpath=True, operation_state=0)
+
+    def test_the_saturated_counter_is_not_published_as_a_number(self):
+        cam = make_cam(machining_times={"Groove1": _SATURATED})
+        facts = cc.op_state_facts(self._op(), cam)
+        assert facts["machining_time"] is None
+        assert facts["nonfinite_toolpath"] is True
+
+    def test_the_counter_is_finite_so_an_isfinite_gate_alone_misses_it(self):
+        # the trap: 2**63 / 1e6 is a perfectly ordinary float, and it is 292 thousand years
+        assert math.isfinite(_SATURATED) and _SATURATED == 2 ** 63 / 1e6
+        assert cc.saturated_time(_SATURATED) is True
+
+    def test_the_healthy_sibling_reads_as_the_duration_it_is(self):
+        # the discriminator, measured beside it: 9.24 s with both distances read
+        cam = make_cam(machining_times={"Groove1": _HEALTHY_S})
+        facts = cc.op_state_facts(self._op(), cam)
+        assert facts["machining_time"] == _HEALTHY_S
+        assert facts["nonfinite_toolpath"] is False
+        assert cc.saturated_time(_HEALTHY_S) is False
+
+    def test_the_sentinel_test_is_the_counter_not_a_band(self):
+        # a long real job is a MEASUREMENT: 100 hours, a decade, anything short of the counter
+        for seconds in (360000.0, 1e9, 3.15e8):
+            assert cc.saturated_time(seconds) is False, seconds
+        assert cc.saturated_time(_SATURATED - 0.5) is True      # the counter, a rounding off
+        assert cc.saturated_time(None) is False                 # an unread time is no verdict
+
+    def test_a_nan_distance_marks_the_path_even_where_the_seconds_read(self):
+        facts = cc.op_state_facts(self._op(), _nan_time_cam(seconds=60.0))
+        assert facts["machining_time"] == 60.0      # the seconds themselves were a measurement
+        assert facts["nonfinite_toolpath"] is True
+
+    def test_a_nonfinite_time_is_no_measurement_either(self):
+        # measured() drops a NaN time to None on its own, but the row still has to be MARKED
+        facts = cc.op_state_facts(self._op(), _nan_time_cam(seconds=float("nan")))
+        assert facts["machining_time"] is None and facts["nonfinite_toolpath"] is True
+
+    def test_a_still_generating_flag_does_not_take_the_bucket_from_it(self):
+        # MEASURED on that document: the two ops kept isGenerating true after generating, over a
+        # state reading valid with a toolpath - the settle-on-state carve-out, which must leave the
+        # nonfinite bucket alone rather than reporting the path as work in flight.
+        op = self._op()
+        op.isGenerating = True
+        facts = cc.op_state_facts(op, _nan_time_cam())
+        assert cc.op_primary_state(facts) == "nonfinite"
+
+    def test_a_distance_that_did_not_read_is_no_nan(self):
+        # the boundary of the same read: the shared fake's MachiningTime carries no distances at
+        # all, and an unreadable member is not a measurement of anything.
+        cam = make_cam(machining_times={"Groove1": 4.19})
+        assert cc.op_state_facts(self._op(), cam)["nonfinite_toolpath"] is False
+
+    def test_the_bucket_outranks_valid_and_only_valid(self):
+        cam = _nan_time_cam()
+        facts = cc.op_state_facts(self._op(), cam)
+        assert cc.op_primary_state(facts) == "nonfinite"
+        # a suppressed or errored op keeps its own bucket - the new one takes nothing from them
+        assert cc.op_primary_state(dict(facts, is_suppressed=True)) == "suppressed"
+        assert cc.op_primary_state(dict(facts, has_error=True)) == "error"
+
+    def test_an_empty_toolpath_claim_is_never_made_over_a_nonfinite_row(self):
+        # is_empty_toolpath keys on the 'valid' bucket, so a path with no readable duration cannot
+        # also be published as one that cut nothing.
+        facts = cc.op_state_facts(self._op(), _nan_time_cam())
+        assert cc.is_empty_toolpath(facts) is False
+
+    def test_the_tally_counts_it_outside_valid_and_names_it(self):
+        cam = _nan_time_cam()
+        tally = cc.op_state_tally([self._op()], cam)
+        assert tally["valid"] == 0 and tally["total"] == 1
+        assert tally["nonfinite"] == 1 and tally["nonfinite_names"] == ["Groove1"]
+
+    def test_without_the_cam_product_the_tally_reads_it_the_way_the_flags_do(self):
+        # the signal costs a platform computation per operation, so a caller that hands no CAM
+        # product gets no bucket - and must not get a fabricated one either.
+        tally = cc.op_state_tally([self._op()])
+        assert tally["valid"] == 1 and tally["nonfinite"] == 0
+
+    def test_the_readiness_verdict_names_the_operation_and_what_the_post_did(self):
+        line = cc.nonfinite_verdict("0 of 1 active ops valid", ["Groove1"])
+        assert line.startswith("BLOCKER:") and "Groove1" in line
+        assert "Number to be formatted is not a number (NaN)" in line
+        assert len(line) <= 400, len(line)
+
+
+class TestErroredVerdictNamesWhatIsBlocked:
+    """MEASURED in one session: an NC program reading hasError ('Invalid NC Program') was present
+    and a cam_post to ANOTHER program name landed - so an errored program blocks its own re-post,
+    not the job. An errored setup or operation blocks what it holds."""
+
+    def test_an_errored_program_does_not_claim_the_job_cannot_post(self):
+        line = cc.errored_verdict(0, 1, 0)
+        assert line == ("BLOCKER: 1 NC program(s) have errors - those programs will not re-post; "
+                        "other posts land.")
+
+    def test_an_errored_operation_names_the_operations(self):
+        assert cc.errored_verdict(0, 0, 2) == ("BLOCKER: 2 operation(s) have errors - those "
+                                               "operations will not post.")
+
+    def test_only_the_kinds_present_are_named_and_all_three_fit_the_budget(self):
+        line = cc.errored_verdict(1, 1, 3)
+        assert line.count("BLOCKER:") == 1 and line.count("have errors") == 3
+        assert len(line) <= 400, len(line)
+        assert "NC program" not in cc.errored_verdict(1, 0, 1)
+
+
 class _UnreadableSuppressionFlagOp(FakeOperation):
     """A warned operation whose isSuppressed read RAISES while operationState reads Suppressed.
     op_state_facts reads that flag through safe(read, False), so the facts it hands on carry
@@ -1027,6 +1168,17 @@ class TestOperationsSummaryErrorGate:
         # inside "'ready to post' is NOT established", so a substring check asserts nothing.
         assert summary["readiness"] == "2 of 2 active ops have valid toolpaths - ready to post."
         assert summary["exceptions"] == []
+
+    def test_a_nonfinite_row_is_neither_valid_nor_ready(self, monkeypatch):
+        # it reads toolpath_valid True with no error, which is the shape that made the sentence
+        # say "2 of 2 ... ready to post" over a path that cannot post at all.
+        monkeypatch.setattr(cr, "validity_basis", lambda: "manufacture_verified")
+        summary = cr._operations_summary([self._rec("Face1"),
+                                          self._rec("Groove1", state="nonfinite",
+                                                    blocked_by=["toolpath_nonfinite"])])
+        assert summary["readiness"].startswith("1 of 2 active ops have valid toolpaths")
+        assert "will not post" in summary["readiness"]
+        assert summary["states"] == {"valid": 1, "nonfinite": 1}
 
 
 class TestReadinessRemedyIsWordedFromTheExceptionKinds:
@@ -1619,7 +1771,9 @@ class TestDuplicateNameAddress:
         cam, setup, op = self._dup()
         one, err_one = cc.resolve_cam_node(cam, "Dup#1", kinds=_ANY_KIND)
         two, err_two = cc.resolve_cam_node(cam, "Dup#2", kinds=_ANY_KIND)
-        assert err_one is None and one.obj is setup and one.kind == "setup"
+        # == , not `is`: a setup read out of cam.setups is a NEW wrapper per read (measured), so
+        # identity across two walks answers False on the live product and in the shared fake.
+        assert err_one is None and one.obj == setup and one.kind == "setup"
         assert err_two is None and two.obj is op and two.kind == "operation"
 
     def test_an_ordinal_past_the_end_names_the_range_it_stops_at(self):
@@ -1648,7 +1802,7 @@ class TestDuplicateNameAddress:
         literal = FakeSetup("Dup#2", ops=[FakeOperation("Face1")])
         cam = make_cam(FakeSetup("Dup"), literal)
         node, err = cc.resolve_cam_node(cam, "Dup#2", kinds=("setup",), label="setup")
-        assert err is None and node.obj is literal
+        assert err is None and node.obj == literal
 
     def test_a_literal_name_that_also_reads_as_an_address_is_refused(self):
         # 'Dup#2' names one setup outright AND addresses the second of the two items named 'Dup'
@@ -1681,7 +1835,7 @@ class TestDuplicateNameAddress:
         node, err = cc.resolve_cam_node(cam, "Op#3#2", kinds=_ANY_KIND)
         assert err is None and node.obj is other.operations.item(0)
         first_node, first_err = cc.resolve_cam_node(cam, "Op#3#1", kinds=_ANY_KIND)
-        assert first_err is None and first_node.obj is setup
+        assert first_err is None and first_node.obj == setup
 
     def test_duplicate_operations_are_addressed_and_keep_their_paths(self):
         cam = make_cam(FakeSetup("Setup1", ops=[FakeOperation("Drill1")]),
@@ -2850,8 +3004,8 @@ class TestLiveReadinessConsumesSetupBlockers:
         assert sig["setups_errored"] == 1
         assert sig["samples"]["setup"] == {"name": "Setup1",
                                            "error": "Stock is smaller than the model."}
-        assert sig["readiness"] == ("BLOCKER: 1 setup(s) have errors - the job will not post "
-                                    "until fixed.")
+        assert sig["readiness"] == ("BLOCKER: 1 setup(s) have errors - those setups will not "
+                                    "post.")
 
     def test_only_the_blocked_setup_of_several_is_named(self, monkeypatch,
                                                         operation_cast_passthrough):
@@ -2937,14 +3091,14 @@ class TestOwningSetup:
         setup = FakeSetup("S1")
         install(FakeCAM([setup]))
         node = cc.walk_cam_tree(cc.get_cam()[0])[0]
-        assert node.kind == "setup" and cc.owning_setup(node) is setup
+        assert node.kind == "setup" and cc.owning_setup(node) == setup
 
     def test_an_op_nested_two_folders_deep_still_resolves_to_the_setup(self, install):
         inner = FakeCAMFolder("Inner", ops=[FakeOperation("Face1")])
         setup = FakeSetup("S1", folders=[FakeCAMFolder("Outer", folders=[inner])])
         install(FakeCAM([setup]))
         op_node = next(n for n in cc.walk_cam_tree(cc.get_cam()[0]) if n.name == "Face1")
-        assert cc.owning_setup(op_node) is setup
+        assert cc.owning_setup(op_node) == setup
 
     def test_a_parentless_non_setup_node_owns_no_setup(self):
         # nothing is invented for a node the walk did not build - the caller reads "no blockers",
@@ -4093,7 +4247,35 @@ class TestMachiningTimeScope:
         monkeypatch.setattr(cam, "getMachiningTime", _s1_total_raises)
         out = _payload(cr.get_machining_time_handler())
         assert out["total_excludes_setups"] == ["S1"]
-        assert "total_excludes_setups names every setup left out of it" in out["note"]
+        assert "total_excludes_setups names it" in out["note"]
+
+    def test_a_setup_with_nothing_to_time_is_named_without_the_wrong_sentence(
+            self, install, object_collection, operation_cast_passthrough):
+        # It contributes nothing to the document figure, so it is named there - but the
+        # setup_total_unavailable sentence describes a key this payload does not carry at all.
+        install(_MTCam([_MTSetup("S1"), _MTSetup("S2", has_valid_toolpath=False)]))
+        out = _payload(cr.get_machining_time_handler())
+        assert out["total_excludes_setups"] == ["S2"]
+        assert "setup_total_unavailable" not in out["note"]
+
+    def test_the_worst_composed_time_note_fits_the_wire_budget(self, install, object_collection,
+                                                               operation_cast_passthrough,
+                                                               monkeypatch):
+        # The note is assembled at run time from two pieces, so test_prose_budget measures neither
+        # composition - and the pieces it does not carry are all keys: assumptions, the per-row
+        # nonfinite/empty_toolpath marks, excluded_suppressed and total_excludes_operations.
+        cam = _MTCam([_MTSetup("S1")])
+        install(cam)
+        whole = cam.getMachiningTime
+
+        def _total_raises(obj, *knobs):
+            if not isinstance(obj, FakeOperation):
+                raise RuntimeError("3 : Machining time could not be calculated.")
+            return whole(obj, *knobs)
+        monkeypatch.setattr(cam, "getMachiningTime", _total_raises)
+        note = _payload(cr.get_machining_time_handler())["note"]
+        assert "do not sum" in note and "setup_total_unavailable" in note
+        assert len(note) <= 400, len(note)          # test_prose_budget.NOTE_BUDGET_CHARS
 
     def test_a_job_whose_setups_all_totalled_names_no_exclusions(self, install, object_collection,
                                                                  operation_cast_passthrough):
@@ -4179,7 +4361,9 @@ class TestMachiningTimeExcludesSuppressed:
         cam = self._cam(install, [_MTOp("Cut", valid=True)])
         out = _payload(cr.get_machining_time_handler())
         assert "0 of 1" in out["setups"][0]["error"]
-        assert cam.calls == []
+        # the per-OPERATION pass runs before the collection is built (it decides what goes in it);
+        # what must never happen is a fallback that times the collection or the Setup anyway
+        assert all(isinstance(c[0], FakeOperation) for c in cam.calls)
 
     def test_an_empty_toolpath_op_is_named_not_timed(self, install, object_collection,
                                                      operation_cast_passthrough):
@@ -4228,7 +4412,10 @@ class TestMachiningTimeExcludesSuppressed:
                                                              operation_cast_passthrough):
         self._cam(install, [_MTOp("Cut", valid=True)])
         out = _payload(cr.get_machining_time_handler())
-        assert "do not sum" in out["note"] and "Suppressed operations are left out" in out["note"]
+        # the ONE fact no key states; the knobs ride 'assumptions' and the exclusions their own keys
+        assert "do not sum" in out["note"]
+        assert out["assumptions"]["feed_scale_percent"] == 100.0
+        assert out["setups"][0]["excluded_suppressed"] == 0
 
     # --- CAM-18: BOTH totals ship, and the note says what each covers ---
 
@@ -4252,6 +4439,75 @@ class TestMachiningTimeExcludesSuppressed:
         rec = _payload(cr.get_machining_time_handler())["setups"][0]
         assert rec["operations_time_sum_seconds"] == 180.0
         assert rec["operations_time_summed"] == 3
+
+    def _saturating(self, cam, monkeypatch, *names, collection_too=False):
+        """Make the per-operation call for `names` - and optionally the whole-collection call -
+        answer the readings measured on the groove: the saturated counter and NaN distances."""
+        whole = cam.getMachiningTime
+
+        def read(obj, *knobs):
+            if getattr(obj, "name", None) in names:
+                return _MTResult(_SATURATED, feed_distance=float("nan"),
+                                 rapid_distance=float("nan"))
+            if collection_too and not isinstance(obj, FakeOperation):
+                mt = _MTResult(_SATURATED, feed_distance=float("nan"),
+                               rapid_distance=float("nan"), tool_changes=17)
+                mt.totalFeedTime = float("nan")     # the two the loaded slice put on the wire raw
+                mt.totalRapidTime = float("nan")
+                return mt
+            return whole(obj, *knobs)
+        monkeypatch.setattr(cam, "getMachiningTime", read)
+
+    def test_a_nonfinite_row_carries_no_figure_and_is_not_summed(
+            self, install, object_collection, operation_cast_passthrough, monkeypatch):
+        # MEASURED on a groove that generated with NaN distances: its seconds read the saturated
+        # counter, which would enter the sum as 9223372036854.8 s and read as a duration.
+        cam = self._cam(install, [_MTOp("Cut", valid=True), _MTOp("Groove1", valid=True)])
+        self._saturating(cam, monkeypatch, "Groove1")
+        rec = _payload(cr.get_machining_time_handler())["setups"][0]
+        rows = {r["operation"]: r for r in rec["operations"]}
+        assert rows["Groove1"] == {"operation": "Groove1", "machining_time_seconds": None,
+                                   "nonfinite": True}
+        assert rec["operations_time_summed"] == 1 and rec["operations_time_sum_seconds"] == 60.0
+
+    def test_the_setup_figure_is_timed_without_it_and_names_what_it_held_out(
+            self, install, object_collection, operation_cast_passthrough, monkeypatch):
+        # MEASURED: the whole-collection call over a setup HOLDING such an operation answered the
+        # saturated counter too - so the one operation is held out of the collection and named.
+        cam = self._cam(install, [_MTOp("Cut", valid=True), _MTOp("Groove1", valid=True)])
+        self._saturating(cam, monkeypatch, "Groove1")
+        out = _payload(cr.get_machining_time_handler())
+        rec = out["setups"][0]
+        assert rec["total_excludes_operations"] == ["Groove1"]
+        assert [op.name for op in object_collection[0]] == ["Cut"]   # the collection it timed
+        assert rec["machining_time_seconds"] == 120.0 and "nonfinite" not in rec
+        # the key carries the fact - the row it names carries nonfinite, and the note stays inside
+        # its budget rather than restating either
+        assert rec["operations"][1] == {"operation": "Groove1", "machining_time_seconds": None,
+                                        "nonfinite": True}
+
+    def test_a_setup_figure_that_reads_the_counter_is_published_as_no_number(
+            self, install, object_collection, operation_cast_passthrough, monkeypatch):
+        # the backstop: whatever the per-operation pass saw, a whole-collection reading that is not
+        # a measurement may not be published as one - nor may it enter the document total.
+        cam = self._cam(install, [_MTOp("Cut", valid=True)])
+        self._saturating(cam, monkeypatch, collection_too=True)
+        out = _payload(cr.get_machining_time_handler())
+        rec = out["setups"][0]
+        assert rec["machining_time_seconds"] is None and rec["nonfinite"] is True
+        assert "machining_time_hms" not in rec
+        assert rec["feed_time_seconds"] is None and rec["rapid_time_seconds"] is None
+        assert out["total_machining_time_seconds"] == 0.0
+        assert out["total_excludes_setups"] == ["S1"]
+
+    def test_no_reading_reaches_the_wire_as_a_bare_nan_token(
+            self, install, object_collection, operation_cast_passthrough, monkeypatch):
+        # MEASURED on the loaded build: "feed_time_seconds": NaN crossed the wire (json.dumps
+        # allow_nan), which a strict JSON parser rejects outright.
+        cam = self._cam(install, [_MTOp("Cut", valid=True), _MTOp("Groove1", valid=True)])
+        self._saturating(cam, monkeypatch, "Groove1", collection_too=True)
+        text = cr.get_machining_time_handler()["content"][0]["text"]
+        assert "NaN" not in text and "Infinity" not in text
 
     def test_an_empty_toolpath_row_contributes_nothing_and_is_not_counted(
             self, install, object_collection, operation_cast_passthrough):
@@ -4348,7 +4604,8 @@ class TestMachiningTimeExcludesSuppressed:
         cam = self._cam(install, [_MTOp("Cut", valid=True)])
         out = _payload(cr.get_machining_time_handler())
         assert "Could not build the operation collection" in out["setups"][0]["error"]
-        assert cam.calls == []          # never falls back to timing the Setup object
+        # never falls back to timing the Setup object - the only calls are the per-operation pass
+        assert all(isinstance(c[0], FakeOperation) for c in cam.calls)
 
 
 # --- the async-generation registry: the handle cam_get_status reads, and what keeps a launch alive ---
@@ -5049,6 +5306,9 @@ class TestMachineCatalog:
         assert err is None and len(rows) == 2
         assert all(r["name_in_both_locations"] is True for r in rows)
         assert {r["location"] for r in rows} == {"local", "fusion360"}
+        # ...and NOT the description collision: both copies read one vendor|model, so that address
+        # would not tell them apart, and the two-library flag is the only true thing to say.
+        assert not any("description_shared" in r for r in rows)
 
     def test_two_rows_in_ONE_location_sharing_a_name_are_not_a_collision(self, monkeypatch,
                                                                         install_library):
@@ -5061,6 +5321,14 @@ class TestMachineCatalog:
         assert err is None and len(rows) == 2
         assert not any("name_in_both_locations" in r for r in rows)
         assert {r["location"] for r in rows} == {"local"}
+        # ...but it IS the description collision: 'name' is the description, and two distinct
+        # machines carrying one is the pair resolve_machine refuses by name.
+        assert all(r["description_shared"] is True for r in rows)
+
+    def test_a_description_one_machine_holds_alone_is_left_unflagged(self, install_library):
+        install_library(_machine_lib(self._pools()))
+        rows, _truncated, err = cc.machine_catalog()
+        assert err is None and not any("description_shared" in r for r in rows)
 
     def test_an_unreachable_library_is_an_error_not_an_empty_catalog(self, monkeypatch):
         def _boom():

@@ -41,8 +41,8 @@ class _Param(FakeCAMParameter):
     text - mirroring live ModelParameter behavior for a string parameter set that way
     (tool_productId/tool_vendor). A plain numeric/unquoted expression leaves .value untouched, same as
     every other existing test in this file expects."""
-    def __init__(self, name, expr):
-        super().__init__(name, expr, value=expr)
+    def __init__(self, name, expr, editable=True):
+        super().__init__(name, expr, value=expr, editable=editable)
 
     @FakeCAMParameter.expression.setter
     def expression(self, v):
@@ -74,10 +74,10 @@ def _evaluate(expr):
     return float(m.group(1)) * 25.4 if m else None
 
 
-def _NumParam(name, expr):
+def _NumParam(name, expr, editable=True):
     """A numeric DIMENSION parameter, whose .value reads a number from the start the way live does -
     _Param seeds .value with the expression TEXT, which a dimension read cannot use."""
-    p = _Param(name, expr)
+    p = _Param(name, expr, editable=editable)
     p.value = _val(_evaluate(expr))
     return p
 
@@ -102,6 +102,59 @@ class _TrackingParam(_Param):
 def _Params(d):
     """A tool's or preset's parameters from {name: expression}."""
     return FakeCAMParameters([_Param(k, v) for k, v in d.items()])
+
+
+# MEASURED (2705.1.15, five shipped samples read off documentToolLibrary): every tool carries the
+# five family flags, whose .value.value answers a real Python bool - at most one true, and a PROBE
+# reads all five false. The flag is the only signal saying which row a 'diameter' override writes.
+_FAMILY_FLAGS = ("tool_isJet", "tool_isMill", "tool_isDrill", "tool_isTurning", "tool_isDepositing")
+
+
+class _Flag(_Param):
+    """A family flag: .value.value answers a real bool, which is what the samples read."""
+
+    def __init__(self, name, on):
+        super().__init__(name, "true" if on else "false")
+        self.value = _val(bool(on))
+
+
+def _family_rows(family):
+    """The whole flag block - true on `family` (None for a probe, which reads all five false)."""
+    return [_Flag(f, f == family) for f in _FAMILY_FLAGS]
+
+
+def _with_family(params, family):
+    """`params` plus that flag block, as a built tool carries it."""
+    return FakeCAMParameters(list(params) + _family_rows(family))
+
+
+# The five shipped samples as measured: each one's flag, the jet columns' PRESENCE and editability,
+# and the cutting diameter - the insert's positive and editable, the waterjet's 0.0 and editable
+# (editability is not relevance), the probe's the real stylus size under no flag at all.
+_SAMPLE_SHAPES = {
+    "waterjet": ("tool_isJet", (("tool_diameter", "0.0", True),
+                                ("tool_nozzleDiameter", "0.15", True),
+                                ("tool_kerfWidth", "0.05", True))),
+    "ball end mill": ("tool_isMill", (("tool_diameter", "0.8", True),
+                                      ("tool_shoulderDiameter", "0.8", True),
+                                      ("tool_nozzleDiameter", "0.0", False),
+                                      ("tool_kerfWidth", "0.0", False))),
+    "drill": ("tool_isDrill", (("tool_diameter", "0.035", True),
+                               ("tool_nozzleDiameter", "0.0", False))),
+    # the insert carries NO jet column at all, and its own size rows read non-editable
+    "turning general": ("tool_isTurning", (("tool_diameter", "0.9525", True),
+                                           ("tool_insertSize", "0.967", False),
+                                           ("tool_cuttingWidth", "2.5", False))),
+    "probe": (None, (("tool_diameter", "0.6", True),
+                     ("tool_nozzleDiameter", "0.0", False))),
+}
+
+
+def _sample_shape(kind):
+    """One measured sample's parameters, flag block included - built fresh per call."""
+    family, rows = _SAMPLE_SHAPES[kind]
+    return _with_family([_NumParam(name, expr, editable=ed) for name, expr, ed in rows]
+                        + [_Param("tool_number", "0")], family)
 
 
 def _replace(parameters, param):
@@ -158,13 +211,15 @@ class _Tool(FakeTool):
     description), the presets carrying this tool's own cutting data, and toJson - the text a copy is
     rebuilt from. `desc` is this file's shorthand for the description it was built under."""
 
-    def __init__(self, desc, preset_params=None, **params):
+    def __init__(self, desc, preset_params=None, family="tool_isMill", **params):
         params.setdefault("tool_description", desc)
         params.setdefault("tool_diameter", params.get("tool_diameter", "1.0"))
         params.setdefault("tool_productId", "")
         params.setdefault("tool_vendor", "")
         params.setdefault("tool_number", params.get("tool_number", "0"))
-        super().__init__(description=desc, parameters=_Params(params))
+        super().__init__(description=desc, parameters=FakeCAMParameters(
+            [_Param(k, v) for k, v in params.items()]
+            + [f for f in _family_rows(family) if f.name not in params]))
         # the cutting data this tool's presets carry (mill unless the test says otherwise)
         self.preset_params = dict(preset_params if preset_params is not None else _MILL_CUTTING_DATA)
         self.presets = _Presets(owner=self)
@@ -257,8 +312,10 @@ _SRC_URL = "systemlibraryroot://Samples/Milling Tools (Metric)"
 
 def _install(monkeypatch, target=None, src=None):
     if target is None:
-        target = _Target(tools=[_Tool("12mm Flat", tool_numberOfFlutes="3"),
-                                _Tool("6mm Ball", tool_numberOfFlutes="2")])
+        # distinct cutter sizes, and neither one a size the sizing tests request: a re-read that
+        # landed on a library tool instead of the added one then reads a number nothing asked for.
+        target = _Target(tools=[_Tool("12mm Flat", tool_numberOfFlutes="3", tool_diameter="1.2"),
+                                _Tool("6mm Ball", tool_numberOfFlutes="2", tool_diameter="0.6")])
     src = src if src is not None else _SrcLib([_Tool("A"), _Tool("B"), _Tool("C")])
     monkeypatch.setattr(ct, "_resolve_target", lambda scope, library: (target, None))
     monkeypatch.setattr(ct, "_source_tool", lambda url, idx: (src.item(idx), None) if 0 <= idx < src.count
@@ -468,20 +525,112 @@ class TestAddRich:
         assert res["isError"] is True and "preset" in res["message"].lower()
         assert len(tgt.tools) == 2          # nothing was added
 
-    def test_missing_diameter_param_errors_not_silent_drop(self, monkeypatch):
-        # A tool without a tool_diameter parameter cannot take the requested override - that is
-        # an error, not a tool silently added at its default diameter.
+    def test_no_flag_and_a_locked_cutting_diameter_is_refused_not_guessed_at(self, monkeypatch):
+        # No flag true is the PROBE case, which falls back to the cutting diameter - but only where
+        # that row reads editable. A locked one leaves nothing this call read as the tool's size,
+        # and writing it anyway is the reported-size lie the selector exists to stop.
         tgt = _install(monkeypatch)
 
         def _from_json(js):
             t = _Tool(json.loads(js).get("description", "built"))
-            t.parameters = _Params({})      # no tool_diameter parameter
+            t.parameters = _with_family(
+                [_NumParam("tool_diameter", "1.0", editable=False)], None)
             return t
 
         monkeypatch.setattr(ct, "_tool_from_json", _from_json)
         res = ct.handler(action="add", scope="cloud", library="L",
                          add_tools=[{"from_type": "drill", "diameter": 8}])
-        assert res["isError"] is True and "tool_diameter" in res["message"]
+        assert res["isError"] is True and "reads false on this tool" in res["message"]
+        assert "does not read isEditable true" in res["message"]
+        for flag in _FAMILY_FLAGS:
+            assert flag in res["message"]
+        assert len(tgt.tools) == 2          # nothing was added
+
+    def test_a_copy_whose_family_flags_are_absent_is_refused_not_sized(self, monkeypatch):
+        # A {library_url, index} copy out of a library the shipped samples do not cover carries no
+        # family flags at all. An ABSENT flag is not a false one: taking the probe's fallback there
+        # sizes an insert on the cutting diameter it is not cut by, and says nothing about it.
+        tgt = _install(monkeypatch)
+
+        def _from_json(js):
+            t = _Tool(json.loads(js).get("description", "built"))
+            t.parameters = FakeCAMParameters([_NumParam("tool_diameter", "0.9525"),
+                                              _NumParam("tool_insertSize", "0.967"),
+                                              _Param("tool_number", "0")])
+            return t
+
+        monkeypatch.setattr(ct, "_tool_from_json", _from_json)
+        res = ct.handler(action="add", scope="cloud", library="L",
+                         add_tools=[{"library_url": "u", "index": 0, "diameter": "1 mm"}])
+        assert res["isError"] is True and "did not read on this tool" in res["message"]
+        for flag in _FAMILY_FLAGS:
+            assert flag in res["message"]
+        assert len(tgt.tools) == 2 and tgt.persisted == 0
+
+    def test_a_cutting_diameter_whose_editability_will_not_read_is_refused(self, monkeypatch):
+        # read_flag keeps True/False/None apart, and the fallback asks for True: an isEditable that
+        # RAISED is not an editable row, and sizing on it is the guess the fallback exists to avoid.
+        class _UnreadableEditable(_Param):
+            @property
+            def isEditable(self):
+                raise RuntimeError("isEditable unreadable")
+
+            @isEditable.setter
+            def isEditable(self, value):
+                pass
+
+        tgt = _install(monkeypatch)
+
+        def _from_json(js):
+            t = _Tool(json.loads(js).get("description", "built"))
+            t.parameters = _with_family([_UnreadableEditable("tool_diameter", "0.6"),
+                                         _Param("tool_number", "0")], None)
+            return t
+
+        monkeypatch.setattr(ct, "_tool_from_json", _from_json)
+        res = ct.handler(action="add", scope="cloud", library="L",
+                         add_tools=[{"from_type": "drill", "diameter": "0.4"}])
+        assert res["isError"] is True and "does not read isEditable true" in res["message"]
+        assert len(tgt.tools) == 2 and "sized" not in res["message"]
+
+    def test_a_size_the_row_swallows_is_an_error_not_a_reported_size(self, monkeypatch):
+        # The nozzle branch left the write ungated: a row that takes the assignment and keeps what
+        # it held would publish a 'sized' row for a size the tool never took.
+        class _Sticky(_Param):
+            @FakeCAMParameter.expression.setter
+            def expression(self, value):
+                pass
+
+        tgt = _install(monkeypatch)
+
+        def _from_json(js):
+            t = _Tool(json.loads(js).get("description", "built"))
+            t.parameters = _with_family([_NumParam("tool_diameter", "0.0"),
+                                         _Sticky("tool_nozzleDiameter", "0.15"),
+                                         _Param("tool_number", "0")], "tool_isJet")
+            return t
+
+        monkeypatch.setattr(ct, "_tool_from_json", _from_json)
+        res = ct.handler(action="add", scope="cloud", library="L",
+                         add_tools=[{"from_type": "drill", "diameter": "0.1"}])
+        assert res["isError"] is True and "the size did not land" in res["message"]
+        assert "tool_nozzleDiameter" in res["message"] and len(tgt.tools) == 2
+
+    def test_a_family_whose_size_row_is_absent_errors_not_silent_drop(self, monkeypatch):
+        # The flag says the mill is sized on its cutting diameter; if that column is gone the
+        # override cannot apply, and adding the tool without it would drop the request silently.
+        tgt = _install(monkeypatch)
+
+        def _from_json(js):
+            t = _Tool(json.loads(js).get("description", "built"))
+            t.parameters = _with_family([], "tool_isMill")        # flags only, no tool_diameter
+            return t
+
+        monkeypatch.setattr(ct, "_tool_from_json", _from_json)
+        res = ct.handler(action="add", scope="cloud", library="L",
+                         add_tools=[{"from_type": "drill", "diameter": 8}])
+        assert res["isError"] is True
+        assert "tool_isMill true but carries no 'tool_diameter'" in res["message"]
         assert len(tgt.tools) == 2          # nothing was added
 
     def test_a_plain_shank_sample_carries_its_shoulder_to_the_new_diameter(self, monkeypatch):
@@ -491,9 +640,10 @@ class TestAddRich:
 
         def _from_json(js):
             t = _Tool(json.loads(js).get("description", "built"))
-            t.parameters = FakeCAMParameters([_NumParam("tool_diameter", "1.2"),
-                                              _NumParam("tool_shoulderDiameter", "1.2"),
-                                              _Param("tool_number", "0")])
+            t.parameters = _with_family([_NumParam("tool_diameter", "1.2"),
+                                         _NumParam("tool_shoulderDiameter", "1.2"),
+                                         _NumParam("tool_nozzleDiameter", "0.01"),
+                                         _Param("tool_number", "0")], "tool_isMill")
             return t
 
         monkeypatch.setattr(ct, "_tool_from_json", _from_json)
@@ -501,7 +651,11 @@ class TestAddRich:
                                   add_tools=[{"from_type": "flat end mill", "diameter": "1.0"}]))
         built = tgt.tools[-1]
         assert built.parameters.itemByName("tool_shoulderDiameter").expression == "1.0"
-        assert out["sized"] == [{"entry": 0, "diameter_mm": 10.0, "shoulder_diameter_mm": 10.0}]
+        # the nozzle column every mill also carries is left where the sample had it
+        assert built.parameters.itemByName("tool_nozzleDiameter").expression == "0.01"
+        assert out["sized"] == [{"entry": 0, "sized_field": "tool_diameter",
+                                 "reread_expression": "1.0",
+                                 "diameter_mm": 10.0, "shoulder_diameter_mm": 10.0}]
         assert "stepped shoulder" not in out["note"]
 
     def test_a_stepped_sample_keeps_its_own_shoulder_and_the_note_says_so(self, monkeypatch):
@@ -511,9 +665,9 @@ class TestAddRich:
 
         def _from_json(js):
             t = _Tool(json.loads(js).get("description", "built"))
-            t.parameters = FakeCAMParameters([_NumParam("tool_diameter", "0.6"),
-                                              _NumParam("tool_shoulderDiameter", "1.2"),
-                                              _Param("tool_number", "0")])
+            t.parameters = _with_family([_NumParam("tool_diameter", "0.6"),
+                                         _NumParam("tool_shoulderDiameter", "1.2"),
+                                         _Param("tool_number", "0")], "tool_isMill")
             return t
 
         monkeypatch.setattr(ct, "_tool_from_json", _from_json)
@@ -521,7 +675,9 @@ class TestAddRich:
                                   add_tools=[{"from_type": "flat end mill", "diameter": "1.0"}]))
         built = tgt.tools[-1]
         assert built.parameters.itemByName("tool_shoulderDiameter").expression == "1.2"
-        assert out["sized"] == [{"entry": 0, "diameter_mm": 10.0, "shoulder_diameter_mm": 12.0}]
+        assert out["sized"] == [{"entry": 0, "sized_field": "tool_diameter",
+                                 "reread_expression": "1.0",
+                                 "diameter_mm": 10.0, "shoulder_diameter_mm": 12.0}]
         assert "stepped shoulder" in out["note"]
 
     def test_a_shoulder_that_FOLLOWS_the_cutter_is_left_as_the_formula_it_holds(self, monkeypatch):
@@ -533,9 +689,9 @@ class TestAddRich:
         def _from_json(js):
             t = _Tool(json.loads(js).get("description", "built"))
             dia = _NumParam("tool_diameter", "1.2")
-            t.parameters = FakeCAMParameters([dia,
-                                              _TrackingParam("tool_shoulderDiameter", dia),
-                                              _Param("tool_number", "0")])
+            t.parameters = _with_family([dia,
+                                         _TrackingParam("tool_shoulderDiameter", dia),
+                                         _Param("tool_number", "0")], "tool_isMill")
             return t
 
         monkeypatch.setattr(ct, "_tool_from_json", _from_json)
@@ -543,7 +699,9 @@ class TestAddRich:
                                   add_tools=[{"from_type": "flat end mill", "diameter": "1.0"}]))
         built = tgt.tools[-1]
         assert built.parameters.itemByName("tool_shoulderDiameter").expression == "tool_diameter"
-        assert out["sized"] == [{"entry": 0, "diameter_mm": 10.0, "shoulder_diameter_mm": 10.0}]
+        assert out["sized"] == [{"entry": 0, "sized_field": "tool_diameter",
+                                 "reread_expression": "1.0",
+                                 "diameter_mm": 10.0, "shoulder_diameter_mm": 10.0}]
 
     def test_a_diameter_that_failed_to_evaluate_is_not_read_as_a_stepped_sample(self, monkeypatch):
         # a cutter whose expression will not evaluate reads a finite 0.0; taken as a number it
@@ -554,20 +712,97 @@ class TestAddRich:
             t = _Tool(json.loads(js).get("description", "built"))
             broken = _NumParam("tool_diameter", "1.2")
             broken._error = "Failed to evaluate expression."
-            t.parameters = FakeCAMParameters([broken,
-                                              _NumParam("tool_shoulderDiameter", "1.2"),
-                                              _Param("tool_number", "0")])
+            t.parameters = _with_family([broken,
+                                         _NumParam("tool_shoulderDiameter", "1.2"),
+                                         _Param("tool_number", "0")], "tool_isMill")
             return t
 
         monkeypatch.setattr(ct, "_tool_from_json", _from_json)
         out = _payload(ct.handler(action="add", scope="cloud", library="L",
                                   add_tools=[{"from_type": "flat end mill", "diameter": "1.0"}]))
         # the unreadable cutter publishes null, never the 0 its value holds
-        assert out["sized"] == [{"entry": 0, "diameter_mm": None, "shoulder_diameter_mm": 12.0}]
+        assert out["sized"] == [{"entry": 0, "sized_field": "tool_diameter",
+                                 "reread_expression": "1.0",
+                                 "diameter_mm": None, "shoulder_diameter_mm": 12.0}]
         assert len(tgt.tools) == 3          # the add still landed; only the carry was withheld
         # a null beside a number is a read that did not answer - calling it a stepped sample would
         # hand back a remedy for a shoulder nothing established.
         assert "stepped shoulder" not in out["note"]
+
+    def _sample(self, monkeypatch, kind):
+        """The tool a clone of one MEASURED shipped sample builds to, behind the add's own seam."""
+        tgt = _install(monkeypatch)
+
+        def _from_json(js):
+            t = _Tool(json.loads(js).get("description", "built"))
+            t.parameters = _sample_shape(kind)
+            return t
+
+        monkeypatch.setattr(ct, "_tool_from_json", _from_json)
+        monkeypatch.setattr(ct, "_sample_for_type",
+                            lambda ty: (_Tool("sample-" + ty, tool_type=ty), None))
+        return tgt
+
+    def test_a_jet_is_sized_by_its_nozzle_though_its_cutting_diameter_reads_editable(
+            self, monkeypatch):
+        # MEASURED: the waterjet's tool_diameter reads 0.0 and isEditable TRUE while its real size
+        # is tool_nozzleDiameter 1.5 mm. Editability is not relevance and neither is presence - the
+        # flag is, so a column that would take the write is still not the row to write.
+        tgt = self._sample(monkeypatch, "waterjet")
+        out = _payload(ct.handler(action="add", scope="cloud", library="L",
+                                  add_tools=[{"from_type": "waterjet", "diameter": "0.1"}]))
+        built = tgt.tools[-1]
+        assert built.parameters.itemByName("tool_nozzleDiameter").expression == "0.1"
+        assert built.parameters.itemByName("tool_diameter").expression == "0.0"
+        assert out["sized"] == [{"entry": 0, "sized_field": "tool_nozzleDiameter",
+                                 "reread_expression": "0.1", "diameter_mm": 1.0}]
+
+    def test_a_mill_is_sized_by_its_cutter_though_it_carries_a_nozzle_column(self, monkeypatch):
+        # MEASURED: the ball end mill carries tool_nozzleDiameter (expr '0.0', isEditable FALSE)
+        # beside its 8 mm cutter - the jet column's PRESENCE must not pull the size onto it.
+        tgt = self._sample(monkeypatch, "ball end mill")
+        out = _payload(ct.handler(action="add", scope="cloud", library="L",
+                                  add_tools=[{"from_type": "ball end mill", "diameter": "1.0"}]))
+        built = tgt.tools[-1]
+        assert built.parameters.itemByName("tool_nozzleDiameter").expression == "0.0"
+        assert out["sized"][0]["sized_field"] == "tool_diameter"
+        assert out["sized"][0]["diameter_mm"] == 10.0
+
+    def test_a_turning_insert_refuses_the_diameter_before_the_add(self, monkeypatch):
+        # MEASURED: the insert reads tool_diameter 9.525 mm, POSITIVE and editable, beside the rows
+        # it is really sized on (tool_insertSize 9.67, tool_cuttingWidth 25, both non-editable) and
+        # carries no nozzle column at all. Writing that cutter would publish a size it is not cut by.
+        tgt = self._sample(monkeypatch, "turning general")
+        res = ct.handler(action="add", scope="cloud", library="L",
+                         add_tools=[{"from_type": "turning general", "diameter": "1 mm"}])
+        assert res["isError"] is True
+        assert "reads tool_isTurning true" in res["message"]
+        assert "name spells a size" in res["message"] and "action='edit'" in res["message"]
+        for row in ("tool_insertSize", "tool_cuttingWidth"):
+            assert row in res["message"]
+        assert len(tgt.tools) == 2 and tgt.persisted == 0     # nothing added, nothing persisted
+
+    def test_the_re_read_finds_the_tool_by_its_assigned_number_after_a_reorder(self, monkeypatch):
+        # A persist may order the library its own way (the Target docstring's own contract), so a
+        # POSITIONAL re-read answers whichever tool landed at that index - here a library cutter of
+        # a different size. The number this call assigned is what addresses the tool it added.
+        tgt = self._sample(monkeypatch, "ball end mill")
+        fresh = tgt._fresh
+        tgt._fresh = lambda: list(reversed(fresh()))
+        out = _payload(ct.handler(action="add", scope="cloud", library="L",
+                                  add_tools=[{"from_type": "ball end mill", "diameter": "1.0"}]))
+        assert out["sized"][0]["reread_expression"] == "1.0"
+
+    def test_a_probe_reads_no_family_flag_and_is_sized_on_its_editable_stylus(self, monkeypatch):
+        # MEASURED: the probe reads all five flags FALSE and its tool_diameter is the 6 mm stylus,
+        # editable - a real size. Refusing it would block the one type the table cannot name, so
+        # the no-flag case falls back to that row exactly when it reads editable.
+        tgt = self._sample(monkeypatch, "probe")
+        out = _payload(ct.handler(action="add", scope="cloud", library="L",
+                                  add_tools=[{"from_type": "probe", "diameter": "0.4"}]))
+        assert tgt.tools[-1].parameters.itemByName("tool_diameter").expression == "0.4"
+        assert out["sized"][0]["sized_field"] == "tool_diameter"
+        assert out["sized"][0]["diameter_mm"] == 4.0
 
     def test_an_add_with_no_diameter_publishes_no_sized_rows(self, monkeypatch):
         _install(monkeypatch)
@@ -600,7 +835,8 @@ class TestAddRich:
             def __init__(self, desc, **params):
                 super().__init__(desc, **params)
                 self.parameters = _LockedParams(
-                    [_Param("tool_diameter", "1.0"), _Param("tool_description", desc)])
+                    [_Param("tool_diameter", "1.0"), _Param("tool_description", desc)]
+                    + list(_family_rows("tool_isMill")))
 
         _install(monkeypatch)
         monkeypatch.setattr(ct, "_tool_from_json", lambda js: _LockedTool("sample-drill"))
@@ -741,6 +977,18 @@ class TestAddToolNumbers:
         # in-memory tools - and point at what does the storing
         assert "in-memory" in out["note"] and "doc_save" in out["note"]
         assert "persist" not in out["note"].lower() and "url" not in out["note"]
+
+    def test_a_document_add_that_re_read_a_sized_row_does_not_claim_in_memory_only(self,
+                                                                                    monkeypatch):
+        # The sized row's re-read comes off the document tool library, so the note must not say the
+        # library was never read back - it says what a document read-back proves, which is presence.
+        _install(monkeypatch, _Target(tools=[_Tool("EM")], is_document=True))
+        out = _payload(ct.handler(action="add", scope="document",
+                                  add_tools=[{"from_type": "drill", "diameter": "1.0"}]))
+        assert out["sized"][0]["reread_expression"] == "1.0"
+        assert "read back from the document tool library" in out["note"]
+        assert "present, not that it was stored" in out["note"]
+        assert "in-memory tool only" not in out["note"]
 
     def test_document_scope_add_does_not_reach_for_a_stored_library(self, monkeypatch):
         # ... and it does not even ask: the stored-number gate is shared-target-only, so a document
@@ -926,17 +1174,39 @@ class TestEdit:
         assert "present, not that it was stored" in out["note"] and "doc_save" in out["note"]
         assert "persist" not in out["note"].lower()
 
-    def test_a_document_tool_edit_says_existing_operations_keep_their_copies(self, monkeypatch):
-        # MEASURED: a document tool edited 25 -> 40 mm flute reaches an op created AFTER the edit,
-        # while an op created before keeps the copy it was made with. Without this clause the
-        # caller reads 'Tool edited' and expects its existing operations to cut at the new geometry.
+    def test_a_document_tool_edit_names_the_operations_operationsByTool_read(self, monkeypatch):
+        # MEASURED: a flute count edited on the document entry read back on the operation running
+        # it at once. WHICH operations that is comes off operationsByTool - the note states that
+        # read rather than asserting a reach nothing here looked at.
         _install(monkeypatch, _Target(tools=[_Tool("EM", tool_numberOfFlutes="3")],
-                                      is_document=True))
+                                      is_document=True, ops_by_desc={"EM": ["Face1", "Adaptive1"]}))
         out = _payload(ct.handler(action="edit", scope="document", tool=0,
                                   parameters={"tool_numberOfFlutes": "4"}))
-        assert "keep their own copy" in out["note"]
-        assert "cam_edit_operation(tool_scope, tool_index)" in out["note"]
+        assert out["invalidated_operations"] == ["Face1", "Adaptive1"]
+        assert "operationsByTool names 2 operation(s) running this entry" in out["note"]
+        assert "cam_generate" in out["note"]
+        assert "fork here and never follows the cloud entry" in out["note"]
         assert len(out["note"]) <= 400, len(out["note"])   # test_prose_budget.NOTE_BUDGET_CHARS
+
+    def test_an_entry_no_operation_runs_says_so_and_publishes_no_names(self, monkeypatch):
+        _install(monkeypatch, _Target(tools=[_Tool("EM", tool_numberOfFlutes="3")],
+                                      is_document=True, ops_by_desc={}))
+        out = _payload(ct.handler(action="edit", scope="document", tool=0,
+                                  parameters={"tool_numberOfFlutes": "4"}))
+        assert "operationsByTool names no operation running this entry" in out["note"]
+        assert "invalidated_operations" not in out
+
+    def test_an_unread_operations_list_is_not_reported_as_no_operations(self, monkeypatch):
+        # The reach sentence is the one an agent acts on, so a list that did not read must not
+        # come back worded as an entry nothing runs.
+        target = _Target(tools=[_Tool("EM", tool_numberOfFlutes="3")], is_document=True)
+        target.operations_by_tool = lambda tool: None
+        _install(monkeypatch, target)
+        out = _payload(ct.handler(action="edit", scope="document", tool=0,
+                                  parameters={"tool_numberOfFlutes": "4"}))
+        assert "operationsByTool did not answer" in out["note"]
+        assert "names no operation" not in out["note"]
+        assert "invalidated_operations" not in out
 
     def test_edit_confirmed_against_the_fresh_library_says_so(self, monkeypatch):
         _install(monkeypatch, _Target(tools=[_Tool("EM", tool_numberOfFlutes="3")]))
@@ -944,8 +1214,8 @@ class TestEdit:
                                   parameters={"tool_numberOfFlutes": "4"}))
         assert out["verified_in_memory_only"] is False
         assert "persisted" in out["note"] and "library url" in out["note"]
-        # a SHARED library holds no operations, so the operation-copy clause does not ride there
-        assert "keep their own copy" not in out["note"]
+        # a SHARED library holds no operations, so the operation-reach clause does not ride there
+        assert "reads the edit at once" not in out["note"]
 
     def test_an_expression_that_does_not_evaluate_errors_and_rolls_back(self, monkeypatch):
         # A tool parameter STORES an unresolvable expression verbatim and reads it back, so the
@@ -1029,6 +1299,16 @@ class TestWhereUsed:
         _install(monkeypatch, tgt)
         out = _payload(ct.handler(action="where_used", scope="document", tool=0))
         assert out["operations"] == ["Face1", "Adaptive1"] and out["operation_count"] == 2
+
+    def test_an_unread_list_is_an_error_not_a_tool_used_by_nothing(self, monkeypatch):
+        # This read's whole answer is that list, so a seam that did not answer must not come back
+        # as operation_count 0 with 'not used by any operation' over it.
+        tgt = _Target(tools=[_Tool("EM")], is_document=True)
+        tgt.operations_by_tool = lambda tool: None
+        _install(monkeypatch, tgt)
+        res = ct.handler(action="where_used", scope="document", tool=0)
+        assert res["isError"] is True and "operationsByTool did not answer" in res["message"]
+        assert "not 'used by none'" in res["message"]
 
 
 # ── parameters (the FULL per-tool parameter read the list summary points to) ──
@@ -2241,12 +2521,18 @@ class TestRealTargetOperationsByTool:
     """operationsByTool hands back an OperationVector - index/len accessible, NOT a Python list - so
     the walk tries len()/[i] first and falls back to the shared count/item walk."""
 
-    def test_a_target_with_no_operations_seam_reports_none(self):
+    def test_a_target_with_no_operations_seam_reports_unread(self):
+        # None, not [] - an unread list is not "no operation runs this tool", and a caller that
+        # cannot tell them apart publishes the second as if it had read it.
         tgt = ct._Target(_SrcLib([]), is_document=True)
-        assert tgt.operations_by_tool(_Tool("EM")) == []
+        assert tgt.operations_by_tool(_Tool("EM")) is None
 
-    def test_a_null_vector_is_no_operations(self):
+    def test_a_null_vector_is_unread_not_an_empty_list(self):
         tgt = ct._Target(_SrcLib([]), is_document=True, ops_fn=lambda t: None)
+        assert tgt.operations_by_tool(_Tool("EM")) is None
+
+    def test_an_empty_vector_is_no_operations(self):
+        tgt = ct._Target(_SrcLib([]), is_document=True, ops_fn=lambda t: [])
         assert tgt.operations_by_tool(_Tool("EM")) == []
 
     def test_an_index_len_vector_is_read_in_order(self):

@@ -571,12 +571,54 @@ class _DeafStockSetup(_Setup):
 
 
 class TestStockMode:
-    def test_previous_setup_mode_lands_and_reads_back(self, monkeypatch):
-        cam = _install(monkeypatch)
-        out = _payload(ces.handler(setup="Setup1", stock_mode="previous_setup"))
-        assert cam.setups.item(0).stockMode == _STOCK_MODES["PreviousSetupStock"]
+    """'previous_setup' takes the stock the setup BEFORE it left. MEASURED: the first setup took
+    the mode with blocked_by empty and kept the prior mode's extents, so the position in cam.setups
+    is what the mode is judged against."""
+
+    def test_previous_setup_mode_lands_and_names_its_predecessor(self, monkeypatch):
+        cam = _install(monkeypatch, setups=("Turn", "Mill"))
+        out = _payload(ces.handler(setup="Mill", stock_mode="previous_setup"))
+        assert cam.setups.item(1).stockMode == _STOCK_MODES["PreviousSetupStock"]
         assert out["stock_mode_set"] == "previous_setup"
         assert out["was_stock_mode"] == "relative_box"
+        assert out["previous_setup_name"] == "Turn"
+
+    def test_previous_setup_on_the_first_setup_is_refused_with_nothing_written(self, monkeypatch):
+        cam = _install(monkeypatch, setups=("Turn", "Mill"))
+        res = ces.handler(setup="Turn", stock_mode="previous_setup")
+        assert res["isError"] is True and "is the first setup" in res["message"]
+        assert cam.setups.item(0).stockMode == _STOCK_MODES["RelativeBoxStock"]
+
+    def test_the_refusal_names_the_setup_order(self, monkeypatch):
+        _install(monkeypatch, setups=("Turn", "Mill"))
+        res = ces.handler(setup="Turn", stock_mode="previous_setup")
+        assert "The order is: Turn, Mill" in res["message"]
+
+    def test_an_ordinal_addressed_duplicate_names_its_OWN_predecessor(self, monkeypatch):
+        # Two setups share a name, so the resolver's own refusal hands out '<name>#<n>' addresses -
+        # and the position has to come from the walk that MATCHED one, or the second 'Turn' reads
+        # the first one's place and publishes a predecessor belonging to another setup.
+        cam = _install(monkeypatch, setups=("Drill", "Turn", "Mill", "Turn"))
+        out = _payload(ces.handler(setup="Turn#2", stock_mode="previous_setup"))
+        assert out["previous_setup_name"] == "Mill"
+        assert cam.setups.item(3).stockMode == _STOCK_MODES["PreviousSetupStock"]
+        assert cam.setups.item(1).stockMode == _STOCK_MODES["RelativeBoxStock"]   # untouched
+
+    def test_the_first_setup_refusal_fires_only_for_the_addressed_setup(self, monkeypatch):
+        # the other side of the same walk: 'Turn#1' IS the first setup and is refused, while
+        # 'Turn#2' - the same name, another position - lands.
+        cam = _install(monkeypatch, setups=("Turn", "Mill", "Turn"))
+        res = ces.handler(setup="Turn#1", stock_mode="previous_setup")
+        assert res["isError"] is True and "is the first setup" in res["message"]
+        assert cam.setups.item(0).stockMode == _STOCK_MODES["RelativeBoxStock"]
+        out = _payload(ces.handler(setup="Turn#2", stock_mode="previous_setup"))
+        assert out["previous_setup_name"] == "Mill"
+
+    def test_a_first_setup_still_takes_every_other_mode(self, monkeypatch):
+        # the boundary: the guard is keyed on the MODE, so no other one is refused by position.
+        _install(monkeypatch)
+        out = _payload(ces.handler(setup="Setup1", stock_mode="fixed_box"))
+        assert out["stock_mode_set"] == "fixed_box" and "previous_setup_name" not in out
 
     def test_a_swallowed_assignment_is_an_error(self, monkeypatch):
         cam = make_cam(_DeafStockSetup("Setup1", dict(_DEFAULT_PARAMS)))
@@ -629,6 +671,85 @@ class TestMachine:
         # machine-only edit is NOT 'nothing to do'
         out = _payload(ces.handler(setup="Setup1", machine="Haas|VF-2"))
         assert out["machine_set"] == "Haas VF-2"
+
+
+class _JobTypeParam(FakeCAMParameter):
+    """The setup's job-type row, which Setup.operationType reads through: milling 0, turning 1."""
+
+    def __init__(self, name, expression, setup):
+        super().__init__(name, expression, value=expression)
+        self._setup = setup
+
+    @FakeCAMParameter.expression.setter
+    def expression(self, value):
+        self._expression = value
+        self._setup.operationType = 1 if "turning" in str(value) else 0
+
+
+class _MillTurnSetup(_Setup):
+    """A setup whose machine assignment moves the job-type row under the caller. moves=False is the
+    assignment that leaves it alone; moves='stuck' moves it onto a row that refuses the restore."""
+
+    def __init__(self, name, params, moves=True):
+        super().__init__(name, params)
+        self.moves = moves
+        self.operationType = 0
+        _replace(self.parameters, _JobTypeParam("job_type", "'milling'", self))
+
+    @property
+    def machine(self):
+        return self._machine
+
+    @machine.setter
+    def machine(self, m):
+        self._machine = m
+        if self.moves == "stuck":
+            _replace(self.parameters, _StuckSetupParam("job_type", "'turning'"))
+            self.operationType = 1
+        elif self.moves:
+            self.parameters.itemByName("job_type").expression = "'turning'"
+
+
+def _mill_turn(monkeypatch, moves=True):
+    """Setup1 rebuilt as a milling setup a mill-turn machine assignment moves, with _install's
+    machine and body resolver seams already patched."""
+    cam = _install(monkeypatch)
+    setup = _MillTurnSetup("Setup1", dict(_DEFAULT_PARAMS), moves=moves)
+    cam.setups._items[0] = setup
+    return cam, setup
+
+
+class TestMachineAssignmentKeepsTheJobType:
+    """MEASURED on 2705.1.15: assigning a mill-turn machine to a MILLING setup left job_type
+    'turning' and Setup.operationType 1 with nothing said, and writing the row back restored it
+    with the machine kept and the existing toolpath still valid."""
+
+    def test_a_moved_job_type_is_put_back_and_both_readings_published(self, monkeypatch):
+        _cam, setup = _mill_turn(monkeypatch)
+        out = _payload(ces.handler(setup="Setup1", machine="Haas|VF-2"))
+        assert out["machine_set"] == "Haas VF-2"                  # the machine still landed
+        assert setup.parameters.itemByName("job_type").expression == "'milling'"
+        assert setup.operationType == 0
+        assert out["job_type_kept"] == {"job_type": "milling", "operation_type": 0,
+                                        "machine_set_it_to": "turning",
+                                        "machine_operation_type": 1}
+
+    def test_an_assignment_that_leaves_the_row_alone_publishes_no_key(self, monkeypatch):
+        # absent = the setup's job type is where the caller left it, so the key marks a real move
+        _cam, setup = _mill_turn(monkeypatch, moves=False)
+        out = _payload(ces.handler(setup="Setup1", machine="Haas|VF-2"))
+        assert out["machine_set"] == "Haas VF-2" and "job_type_kept" not in out
+        assert setup.parameters.itemByName("job_type").expression == "'milling'"
+
+    def test_a_restore_that_does_not_take_is_an_error_naming_the_move(self, monkeypatch):
+        _cam, setup = _mill_turn(monkeypatch, moves="stuck")
+        res = ces.handler(setup="Setup1", machine="Haas|VF-2")
+        assert res["isError"] is True
+        assert "moved its job_type to 'turning'" in res["message"]
+        assert "Setup.operationType 1" in res["message"]
+        assert "'job_type': \"'milling'\"" in res["message"]
+        assert "Nothing in this call was rolled back" in res["message"]
+        assert setup.machine.description == "Haas VF-2"     # the machine DID land, and is kept
 
 
 # ── bind the WCS to geometry (the associative, from-selection WCS) ──────────
@@ -756,8 +877,17 @@ class TestReadMachines:
         _install_machine_lib(monkeypatch, [_machine("Haas", "VF-%d" % i) for i in range(3)])
         out = _payload(ces.read_machines(max_results=2))
         assert out["count"] == 2 and out["truncated"] is True
-        # the collision flag is read over the LISTED rows, so a capped listing says so
-        assert "a copy past the cap is not marked" in out["note"]
+        # both flags are read over the LISTED rows, so a capped listing says so AND how to widen
+        assert "both flags read the listed rows only" in out["note"]
+        assert "raise max_results" in out["note"]
+
+    def test_a_cap_above_the_default_reaches_that_many_rows(self, monkeypatch):
+        # the default is 100, so a listing of 200 answers 100 rows truncated unless the cap rides
+        # through to the catalog.
+        _install_machine_lib(monkeypatch, [_machine("Haas", "VF-%d" % i) for i in range(200)])
+        out = _payload(ces.read_machines(max_results=150))
+        assert out["count"] == 150 and out["truncated"] is True
+        assert _payload(ces.read_machines())["count"] == 100      # the default still holds
 
     def test_machine_type_filters_by_capability_and_rows_carry_kind(self, monkeypatch):
         # The bundled library is mostly additive printers; machine_type='milling' must keep only
@@ -797,14 +927,15 @@ class TestReadMachines:
 
     def test_the_worst_composed_note_fits_the_wire_budget(self, monkeypatch):
         # the note is assembled at run time, so test_prose_budget measures none of the
-        # compositions: a shared name and a capped listing ride together the moment one of two
-        # colliding copies falls past the cap.
-        _install_machine_lib(monkeypatch, [_machine("Haas", "VF-2", "Haas VF-2")],
-                             [_machine("Haas", "VF-2", "Haas VF-2"),
+        # compositions: all THREE clauses ride together when two different machines share one
+        # description across the two libraries and a third row falls past the cap.
+        _install_machine_lib(monkeypatch, [_machine("Haas", "VF-2", "Small Flexible System.")],
+                             [_machine("Brother", "S700", "Small Flexible System."),
                               _machine("Haas", "VF-9", "Haas VF-9")])
         out = _payload(ces.read_machines(max_results=2))
         assert out["truncated"] is True
-        assert any(r.get("name_in_both_locations") for r in out["machines"])
+        assert all(r.get("name_in_both_locations") and r.get("description_shared")
+                   for r in out["machines"])
         assert len(out["note"]) <= 400, len(out["note"])   # test_prose_budget.NOTE_BUDGET_CHARS
 
     def test_a_name_both_libraries_hold_earns_the_collision_sentence(self, monkeypatch):
@@ -816,6 +947,10 @@ class TestReadMachines:
         assert [r.get("name_in_both_locations") for r in out["machines"]] == [True, True]
         assert "name_in_both_locations" in out["note"]
         assert "reaches the local one" in out["note"]
+        # ONE machine listed twice reads one vendor|model, so the description remedy would not tell
+        # the copies apart - that flag and its sentence stay off this pair.
+        assert not any(r.get("description_shared") for r in out["machines"])
+        assert "description_shared" not in out["note"]
 
     def test_two_local_machines_sharing_a_name_earn_no_collision_sentence(self, monkeypatch):
         # A duplicate INSIDE one library is not the two-library collision the sentence describes.
@@ -824,6 +959,17 @@ class TestReadMachines:
         out = _payload(ces.read_machines())
         assert not any(r.get("name_in_both_locations") for r in out["machines"])
         assert "name_in_both_locations" not in out["note"]
+
+    def test_two_machines_of_one_description_carry_the_flag_and_the_note_names_vendor_model(
+            self, monkeypatch):
+        # The shipped library holds two DISTINCT machines reading one description, and 'name' is
+        # that description - so neither row is addressable by name and vendor|model is the address.
+        _install_machine_lib(monkeypatch, [], [_machine("Haas", "VF-2", "Small Flexible System."),
+                                               _machine("Brother", "S700", "Small Flexible System.")])
+        out = _payload(ces.read_machines())
+        assert [r.get("description_shared") for r in out["machines"]] == [True, True]
+        assert "description_shared" in out["note"] and "'vendor|model'" in out["note"]
+        assert "name_in_both_locations" not in out["note"]       # one location, two machines
 
 
 # ── machine_strip_simulation: the ONE assignment path for simulation-ready machines ─────────────────

@@ -53,7 +53,8 @@ def stub_slices(monkeypatch):
                         lambda cam, scope, library, tool_type: ({"tool_count": 0, "tools": []}, None))
     monkeypatch.setattr(cg, "_slice_library_types", lambda cam: ({"type_count": 0, "types": []}, None))
     monkeypatch.setattr(cg, "_slice_machines",
-                        lambda cam, vendor, machine_type: ({"count": 0, "machines": []}, None))
+                        lambda cam, vendor, machine_type, max_results: (
+                            {"count": 0, "machines": []}, None))
     monkeypatch.setattr(cg, "_slice_print_settings",
                         lambda cam, technology, max_results: (
                             {"count": 0, "print_settings": []}, None))
@@ -797,15 +798,17 @@ class TestLibrarySlice:
         assert out is None and err["isError"] is True
 
     def test_router_includes_machines_and_passes_filters(self, monkeypatch, stub_slices):
-        # include=['machines'] must route AND forward the vendor + machine_type filters to the slice.
+        # include=['machines'] must route AND forward the vendor + machine_type filters and the cap.
         seen = {}
         monkeypatch.setattr(cg, "_slice_machines",
-                            lambda cam, vendor, machine_type: (
-                                seen.update(vendor=vendor, machine_type=machine_type)
+                            lambda cam, vendor, machine_type, max_results: (
+                                seen.update(vendor=vendor, machine_type=machine_type,
+                                            max_results=max_results)
                                 or ({"count": 2, "machines": []}, None)))
-        out = _payload(cg.handler(include=["machines"], vendor="Haas", machine_type="milling"))
+        out = _payload(cg.handler(include=["machines"], vendor="Haas", machine_type="milling",
+                                  max_results=150))
         assert out["machines"]["count"] == 2
-        assert seen == {"vendor": "Haas", "machine_type": "milling"}
+        assert seen == {"vendor": "Haas", "machine_type": "milling", "max_results": 150}
 
     def test_router_includes_print_settings_and_passes_the_technology_filter(self, monkeypatch,
                                                                             stub_slices):
@@ -886,14 +889,29 @@ class TestLibrarySlice:
         ces = load_tool("cam_edit_setup")
         seen = {}
         monkeypatch.setattr(ces, "read_machines",
-                            lambda vendor, machine_type: (
-                                seen.update(vendor=vendor, machine_type=machine_type)
+                            lambda vendor, machine_type, max_results: (
+                                seen.update(vendor=vendor, machine_type=machine_type,
+                                            max_results=max_results)
                                 or {"isError": False,
                                     "content": [{"type": "text", "text": json.dumps(
                                         {"count": 1, "machines": [{"name": "Haas VF-2"}]})}]}))
-        out, err = cg._slice_machines(object(), "Haas", "milling")
+        out, err = cg._slice_machines(object(), "Haas", "milling", 0)
         assert err is None and out["count"] == 1
-        assert seen == {"vendor": "Haas", "machine_type": "milling"}
+        assert seen == {"vendor": "Haas", "machine_type": "milling", "max_results": 100}
+
+    def test_the_machines_cap_reaches_read_machines_clamped(self, monkeypatch):
+        # read_machines defaults to 100 rows, so a max_results the slice does not pass through is a
+        # request for 150 answered with 100 and truncated true.
+        ces = load_tool("cam_edit_setup")
+        seen = []
+        monkeypatch.setattr(ces, "read_machines",
+                            lambda vendor, machine_type, max_results: (
+                                seen.append(max_results)
+                                or {"isError": False,
+                                    "content": [{"type": "text", "text": "{}"}]}))
+        for asked in (150, 5000):
+            cg._slice_machines(object(), "", "", asked)
+        assert seen == [150, 400]                 # clamp_rows' ceiling holds the second
 
     def test_templates_slice_delegates_with_location(self, monkeypatch):
         # _slice_templates forwards location/url/depth to _cam_templates' list engine and unwraps it.
@@ -937,7 +955,7 @@ class TestLibrarySlicesNeedNoCamProduct:
     def test_machines_answers_without_a_cam_product(self, monkeypatch, no_cam):
         ces = load_tool("cam_edit_setup")
         monkeypatch.setattr(ces, "read_machines",
-                            lambda vendor, machine_type: {
+                            lambda vendor, machine_type, max_results: {
                                 "isError": False,
                                 "content": [{"type": "text", "text": json.dumps(
                                     {"count": 1, "machines": [{"name": "Haas VF-2"}]})}]})

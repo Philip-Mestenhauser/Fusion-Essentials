@@ -1,10 +1,10 @@
-"""Unit tests for ``cam_delete`` — delete any CAM entity (setup / operation / folder / pattern).
+"""Unit tests for ``cam_delete`` — delete any CAM entity (setup / operation / folder / pattern /
+NC program).
 
-The adsk.cam API is mocked; what we pin is the tool's OWN logic: finding the named entity across all
-setups (setups themselves by name, and operations/folders/patterns via each setup's allOperations),
-calling .deleteMe(), turning a deleteMe()==False into an explicit error (never a false success), and
-the guards (no CAM, nothing named that, ambiguous name across the doc). This fills the gap that
-design_delete_feature/_occurrence (timeline-only) do NOT cover CAM entities.
+The adsk.cam API is mocked; what we pin is the tool's OWN logic: finding the named entity across the
+setup tree AND cam.ncPrograms, calling .deleteMe(), judging the delete on the HELD node plus the
+name census (never a re-resolve of the address), turning a deleteMe()==False into an explicit error,
+and the guards (no CAM, nothing named that, an ambiguous name).
 """
 
 import json
@@ -29,19 +29,50 @@ class _LiveCollection(_NamedCollection):
         self._all = list(items)
 
 
+class _Regrown(_LiveCollection):
+    """A collection that swaps a deleted item for a fresh twin of its name - the name census that
+    does NOT fall though the deleted node itself has gone quiet."""
+
+    @property
+    def _items(self):
+        return [FakeOperation(x._name) if getattr(x, "deleted", False) else x for x in self._all]
+
+    @_items.setter
+    def _items(self, items):
+        self._all = list(items)
+
+
 class _Deletable:
     """deleteMe() as a CAM node answers it: the bool the caller gates on, and only a true one takes
-    the node out of its parent's enumeration."""
+    the node out of its parent's enumeration AND makes its own name read raise, as a deleted node's
+    same-transaction read does."""
 
     def __init__(self, *args, can_delete=True, **kwargs):
         super().__init__(*args, **kwargs)
         self._can = can_delete
         self.deleted = False
 
+    @property
+    def name(self):
+        if getattr(self, "deleted", False):
+            raise RuntimeError("the object has been deleted")
+        return self._name
+
+    @name.setter
+    def name(self, value):
+        self._name = value
+
     def deleteMe(self):
         if self._can:
             self.deleted = True
         return self._can
+
+
+class _Named:
+    """A leaf carrying nothing but the name a walk reads off it."""
+
+    def __init__(self, name):
+        self.name = name
 
 
 class _Container(_Deletable):
@@ -66,7 +97,12 @@ class CAMFolder(_Container, FakeCAMFolder):
     pass
 
 
-def _install(monkeypatch, setups=None):
+class _NCProgram(_Deletable, _Named):
+    """An NC program: cam.ncPrograms lists it by name and deleteMe takes it out of that collection.
+    NCProgram has no live SHAPES dump, so it keeps a local fake."""
+
+
+def _install(monkeypatch, setups=None, programs=()):
     if setups is None:
         # a folder with a nested op + a nested pattern, plus two loose ops - the folder and the
         # pattern are NOT in allOperations, so the tool must walk .folders/.patterns to reach them.
@@ -76,6 +112,7 @@ def _install(monkeypatch, setups=None):
         setups = [s]
     cam = make_cam(*setups)
     cam.setups = _LiveCollection(setups)   # a deleted setup leaves the walk too
+    cam.ncPrograms = _LiveCollection(programs)
     monkeypatch.setattr(cd, "get_cam", lambda: (cam, None))
     return cam
 
@@ -124,7 +161,8 @@ class TestDelete:
         out = _payload(cd.handler(entity="Face1"))           # from enumeration (live contract)
         assert face1.deleted is True
         assert out["deleted"] is True and out["entity"] == "Face1"
-        assert "verified gone" in out["note"]
+        assert out["remaining_with_name"] == 0
+        assert "'Face1' removed; 0 CAM item(s) still carry that name." in out["note"]
 
     def test_delete_folder(self, monkeypatch):
         cam = _install(monkeypatch)
@@ -158,10 +196,9 @@ class TestDelete:
         res = cd.handler(entity="Stubborn")
         assert res["isError"] is True and "declin" in res["message"].lower()
 
-    def test_a_lying_deleteme_true_is_caught_by_the_re_resolve(self, monkeypatch):
-        # deleteMe() returns True but the node still enumerates - the verify-gone re-resolve
-        # (measured: a genuinely deleted node RAISES on a same-transaction read, so a clean
-        # resolve means the platform lied) converts the false success into an error.
+    def test_a_lying_deleteme_true_is_caught_by_the_held_node(self, monkeypatch):
+        # deleteMe() returns True and the node is untouched - measured, a genuinely deleted node
+        # RAISES on a same-transaction read, so a name that still reads means the platform lied.
         class _Liar(Operation):
             """deleteMe answers true and takes nothing out of the tree."""
 
@@ -171,4 +208,50 @@ class TestDelete:
         _install(monkeypatch, [s])
         res = cd.handler(entity="Sticky")
         assert res["isError"] is True
-        assert "still resolves" in res["message"]
+        assert "still reads its name ('Sticky')" in res["message"]
+
+    def test_an_ordinal_delete_takes_the_node_it_addressed_and_leaves_the_survivor(self,
+                                                                                   monkeypatch):
+        # Once 'DUP#1' goes the SURVIVOR is the only node named 'DUP', so re-resolving the address
+        # after the delete reads IT and convicts a delete that took. The held node is the judge.
+        first, second = Operation("DUP"), Operation("DUP")
+        _install(monkeypatch, [Setup("S1", ops=[first]), Setup("S2", ops=[second])])
+        out = _payload(cd.handler(entity="DUP#1"))
+        assert out["deleted"] is True and out["entity_type"] == "operation"
+        assert out["remaining_with_name"] == 1
+        assert first.deleted is True and second.deleted is False
+
+    def test_a_name_census_that_did_not_fall_is_an_error(self, monkeypatch):
+        # the held node went quiet, but the tree still carries as many of that name - the second,
+        # independent channel, which a delete that took cannot leave standing.
+        s = Setup("Setup1")
+        s.operations = _Regrown([Operation("Twin")])
+        _install(monkeypatch, [s])
+        res = cd.handler(entity="Twin")
+        assert res["isError"] is True
+        assert "1 CAM item(s) still carry the name 'Twin'" in res["message"]
+
+
+class TestNCPrograms:
+    """NC programs hang off cam.ncPrograms, outside the setup tree walk_cam_tree covers - cam_post's
+    own rollback sentence points a failed one at cam_delete."""
+
+    def test_a_program_is_deleted_by_name(self, monkeypatch):
+        prog = _NCProgram("1003")
+        cam = _install(monkeypatch, programs=[prog])
+        out = _payload(cd.handler(entity="1003"))
+        assert out["deleted"] is True and out["entity_type"] == "nc_program"
+        assert prog.deleted is True and cam.ncPrograms.count == 0
+
+    def test_a_program_and_an_operation_of_one_name_refuse_with_both_addresses(self, monkeypatch):
+        s = Setup("Setup1", ops=[Operation("1003")])
+        _install(monkeypatch, [s], programs=[_NCProgram("1003")])
+        res = cd.handler(entity="1003")
+        assert res["isError"] is True and "ambiguous" in res["message"].lower()
+        assert "1003#1" in res["message"] and "1003#2" in res["message"]
+
+    def test_a_program_whose_deleteme_declines_is_an_error(self, monkeypatch):
+        cam = _install(monkeypatch, programs=[_NCProgram("1003", can_delete=False)])
+        res = cd.handler(entity="1003")
+        assert res["isError"] is True and "declin" in res["message"].lower()
+        assert cam.ncPrograms.count == 1

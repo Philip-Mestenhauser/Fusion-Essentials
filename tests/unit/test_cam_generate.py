@@ -155,6 +155,84 @@ class TestGenerateHandler:
         assert out["launched"] is True
         assert cam.generate_calls[0][0] == "target"
 
+    def test_skip_valid_never_passes_over_a_nonfinite_toolpath(self, monkeypatch):
+        # THE BITE, at the SINGLE-OPERATION short-circuit (the walk's own gate is pinned in
+        # TestEntitlementPreflight): it reads operationState IsValid with a toolpath, so without
+        # this gate the arm calls it already valid and skips the operation the verdict sends here.
+        op = SharedOp("Groove1", operation_state=0)
+        cam = _FakeCAM([_setup("S", [op])], machining_times={"Groove1": 9223372036854.775})
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        out = _payload(gen.handler(target="Groove1", skip_valid=True))
+        assert out["launched"] is True and cam.generate_calls[0][0] == "target"
+        assert out["launch_reasons"] == {"nonfinite": 1}
+        assert out["launched_operations"] == [{"operation": "Groove1", "reason": "nonfinite"}]
+        assert "nonfinite (its motion read NaN)" in out["note"]
+
+    def test_the_document_sweep_names_the_nonfinite_op_it_does_not_cover(self, monkeypatch):
+        # MEASURED: generateAllToolpaths(true) regenerated the out-of-date operation and left the
+        # nonfinite one untouched - state, machining time and distances unchanged after. Counting
+        # it as launched would report a regeneration this call did not get.
+        _GENERATIONS.clear()
+        cam = _FakeCAM([_setup("S", [SharedOp("Stale1", operation_state=1),
+                                     SharedOp("Groove1", operation_state=0)])],
+                       machining_times={"Groove1": 9223372036854.775})
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        out = _payload(gen.handler(target="", skip_valid=True))
+        assert out["launched"] is True and cam.generate_calls == [("all", True)]
+        assert out["operations_to_generate"] == 1
+        assert out["launched_operations"] == [{"operation": "Stale1", "reason": "out_of_date"}]
+        assert out["nonfinite_not_relaunched"] == ["Groove1"]
+        assert "regenerate that operation by name" in out["nonfinite_triage"]
+        assert "Triage: nonfinite_triage." in out["note"]
+        _GENERATIONS.clear()
+
+    def test_a_sweep_of_only_nonfinite_paths_launches_nothing_and_says_why(self, monkeypatch):
+        # the other side: nothing the sweep would touch, so no Future is minted and no caller is
+        # sent to poll a generation nobody started.
+        cam = _FakeCAM([_setup("S", [SharedOp("Groove1", operation_state=0)])],
+                       machining_times={"Groove1": 9223372036854.775})
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        out = _payload(gen.handler(target="", skip_valid=True))
+        assert out["launched"] is False and out["skipped"] is True
+        assert cam.generate_calls == []
+        assert out["nonfinite_not_relaunched"] == ["Groove1"]
+        assert "1 nonfinite" in out["reason"] and "nonfinite_triage" in out["hint"]
+        assert "no operations in scope" not in out["reason"]
+
+    def test_a_scoped_launch_still_covers_the_nonfinite_op(self, monkeypatch):
+        # the boundary: generateToolpath regenerates its whole target whatever the flag says, so a
+        # SETUP target keeps it in the launch rather than stranding it.
+        _GENERATIONS.clear()
+        cam = _FakeCAM([_setup("S", [SharedOp("Groove1", operation_state=0)])],
+                       machining_times={"Groove1": 9223372036854.775})
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: x))
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        out = _payload(gen.handler(target="S", skip_valid=True))
+        assert out["operations_to_generate"] == 1
+        assert out["launched_operations"] == [{"operation": "Groove1", "reason": "nonfinite"}]
+        assert "nonfinite_not_relaunched" not in out
+        _GENERATIONS.clear()
+
+    def test_a_valid_operation_whose_time_reads_is_still_skipped(self, monkeypatch):
+        # the discriminator: same state, same flags, a machining time that IS a measurement.
+        op = SharedOp("Groove1", operation_state=0)
+        cam = _FakeCAM([_setup("S", [op])], machining_times={"Groove1": 9.241742})
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        out = _payload(gen.handler(target="Groove1", skip_valid=True))
+        assert out["skipped"] is True and cam.generate_calls == []
+
 
 # ── the launch hands completion to the status read, and claims none of its own ──────────────────
 
@@ -355,10 +433,10 @@ def _entitlement(table):
 
 
 class TestEntitlementPreflight:
-    def _install(self, monkeypatch, setups, table):
+    def _install(self, monkeypatch, setups, table, machining_times=None):
         import adsk.cam
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
-        cam = _FakeCAM(setups)
+        cam = _FakeCAM(setups, machining_times=machining_times)
         monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
         monkeypatch.setattr(gen._cam_common, "strategy_generation_allowed", _entitlement(table))
         return cam
@@ -387,6 +465,23 @@ class TestEntitlementPreflight:
         assert "isGenerationAllowed false" in out["note"] and "Cham" in out["note"]
         assert "Manufacturing Extension" in out["note"]      # the remedy cam_create_operation uses
         assert "cam_get_status" in out["note"]               # this launch claims no completion either
+
+    def test_the_split_launch_covers_a_nonfinite_op_skip_valid_would_pass_over(self, monkeypatch):
+        # The per-operation walk's OWN gate: this arm launches each operation itself, so skip_valid
+        # narrows here - and an op reading IsValid with a saturated machining time is the one the
+        # readiness verdict sends the caller to redo, not one already valid.
+        _GENERATIONS.clear()
+        setup = SharedSetup("S", ops=[SharedOp("Cham", operation_state=1, strategy="chamfer"),
+                                      SharedOp("Groove1", operation_state=0, strategy="groove"),
+                                      SharedOp("Cut", operation_state=0, strategy="face")])
+        cam = self._install(monkeypatch, [setup], {"chamfer": False, "groove": True, "face": True},
+                            machining_times={"Groove1": 9223372036854.775, "Cut": 9.241742})
+        out = _payload(gen.handler(target="", skip_valid=True))
+        assert self._launched(cam) == ["Groove1"]          # 'Cut' really is already valid
+        assert out["launched_operations"] == [{"operation": "Groove1", "reason": "nonfinite"}]
+        assert out["launch_reasons"] == {"nonfinite": 1}
+        assert out["operations_to_generate"] == 1
+        _GENERATIONS.clear()
 
     def test_one_handle_covers_every_future_the_split_launch_made(self, monkeypatch):
         # the futures must all stay REFERENCED: Fusion abandons an in-progress generation whose

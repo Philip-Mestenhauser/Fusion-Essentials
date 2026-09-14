@@ -184,6 +184,74 @@ def _envelope_rows(feature, factor):
     return rows
 
 
+_MISSING_FACE_CODE = "ARRANGE_ERROR_MISSING_FACE"
+
+_NO_PLANAR_FACE = (
+    "No face of these shapes reads a plane, which solver='{label}' needs: {names}. Nothing was "
+    "created. Drop them from 'shapes' to nest the rest, or pass solver='3d', which packed a body "
+    "with no planar face on an account carrying the Machining Extension.")
+
+_PLATFORM_MISSING_FACE = (
+    "Arrange (solver='{label}') failed with '{code}': a shape it holds carries no planar face and "
+    "the platform names none of them. The feature is gone from the timeline, so nothing was "
+    "created. Arrange the shapes in smaller groups to find the one and drop it, or pass "
+    "solver='3d', which packed a body with no planar face on an account carrying the Machining "
+    "Extension. Platform: {msg}")
+
+
+def _shape_bodies(occ):
+    """(the BRep bodies under one arranged occurrence, whether every collection on the way ANSWERED)
+    - its own bodies plus those of the occurrences nested under it, since a sub-assembly shape
+    carries its bodies one level down. An occurrence tree cannot contain itself, so the walk runs to
+    its end rather than under a cap that would truncate a deep assembly in silence."""
+    bodies, complete, pending = [], True, [occ]
+    while pending:
+        node = pending.pop()
+        own = safe(lambda n=node: n.bRepBodies)
+        children = safe(lambda n=node: n.childOccurrences)
+        if own is None or children is None:
+            complete = False
+        bodies.extend(_common.iter_collection(own))
+        pending.extend(_common.iter_collection(children))
+    return bodies, complete
+
+
+def _has_planar_face(body):
+    """(whether a face of `body` READS a plane, whether every face's surface type answered) - a
+    geometry that would not read is no verdict, never a non-planar face."""
+    faces = safe(lambda: body.faces)
+    if faces is None:
+        return False, False
+    complete = True
+    for face in _common.iter_collection(faces):
+        surface_type = safe(lambda f=face: f.geometry.surfaceType)
+        if surface_type is None:
+            complete = False
+        elif surface_type == adsk.core.SurfaceTypes.PlaneSurfaceType:
+            return True, complete
+    return False, complete
+
+
+def _faceless_shapes(names, occs):
+    """The arranged shapes whose bodies were READ and hold no planar face. A shape whose bodies,
+    nested occurrences or face geometry did not answer is not one of them - a refusal rests on a
+    positive read, and the platform's own refusal still covers what this walk could not see."""
+    out = []
+    for name, occ in zip(names, occs):
+        bodies, complete = _shape_bodies(occ)
+        if not bodies or not complete:
+            continue
+        planar = False
+        for body in bodies:
+            planar, body_read = _has_planar_face(body)
+            complete = complete and body_read
+            if planar:
+                break
+        if not planar and complete:
+            out.append(name)
+    return out
+
+
 def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_shape",
             spacing: float = 0.0, units: str = "mm", boundary_component: str = "",
             envelope_plane: str = "", envelope_length: float = 0.0, envelope_width: float = 0.0,
@@ -303,6 +371,13 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
     if af is None:
         return error("This design does not expose Arrange features.")
 
+    # The 2D solvers lay every part on a planar face; the 3D one packed a body carrying none.
+    if not is_3d:
+        faceless = _faceless_shapes(resolved, occs)
+        if faceless:
+            return error(_NO_PLANAR_FACE.format(
+                label=label, names=_common.named_with_remainder(faceless)))
+
     # Effect evidence read BEFORE the add: the solver can leave the named occurrences unmoved and
     # mint envelope copies instead, which only these two reads distinguish from a real nest.
     def _translation(o):
@@ -403,6 +478,9 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
         if any(t in msg.lower() for t in ("extension", "entitle", "license", "subscrib")):
             return error(f"Arrange ({label}) appears to need a Fusion extension on this "
                           f"account: {msg}. Try solver='rectangular', or enable the extension.")
+        if _MISSING_FACE_CODE in msg:
+            return error(_PLATFORM_MISSING_FACE.format(label=label, code=_MISSING_FACE_CODE,
+                                                       msg=msg))
         return error(f"Arrange failed: {msg}")
     if not feature:
         return error(_common.no_feature_error(design, "Arrange"))

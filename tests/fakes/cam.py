@@ -177,6 +177,50 @@ def strategy_factory(table, seen=None):
     return create
 
 
+def _underlying(obj):
+    """The setup one read stands for - the object itself for anything that is not a read."""
+    return object.__getattribute__(obj, "_setup") if isinstance(obj, _SetupRead) else obj
+
+
+class _SetupRead:
+    """ONE read of a setup out of cam.setups. MEASURED on one setup read twice: `is` False, `==`
+    True, `==` another setup False, ids differ, and hash() RAISES TypeError - the live wrapper
+    defines equality and NO hash. Reads and writes forward to the setup itself, so a test writing
+    through one read sees it through the next."""
+
+    __slots__ = ("_setup",)
+
+    def __init__(self, setup):
+        object.__setattr__(self, "_setup", setup)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_setup"), name)
+
+    def __setattr__(self, name, value):
+        setattr(object.__getattribute__(self, "_setup"), name, value)
+
+    def __eq__(self, other):
+        return _underlying(self) is _underlying(other)
+
+    __hash__ = None         # live: hash(setup) raises TypeError: unhashable type 'Setup'
+
+
+class _SetupsCollection(_NamedCollection):
+    """cam.setups: the counted/by-name walk, handing back a FRESH read per lookup the way live does
+    - so a resolver comparing `is` across two walks matches nothing here either."""
+
+    def item(self, i):
+        got = super().item(i)
+        return None if got is None else _SetupRead(got)
+
+    def itemByName(self, name):
+        got = super().itemByName(name)
+        return None if got is None else _SetupRead(got)
+
+    def __iter__(self):
+        return (_SetupRead(s) for s in super().__iter__())
+
+
 @fusion_fake(factory_for="_NamedCollection")
 def make_cam(*setups, machining_times=None):
     """A minimal CAM product carrying `setups` (count/item protocol) - pair with
@@ -198,7 +242,7 @@ def make_cam(*setups, machining_times=None):
             raise RuntimeError("3 : Machining time could not be calculated.")
         return types.SimpleNamespace(machiningTime=times[name])
 
-    return types.SimpleNamespace(setups=_NamedCollection(list(setups)),
+    return types.SimpleNamespace(setups=_SetupsCollection(list(setups)),
                                  getMachiningTime=_machining_time,
                                  machining_time_calls=calls)
 
@@ -433,10 +477,10 @@ class FakeSetups:
         return len(self._setups)
 
     def item(self, i):
-        return _NamedCollection(self._setups).item(i)
+        return _SetupsCollection(self._setups).item(i)
 
     def itemByName(self, name):
-        return _NamedCollection(self._setups).itemByName(name)
+        return _SetupsCollection(self._setups).itemByName(name)
 
     def createInput(self, operation_type):
         return FakeSetupInput(operation_type) if self._input is None else self._input

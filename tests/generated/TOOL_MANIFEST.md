@@ -158,9 +158,9 @@ Produces: entity_refs -> sketch_constrain/sketch_dimension. |
 | ✎ | `cam_create_machine` | Create a MACHINE in the LOCAL machine library from a Fusion machine template, so cam_edit_setup(machine=...) can assign it by name. |
 | ✎ | `cam_create_operation` | Create a CAM milling operation in a setup, with a cutting tool from cam_edit_tools |
 | ✎ | `cam_create_setup` | Create a CAM (Manufacture) setup - milling, turning, or additive on a printer from cam_get(include=['machines']) - then add toolpaths with cam_create_operation. |
-| ⚠ | `cam_delete` | Delete a CAM setup, operation, folder or pattern by name (design_delete_* do not reach CAM data). |
+| ⚠ | `cam_delete` | Delete a CAM setup, operation, folder, pattern or NC program by name (design_delete_* do not reach CAM data). |
 | ⚠ | `cam_delete_machine` | Delete a machine from the LOCAL machine library by name; 'confirm_name' must match the resolved name exactly |
-| ⚠ | `cam_delete_template` | Delete a template from the LOCAL toolpath template library by name; 'confirm_name' must match the resolved name exactly |
+| ⚠ | `cam_delete_template` | Delete a template from the LOCAL toolpath template library by name, or by the 'template_url' cam_get(include=['templates']) lists; 'confirm_name' must match the... |
 | ✎ | `cam_edit_folders` | Manage a CAM setup's folders: list, create, rename, or move operations into one. |
 | ✎ | `cam_edit_operation` | Edit a CAM operation: its parameters (the feeds/speeds/depths no other CAM tool reaches), its cutting tool, preset, name or suppression |
 | ✎ | `cam_edit_setup` | Edit a CAM SETUP: its machine, its model/fixture/stock selections (bodies or occurrence names, each REPLACED), its WCS, any other setup parameter, or its name |
@@ -181,7 +181,7 @@ Produces: passed. |
 | ✎ | `cam_reorder` | Reorder a CAM item in the machining sequence: move 'entity' before or after 'reference' (both are names from cam_get / cam_edit_folders) |
 | ✎ | `cam_save_template` | Bundle some of a setup's operations into a NEW toolpath template. |
 | ✎ | `cam_select_geometry` | Select the machining geometry on a CAM operation; 'selection' picks the family and fixes which input carries it |
-| ✎ | `cam_set_nc_comment` | Set the COMMENT field of the active document's NC programs - what most posts emit near the top of the G-code. |
+| ✎ | `cam_set_nc_comment` | Set an NC program's COMMENT, its listing NAME (what cam_post addresses) and its program NUMBER (nc_program_name, what the post emits). |
 | ✎ | `cam_show_toolpath` | Show or hide CAM toolpaths to inspect one operation's path at a time |
 
 ### assembly

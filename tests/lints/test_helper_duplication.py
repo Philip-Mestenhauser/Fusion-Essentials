@@ -37,6 +37,10 @@ _DENYLIST = {
     # accompanies - and how one unscoped miss walks the tree twice.
     "operation_nodes": ("_cam_common", "def"),
     "resolve_operation": ("_cam_common", "def"),
+    # The ONE setup-scoped operation-name census the create and the rename both refuse on. Two
+    # copies are how one of them comes to scan a different scope than the other, and how the
+    # sentence an agent reads on a refused create stops matching the one on a refused rename.
+    "operation_name_clash": ("_cam_common", "def"),
     "setup_names": ("_cam_common", "def"),
     "op_state_tally": ("_cam_common", "def"),
     "op_state_facts": ("_cam_common", "def"),
@@ -134,6 +138,24 @@ _DENYLIST = {
     "asset_leaf": ("_cam_common", "def"),
     "asset_leaf_keys": ("_cam_common", "def"),
     "assets_named": ("_cam_common", "def"),
+    # The ONE 'two arrivals of this url are one asset' decision, which the name matcher, the
+    # template tree walk and the template delete all de-dup on. A second copy is how one of them
+    # counts a template listed under the root AND under its folder as two and refuses its name.
+    "unique_by_url": ("_cam_common", "def"),
+    # The ONE surface-group reader: the parameter, the machining-mode vocabulary, the per-group
+    # record and the gate. cam_select_geometry WRITES groups through it and cam_compare_operations
+    # READS them through it, so a second copy is how the compare starts reporting a flag or a mode
+    # the writer no longer sets - the two halves of one contract, kept in one place.
+    "avoid_groups": ("_cam_common", "def"),
+    "group_record": ("_cam_common", "def"),
+    "machine_mode_value": ("_cam_common", "def"),
+    "machine_mode_key": ("_cam_common", "def"),
+    "AVOID_GROUPS_PARAM": ("_cam_common", "assign"),
+    "MACHINE_MODE_MEMBERS": ("_cam_common", "assign"),
+    # The ONE 'read this operation's own parameters' pointer every refusal naming a parameter sends
+    # the caller to. A second spelling is a second remedy for one read - the SETUP-scoped sentence
+    # in cam_edit_setup is a different read and keeps its own text.
+    "PARAM_READ": ("_cam_common", "assign"),
     # The ONE MachineLibrary handle (off CAMManager.libraryManager, so no open CAM job is needed)
     # and the ONE 'which location holds this machine' read - a single FILTERED Local query. A second
     # copy is how the create's clash report and the delete's local-only gate start answering
@@ -474,7 +496,11 @@ _DENYLIST = {
 # test_allowlist_entries_still_exist_and_still_differ: the entry must still match the pattern in
 # that module AND its definition must still differ from the home module's - a local copy that
 # becomes identical to home is a true duplicate and loses its exemption.
-_ALLOWLIST = {}
+_ALLOWLIST = {
+    # cam_edit_setup's pointer names the SETUP's own parameters (cam_get(..., setup=...)), a
+    # different read from the operation-scoped one in _cam_common - not a re-roll of it.
+    ("cam_edit_setup", "PARAM_READ"): "the SETUP-scoped parameter read, not the operation's",
+}
 
 
 def _pattern(symbol, kind):

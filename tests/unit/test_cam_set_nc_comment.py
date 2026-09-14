@@ -1,9 +1,9 @@
-"""Unit tests for ``cam_set_nc_comment.handler`` — the empty-input guard and
+"""Unit tests for ``cam_set_nc_comment.handler`` — the empty-input guard, the two NAMES and
 multi-program behaviour.
 
 ``comment`` defaults to ``""`` (never ``None``). The handler must refuse when there is genuinely
-nothing to write (empty comment AND empty set_name) rather than writing an empty comment to every NC
-program; an explicit non-empty comment must still go through.
+nothing to write rather than writing an empty comment to every NC program. ``set_name`` moves
+NCProgram.name (the listing name); ``set_number`` moves the nc_program_name PARAMETER.
 """
 
 import json
@@ -24,6 +24,19 @@ class FakeNCP:
             FakeCAMParameter("nc_program_comment", comment, editable=editable),
             FakeCAMParameter("nc_program_name", "'" + name + "'", editable=editable),
         ])
+
+
+class _UnnamedNCP(FakeNCP):
+    """A program whose NCProgram.name will not READ - the name a rename could not be confirmed
+    against, and the one a listing must show as an unnamed slot rather than drop."""
+
+    @property
+    def name(self):
+        raise RuntimeError("name is locked")
+
+    @name.setter
+    def name(self, _v):
+        pass
 
 
 def _install(monkeypatch, programs):
@@ -66,7 +79,20 @@ class TestEmptyInputGuard:
         cam = _install(monkeypatch, [FakeNCP("P1")])
         res = nc.handler(comment="", program="P1", set_name="NewName")
         assert res["isError"] is False
-        assert cam.ncPrograms.item(0).parameters.itemByName("nc_program_name").expression == "'NewName'"
+        assert cam.ncPrograms.item(0).name == "NewName"
+
+    def test_the_wire_requires_no_single_input(self):
+        # MEASURED on a receipt run: a schema requiring 'comment' refused a rename-only call before
+        # the handler saw it. Any one of the three fields is a legal call on its own.
+        schema = nc.tool.to_dict()["inputSchema"]
+        assert not schema.get("required")
+        assert {"comment", "program", "set_name", "set_number"} <= set(schema["properties"])
+
+    def test_set_number_only_is_allowed(self, monkeypatch):
+        cam = _install(monkeypatch, [FakeNCP("P1")])
+        res = nc.handler(comment="", program="P1", set_number="2002")
+        assert res["isError"] is False
+        assert cam.ncPrograms.item(0).parameters.itemByName("nc_program_name").expression == "'2002'"
 
 
 # ── multi-program pre-validation (rollback concern) ─────────────────────────
@@ -146,13 +172,6 @@ class TestProgramTargeting:
         # the available list is what the user picks their next 'program' from, so a program that
         # exists but whose name is unreadable must show up as an unnamed slot - dropping it would
         # claim the document holds fewer programs than it does
-        class _UnnamedNCP(FakeNCP):
-            @property
-            def name(self):
-                raise RuntimeError("name is locked")
-            @name.setter
-            def name(self, _v):
-                pass
         _install(monkeypatch, [FakeNCP("P1"), _UnnamedNCP("P2")])
         res = nc.handler(comment="X", program="Ghost")
         assert res["isError"] is True
@@ -170,14 +189,14 @@ class TestProgramTargeting:
         assert rec["comment_after"] == "C"
         assert rec["name_after"] == "Renamed"
         assert out["set_name"] == "Renamed"
-        assert cam.ncPrograms.item(0).parameters.itemByName("nc_program_name").expression == "'Renamed'"
+        assert cam.ncPrograms.item(0).name == "Renamed"
 
-    def test_uneditable_name_aborts_before_any_write(self, monkeypatch):
-        # set_name targets nc_program_name; if it's locked, abort before changing the comment.
+    def test_uneditable_number_aborts_before_any_write(self, monkeypatch):
+        # set_number targets nc_program_name; if it's locked, abort before changing the comment.
         ncp = FakeNCP("P1", "'keepc'")
         ncp.parameters.itemByName("nc_program_name").isEditable = False
         _install(monkeypatch, [ncp])
-        res = nc.handler(comment="C", program="P1", set_name="X")
+        res = nc.handler(comment="C", program="P1", set_number="9")
         assert res["isError"] is True
         # comment must be untouched (aborted in the pre-validation pass)
         assert ncp.parameters.itemByName("nc_program_comment").expression == "'keepc'"
@@ -217,12 +236,38 @@ class _UnreadableParam(FakeCAMParameter):
 
 
 class _StuckNCP(FakeNCP):
-    """A program whose comment and name parameters both keep the expression they already hold."""
+    """A program whose comment and NUMBER parameters both keep the expression they already hold."""
     def __init__(self, name, comment="'old'"):
         super().__init__(name, comment, parameters=FakeCAMParameters([
             _StuckParam("nc_program_comment", comment),
             _StuckParam("nc_program_name", "'" + name + "'"),
         ]))
+
+
+class _StuckNameNCP(FakeNCP):
+    """NCProgram.name accepts the assignment and keeps the name it holds - the declined rename."""
+
+    @property
+    def name(self):
+        return self._n
+
+    @name.setter
+    def name(self, value):
+        if not hasattr(self, "_n"):
+            self._n = value               # born under its own name; every later write is swallowed
+
+
+class _SuffixingNCP(FakeNCP):
+    """NCProgram.name lands a VARIANT of what was written - the setter whose result, whatever made
+    it differ, is the program's new address."""
+
+    @property
+    def name(self):
+        return self._n
+
+    @name.setter
+    def name(self, value):
+        self._n = str(value) + "1" if hasattr(self, "_n") else str(value)
 
 
 class TestStuckParameter:
@@ -236,23 +281,35 @@ class TestStuckParameter:
         assert cam.ncPrograms.item(0).parameters.itemByName(
             "nc_program_comment").expression == "'keep me'"
 
-    def test_a_stuck_name_is_an_error_not_a_reported_success(self, monkeypatch):
+    def test_a_stuck_number_is_an_error_not_a_reported_success(self, monkeypatch):
         _install(monkeypatch, [_StuckNCP("P1", "'c'")])
-        res = nc.handler(comment="", program="P1", set_name="Renamed")
+        res = nc.handler(comment="", program="P1", set_number="2002")
         assert res["isError"] is True
-        assert "did not take" in res["message"] and "Renamed" in res["message"]
+        assert "did not take" in res["message"] and "2002" in res["message"]
 
-    def test_a_stuck_name_after_a_landed_comment_says_the_comment_remains(self, monkeypatch):
+    def test_a_stuck_number_after_a_landed_comment_says_the_comment_remains(self, monkeypatch):
         # the comment write already landed on this program and this call does not undo it - an
         # isError the caller reads as "nothing happened" would be the false part.
         ncp = FakeNCP("P1", "'old'")
         ncp.parameters = FakeCAMParameters([FakeCAMParameter("nc_program_comment", "'old'"),
                                             _StuckParam("nc_program_name", "'P1'")])
         _install(monkeypatch, [ncp])
-        res = nc.handler(comment="Job 42", program="P1", set_name="Renamed")
+        res = nc.handler(comment="Job 42", program="P1", set_number="2002")
         assert res["isError"] is True
         assert "The comment on 'P1' reads 'Job 42' and remains." in res["message"]
         assert ncp.parameters.itemByName("nc_program_comment").expression == "'Job 42'"
+
+    def test_a_stuck_number_after_a_landed_name_says_the_name_remains(self, monkeypatch):
+        # the rename landed and is not undone, so the program now answers to the NEW name - a
+        # caller told only that the call failed would address a name nothing answers to.
+        ncp = FakeNCP("P1", "'c'")
+        ncp.parameters = FakeCAMParameters([FakeCAMParameter("nc_program_comment", "'c'"),
+                                            _StuckParam("nc_program_name", "'P1'")])
+        cam = _install(monkeypatch, [ncp])
+        res = nc.handler(comment="", program="P1", set_name="Renamed", set_number="2002")
+        assert res["isError"] is True
+        assert "The name reads 'Renamed' and remains." in res["message"]
+        assert cam.ncPrograms.item(0).name == "Renamed"
 
     def test_a_comment_that_cannot_be_read_back_is_unconfirmed_not_ok(self, monkeypatch):
         # a write whose effect cannot be READ is unconfirmed; reporting set:true would state a
@@ -272,3 +329,112 @@ class TestStuckParameter:
         assert res["isError"] is False
         assert cam.ncPrograms.item(0).parameters.itemByName(
             "nc_program_comment").expression == "'O\\'Brien'"
+
+
+# ── the two names: NCProgram.name is the LISTING, nc_program_name the program NUMBER ──────────
+#
+# They are different fields: writing the parameter moves what a report reads while the listing does
+# not follow, and cam_post's 'program_name' looks a program up by the LISTING. The fresh ncPrograms
+# walk is the second, independent channel that catches the disagreement.
+
+
+class TestSetNameAndNumber:
+    def test_a_rename_lands_on_the_program_name_and_the_listing_carries_it(self, monkeypatch):
+        cam = _install(monkeypatch, [FakeNCP("1001")])
+        out = _payload(nc.handler(comment="", program="1001", set_name="BRACKET-1001"))
+        rec = out["programs"][0]
+        assert rec["name_before"] == "1001" and rec["name_after"] == "BRACKET-1001"
+        assert rec["name_listed"] is True and "name_differs_from_request" not in rec
+        assert [p.name for p in cam.ncPrograms] == ["BRACKET-1001"]
+        # the NUMBER parameter is a different field and this call did not touch it
+        assert cam.ncPrograms.item(0).parameters.itemByName(
+            "nc_program_name").expression == "'1001'"
+
+    def test_a_name_that_does_not_move_is_an_error(self, monkeypatch):
+        cam = _install(monkeypatch, [_StuckNameNCP("1001")])
+        res = nc.handler(comment="", program="1001", set_name="BRACKET-1001")
+        assert res["isError"] is True
+        assert "still reads '1001'" in res["message"]
+        assert cam.ncPrograms.item(0).name == "1001"
+
+    def test_a_landed_name_the_listing_does_not_carry_is_an_error(self, monkeypatch):
+        # the held program reads the name that landed while the ncPrograms walk answers another
+        _install(monkeypatch, [FakeNCP("1001")])
+        monkeypatch.setattr(nc, "_listing_names", lambda cam: ["1001"])
+        res = nc.handler(comment="", program="1001", set_name="BRACKET-1001")
+        assert res["isError"] is True
+        assert "fresh ncPrograms walk lists 1001" in res["message"]
+
+    def test_set_number_writes_the_parameter_and_reads_it_back(self, monkeypatch):
+        cam = _install(monkeypatch, [FakeNCP("1001")])
+        out = _payload(nc.handler(comment="", program="1001", set_number="2002"))
+        rec = out["programs"][0]
+        assert rec["number_before"] == "1001" and rec["number_after"] == "2002"
+        assert out["set_number"] == "2002"
+        assert cam.ncPrograms.item(0).name == "1001"          # the listing name did not move
+
+    def test_both_names_move_independently_in_one_call(self, monkeypatch):
+        cam = _install(monkeypatch, [FakeNCP("1001")])
+        out = _payload(nc.handler(comment="Job 42", program="1001",
+                                  set_name="BRACKET-1001", set_number="2002"))
+        rec = out["programs"][0]
+        assert rec["comment_after"] == "Job 42"
+        assert rec["name_after"] == "BRACKET-1001" and rec["number_after"] == "2002"
+        assert cam.ncPrograms.item(0).name == "BRACKET-1001"
+        assert cam.ncPrograms.item(0).parameters.itemByName(
+            "nc_program_name").expression == "'2002'"
+
+    def test_a_landed_name_that_differs_from_the_request_is_flagged_as_the_new_address(
+            self, monkeypatch):
+        # the setter can land a variant; the payload states THAT the landed name differs and is the
+        # address to use from here, without asserting a cause no read backs.
+        cam = _install(monkeypatch, [_SuffixingNCP("1001")])
+        out = _payload(nc.handler(comment="", program="1001", set_name="BRACKET"))
+        rec = out["programs"][0]
+        assert rec["name_after"] == "BRACKET1" and rec["name_differs_from_request"] is True
+        assert cam.ncPrograms.item(0).name == "BRACKET1"
+
+
+class TestOneValueFields:
+    """'set_name' and 'set_number' address ONE program; writing either to every match stamps one
+    value on all of them, the same class as the empty-comment wipe-all."""
+
+    def test_set_name_across_several_programs_is_refused_before_any_write(self, monkeypatch):
+        cam = _install(monkeypatch, [FakeNCP("P1"), FakeNCP("P2"), FakeNCP("P3")])
+        res = nc.handler(comment="", set_name="BRACKET")
+        assert res["isError"] is True
+        assert "all 3 matched NC programs" in res["message"]
+        assert "Name one program with 'program'." in res["message"]
+        assert [p.name for p in cam.ncPrograms] == ["P1", "P2", "P3"]
+
+    def test_set_number_across_several_programs_is_refused_too(self, monkeypatch):
+        cam = _install(monkeypatch, [FakeNCP("P1"), FakeNCP("P2")])
+        res = nc.handler(comment="STAMP", set_number="2002")
+        assert res["isError"] is True and "'set_number'" in res["message"]
+        # the comment is the deliberate broadcast, and this refusal fires before it too
+        assert cam.ncPrograms.item(0).parameters.itemByName(
+            "nc_program_comment").expression == "'old'"
+
+    def test_one_named_program_still_takes_both(self, monkeypatch):
+        cam = _install(monkeypatch, [FakeNCP("P1"), FakeNCP("P2")])
+        out = _payload(nc.handler(comment="", program="P2", set_name="X", set_number="7"))
+        assert out["programs_changed"] == 1
+        assert cam.ncPrograms.item(1).name == "X" and cam.ncPrograms.item(0).name == "P1"
+
+
+class TestUnreadableName:
+    def test_a_rename_on_a_program_whose_name_did_not_read_is_refused_before_any_write(
+            self, monkeypatch):
+        # the target's name is kept as READ (None), so this guard can see it; coercing it to ''
+        # let the rename run against a name nothing could be compared with.
+        ncp = _UnnamedNCP("P1", "'keep'")
+        _install(monkeypatch, [ncp])
+        res = nc.handler(comment="C", set_name="Renamed")
+        assert res["isError"] is True and "does not read" in res["message"]
+        assert ncp.parameters.itemByName("nc_program_comment").expression == "'keep'"
+
+    def test_a_comment_on_that_program_publishes_the_name_as_null(self, monkeypatch):
+        _install(monkeypatch, [_UnnamedNCP("P1", "'old'")])
+        out = _payload(nc.handler(comment="Job 42"))
+        rec = out["programs"][0]
+        assert rec["program"] is None and rec["comment_after"] == "Job 42"

@@ -5,6 +5,9 @@ verbatim to an agent that holds only the Fusion MCP tools. The proctor (`proctor
 document, runs the agent, saves the result into your project, takes a screenshot, and records the
 run. It grades nothing. You open the saved document beside the agent's report and judge it.
 
+The CAM chain (scenarios C0_CAM-Fixture through C7_CAM-Job-End-to-End) has its own run order,
+coverage placement and results convention in CAM-CHAIN.md beside this file.
+
 ## Running one
 
 ```

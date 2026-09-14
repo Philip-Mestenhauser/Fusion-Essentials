@@ -1379,8 +1379,59 @@ class TestTurningObjectSets:
 # takes BRep FACES - the plane, boss, bore or web probingType 'probing-unknown' derives from.
 
 
-def _probe_op(name="Probe WCS1", **kw):
-    return _Op(name, {"probe_selection": _Param(_HoleParamValue())}, **kw)
+class _StockProbeValue:
+    """probe_stock_selection's value - no measured SHAPE dump exists for it, so this is a local
+    double: stockFaceNames is the analytic name list, matched case-insensitively on set and read
+    back in the spelling it was set in."""
+    def __init__(self, names=()):
+        self._names = [str(n) for n in names]
+
+    @property
+    def stockFaceNames(self):
+        return list(self._names)
+
+    @stockFaceNames.setter
+    def stockFaceNames(self, names):
+        self._names = [str(n) for n in names]
+
+
+class _DeafStockProbeValue(_StockProbeValue):
+    """Takes the assignment and keeps the names it started on - the swallowed write only the
+    read-back reveals."""
+    @_StockProbeValue.stockFaceNames.setter
+    def stockFaceNames(self, _names):
+        pass
+
+
+class _ModeGatedParam(_Param):
+    """A selection set whose isEditable is DERIVED from its mode parameter, never a fixed flag.
+    MEASURED both places: a probe's two sets swap it with probe_mode ('selection-model' makes
+    probe_selection editable and probe_stock_selection not, 'selection-stock' the other way), and
+    machiningDirections reads False while toolAxisMode is 'automatic' and True at 'manual'."""
+
+    def __init__(self, value, mode_param, reads_under):
+        self._mode_param = mode_param
+        self._reads_under = reads_under
+        super().__init__(value)
+
+    @property
+    def isEditable(self):
+        return cg.unquote_expression(self._mode_param.expression) == self._reads_under
+
+    @isEditable.setter
+    def isEditable(self, _flag):
+        pass                      # the mode decides it here, not a constructor argument
+
+
+def _probe_op(name="Probe WCS1", stock=None, mode="selection-model", **kw):
+    """A probe op: the model face set, the STOCK name set, and the probe_mode that decides which of
+    the two the operation reads - and which of them reads isEditable true."""
+    mode_param = _BoundaryModeParam(mode)
+    params = {"probe_selection": _ModeGatedParam(_HoleParamValue(), mode_param, "selection-model"),
+              "probe_mode": mode_param}
+    if stock is not None:
+        params["probe_stock_selection"] = _ModeGatedParam(stock, mode_param, "selection-stock")
+    return _Op(name, params, **kw)
 
 
 class TestProbeSelection:
@@ -1393,6 +1444,18 @@ class TestProbeSelection:
                                   generate=False))
         assert op.parameters.itemByName("probe_selection").value.value == faces
         assert out["selections"] == 1 and out["selection_param"] == "probe_selection"
+        # the model route confirms the mode that decides those faces are read at all
+        assert out["probe_engaged"] is True and out["probe_mode"] == "selection-model"
+
+    def test_handles_switch_the_mode_back_off_the_stock_route(self, monkeypatch):
+        op = _probe_op(stock=_StockProbeValue(["Top"]), mode="selection-stock")
+        cam = _CAM([_Setup([op])])
+        faces = [_Face()]
+        _install(monkeypatch, cam, faces)
+        out = _payload(cg.handler(operation="Probe WCS1", selection="probe", handles=["f"],
+                                  generate=False))
+        assert out["probe_mode"] == "selection-model"
+        assert op.parameters.itemByName("probe_selection").value.value == faces
 
     def test_a_curve_kind_on_a_probe_op_names_probe_selection_as_the_remedy(self, monkeypatch):
         # a probing op carries no curve parameter, so 'face' reaches the curve refusal - which has
@@ -1414,13 +1477,142 @@ class TestProbeSelection:
         assert "probe_selection" in res["message"] and "probe_geometry" in res["message"]
 
 
+class TestProbeStockFaces:
+    """The other probing route: analytic STOCK face names on probe_stock_selection, read while
+    probe_mode holds 'selection-stock' - so the mode is engaged in the same call."""
+
+    def test_stock_faces_engage_the_mode_and_read_the_names_back(self, monkeypatch):
+        op = _probe_op(stock=_StockProbeValue())
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        out = _payload(cg.handler(operation="Probe WCS1", selection="probe",
+                                  stock_faces=["Top", "front"], generate=False))
+        assert out["probe_mode"] == "selection-stock" and out["probe_engaged"] is True
+        assert out["stock_faces"] == ["Top", "Front"]      # canonical spelling, matched case-free
+        assert out["selections"] == 2
+        assert out["selection_param"] == "probe_stock_selection"
+        assert op.parameters.itemByName("probe_stock_selection").value.stockFaceNames == [
+            "Top", "Front"]
+        assert op.parameters.itemByName("probe_selection").value.value == []
+
+    def test_a_stock_with_no_analytic_faces_is_refused_before_any_write(self, monkeypatch):
+        # MEASURED: under job_stockMode 'solid' or 'previoussetup' the names read back EMPTY, under
+        # 'default' (a relative box) they land - so the setup's mode is read before probe_mode moves.
+        op = _probe_op(stock=_StockProbeValue())
+        setup = SharedSetup("Setup1", ops=[op],
+                            parameters=FakeCAMParameters([FakeCAMParameter("job_stockMode",
+                                                                           "'solid'")]))
+        cam = _CAM([setup])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Probe WCS1", selection="probe", stock_faces=["Top"],
+                         generate=False)
+        assert res["isError"] is True
+        assert "no analytic faces" in res["message"] and "'solid'" in res["message"]
+        assert "cam_edit_setup stock_mode" in res["message"]
+        # nothing moved: the mode still reads the model route and the stock set is untouched
+        assert op.parameters.itemByName("probe_mode").expression == "'selection-model'"
+        assert op.parameters.itemByName("probe_stock_selection").value.stockFaceNames == []
+
+    def test_a_fresh_setups_formula_expression_is_judged_on_its_evaluated_mode(self, monkeypatch):
+        # MEASURED: a fresh setup's job_stockMode EXPRESSION is a formula over job_type whose
+        # evaluated value reads 'default' (a relative box) - and the names land there.
+        formula = ("(job_type == 'turning') ? 'fixedcylinder' : (job_type == 'additive' && "
+                   "job_enableStockSimForAdditive) ? 'solid' : 'default'")
+        op = _probe_op(stock=_StockProbeValue())
+        setup = SharedSetup("Setup1", ops=[op],
+                            parameters=FakeCAMParameters([FakeCAMParameter("job_stockMode",
+                                                                           formula,
+                                                                           value="default")]))
+        cam = _CAM([setup])
+        _install(monkeypatch, cam, [_Face()])
+        out = _payload(cg.handler(operation="Probe WCS1", selection="probe", stock_faces=["Top"],
+                                  generate=False))
+        assert out["stock_faces"] == ["Top"] and out["probe_mode"] == "selection-stock"
+
+    def test_a_name_that_does_not_land_is_an_error_naming_what_reads_back(self, monkeypatch):
+        op = _probe_op(stock=_DeafStockProbeValue(["Top"]))
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Probe WCS1", selection="probe", stock_faces=["Bottom"],
+                         generate=False)
+        assert res["isError"] is True
+        assert "did not take" in res["message"] and "Bottom" in res["message"]
+        assert "reads back Top" in res["message"]
+        # the mode was written first, so the refusal has to say it is still there
+        assert "probe_mode was set to 'selection-stock'" in res["message"]
+
+    def test_an_op_with_no_stock_parameter_is_refused_before_the_mode_moves(self, monkeypatch):
+        op = _probe_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Probe WCS1", selection="probe", stock_faces=["Top"],
+                         generate=False)
+        assert res["isError"] is True
+        assert "has no 'probe_stock_selection' parameter" in res["message"]
+        assert op.parameters.itemByName("probe_mode").expression == "'selection-model'"
+
+    def test_an_unknown_stock_face_name_is_refused_before_any_write(self, monkeypatch):
+        op = _probe_op(stock=_StockProbeValue())
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Probe WCS1", selection="probe", stock_faces=["Lid"],
+                         generate=False)
+        assert res["isError"] is True
+        assert "no name(s) Lid" in res["message"] and "Outside" in res["message"]
+        assert op.parameters.itemByName("probe_mode").expression == "'selection-model'"
+        assert op.parameters.itemByName("probe_stock_selection").value.stockFaceNames == []
+
+    def test_handles_and_stock_faces_together_are_refused_before_any_write(self, monkeypatch):
+        op = _probe_op(stock=_StockProbeValue())
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Probe WCS1", selection="probe", handles=["f"],
+                         stock_faces=["Top"], generate=False)
+        assert res["isError"] is True and "takes no model geometry" in res["message"]
+        assert "handles was passed beside it" in res["message"]
+        assert op.parameters.itemByName("probe_mode").expression == "'selection-model'"
+        assert op.parameters.itemByName("probe_selection").value.value == []
+
+    def test_bodies_beside_stock_faces_are_refused_too(self, monkeypatch):
+        # bodies= and sketches= reach nothing on a probe route, so passing one beside stock_faces
+        # has to be named rather than dropped.
+        op = _probe_op(stock=_StockProbeValue())
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Probe WCS1", selection="probe", bodies=["Carrier"],
+                         stock_faces=["Top"], generate=False)
+        assert res["isError"] is True and "bodies was passed beside it" in res["message"]
+        assert op.parameters.itemByName("probe_mode").expression == "'selection-model'"
+        assert op.parameters.itemByName("probe_stock_selection").value.stockFaceNames == []
+
+    def test_stock_faces_on_another_selection_kind_is_refused(self, monkeypatch):
+        op = _drill_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Drill1", selection="holes", handles=["f"],
+                         stock_faces=["Top"], generate=False)
+        assert res["isError"] is True
+        assert "'stock_faces' does not apply to the 'holes' selection" in res["message"]
+        assert op.parameters.itemByName("holeFaces").value.value == []
+
+
 def _orientation_op(name="3+2 Roughing1", mode=None, editable=True, **kw):
     """A three_plus_two op: machiningDirections beside toolAxisMode, the mode that decides whether
     the orientation faces are read at all. A fresh op reads 'manual' and isEditable true (measured);
-    `flat` carries the same pair reading isEditable false."""
+    `flat` carries the same pair reading isEditable false. Only three_plus_two carries either -
+    face, adaptive2d and drill carry neither (measured), and they take the no-such-set refusal."""
     return _Op(name, {"machiningDirections": _Param(_HoleParamValue(), editable=editable),
                       "toolAxisMode": mode if mode is not None else _BoundaryModeParam("manual")},
                **kw)
+
+
+def _auto_axis_op(name="3+2 Roughing1"):
+    """The same three_plus_two shape with toolAxisMode on 'automatic' - MEASURED: machiningDirections
+    reads isEditable FALSE there and TRUE at 'manual', so the set is reachable only because the
+    engage runs before the write."""
+    mode = _BoundaryModeParam("automatic")
+    return _Op(name, {"machiningDirections": _ModeGatedParam(_HoleParamValue(), mode, "manual"),
+                      "toolAxisMode": mode})
 
 
 class TestOrientationSelection:
@@ -1463,14 +1655,58 @@ class TestOrientationSelection:
         assert "toolAxisMode" in res["message"] and "did not take" in res["message"]
         assert "tilt" in res["message"]
 
+    def test_an_automatic_axis_set_becomes_settable_because_the_mode_goes_first(self, monkeypatch):
+        # MEASURED: machiningDirections reads isEditable false at toolAxisMode 'automatic' and true
+        # at 'manual'. Gating the set's editability before the engage refuses a call that works.
+        op = _auto_axis_op()
+        cam = _CAM([_Setup([op])])
+        faces = [_Face()]
+        _install(monkeypatch, cam, faces)
+        out = _payload(cg.handler(operation="3+2 Roughing1", selection="orientation",
+                                  handles=["f"], generate=False))
+        assert out["tool_axis_mode"] == "manual" and out["selections"] == 1
+        assert op.parameters.itemByName("machiningDirections").value.value == faces
+
+    def test_a_set_that_fails_after_a_CHANGED_mode_names_what_it_left(self, monkeypatch):
+        # the mode is written BEFORE the set, so a refusal reading as a no-op would leave the
+        # caller believing toolAxisMode is where they found it.
+        op = _auto_axis_op()
+        op.parameters.itemByName("machiningDirections").value = _ShortSurfaceParam()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face(), _Face(), _Face()])
+        res = cg.handler(operation="3+2 Roughing1", selection="orientation",
+                         handles=["a", "b", "c"], generate=False)
+        assert res["isError"] is True and "did not take" in res["message"]
+        assert "toolAxisMode was set to 'manual' (it held 'automatic')" in res["message"]
+        assert "REMAINS on the operation" in res["message"]
+
+    def test_a_set_that_fails_after_an_UNCHANGED_mode_says_it_changed_nothing(self, monkeypatch):
+        # a fresh three_plus_two already reads 'manual' (measured), so the engage writes the value
+        # it found - claiming the mode REMAINS changed would name a residue that is not there.
+        op = _orientation_op()
+        op.parameters.itemByName("machiningDirections").value = _ShortSurfaceParam()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face(), _Face(), _Face()])
+        res = cg.handler(operation="3+2 Roughing1", selection="orientation",
+                         handles=["a", "b", "c"], generate=False)
+        assert res["isError"] is True and "did not take" in res["message"]
+        assert "toolAxisMode already read 'manual'" in res["message"]
+        assert "changed nothing there" in res["message"]
+        assert "REMAINS" not in res["message"]
+
     def test_an_op_without_the_mode_parameter_is_disclosed_not_claimed_engaged(self, monkeypatch):
+        # the engage runs BEFORE the write here, so the refusal must not claim a selection - and
+        # the set has to be left as it was found.
         op = _Op("3+2 Roughing1", {"machiningDirections": _Param(_HoleParamValue())})
         cam = _CAM([_Setup([op])])
         _install(monkeypatch, cam, [_Face()])
         res = cg.handler(operation="3+2 Roughing1", selection="orientation", handles=["f"],
                          generate=False)
         assert res["isError"] is True
-        assert "toolAxisMode" in res["message"] and "cannot confirm" in res["message"]
+        assert "toolAxisMode" in res["message"]
+        assert "cannot be confirmed engaged" in res["message"]
+        assert res["message"].startswith("Nothing was selected")
+        assert op.parameters.itemByName("machiningDirections").value.value == []
 
     def test_a_non_editable_orientation_set_is_refused_before_any_assignment(self, monkeypatch):
         # `flat` carries machiningDirections reading isEditable false (measured), and such a set
@@ -2080,7 +2316,9 @@ class TestBoundaryEngage:
         _install(monkeypatch, cam, [_Edge()])
         res = cg.handler(operation="Parallel1", selection="chain", handles=["h"], generate=False)
         assert res["isError"] is True
-        assert "Could not set boundaryMode" in res["message"] and "read-only here" in res["message"]
+        assert "could not be set" in res["message"] and "read-only here" in res["message"]
+        # the curve family applies the selection FIRST, so this refusal says so
+        assert res["message"].startswith("The selection landed")
 
     def test_an_op_without_boundary_mode_is_disclosed_not_claimed_engaged(self, monkeypatch):
         # machiningBoundarySel present, boundaryMode absent: the engage cannot be confirmed, so it is
@@ -2090,7 +2328,8 @@ class TestBoundaryEngage:
         _install(monkeypatch, cam, [_Edge()])
         res = cg.handler(operation="Parallel1", selection="chain", handles=["h"], generate=False)
         assert res["isError"] is True
-        assert "boundaryMode" in res["message"] and "cannot confirm" in res["message"]
+        assert "boundaryMode" in res["message"]
+        assert "cannot be confirmed engaged" in res["message"]
 
     def test_a_boundary_mode_that_cannot_be_read_back_is_unconfirmed(self, monkeypatch):
         op = _boundary_op(boundary_mode=_UnreadableBoundaryMode())
@@ -2150,7 +2389,7 @@ class TestQuotingMatchesWhatTheParameterStores:
         op, res = self._refused_by_enumeration(monkeypatch, _RefusingEnumerationMode())
         assert res["isError"] is True
         assert "the expression written was 'selection'" in res["message"]
-        assert cg._PARAM_READ in res["message"]
+        assert cg.PARAM_READ in res["message"]
 
     def test_a_refused_height_names_the_expression_that_was_WRITTEN(self, monkeypatch):
         op = _curve_op()
@@ -2161,7 +2400,7 @@ class TestQuotingMatchesWhatTheParameterStores:
                          bottom_mode="from contour", generate=False)
         assert res["isError"] is True
         assert "the expression written was 'from contour'" in res["message"]
-        assert cg._PARAM_READ in res["message"]
+        assert cg.PARAM_READ in res["message"]
 
     def test_a_refused_mode_whose_value_answers_getChoices_lists_them(self, monkeypatch):
         # The read pointer costs the caller a turn; where the parameter itself answers the set, the
@@ -2258,6 +2497,58 @@ def _turning_trace_op(name="TurnTrace1", **kw):
     the same class 'contours' carries - and it holds none of the other curve parameters."""
     return _Op(name, {"modelContour": _Param(_CurveParamValue()),
                       "frontHeight_ref": _Param(None)}, **kw)
+
+
+def _blend_op(name="Blend1", **kw):
+    """A blend op: MEASURED, its drive input is 'blend_curves' (a CadContours2dParameterValue,
+    isEditable true) and it carries machiningBoundarySel beside it - so this op is what decides the
+    blend_curves probe order."""
+    return _Op(name, {"blend_curves": _Param(_CurveParamValue()),
+                      "machiningBoundarySel": _Param(_CurveParamValue()),
+                      "boundaryMode": _BoundaryModeParam("none")}, **kw)
+
+
+class TestBlendDriveCurves:
+    """blend takes a PAIR of drive curves, one CurveSelection each - the shape 'curves' has."""
+
+    def test_a_blend_pair_lands_on_blend_curves_not_the_machining_boundary(self, monkeypatch):
+        op = _blend_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        out = _payload(cg.handler(operation="Blend1", selection="chain", handles=["a", "b"],
+                                  generate=False))
+        assert _selection_on(op, "blend_curves").count == 2      # one selection per curve
+        assert _selection_on(op, "machiningBoundarySel").count == 0
+        assert out["selections"] == 2 and out["selection_param"] == "blend_curves"
+
+    def test_one_reference_is_refused_before_any_selection_is_applied(self, monkeypatch):
+        op = _blend_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="Blend1", selection="chain", handles=["a"], generate=False)
+        assert res["isError"] is True
+        assert "takes a PAIR of drive curves" in res["message"]
+        assert "Incorrect number of drive curves" in res["message"]
+        assert _selection_on(op, "blend_curves").count == 0
+
+    def test_a_blend_pair_is_not_a_rail_pair(self, monkeypatch):
+        # neither curve is lower or upper here, so no is_open default and no rails_order clause.
+        op = _blend_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        out = _payload(cg.handler(operation="Blend1", selection="chain", handles=["a", "b"],
+                                  generate=False))
+        assert "rails_order" not in out and "rails_open" not in out
+        sels = _selection_on(op, "blend_curves")
+        assert all(sels.item(i).isOpen is not True for i in range(sels.count))
+
+    def test_an_op_without_blend_curves_still_routes_to_its_boundary(self, monkeypatch):
+        op = _ma_roughing_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        _payload(cg.handler(operation="Multi-Axis Roughing1", selection="chain", handles=["a"],
+                            generate=False))
+        assert _selection_on(op, "machiningBoundarySel").count == 1
 
 
 class TestDriveParamRouting:
@@ -2361,7 +2652,8 @@ class TestDriveParamRouting:
         _install(monkeypatch, cam, [_Edge(), _Edge()])
         res = cg.handler(operation="Swarf1", selection="chain", handles=["a", "b"], generate=False)
         assert res["isError"] is True
-        assert "swarfSelectionMode" in res["message"] and "cannot confirm" in res["message"]
+        assert "swarfSelectionMode" in res["message"]
+        assert "cannot be confirmed engaged" in res["message"]
 
     def test_the_curve_param_miss_names_the_drive_params_it_looked_for(self, monkeypatch):
         # the refusal lists the candidates, so a strategy whose drive param is not routed yet is
@@ -2993,15 +3285,25 @@ class TestSurfaceSelection:
 
 # ── surface groups (checkSurfaceSelectionSets) ───────────────────────────────
 
+def _machining_mode(member):
+    """One adsk.cam.MachiningMode member, read off the measured enum rather than hand-typed."""
+    return getattr(cg.adsk.cam.MachiningMode, member)
+
+
 class _AvoidGroup:
     """One MachineAvoidSelectionBase. A DEFAULT group is parameter-driven: its machineOverHoles
-    setter raises, exactly as the live operation's own group does."""
-    def __init__(self, default=False, over_holes_setter_raises=False):
+    setter raises, exactly as the live operation's own group does, while its machineMode answers.
+    The mode a FRESH group reads varies by strategy (corner and three_plus_two answered Machine,
+    blend answered Gouge), so `mode` is what a test states rather than a constant."""
+    def __init__(self, default=False, over_holes_setter_raises=False, deaf_mode=False,
+                 mode="Machine_MachiningMode"):
         self.inputGeometry = None
         self.value = []
         self._over_holes = False
         self.is_default = default
         self._raises = over_holes_setter_raises or default
+        self._mode = _machining_mode(mode)
+        self._deaf_mode = deaf_mode
 
     @property
     def machineOverHoles(self):
@@ -3013,6 +3315,15 @@ class _AvoidGroup:
             raise RuntimeError("3 : The 'machine over holes/pockets' option is not enabled for "
                                "this group.")
         self._over_holes = bool(flag)
+
+    @property
+    def machineMode(self):
+        return self._mode
+
+    @machineMode.setter
+    def machineMode(self, value):
+        if not self._deaf_mode:            # deaf = the write is swallowed, seen only on read-back
+            self._mode = value
 
 
 class _AvoidGroups:
@@ -3099,6 +3410,73 @@ class TestSurfaceGroup:
         out = _payload(cg.handler(operation="Adaptive1", selection="surface_group", handles=["a"],
                                   machine_over_holes=True, generate=False))
         assert out["surface_group"]["machine_over_holes"] is True
+
+    @pytest.mark.parametrize("key,member", [("avoid", "Avoid_MachiningMode"),
+                                            ("machine", "Machine_MachiningMode"),
+                                            ("gouge", "Gouge_MachiningMode"),
+                                            ("fixture", "Fixture_MachiningMode"),
+                                            ("none", "None_MachiningMode")])
+    def test_each_machine_mode_lands_and_reads_back_as_its_key(self, monkeypatch, key, member):
+        value = _AvoidGroupsParamValue()
+        op = _group_op(value=value)
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        out = _payload(cg.handler(operation="Adaptive1", selection="surface_group", handles=["a"],
+                                  machine_mode=key, generate=False))
+        assert out["surface_group"]["machine_mode"] == key
+        groups = value.getMachineAvoidGroups()
+        assert groups.item(groups.count - 1).machineMode == _machining_mode(member)
+
+    @pytest.mark.parametrize("member,key", [("Machine_MachiningMode", "machine"),
+                                            ("Gouge_MachiningMode", "gouge")])
+    def test_the_groups_own_mode_is_read_back_where_none_was_asked_for(self, monkeypatch,
+                                                                       member, key):
+        # omitted is not absent: the group's own mode is published whether or not this call set it,
+        # and the mode a FRESH group reads varies by strategy - so it is read, never assumed.
+        op = _group_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        monkeypatch.setattr(_AvoidGroups, "createNewMachineAvoidDirectSelectionGroup",
+                            lambda self: self._groups.append(_AvoidGroup(mode=member))
+                            or self._groups[-1])
+        out = _payload(cg.handler(operation="Adaptive1", selection="surface_group", handles=["a"],
+                                  generate=False))
+        assert out["surface_group"]["machine_mode"] == key
+
+    def test_a_swallowed_machine_mode_write_is_an_error_and_rolls_the_group_back(self, monkeypatch):
+        # the group is COMMITTED by the time the mode reads back, so a mode that did not take has
+        # to take the group back off rather than leave a group nothing asked for on the operation.
+        value = _AvoidGroupsParamValue(groups=[_AvoidGroup(default=True)])
+        op = _group_op(value=value)
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        monkeypatch.setattr(_AvoidGroups, "createNewMachineAvoidDirectSelectionGroup",
+                            lambda self: self._groups.append(_AvoidGroup(deaf_mode=True))
+                            or self._groups[-1])
+        res = cg.handler(operation="Adaptive1", selection="surface_group", handles=["a"],
+                         machine_mode="avoid", generate=False)
+        assert res["isError"] is True
+        assert "reads machine_mode 'machine' after 'avoid' was set" in res["message"]
+        assert "taken back off" in res["message"]
+        assert value.getMachineAvoidGroups().count == 1
+
+    def test_machine_mode_on_another_selection_kind_is_refused(self, monkeypatch):
+        op = _drill_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Drill1", selection="holes", handles=["a"],
+                         machine_mode="avoid", generate=False)
+        assert res["isError"] is True
+        assert "'machine_mode' does not apply to the 'holes' selection" in res["message"]
+        assert op.parameters.itemByName("holeFaces").value.value == []
+
+    def test_an_unknown_machine_mode_is_refused_by_the_schema_enum(self, monkeypatch):
+        op = _group_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Adaptive1", selection="surface_group", handles=["a"],
+                         machine_mode="clamp", generate=False)
+        assert res["isError"] is True and "'machine_mode' must be one of" in res["message"]
 
     def test_a_group_that_refuses_machine_over_holes_is_an_error_and_applies_nothing(
             self, monkeypatch):

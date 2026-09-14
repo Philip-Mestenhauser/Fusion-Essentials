@@ -144,6 +144,22 @@ _THREAD_INSERT_AT = [t for t, _d in _HUB_TOOLS].index("turning threading")
 # what .index() answers with.
 _FLAT6_AT = len(_HUB_TOOLS) - 1 - [t for t, _d in reversed(_HUB_TOOLS)].index("flat end mill")
 
+# The three types a 'diameter' override is judged on, each added and taken back out before the set
+# above lands. MEASURED: a column's presence, value and editability all say nothing - the waterjet's
+# tool_diameter reads 0.0 yet editable - so the size row is picked off the tool's own family flag.
+_NOZZLE_TYPE = "waterjet"
+_INSERT_TYPE = "turning general"
+_PROBE_TYPE = "probe"
+_P_DIAMETER = "tool_diameter"
+_P_NOZZLE = "tool_nozzleDiameter"
+_TURNING_FLAG = "tool_isTurning"
+
+# The dedicated entry and operation the tool-reach proof runs on, in a setup of its own: the ball
+# and flat mills are shared by the census, and an edit to either reaches every operation running it.
+_REACH_TOOL = "flat end mill"
+_REACH_SETUP = "ToolReachSetup"
+_REACH_OP = "ToolReachProbe"
+
 
 def _fully_constrained(name, constraints, dimensions):
     """sketch_get: the sketch closed every degree of freedom, and the counts it took to do it.
@@ -332,6 +348,59 @@ def _hub_tools_landed(p):
                      {"tool_count": p.get("tool_count"), "base": base, "landed": got}, ok_)
 
 
+def _sized_by(field, request, mm):
+    """cam_edit_tools(action='add', diameter=...): WHICH row the tool's own family flag picked for
+    the size, and the expression the library read AGAIN holds there - compared to the size ASKED
+    for, since a re-read that merely answers something proves no size reached the entry."""
+    def check(p):
+        rows = p.get("sized") or []
+        row = rows[0] if rows else {}
+        return _measured(f"one tool sized '{request}' on its '{field}' row, re-read",
+                         {"added": p.get("added"), "sized": rows},
+                         p.get("added") == 1 and len(rows) == 1
+                         and row.get("sized_field") == field
+                         and row.get("reread_expression") == request
+                         and _num(row.get("diameter_mm")) and _near(row["diameter_mm"], mm, 0.001))
+    return check
+
+
+def _row_reads(field, mm):
+    """cam_edit_tools(action='parameters'): what the STORED entry holds for one row, in Fusion's
+    own cm - the read that says an add's size reached the library rather than the object it built."""
+    def check(p):
+        row = next((r for r in (p.get("parameters") or []) if r.get("name") == field), {})
+        return _measured(f"the stored entry reads {mm} mm on '{field}'",
+                         {"parameter_count": p.get("parameter_count"), "row": row},
+                         _num(row.get("value")) and _near(row["value"], mm / 10.0, 1e-4))
+    return check
+
+
+def _reached(operation, count):
+    """cam_edit_tools(action='edit') on a DOCUMENT entry: the operations operationsByTool answered
+    for it. An entry an operation runs cannot report none, and the note states that read."""
+    def check(p):
+        names = p.get("invalidated_operations") or []
+        return _measured(f"operationsByTool names {count} operation(s), '{operation}' among them",
+                         {"edited": p.get("edited"), "invalidated_operations": names,
+                          "note": p.get("note")},
+                         p.get("edited") == 1 and len(names) == count and operation in names
+                         and f"names {count} operation(s) running this entry" in (p.get("note") or ""))
+    return check
+
+
+def _op_flutes(operation, flutes):
+    """cam_get(include=['tool'], operation=...): the flute count Operation.tool reads NOW - the
+    document-library entry's own, which is what a library edit moves."""
+    def check(p):
+        tool = p.get("tool") or {}
+        dims = tool.get("dimensions") or {}
+        return _measured(f"'{operation}' reads {flutes} flutes off the entry it runs",
+                         {"operation": tool.get("operation"), "tool": tool.get("tool"),
+                          "flutes": dims.get("flutes")},
+                         tool.get("operation") == operation and dims.get("flutes") == flutes)
+    return check
+
+
 def _z_down(wcs, down):
     """One setup's own +Z, off the row's wcs block: 'down' asks for a frame whose Z runs along world
     -Z, which on this part is the end opposite the flange top."""
@@ -370,14 +439,17 @@ def _hub_setups(p):
                      and turn.get("selected_models") == [HUB_COMP + ":1"])
 
 
-def _stock_mode_set(mode, was):
+def _stock_mode_set(mode, was, previous=None):
     """cam_edit_setup(stock_mode=...): the mode read BACK off Setup.stockMode after the write,
-    beside the one the setup carried before it - a swallowed assignment errors in the tool."""
+    beside the one the setup carried before it - a swallowed assignment errors in the tool.
+    `previous` is the setup 'previous_setup' takes its stock from, named off cam.setups order."""
     def check(p):
         return _measured(f"stock mode '{mode}' (was '{was}')",
                          {"stock_mode_set": p.get("stock_mode_set"),
-                          "was_stock_mode": p.get("was_stock_mode")},
-                         p.get("stock_mode_set") == mode and p.get("was_stock_mode") == was)
+                          "was_stock_mode": p.get("was_stock_mode"),
+                          "previous_setup_name": p.get("previous_setup_name")},
+                         p.get("stock_mode_set") == mode and p.get("was_stock_mode") == was
+                         and (previous is None or p.get("previous_setup_name") == previous))
     return check
 
 
@@ -801,7 +873,48 @@ _HUB_JOB = [
     # the from_type vocabulary, read before the adds: a spelling this installation does not carry
     # reds HERE, naming it, instead of inside the add that used it.
     ("cam_edit_tools", {"action": "list_types", "scope": "document"},
-     _types_offered(*[t for t, _d in _HUB_TOOLS]), None),
+     _types_offered(*([t for t, _d in _HUB_TOOLS] + [_NOZZLE_TYPE, _PROBE_TYPE, _INSERT_TYPE])),
+     None),
+    # WHICH ROW A 'diameter' OVERRIDE WRITES. Every tool carries every column, so the size row is
+    # the one the tool's own family flag picks: a waterjet reads tool_isJet and is sized on its
+    # nozzle; a threading insert reads tool_isTurning and is refused, though it carries a cutting
+    # diameter that reads. Both run on a tool added and taken back out, ahead of the base index.
+    ("cam_edit_tools", {"action": "add", "scope": "document",
+                        "add_tools": [{"from_type": _NOZZLE_TYPE, "diameter": "1 mm"}]},
+     _sized_by(_P_NOZZLE, "1 mm", 1.0),
+     ("wj_count", _recall("wj_count", lambda p: p["tool_count"]))),
+    # the STORED entry, read on its own: action='parameters' re-reads the tool the library holds,
+    # which is where a size written to the object a createFromJson built either landed or did not.
+    ("cam_edit_tools", lambda c: {"action": "parameters", "scope": "document",
+                                  "tool": _ctx_get(c, "wj_count", "the sized-add count") - 1},
+     _row_reads(_P_NOZZLE, 1.0), None),
+    ("cam_edit_tools", {"action": "add", "scope": "document",
+                        "add_tools": [{"from_type": _INSERT_TYPE, "diameter": "1 mm"}]},
+     _refused(f"reads {_TURNING_FLAG} true", "tool_insertSize", "action='edit'"), None),
+    ("cam_edit_tools", {"action": "list", "scope": "document"},
+     lambda p: _measured("the refused override added no tool",
+                         {"tool_count": p.get("tool_count"), "after_the_sized_add":
+                          _RECALL.get("wj_count")},
+                         p.get("tool_count") == _RECALL.get("wj_count")), None),
+    ("cam_edit_tools", lambda c: {"action": "remove", "scope": "document",
+                                  "remove_indices": [_ctx_get(c, "wj_count",
+                                                              "the sized-add count") - 1]},
+     lambda p: p.get("removed") == 1
+     and p.get("tool_count") == _RECALL.get("wj_count") - 1, None),
+    # THE PROBE: no family flag reads true on it, so the size falls back to the cutting diameter -
+    # the stylus, the one row it IS sized on - and only because that row reads editable.
+    ("cam_edit_tools", {"action": "add", "scope": "document",
+                        "add_tools": [{"from_type": _PROBE_TYPE, "diameter": "4 mm"}]},
+     _sized_by(_P_DIAMETER, "4 mm", 4.0),
+     ("probe_count", _recall("probe_count", lambda p: p["tool_count"]))),
+    ("cam_edit_tools", lambda c: {"action": "parameters", "scope": "document",
+                                  "tool": _ctx_get(c, "probe_count", "the probe-add count") - 1},
+     _row_reads(_P_DIAMETER, 4.0), None),
+    ("cam_edit_tools", lambda c: {"action": "remove", "scope": "document",
+                                  "remove_indices": [_ctx_get(c, "probe_count",
+                                                              "the probe-add count") - 1]},
+     lambda p: p.get("removed") == 1
+     and p.get("tool_count") == _RECALL.get("probe_count") - 1, None),
     # the base index the adds below land at: the count of the cutters the earlier CAM acts left in
     # this document's library, which is what every create row below selects its tool against.
     ("cam_edit_tools", {"action": "list", "scope": "document"},
@@ -889,7 +1002,7 @@ _HUB_JOB = [
     ("cam_create_setup", {"models": [HUB_COMP + ":1"], "name": HUB_MILL_SETUP},
      _setup_created(HUB_MILL_SETUP, "milling"), None),
     ("cam_edit_setup", {"setup": HUB_MILL_SETUP, "stock_mode": "previous_setup"},
-     _stock_mode_set("previous_setup", "relative_box"), None),
+     _stock_mode_set("previous_setup", "relative_box", HUB_TURN_SETUP), None),
     ("cam_get", {}, _hub_setups, None),
     # launched behind every write this act makes, and certified by the act boundary's poll.
     ("cam_generate", {"target": HUB_TURN_SETUP, "skip_valid": False},
@@ -984,6 +1097,55 @@ _HUB_ROTARY_READ = [
     ("cam_post", {"scope": HUB_ROT_SETUP, "post": _DUMP_POST, "post_scope": "fusion",
                   "output_folder": EXPORT_DIR + "/dump", "program_name": _ROT_PROGRAM},
      _dumped_rotary(HUB_ROT_SETUP, _ROT_PROGRAM), None),
+    # THE OPERATION'S TOOL IS THE DOCUMENT-LIBRARY ENTRY, not a copy taken when it was created: an
+    # entry edited after an operation was made on it reads back ON that operation. The whole proof
+    # runs on an entry and a setup of its own, both taken back out at the end - the shared mills are
+    # run by the census, and nothing here is generated, so no operation is left stale behind it.
+    ("cam_edit_tools", {"action": "add", "scope": "document",
+                        "add_tools": [{"from_type": _REACH_TOOL, "diameter": "8 mm"}]},
+     _sized_by(_P_DIAMETER, "8 mm", 8.0),
+     ("reach_count", _recall("reach_count", lambda p: p["tool_count"]))),
+    ("cam_edit_tools", lambda c: {"action": "parameters", "scope": "document",
+                                  "tool": _ctx_get(c, "reach_count", "the reach-tool count") - 1},
+     _row_reads(_P_DIAMETER, 8.0),
+     ("reach_flutes", _recall("reach_flutes", lambda p: next(
+         r["value"] for r in p["parameters"] if r["name"] == "tool_numberOfFlutes")))),
+    ("cam_create_setup", {"models": [HUB_COMP + ":1"], "name": _REACH_SETUP},
+     _setup_created(_REACH_SETUP, "milling"), None),
+    ("cam_create_operation",
+     lambda c: {"setup": _REACH_SETUP, "strategy": "face", "name": _REACH_OP,
+                "tool_scope": "document",
+                "tool_index": _ctx_get(c, "reach_count", "the reach-tool count") - 1,
+                "generate": False},
+     _op_named(_REACH_SETUP, "face", _REACH_OP), None),
+    # the edit, on the entry that one operation runs: operationsByTool NAMES it, which is the read
+    # the note is worded from rather than a reach nothing looked at.
+    ("cam_edit_tools",
+     lambda c: {"action": "edit", "scope": "document",
+                "tool": _ctx_get(c, "reach_count", "the reach-tool count") - 1,
+                "parameters": {"tool_numberOfFlutes":
+                               str(int(_ctx_get(c, "reach_flutes", "the entry flute count")) + 1)}},
+     _reached(_REACH_OP, 1), None),
+    # and the operation reads the entry's NEW flute count, though it was created before the edit
+    ("cam_get", {"include": ["tool"], "operation": _REACH_OP},
+     lambda p: _op_flutes(_REACH_OP, int(_RECALL["reach_flutes"]) + 1)(p), None),
+    ("cam_edit_tools",
+     lambda c: {"action": "edit", "scope": "document",
+                "tool": _ctx_get(c, "reach_count", "the reach-tool count") - 1,
+                "parameters": {"tool_numberOfFlutes":
+                               str(int(_ctx_get(c, "reach_flutes", "the entry flute count")))}},
+     _reached(_REACH_OP, 1), None),
+    ("cam_get", {"include": ["tool"], "operation": _REACH_OP},
+     lambda p: _op_flutes(_REACH_OP, int(_RECALL["reach_flutes"]))(p), None),
+    # both taken back out, so the document this act leaves is the one it found
+    ("cam_delete", {"entity": _REACH_SETUP},
+     lambda p: p.get("deleted") is True and p.get("entity") == _REACH_SETUP
+     and p.get("entity_type") == "setup", None),
+    ("cam_edit_tools", lambda c: {"action": "remove", "scope": "document",
+                                  "remove_indices": [_ctx_get(c, "reach_count",
+                                                              "the reach-tool count") - 1]},
+     lambda p: p.get("removed") == 1
+     and p.get("tool_count") == _RECALL.get("reach_count") - 1, None),
 ]
 
 

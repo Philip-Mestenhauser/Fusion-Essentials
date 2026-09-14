@@ -131,9 +131,11 @@ def _source_document_urn(native):
     """The lineage id of the document ``native`` lives in, or None (a never-saved document carries
     no dataFile, which is an answer: it cannot be x-ref'd, so its token is already unique)."""
     # MEASURED: BRepBody/MeshBody carry parentComponent and NOT parentDesign; Component carries
-    # parentDesign and NOT parentComponent. Exactly ONE chain reads per kind.
+    # parentDesign and NOT parentComponent; a BRepFace/BRepEdge carries NEITHER - on the native and
+    # on an occurrence proxy alike - and reaches its design one hop further on, through .body.
     design = (safe(lambda: native.parentComponent.parentDesign)
-              or safe(lambda: native.parentDesign))
+              or safe(lambda: native.parentDesign)
+              or safe(lambda: native.body.parentComponent.parentDesign))
     return safe(lambda: design.parentDocument.dataFile.id)
 
 

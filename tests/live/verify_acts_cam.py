@@ -60,8 +60,11 @@ _FLIP_FACE_OP = "FlipFace"     # the second setup: facing the underside
 _FLIP_BACK_OP = "FlipCbores"   # and the contour round the counterbore backsides
 _ENGRAVE_OP = "SketchEngrave"  # the engraving, driven by the scratch sketch
 _PROBE_OP = "ProbeStepTop"     # the Probe WCS cycle that touches off the stepped top
+_PROBE_STOCK_OP = "ProbeStockTop"   # the same cycle aimed at a BOX stock's own top face
 _RECOGNIZED_OP = "DrillRecognized"   # the drill selected off cam_find_holes' handles, then deleted
 _POCKET_RECOG_OP = "PocketRecognized"   # the 2D pocket selected off cam_find_pockets' floor handle
+_BLEND_OP = "BlendRims"        # the blend whose drive curves are a PAIR, then deleted
+_SAME_FACE_OP = "SpotAgain"    # the second op aimed at the spot drill's own bores, then deleted
 
 _FOLDER_INNER = "FolderInner"
 _FOLDER_DEEP = "FolderDeep"
@@ -290,6 +293,23 @@ def _op_named(setup, strategy, name):
                          p.get("operation") == name and p.get("setup") == setup
                          and p.get("strategy") == strategy
                          and "generation_mode_note" not in p)
+    return check
+
+
+def _machines_capped_above_the_default(rows_seen):
+    """cam_get(include=['machines'], max_results=150): the cap rides through to the catalog, so a
+    listing that answered rows_seen truncated at the default answers more here. A library holding
+    fewer than the default never truncated, and its whole listing is the pass. The rows a listed
+    twin marks description_shared ride in the reading - which rows those are is the library's."""
+    def check(p):
+        slice_ = p.get("machines") or {}
+        rows = slice_.get("machines") or []
+        shared = [r["name"] for r in rows if r.get("description_shared")]
+        return _measured(f"the machine catalog answers past {rows_seen} rows when it has more",
+                         {"count": slice_.get("count"), "truncated": slice_.get("truncated"),
+                          "description_shared": shared[:4], "note": slice_.get("note")},
+                         len(rows) == slice_.get("count")
+                         and (len(rows) > rows_seen or slice_.get("truncated") is False))
     return check
 
 
@@ -584,6 +604,19 @@ def _setup_bodies(**counts):
     return check
 
 
+def _job_type_kept(job_type, moved_to):
+    """cam_edit_setup(machine=...): the setup's job-type row read BACK where it was, beside what
+    the assignment moved it to - a mill-turn machine on a milling setup moves it and the tool puts
+    it back, and a machine that leaves it alone publishes no such key at all."""
+    def check(p):
+        kept = p.get("job_type_kept") or {}
+        return _measured(f"job_type kept '{job_type}' (the machine set '{moved_to}')",
+                         {"machine_set": p.get("machine_set"), "job_type_kept": kept},
+                         bool(p.get("machine_set")) and kept.get("job_type") == job_type
+                         and kept.get("machine_set_it_to") == moved_to)
+    return check
+
+
 def _complete_setup_row(payload, setup):
     """Return one exact, readable and untruncated setup row, or None."""
     rows = payload.get("setups") or []
@@ -781,6 +814,11 @@ _CAM_STORY = [
      lambda p: p["created"] is True and p["setup_name"] == CAM_SETUP
      and p["operation_type"] == "milling" and p["model_count"] >= 1
      and p["operation_count"] == 0, None),
+    # 'previous_setup' machines what the setup BEFORE it left, and this is the document's first -
+    # so the mode is refused naming the order rather than landing with the prior mode's extents.
+    # The hub's mill-turn pair (ACT 10c9) is the positive, on a setup that has a predecessor.
+    ("cam_edit_setup", {"setup": CAM_SETUP, "stock_mode": "previous_setup"},
+     _refused("is the first setup", "The order is"), None),
     # the REAL stock solid and the REAL fixture bodies - the shop-template selection shape, each
     # collection's count read back off the setup.
     ("cam_edit_setup", {"setup": CAM_SETUP, "stock": [STOCK_COMP],
@@ -959,14 +997,20 @@ _CAM_STORY = [
                 "handles": _ctx_get(c, "recognized_cbore_walls", "the recognized counterbore walls"),
                 "generate": False}, _selected_saved("recognized_cbore_walls"), None),
     # THE SURFACE GROUP on a BASE-licence strategy: a drill carries checkSurfaceSelectionSets, so
-    # two faces land on a direct group of their own. This op is deleted on the next row.
+    # two faces land on a direct group of their own, told to be AVOIDED rather than machined.
     # _surface_group_applied is defined below this list, so the predicate is built when it RUNS.
     ("cam_select_geometry",
      lambda c: {"operation": _RECOGNIZED_OP, "selection": "surface_group",
                 "handles": [_ctx_get(c, "step_top_face", "the stepped top"),
                             _ctx_get(c, "boss_top", "the boss top")],
-                "machine_over_holes": True, "generate": False},
-     lambda p: _surface_group_applied(2, True, groups=3)(p), None),
+                "machine_over_holes": True, "machine_mode": "avoid", "generate": False},
+     lambda p: _surface_group_applied(2, True, groups=3, mode="avoid")(p), None),
+    # THE SURFACE GROUP AS A DIFFERENCE: this drill now carries a direct group the other does not,
+    # and a group's faces and flags live on the group objects - so the two read identical parameter
+    # expressions for it. Taken here, while the group is still on the operation.
+    ("cam_compare_operations", lambda c: {"operation_a": _RECOGNIZED_OP,
+                                          "operation_b": _ctx_get(c, "drill_op", "the drill op")},
+     lambda p: _group_census_differs("checkSurfaceSelectionSets")(p), None),
     # _op_deleted is defined below this list, so the predicate is built when the step RUNS.
     ("cam_delete", {"entity": _RECOGNIZED_OP}, lambda p: _op_deleted(_RECOGNIZED_OP)(p), None),
     # THE RECOGNIZED POCKET, machined the same way: the FLOOR handle cam_find_pockets minted in the
@@ -1060,6 +1104,28 @@ _CAM_STORY = [
                                                    _ctx_get(c, "bk_rim_far", "the +y rim edge")],
                                        "generate": False},
      _refused("share no vertex", "chain_groups"), None),
+    # THE DRIVE-CURVE PAIR: blend carries 'blend_curves' AND machiningBoundarySel (measured), so a
+    # chain routed to the boundary leaves the drive input empty and the op reports 'Incorrect number
+    # of drive curves'. The two opposite rim edges are one CurveSelection each. Deleted right after,
+    # so the folder census, the post and the counts below read the job the rows above built.
+    ("cam_create_operation", {"setup": CAM_SETUP, "strategy": "blend", "name": _BLEND_OP,
+                              "tool_scope": "document", "tool_index": _BALL_MILL,
+                              "generate": False},
+     _needs(MACHINING_EXTENSION, _op_named(CAM_SETUP, "blend", _BLEND_OP)), None),
+    # REFUSED: ONE curve where the pair is needed. The refusal names the generate result it
+    # prevents, and it fires before applyCurveSelections, so the operation is left as it was found.
+    ("cam_select_geometry", lambda c: {"operation": _BLEND_OP, "selection": "chain",
+                                       "handles": [_ctx_get(c, "bk_rim_near", "the -y rim edge")],
+                                       "generate": False},
+     _needs(MACHINING_EXTENSION,
+            _refused("takes a PAIR of drive curves", "Incorrect number of drive curves")), None),
+    ("cam_select_geometry", lambda c: {"operation": _BLEND_OP, "selection": "chain",
+                                       "handles": [_ctx_get(c, "bk_rim_near", "the -y rim edge"),
+                                                   _ctx_get(c, "bk_rim_far", "the +y rim edge")],
+                                       "generate": False},
+     _needs(MACHINING_EXTENSION, lambda p: _drive_curves_applied("blend_curves", 2)(p)), None),
+    ("cam_delete", {"entity": _BLEND_OP},
+     _needs(MACHINING_EXTENSION, lambda p: _op_deleted(_BLEND_OP)(p)), None),
     # and back to the silhouette this contour is generated from, now through NAMED bodies - the
     # branch that does NOT ride the setup's own models, and the last selection the generate acts on.
     ("cam_select_geometry", lambda c: {"operation": _ctx_get(c, "contour_op", "the contour op"),
@@ -1108,6 +1174,17 @@ _CAM_STORY = [
                                        "handles": [_ctx_get(c, "probe_face", "the stepped top")],
                                        "generate": False},
      _needs(MACHINING_EXTENSION, _probe_applied(1)), None),
+    # THE OTHER PROBING ROUTE is refused HERE: this setup's stock is the billet SOLID, and under a
+    # stock with no analytic faces the names read back empty (measured), so the route refuses
+    # before probe_mode is touched. The positive beat runs on a box-stock setup (the template act).
+    ("cam_select_geometry", {"operation": _PROBE_OP, "selection": "probe",
+                             "stock_faces": ["Top"], "generate": False},
+     _needs(MACHINING_EXTENSION, _refused("no analytic faces", "job_stockMode", "'solid'")), None),
+    ("cam_select_geometry", lambda c: {"operation": _PROBE_OP, "selection": "probe",
+                                       "handles": [_ctx_get(c, "probe_face", "the stepped top")],
+                                       "generate": False},
+     _needs(MACHINING_EXTENSION, lambda p: _probe_applied(1)(p)
+            and p.get("probe_mode") == "selection-model"), None),
     # the feed edit is read BACK off the parameter: 'after' is the expression the platform stored,
     # which a set that did not take leaves at the tool's default.
     ("cam_edit_operation", lambda c: {"operation": _ctx_get(c, "face_op", "the face op"),
@@ -1137,6 +1214,36 @@ _CAM_STORY = [
                                                                   "the created adaptive op")},
      lambda p: _compare_geometry(_RECALL.get("face_op"), _RECALL.get("adaptive_op"))(p)
      and all(d["parameter"] for d in p["differences"]), None),
+    # TWO DRILLING CYCLES ON DIFFERENT HOLES: the spot drill spots the two through bores, the drill
+    # opens the four mounting bores. Their COUNTS differ, and a count difference is a difference
+    # of its own - the identity verdict is reserved for equal counts (the row two below).
+    ("cam_compare_operations", lambda c: {"operation_a": _SPOT_OP,
+                                          "operation_b": _ctx_get(c, "drill_op", "the drill op")},
+     lambda p: _picks_count_differ("holeFaces", [2, 4])(p), None),
+    # and the same read in the direction where it must stay SILENT: a SECOND spot drill aimed at
+    # the two through bores the first one spots. Two operations, one pair of faces - the compare
+    # must put no row on holeFaces.
+    ("cam_create_operation", {"setup": CAM_SETUP, "strategy": "drill", "name": _SAME_FACE_OP,
+                              "tool_scope": "document", "tool_index": _CENTER_DRILL,
+                              "generate": False},
+     _op_named(CAM_SETUP, "drill", _SAME_FACE_OP), None),
+    ("cam_select_geometry",
+     lambda c: {"operation": _SAME_FACE_OP, "selection": "holes",
+                "handles": _ctx_get(c, "through_bores", "the two through bores"),
+                "generate": False}, _selected(2), None),
+    ("cam_compare_operations", {"operation_a": _SPOT_OP, "operation_b": _SAME_FACE_OP},
+     lambda p: _picks_same("holeFaces")(p), None),
+    # then the SAME operation re-aimed at two OTHER holes: equal counts, different faces - the one
+    # case a count cannot tell apart, which the identity verdict names. Deleted straight after, so
+    # the census and post below are the job the rows above built.
+    ("cam_select_geometry",
+     lambda c: {"operation": _SAME_FACE_OP, "selection": "holes",
+                "handles": _ctx_get(c, "mount_bores", "the mounting bores")[:2],
+                "generate": False}, _selected(2), None),
+    ("cam_compare_operations", {"operation_a": _SPOT_OP, "operation_b": _SAME_FACE_OP},
+     lambda p: _picks_differ("holeFaces")(p), None),
+    ("cam_delete", {"entity": _SAME_FACE_OP},
+     lambda p: _op_deleted(_SAME_FACE_OP)(p), None),
     # The listed rows are not the operation's whole set: the read counts what its own filter dropped.
     ("cam_get", lambda c: {"include": ["parameters"],
                            "operation": _ctx_get(c, "adaptive_op", "the created adaptive op")},
@@ -1148,6 +1255,15 @@ _CAM_STORY = [
     ("cam_edit_folders", {"action": "create", "setup": CAM_SETUP, "name": "Drilling"},
      lambda p: p["created"] is True and p["folder"] == "Drilling" and p["setup"] == CAM_SETUP,
      None),
+    # 'folder' is a strategy the setup OFFERS and operations.add over it creates a FOLDER the
+    # operation count never moves for - so it is refused on the NAME, before the add, and the
+    # listing beside it is the witness that this call left the two folders above alone.
+    ("cam_create_operation", {"setup": CAM_SETUP, "strategy": "folder", "name": "StrategyFolder",
+                              "tool_scope": "document", "tool_index": _FACE_MILL},
+     _refused("'folder' is not an operation", "cam_edit_folders"), None),
+    ("cam_edit_folders", {"action": "list", "setup": CAM_SETUP},
+     lambda p: p["folder_count"] == 2
+     and sorted(f["name"] for f in p["folders"]) == ["Drilling", "Milling"], None),
     # 'moved' counts the moves whose destination-membership re-read GREW the folder under that
     # name; an item the folder already listed lands in 'unattributed', and the first failed move
     # errors naming what had landed - so the count IS the operations measured into the folder.
@@ -1166,17 +1282,17 @@ _CAM_STORY = [
                                                    _BORE_OP]},
      lambda p: p["moved"] == 3 and p["into"] == "Drilling", None),
     # The nested-folder control runs in this act's bounded post-act poll, after its generation.
-    # WALK-ORDER ADDRESSING, now that the job is split across the setup and two folders. Operation
-    # .name DEDUPES rather than refusing, which would mint a second 'Face1' nothing asked for and
-    # leave the two tellable apart only by walk position. Both arms that could reach that refuse
-    # BEFORE mutating - the create here, the rename below - each naming the count it collided with.
+    # WALK-ORDER ADDRESSING, now that the job is split across the setup and two folders. Both write
+    # paths DEDUPE rather than refusing, minting a second 'Face1' nobody asked for and leaving the
+    # two tellable apart only by walk position - the create across the whole document to
+    # '<name> (2)', the rename inside one setup. Each refuses BEFORE mutating, in its own scope.
     ("cam_create_operation", lambda c: {"setup": CAM_SETUP, "strategy": "face",
                                         "name": _ctx_get(c, "face_op", "the face op"),
                                         "tool_scope": "document", "tool_index": _FACE_MILL,
                                         "generate": False},
-     _refused("already answer to", "dedupes rather than refusing", "cam_get"), None),
+     _refused("already answer to", "(2)", "cam_get"), None),
     # the rename arm, on an operation in one FOLDER aimed at a name an operation in ANOTHER carries
-    # - the refusal is document-wide, not per folder. Nothing is written, so no rename reaches the
+    # - the refusal is setup-wide, not per folder. Nothing is written, so no rename reaches the
     # platform: setting Operation.name is itself a generation trigger (ledger BORE-PARK-REPRO-1).
     ("cam_edit_operation", lambda c: {"operation": _ctx_get(c, "drill_op", "the drill op"),
                                       "rename": _ctx_get(c, "face_op", "the face op")},
@@ -1198,6 +1314,12 @@ _CAM_STORY = [
     # the name is now how the library reaches a machine, so a second create is refused naming the
     # machine it collides with and the library holding it.
     ("cam_create_machine", {"name": MACHINE_NAME, "template": "generic_3_axis"}, "refused", None),
+    # A MILL-TURN machine on this MILLING setup: assigning one MOVED the setup's job_type row to
+    # 'turning' (Setup.operationType 1) with nothing said, so the tool puts the row back and
+    # publishes both readings. The act's own machine goes back on in the next row.
+    ("cam_edit_setup", {"setup": CAM_SETUP, "machine": "Brother|SPEEDIO M140X1",
+                        "machine_strip_simulation": True},
+     _job_type_kept("milling", "turning"), None),
     # a real machine, and the assignment the post and setup sheet run on: assigning a
     # simulation-ready machine can be REFUSED - measured on the library machine the measuring run
     # picks, when that machine carries a simulation model - so this step assigns through
@@ -1207,6 +1329,11 @@ _CAM_STORY = [
      lambda p: p.get("machine_set") == "Haas VF-2", None),
     ("cam_get", {"include": ["machines"], "vendor": "Haas", "machine_type": "milling"},
      lambda p: p.get("machines", {}).get("count", 0) > 0, None),
+    # THE CAP the catalog runs under: the read's own default is 100 rows and the shipped library
+    # holds more, so a max_results above it has to reach the library walk rather than stopping at
+    # the default. The reading also carries whichever listed rows a twin marked description_shared.
+    ("cam_get", {"include": ["machines"], "max_results": 150},
+     _machines_capped_above_the_default(100), None),
     ("cam_show_toolpath", {"action": "list"},
      lambda p: p["action"] == "list" and p["operation_count"] >= 9
      and len(p["operations"]) == p["operation_count"]
@@ -1471,6 +1598,114 @@ def _op_deleted(name_or_key):
     return check
 
 
+def _posted_as_is(name):
+    """cam_post carrying nothing but 'program_name': the stored configuration posted untouched. The
+    mode and the scope both say so, and files still land - an as-is post that wrote nothing would
+    be a re-post in name only."""
+    def check(p):
+        return _measured(f"as-is re-post of program '{name}'",
+                         {"posted": p.get("posted"), "mode": p.get("mode"),
+                          "scope": p.get("scope"), "program_name": p.get("program_name"),
+                          "file_count": p.get("file_count")},
+                         p.get("posted") is True and p.get("mode") == "as_is"
+                         and p.get("scope") == "as_is" and p.get("program_name") == name
+                         and _num(p.get("file_count")) and p["file_count"] >= 1)
+    return check
+
+
+def _nc_renamed(was, now):
+    """cam_set_nc_comment(set_name=...): NCProgram.name is what moves. 'name_after' is read off the
+    held program and 'name_listed' off a FRESH ncPrograms walk - the listing cam_post's
+    'program_name' looks a program up through, and the channel that catches a rename a payload
+    reports while the listing does not carry it. The NUMBER is a different field: a set_name call
+    touches it not at all, so its keys are absent."""
+    def check(p):
+        rec = (p.get("programs") or [{}])[0]
+        return _measured(f"NC program {was!r} renamed to {now!r}, listing and all",
+                         {"set": p.get("set"), "programs_changed": p.get("programs_changed"),
+                          "program": rec.get("program"), "name_before": rec.get("name_before"),
+                          "name_after": rec.get("name_after"),
+                          "name_listed": rec.get("name_listed"),
+                          "name_differs_from_request": rec.get("name_differs_from_request"),
+                          "number_after": rec.get("number_after")},
+                         p.get("set") is True and p.get("programs_changed") == 1
+                         and rec.get("program") == was and rec.get("name_before") == was
+                         and rec.get("name_after") == now and rec.get("name_listed") is True
+                         and "name_differs_from_request" not in rec
+                         and "number_after" not in rec)
+    return check
+
+
+def _nc_numbered(program, was, now):
+    """cam_set_nc_comment(set_number=...): the nc_program_name PARAMETER - the number the post
+    emits - moved and read back, while the listing NAME this program is addressed by stayed put
+    (its keys are absent)."""
+    def check(p):
+        rec = (p.get("programs") or [{}])[0]
+        return _measured(f"NC program {program!r} renumbered {was!r} -> {now!r}",
+                         {"set": p.get("set"), "programs_changed": p.get("programs_changed"),
+                          "program": rec.get("program"),
+                          "number_before": rec.get("number_before"),
+                          "number_after": rec.get("number_after"),
+                          "name_after": rec.get("name_after")},
+                         p.get("set") is True and p.get("programs_changed") == 1
+                         and rec.get("program") == program and rec.get("number_before") == was
+                         and rec.get("number_after") == now and "name_after" not in rec)
+    return check
+
+
+def _nc_listing(holds=None, gone=None):
+    """cam_get(include=['nc_programs']): the listing's own 'name' rows - an independent read of the
+    channel the rename above claims to have moved."""
+    def check(p):
+        names = [r.get("name") for r in (p.get("nc_programs") or {}).get("nc_programs") or []]
+        return _measured(f"the NC program listing holds {holds!r} and no {gone!r}",
+                         {"names": names},
+                         (holds is None or holds in names) and (gone is None or gone not in names))
+    return check
+
+
+def _nc_program_deleted(name):
+    """cam_delete on an NC PROGRAM: programs hang off cam.ncPrograms, outside the setup tree, and
+    'entity_type' is the resolved node's kind - which is what says a program went rather than a
+    setup or operation a shared name could have reached."""
+    def check(p):
+        return _measured(f"NC program {name!r} deleted",
+                         {"deleted": p.get("deleted"), "entity": p.get("entity"),
+                          "entity_type": p.get("entity_type"),
+                          "remaining_with_name": p.get("remaining_with_name")},
+                         p.get("deleted") is True and p.get("entity") == name
+                         and p.get("entity_type") == "nc_program"
+                         and p.get("remaining_with_name") == 0)
+    return check
+
+
+def _renamed_exactly(was, now):
+    """cam_edit_operation(rename=...): Operation.name dedupes inside ONE setup, so a rename onto a
+    name another SETUP's operation carries lands exactly. 'operation' is the read-back off the
+    operation, and the ABSENCE of 'name_deduped' is what says nothing was appended."""
+    def check(p):
+        return _measured(f"{was!r} renamed to {now!r} exactly, beside the twin in another setup",
+                         {"operation": p.get("operation"), "was_operation": p.get("was_operation"),
+                          "renamed": p.get("renamed"), "name_deduped": p.get("name_deduped")},
+                         p.get("renamed") is True and p.get("operation") == now
+                         and p.get("was_operation") == was and "name_deduped" not in p)
+    return check
+
+
+def _setup_holds(setup, name, present=True):
+    """cam_get(include=['operations']) scoped to one setup: whether THAT setup carries an operation
+    of this name - which is what says which of two same-named operations an ordinal address
+    reached, rather than trusting the ordinal to have counted the way the act expected."""
+    def check(p):
+        recs = ((p.get("operations") or {}).get("setups") or [])
+        rec = next((r for r in recs if r.get("setup") == setup), None)
+        names = [r.get("name") for r in ((rec or {}).get("operations") or [])]
+        return _measured(f"'{setup}' {'holds' if present else 'no longer holds'} {name!r}",
+                         {"names": names}, (name in names) is present)
+    return check
+
+
 def _setup_ready(setup, count):
     """cam_get(include=['operations']) on one generated setup: the readiness verdict is published
     either way, and a setup carrying a blocked_by changes its WORDING to "'ready to post' is NOT
@@ -1558,6 +1793,34 @@ _CAM_DELIVER = [
     ("cam_set_nc_comment", {"comment": "BRACKET sweep"},
      lambda p: p["set"] is True and p["programs_changed"] >= 1
      and all(r["comment_after"] == "BRACKET sweep" for r in p["programs"]), None),
+    # THE TWO NAMES on the program the post above wrote: set_name moves NCProgram.name, the name
+    # the listing carries and cam_post's 'program_name' looks a program up by, while the
+    # nc_program_name PARAMETER stays the number the post emits. The listing read between them is
+    # the independent channel; the rename back leaves every later row its address.
+    ("cam_set_nc_comment", {"program": "1001", "set_name": "BRACKET-1001"},
+     _nc_renamed("1001", "BRACKET-1001"), None),
+    ("cam_get", {"include": ["nc_programs"]},
+     _nc_listing(holds="BRACKET-1001", gone="1001"), None),
+    # THE ADDRESS, proven: an as-is re-post reaches the program by its new listing name and writes
+    # no parameter at all, so nothing but itemByName on that name can have found it.
+    ("cam_post", {"program_name": "BRACKET-1001"}, _posted_as_is("BRACKET-1001"), None),
+    ("cam_set_nc_comment", {"program": "BRACKET-1001", "set_name": "1001"},
+     _nc_renamed("BRACKET-1001", "1001"), None),
+    # THE OTHER FIELD, round-tripped: the nc_program_name PARAMETER is the number the post emits,
+    # and it moves without touching the listing name the rows above addressed.
+    ("cam_set_nc_comment", {"program": "1001", "set_number": "1101"},
+     _nc_numbered("1001", "1001", "1101"), None),
+    ("cam_get", {"include": ["nc_programs"]}, _nc_listing(holds="1001"), None),
+    ("cam_set_nc_comment", {"program": "1001", "set_number": "1001"},
+     _nc_numbered("1001", "1101", "1001"), None),
+    # REFUSED: a post path whose DIRECTORY does not exist. Its basename resolves in the installed
+    # post folder, so a basename fallback would post a .cps nothing asked for; the listing read
+    # after it is what says the refusal fired before any program was built.
+    ("cam_post", {"scope": CAM_SETUP, "post": EXPORT_DIR + "/no-such-folder/haas.cps",
+                  "post_scope": "local", "output_folder": EXPORT_DIR + "/nc",
+                  "program_name": "1004"},
+     _refused("no-such-folder", "Nothing was posted"), None),
+    ("cam_get", {"include": ["nc_programs"]}, _nc_listing(gone="1004"), None),
     # the saved template names the operation it was bundled from (read off the Operation objects the
     # names resolved to) and carries the url a template loaded back from - the tool refuses the save
     # when nothing loads from what importTemplate returned.
@@ -1566,7 +1829,8 @@ _CAM_DELIVER = [
                                      "location": "local"},
      lambda p: p["saved"] is True and p["template"] == TEMPLATE_NAME
      and p["operation_count"] == 1 and p["operations"] == [_RECALL.get("face_op")]
-     and bool(p["template_url"]), None),
+     and bool(p["template_url"]),
+     ("saved_template_url", _recall("saved_template_url", lambda p: p["template_url"]))),
     ("cam_create_setup", {"models": [PART_COMP], "name": "Setup2"},
      lambda p: p["created"] is True and p["setup_name"] == "Setup2"
      and p["operation_count"] == 0, None),
@@ -1675,18 +1939,24 @@ _CAM_DELIVER = [
      and p["had_toolpath"] is True and p["has_toolpath"] is False, None),
     # the FILTERED read: one operation fewer in the tally than the baseline counted, the suppressed
     # bucket empty because the suppressed op was left OUT of the tally, and the excluded count
-    # naming what it left out.
+    # naming what it left out. 'passed' judges the SAME set the tally counted - CAM's own check
+    # answers False for a setup whose only non-valid operation is suppressed, so it is not asked.
     ("cam_inspect_toolpaths", {"scope": CAM_SETUP},
      lambda p: p["measured"]["suppressed_excluded"] == 1
      and p["measured"]["states"]["suppressed"] == 0
      and p["measured"]["states"]["total"] == _RECALL.get("active_ops_before") - 1
-     and p["tolerance_used"]["tally_counts"] == "active_operations", None),
+     and p["tolerance_used"]["tally_counts"] == "active_operations"
+     and p["tolerance_used"]["verdict_counts"] == "active_operations"
+     and p["passed"] is True, None),
     # the same read WIDENED: every operation back in the tally, the suppressed one counted in its
-    # own bucket. The pair is the filter - one flag, two different sets over one job.
+    # own bucket, and the verdict is CAM's own over all of them - which the suppression fails. The
+    # pair is the filter - one flag, two different sets and two verdicts over one job.
     ("cam_inspect_toolpaths", {"scope": CAM_SETUP, "include_suppressed": True},
      lambda p: p["measured"]["states"]["total"] == _RECALL.get("active_ops_before")
      and p["measured"]["states"]["suppressed"] == 1
-     and p["measured"]["suppressed_excluded"] == 0, None),
+     and p["measured"]["suppressed_excluded"] == 0
+     and p["tolerance_used"]["verdict_counts"] == "all_operations"
+     and p["passed"] is False, None),
     ("cam_edit_operation", lambda c: {"operation": _ctx_get(c, "drill_op", "the drill op"),
                                       "suppressed": False},
      lambda p: p["is_suppressed"] is False, None),
@@ -1731,6 +2001,20 @@ _CAM_TEMPLATE_MODES = [
      ("template_skip_ops", _recall("template_skip_ops", lambda p: p["created_operations"]))),
     ("cam_get", {"include": ["operations"], "setup": _TEMPLATE_SKIP_SETUP},
      _template_path_state(_TEMPLATE_SKIP_SETUP, "template_skip_ops", "no_toolpath"), None),
+    # THE STOCK PROBING ROUTE lands here, on a setup whose stock is the default relative BOX:
+    # the analytic names read back only under a box, cylinder or tube stock (measured - a solid
+    # stock answers them empty), and probe_mode is written in the same call and read back.
+    ("cam_create_operation", lambda c: {"setup": _TEMPLATE_SKIP_SETUP, "strategy": "probe",
+                                        "name": _PROBE_STOCK_OP, "tool_scope": "document",
+                                        "tool_index": _ctx_get(c, "probe_tool",
+                                                               "the cloned probe's index"),
+                                        "generate": False},
+     _needs(MACHINING_EXTENSION, _op_named(_TEMPLATE_SKIP_SETUP, "probe", _PROBE_STOCK_OP)), None),
+    ("cam_select_geometry", {"operation": _PROBE_STOCK_OP, "selection": "probe",
+                             "stock_faces": ["Top"], "generate": False},
+     _needs(MACHINING_EXTENSION, lambda p: _stock_probed(["Top"], "selection-stock")(p)), None),
+    ("cam_delete", {"entity": _PROBE_STOCK_OP},
+     _needs(MACHINING_EXTENSION, _op_deleted(_PROBE_STOCK_OP)), None),
     ("cam_create_setup", {"models": [PART_COMP + ":1"], "name": _TEMPLATE_GENERATE_SETUP},
      lambda p: p["created"] is True and p["setup_name"] == _TEMPLATE_GENERATE_SETUP
      and p["operation_count"] == 0, None),
@@ -1745,11 +2029,28 @@ _CAM_TEMPLATE_MODES = [
 _CAM_TEMPLATE_CLEANUP = [
     ("cam_get", {"include": ["operations"], "setup": _TEMPLATE_GENERATE_SETUP},
      _template_path_state(_TEMPLATE_GENERATE_SETUP, "template_generate_ops", "valid"), None),
+    # The listing this run's own save landed in: the Local library answers a saved template under
+    # the root AND under its folder with the SAME asset url; one url listed twice is one template,
+    # not two.
+    ("cam_get", {"include": ["templates"], "template_location": "local"},
+     lambda p: _no_repeated_template_url(p), None),
+    # the by-NAME resolve still reaches the template - it is the CONFIRMATION that refuses here,
+    # which is why the refusal is pinned to that wording: an ambiguity refusal would pass a bare
+    # 'refused' while proving the opposite of what this row is for.
     ("cam_delete_template", {"name": TEMPLATE_NAME, "confirm_name": "NotThisTemplate"},
-     "refused", None),
-    ("cam_delete_template", {"name": TEMPLATE_NAME, "confirm_name": TEMPLATE_NAME},
+     _refused("Name mismatch", TEMPLATE_NAME), None),
+    # the ADDRESS route: template_url names one asset, so no name has to be shown unique first.
+    # confirm_name is checked against what that url loads, and a wrong one refuses.
+    ("cam_delete_template", lambda c: {"template_url": _ctx_get(c, "saved_template_url",
+                                                                "the saved template's url"),
+                                       "confirm_name": "NotThisTemplate"},
+     _refused("Name mismatch", TEMPLATE_NAME), None),
+    ("cam_delete_template", lambda c: {"template_url": _ctx_get(c, "saved_template_url",
+                                                                "the saved template's url"),
+                                       "confirm_name": TEMPLATE_NAME},
      lambda p: p["deleted"] is True and p["template"] == TEMPLATE_NAME
-     and p["loads_after_delete"] is False and p["location"] == "local", None),
+     and p["loads_after_delete"] is False and p["location"] == "local"
+     and p["url"] == _RECALL.get("saved_template_url"), None),
     ("cam_get", {"include": ["templates"], "template_location": "local"},
      lambda p: TEMPLATE_NAME not in _tmpl_names(p["templates"]["tree"]), None),
 ]
@@ -2457,12 +2758,30 @@ _CAM_FB_DELIVER = [
     ("cam_set_nc_comment", {"comment": "BRACKET sweep"},
      lambda p: p["set"] is True and p["programs_changed"] >= 1
      and all(r["comment_after"] == "BRACKET sweep" for r in p["programs"]), None),
+    ("cam_set_nc_comment", {"program": "1001", "set_name": "BRACKET-1001"},
+     _nc_renamed("1001", "BRACKET-1001"), None),
+    ("cam_get", {"include": ["nc_programs"]},
+     _nc_listing(holds="BRACKET-1001", gone="1001"), None),
+    ("cam_post", {"program_name": "BRACKET-1001"}, _posted_as_is("BRACKET-1001"), None),
+    ("cam_set_nc_comment", {"program": "BRACKET-1001", "set_name": "1001"},
+     _nc_renamed("BRACKET-1001", "1001"), None),
+    ("cam_set_nc_comment", {"program": "1001", "set_number": "1101"},
+     _nc_numbered("1001", "1001", "1101"), None),
+    ("cam_get", {"include": ["nc_programs"]}, _nc_listing(holds="1001"), None),
+    ("cam_set_nc_comment", {"program": "1001", "set_number": "1001"},
+     _nc_numbered("1001", "1101", "1001"), None),
+    ("cam_post", {"scope": "Setup1", "post": EXPORT_DIR + "/no-such-folder/haas.cps",
+                  "post_scope": "local", "output_folder": EXPORT_DIR + "/nc",
+                  "program_name": "1004"},
+     _refused("no-such-folder", "Nothing was posted"), None),
+    ("cam_get", {"include": ["nc_programs"]}, _nc_listing(gone="1004"), None),
     ("cam_save_template", lambda c: {"template_name": TEMPLATE_NAME, "setup": "Setup1",
                                      "operations": _ctx_get(c, "face_op", "the face op"),
                                      "location": "local"},
      lambda p: p["saved"] is True and p["template"] == TEMPLATE_NAME
      and p["operation_count"] == 1 and p["operations"] == [_RECALL.get("face_op")]
-     and bool(p["template_url"]), None),
+     and bool(p["template_url"]),
+     ("saved_template_url", _recall("saved_template_url", lambda p: p["template_url"]))),
     ("cam_create_setup", {"models": ["ScratchStock"], "name": "Setup2"},
      lambda p: p["created"] is True and p["setup_name"] == "Setup2"
      and p["operation_count"] == 0, None),
@@ -2471,13 +2790,19 @@ _CAM_FB_DELIVER = [
     ("cam_delete", lambda c: {"entity": _ctx_get(c, "adaptive_op", "the created adaptive op")},
      lambda p: p["deleted"] is True and p["entity"] == _RECALL.get("adaptive_op")
      and p["entity_type"] == "operation", None),
-    # the same teardown as the narrative branch, in the branch that saved the template: the guard
-    # while the asset still exists, the delete on its own read-backs, then the library as witness.
+    # the same teardown as the narrative branch, in the branch that saved the template: the listing
+    # with no url twice, the guard while the asset still exists, the delete by ADDRESS on its own
+    # read-backs, then the library as witness.
+    ("cam_get", {"include": ["templates"], "template_location": "local"},
+     lambda p: _no_repeated_template_url(p), None),
     ("cam_delete_template", {"name": TEMPLATE_NAME, "confirm_name": "NotThisTemplate"},
-     "refused", None),
-    ("cam_delete_template", {"name": TEMPLATE_NAME, "confirm_name": TEMPLATE_NAME},
+     _refused("Name mismatch", TEMPLATE_NAME), None),
+    ("cam_delete_template", lambda c: {"template_url": _ctx_get(c, "saved_template_url",
+                                                                "the saved template's url"),
+                                       "confirm_name": TEMPLATE_NAME},
      lambda p: p["deleted"] is True and p["template"] == TEMPLATE_NAME
-     and p["loads_after_delete"] is False, None),
+     and p["loads_after_delete"] is False
+     and p["url"] == _RECALL.get("saved_template_url"), None),
     ("cam_get", {"include": ["templates"], "template_location": "local"},
      lambda p: TEMPLATE_NAME not in _tmpl_names(p["templates"]["tree"]), None),
     ("design_export", {"format": "step", "file_path": EXPORT_DIR + "/bracket_export", "target": "ScratchStock"}, "ok", None),
@@ -2727,6 +3052,136 @@ def _compare_geometry(op_a, op_b):
     return check
 
 
+def _geometry_rows(payload):
+    """{parameter: the difference row} off a cam_compare_operations payload."""
+    return {d.get("parameter"): d for d in (payload.get("geometry_differences") or [])}
+
+
+def _side_values(row, key):
+    """One key read off both sides of a difference row - None where that side is absent."""
+    return [(row.get(side) or {}).get(key) if isinstance(row.get(side), dict) else None
+            for side in ("operation_a", "operation_b")]
+
+
+_NATIVE_BASIS = "native identity"      # cam_compare_operations' basis for an entity that answered
+
+
+def _picks_differ(selection_param):
+    """cam_compare_operations: the geometry half told two operations apart by WHICH entities they
+    select - the read no parameter expression carries. Both sides must read every entity as a
+    native identity, and the row must carry the verdict naming the geometry as different."""
+    def check(p):
+        row = _geometry_rows(p).get(selection_param) or {}
+        bases = _side_values(row, "entity_bases")
+        return _measured(f"'{selection_param}' selects different entities on the two operations",
+                         {"geometry_difference_count": p.get("geometry_difference_count"),
+                          "entities": _side_values(row, "entities"), "entity_bases": bases,
+                          "entity_verdict": row.get("entity_verdict")},
+                         all(isinstance(b, list) and b and set(b) == {_NATIVE_BASIS}
+                             for b in bases)
+                         and "resolve to different geometry" in (row.get("entity_verdict") or ""))
+    return check
+
+
+def _picks_count_differ(selection_param, counts):
+    """cam_compare_operations: two selections of UNEQUAL size differ on their counts alone - the
+    row carries both counts and NO identity verdict, which is reserved for equal counts."""
+    def check(p):
+        row = _geometry_rows(p).get(selection_param) or {}
+        return _measured(f"'{selection_param}' holds {counts[0]} vs {counts[1]} entities",
+                         {"geometry_difference_count": p.get("geometry_difference_count"),
+                          "entities": _side_values(row, "entities"),
+                          "entity_verdict": row.get("entity_verdict")},
+                         _side_values(row, "entities") == list(counts)
+                         and row.get("entity_verdict") is None)
+    return check
+
+
+def _picks_same(selection_param):
+    """The other direction, over TWO operations pointed at ONE pair of faces: the geometry half
+    opened both sets and put NO row on that parameter. Each operation's set answers its own wrapper
+    for those faces, so a key taken off the wrapper instead of the physical entity splits them and
+    emits the row this refuses."""
+    def check(p):
+        rows = _geometry_rows(p)
+        return _measured(f"'{selection_param}' compares equal across two operations",
+                         {"geometry_difference_count": p.get("geometry_difference_count"),
+                          "same_geometry_count": p.get("same_geometry_count"),
+                          "parameters": sorted(rows),
+                          "entity_bases_truncated": p.get("entity_bases_truncated")},
+                         selection_param not in rows
+                         and (p.get("same_geometry_count") or 0) >= 1
+                         and "entity_bases_truncated" not in p)
+    return check
+
+
+def _group_census_differs(group_param):
+    """cam_compare_operations: the surface GROUPS are a geometry difference of their own - a group
+    and its flags live on the group objects, so two operations differing only there read zero
+    parameter differences."""
+    def check(p):
+        row = _geometry_rows(p).get(group_param) or {}
+        census = _side_values(row, "groups")
+        return _measured(f"'{group_param}' reads a different group census on the two operations",
+                         {"geometry_difference_count": p.get("geometry_difference_count"),
+                          "groups": census, "rows": _side_values(row, "rows")},
+                         all(isinstance(n, int) for n in census) and census[0] != census[1])
+    return check
+
+
+def _drive_curves_applied(param, selections):
+    """cam_select_geometry(chain) onto a per-reference drive parameter: one CurveSelection per
+    reference, on the parameter 'selection_param' names - the probe order is what puts them there
+    rather than on the machining boundary the same operation carries."""
+    def check(p):
+        return _measured(f"{selections} selection(s) on '{param}'",
+                         {"selections": p.get("selections"), "resolved": p.get("resolved"),
+                          "selection_param": p.get("selection_param"),
+                          "operation": p.get("operation")},
+                         p.get("selections") == selections
+                         and p.get("selection_param") == param)
+    return check
+
+
+def _stock_probed(names, mode):
+    """cam_select_geometry(probe): which probing route the operation now reads. stock_faces are the
+    STOCK's analytic names read back off probe_stock_selection, and probe_mode is the parameter that
+    decides the set is read at all - a selection landing under the other mode is inert."""
+    def check(p):
+        return _measured(f"probe_mode {mode!r} with stock faces {names}",
+                         {"probe_mode": p.get("probe_mode"), "stock_faces": p.get("stock_faces"),
+                          "probe_engaged": p.get("probe_engaged"),
+                          "selection_param": p.get("selection_param"),
+                          "selections": p.get("selections")},
+                         p.get("probe_mode") == mode and p.get("probe_engaged") is True
+                         and p.get("stock_faces") == names
+                         and p.get("selections") == len(names)
+                         and p.get("selection_param") == "probe_stock_selection")
+    return check
+
+
+def _collided_counts(node):
+    """The 'templates_collided' each folder of a templates tree reports - how many arrivals the
+    walk dropped as an asset it had already listed."""
+    counts = [node.get("templates_collided")] if node.get("templates_collided") else []
+    for sub in (node.get("folders") or []):
+        counts.extend(_collided_counts(sub))
+    return counts
+
+
+def _no_repeated_template_url(payload):
+    """cam_get(include=['templates']): every url in the tree is listed ONCE. The Local library
+    answers a saved template under the root AND under its own folder with the same asset url, and
+    two rows of one template refuse its name as ambiguous everywhere it is resolved.
+    templates_collided is recorded beside it - it is what says a duplicate arrival was collapsed."""
+    tree = (payload.get("templates") or {}).get("tree") or {}
+    urls = [t.get("url") for _folder, t in _tmpl_rows(tree) if t.get("url")]
+    return _measured("no asset url listed twice in the local template tree",
+                     {"urls": len(urls), "distinct": len(set(urls)),
+                      "templates_collided": _collided_counts(tree)},
+                     len(urls) == len(set(urls)))
+
+
 def _params_counted(operation):
     """cam_get(include=['parameters']): the LISTED rows and the count of the ones the visible+enabled
     filter dropped, so the listed count is not read as the operation's whole set."""
@@ -2924,19 +3379,20 @@ def _surfaces_applied(count, target, param):
     return check
 
 
-def _surface_group_applied(count, over_holes, groups=2):
+def _surface_group_applied(count, over_holes, groups=2, mode="machine"):
     """cam_select_geometry(surface_group): what the applied group reads BACK - its own face count,
-    the machine-over-holes flag, and the group count the operation now holds. `groups` is that
-    count after ONE direct group lands: the operation's own groups come first, and they differ
-    by strategy - a corner reads 2, a drill reads 3 (both measured)."""
+    the machine-over-holes flag, the machining mode, and the group count the operation now holds.
+    `groups` is that count after ONE direct group lands: the operation's own groups come first, and
+    they differ by strategy - a corner reads 2, a drill reads 3 (both measured)."""
     def check(p):
         group = p.get("surface_group") or {}
         return _measured(f"{count} face(s) on a surface group reading machine_over_holes "
-                         f"{over_holes}, {groups} groups on the operation",
+                         f"{over_holes} and machine_mode {mode!r}, {groups} groups on the operation",
                          {"selections": p.get("selections"), "surface_group": group,
                           "surface_group_count": p.get("surface_group_count")},
                          p.get("selections") == count and group.get("entities") == count
                          and group.get("machine_over_holes") is over_holes
+                         and group.get("machine_mode") == mode
                          and p.get("surface_group_count") == groups)
     return check
 
@@ -3095,21 +3551,6 @@ def _posted_turning(setup, program):
                          and _num(p.get("posted_operations")) and p["posted_operations"] >= 1
                          and p.get("file_count") == len(files) and len(files) >= 1
                          and all(_num(f.get("size_bytes")) and f["size_bytes"] > 0 for f in files))
-    return check
-
-
-def _posted_as_is(name):
-    """cam_post carrying nothing but 'program_name': the stored configuration posted untouched. The
-    mode and the scope both say so, and files still land - an as-is post that wrote nothing would
-    be a re-post in name only."""
-    def check(p):
-        return _measured(f"as-is re-post of program '{name}'",
-                         {"posted": p.get("posted"), "mode": p.get("mode"),
-                          "scope": p.get("scope"), "program_name": p.get("program_name"),
-                          "file_count": p.get("file_count")},
-                         p.get("posted") is True and p.get("mode") == "as_is"
-                         and p.get("scope") == "as_is" and p.get("program_name") == name
-                         and _num(p.get("file_count")) and p["file_count"] >= 1)
     return check
 
 
@@ -3361,6 +3802,7 @@ _CAM_EXTENSION = [
     # THE SURFACE GROUP, on that corner: the frustum's five faces on a direct group of their own,
     # cutting across their holes and pockets. The operation's OWN default group stays group 1 - on
     # adaptive, contour3d and drill its machineOverHoles setter raised, so the faces get their own.
+    # No machine_mode is asked for here, so the predicate's default reads the group's own back.
     ("cam_select_geometry", lambda c: {"operation": _ctx_get(c, "corner_op", "the corner op"),
                                        "selection": "surface_group",
                                        "handles": _ctx_get(c, "sw_faces", "the frustum faces"),
@@ -3587,6 +4029,29 @@ _CAM_SECOND_SETUP = [
     ("cam_select_geometry", {"operation": _FLIP_BACK_OP, "selection": "silhouette",
                              "generate": False},
      lambda p: p["setup_models_selected"] is True, None),
+    # THE CROSS-SETUP NAME, and the two paths differing over it. A CREATE named like the story
+    # setup's pocket op is REFUSED: operations.add dedupes across the whole document, landing
+    # '<name> (2)', a name nobody asked for.
+    ("cam_create_operation", {"setup": FLIP_SETUP, "strategy": "face", "name": _POCKET_OP,
+                              "tool_scope": "document", "tool_index": _FACE_MILL,
+                              "generate": False},
+     _refused("already answer to", "(2)"), None),
+    # The RENAME takes it exactly: Operation.name dedupes inside ONE setup, so this setup's own op
+    # lands the story setup's name beside its twin, with no dedupe marker. Two operations then
+    # answer to that name document-wide and '<name>#2' is the only handle on this one - the rename
+    # back is addressed through it, and the scoped reads either side say it reached THIS setup's.
+    ("cam_edit_operation", {"operation": _FLIP_BACK_OP, "rename": _POCKET_OP},
+     _renamed_exactly(_FLIP_BACK_OP, _POCKET_OP), None),
+    ("cam_get", {"include": ["operations"], "setup": FLIP_SETUP},
+     _setup_holds(FLIP_SETUP, _POCKET_OP), None),
+    ("cam_get", {"include": ["operations"], "setup": CAM_SETUP},
+     _setup_holds(CAM_SETUP, _POCKET_OP), None),
+    ("cam_edit_operation", {"operation": _POCKET_OP + "#2", "rename": _FLIP_BACK_OP},
+     _renamed_exactly(_POCKET_OP, _FLIP_BACK_OP), None),
+    ("cam_get", {"include": ["operations"], "setup": FLIP_SETUP},
+     _setup_holds(FLIP_SETUP, _FLIP_BACK_OP), None),
+    ("cam_get", {"include": ["operations"], "setup": CAM_SETUP},
+     _setup_holds(CAM_SETUP, _POCKET_OP), None),
     ("cam_generate", {"target": FLIP_SETUP, "skip_valid": False}, _launched_on(FLIP_SETUP), None),
 ]
 
@@ -3628,6 +4093,15 @@ _CAM_MULTI_POST = [
                   "output_folder": EXPORT_DIR + "/nc", "program_name": "2001"},
      _refused("already exists", "Omit 'scope', 'setups', 'post', and 'output_folder'"), None),
     ("cam_post", {"program_name": "2001"}, _posted_as_is("2001"), None),
+    # NC PROGRAMS JOIN cam_delete: they hang off cam.ncPrograms, outside the setup tree cam_delete
+    # walked, so a failed program had no route although cam_post's own rollback sentence names this
+    # tool. One posted, deleted by name, and the listing read as the witness.
+    ("cam_post", {"scope": CAM_SETUP, "post": "haas", "post_scope": "local",
+                  "output_folder": EXPORT_DIR + "/nc", "program_name": "1003"},
+     lambda p: p["posted"] is True and p["program_name"] == "1003"
+     and p["file_count"] == len(p["files"]) and p["file_count"] >= 1, None),
+    ("cam_delete", {"entity": "1003"}, _nc_program_deleted("1003"), None),
+    ("cam_get", {"include": ["nc_programs"]}, _nc_listing(gone="1003"), None),
     # The clean mode targets survive every intervening CAM act. Remove only the ungenerated setup
     # before the final document poll; the generated target remains as the lasting witness.
     ("cam_delete", {"entity": _TEMPLATE_SKIP_SETUP},
@@ -3669,9 +4143,26 @@ def _all_current(scope, exactly=None):
     return check
 
 
+def _no_stale_operations():
+    """cam_get(include=['operations']) over the whole document: every operation reads valid - and
+    when one does not, its setup, name and state are what the evidence NAMES, so a stale operation
+    the relaunch rows missed is identified rather than counted."""
+    def check(p):
+        stale = []
+        for rec in ((p.get("operations") or {}).get("setups") or []):
+            for row in (rec.get("operations") or []):
+                if row.get("state") != "valid":
+                    stale.append((rec.get("setup"), row.get("name"), row.get("state")))
+        return _measured("every operation in the document reads valid",
+                         {"stale": stale[:8], "stale_count": len(stale)}, not stale)
+    return check
+
+
 # ACT 10f: the last CAM step - the state the browser is left in, read off the document itself and
 # off the setup whose operations arrived tool-less.
 _CAM_GREEN = [
+    # the read that NAMES a stale operation, ahead of the tallies below that only count one
+    ("cam_get", {"include": ["operations"], "max_results": 400}, _no_stale_operations(), None),
     # Setup2's count is PINNED: the run's own template lands one operation there and the shipped
     # bundle three, so a bundle that landed fewer reddens here rather than passing on an all-valid
     # tally of whatever survived.

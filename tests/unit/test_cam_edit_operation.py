@@ -17,6 +17,7 @@ from conftest import (FakeCAMFolder, FakeCAMParameter, FakeCAMParameters, FakeTo
 from conftest import FakeSetup as SharedSetup, FakeOperation as SharedOp
 
 ce = load_tool("cam_edit_operation")
+cc = load_tool("_cam_common")           # the saturated-counter band the nonfinite reading keys on
 
 
 class FakeParam(FakeCAMParameter):
@@ -285,6 +286,14 @@ def _install_op(monkeypatch, op, doc_tools=()):
     return op
 
 
+def _install_two_setups(monkeypatch, first_ops, second_ops):
+    """Two setups behind get_cam - Operation.name dedupes WITHIN a setup and takes the same name on
+    an operation in another one, so a name clash is a per-setup verdict."""
+    cam = make_cam(SharedSetup("Setup1", ops=first_ops), SharedSetup("Setup2", ops=second_ops))
+    monkeypatch.setattr(ce, "get_cam", lambda: (cam, None))
+    return cam
+
+
 def _payload(res):
     assert res["isError"] is False, res
     return json.loads(res["content"][0]["text"])
@@ -475,16 +484,16 @@ class TestStuckParameter:
         assert op.parameters.itemByName("tool_stepover").expression == "2."
         assert op.parameters.itemByName("tool_feedCutting").expression == "1000."
 
-    def test_the_no_take_refusal_words_the_tool_remedy_by_creation_order(self, monkeypatch):
-        # MEASURED: a document tool edited 25 -> 40 mm flute lands at 40 in an op created AFTER the
-        # edit, while an op created before keeps its stale copy. So a cam_edit_tools edit on its own
-        # is not a remedy for THIS operation - the re-assign is, and the sentence has to say which.
+    def test_the_no_take_refusal_sends_a_tool_dimension_to_the_library_entry(self, monkeypatch):
+        # MEASURED: the operation's tool IS the document-library entry - a flute count edited there
+        # read back on the operation at once. The remedy for a tool dimension the operation will
+        # not take is that edit, so the sentence has to name it.
         _install(monkeypatch,
                  params={"tool_fluteLength": StuckParam("tool_fluteLength", "25.")})
         res = ce.handler(operation="Adaptive1", parameters={"tool_fluteLength": "32"})
         assert res["isError"] is True and "did not take" in res["message"]
-        assert "reaches only operations created AFTER it" in res["message"]
-        assert "cam_edit_operation(tool_scope, tool_index)" in res["message"]
+        assert "document-library entry this operation runs" in res["message"]
+        assert "cam_edit_tools(action='edit', scope='document')" in res["message"]
         assert "must reference existing parameters" not in res["message"]
 
     def test_an_expression_that_will_not_read_back_is_UNCONFIRMED_not_edited(self, monkeypatch):
@@ -613,7 +622,30 @@ class TestParameterStateGuidance:
                         suppressed=suppressed, is_generating=generating)
             op._operation_state = state
             op.hasError = error
-            assert expected in ce._parameter_state_note(op)
+            assert expected in ce._parameter_state_note(op, None)
+
+    def test_a_toolpath_whose_motion_is_not_a_number_is_not_reported_as_an_error(self,
+                                                                                  monkeypatch):
+        # op_primary_state answers 'nonfinite' ahead of valid, but ONLY when the facts are taken
+        # WITH the CAM product - the saturated machining counter is the reading that says so. The
+        # note is driven through the real op_state_facts here, so a cam the call forgot to pass
+        # cannot be hidden by a stubbed fact dict; without its own branch that bucket falls through
+        # to the error sentence, which names a fault the row does not carry.
+        monkeypatch.setattr(ce, "validity_basis", lambda: "manufacture_verified")
+        op = FakeOp("Adaptive1", {"tool_stepover": "2."})
+        cam = make_cam(SharedSetup("Setup1", ops=[op]),
+                       machining_times={"Adaptive1": cc._SATURATED_TIME_S})
+        note = ce._parameter_state_note(op, cam)
+        assert "NOT A NUMBER" in note and "not a number (NaN)" in note
+        assert "reads error" not in note and "carries the fault to fix" not in note
+
+    def test_the_same_operation_without_the_cam_product_reads_valid(self, monkeypatch):
+        # The nonfinite reading COSTS the CAM product: with no cam no machining time is read, so
+        # the row reads valid on every other flag. This is the pair that says the note's cam
+        # argument is load-bearing rather than decorative.
+        monkeypatch.setattr(ce, "validity_basis", lambda: "manufacture_verified")
+        op = FakeOp("Adaptive1", {"tool_stepover": "2."})
+        assert "reads valid in Manufacture" in ce._parameter_state_note(op, None)
 
     def test_a_valid_state_outside_manufacture_is_qualified(self, monkeypatch):
         monkeypatch.setattr(ce, "validity_basis", lambda: "unverified_design_workspace")
@@ -646,7 +678,7 @@ class TestMissingParameter:
         res = ce.handler(operation="Adaptive1", parameters={"tool_dia": "12"})
         assert res["isError"] is True
         assert "has no parameter(s): tool_dia" in res["message"]
-        assert "cam_get(include=['parameters'], operation=...)" in res["message"]
+        assert ce.PARAM_READ in res["message"]
         assert op.parameters.itemByName("tool_diameter").expression == "10."
 
     def test_the_refusal_does_not_call_that_read_the_whole_settable_set(self, monkeypatch):
@@ -671,15 +703,15 @@ class TestNotEditable:
         assert "Nothing was applied" in res["message"]
         assert op.parameters.itemByName("tool_diameter").expression == "10."
 
-    def test_the_locked_tool_dimension_remedy_is_worded_by_creation_order(self, monkeypatch):
-        # MEASURED: a document tool edited 25 -> 40 mm flute lands at 40 in an op created AFTER the
-        # edit, while an op created before keeps its stale copy. So a cam_edit_tools edit is NOT a
-        # remedy for THIS operation on its own - the re-assign is.
+    def test_the_locked_tool_dimension_remedy_names_the_library_entry(self, monkeypatch):
+        # MEASURED: the operation's tool IS the document-library entry - a flute count edited there
+        # read back on the operation at once and put its toolpath out of date. A locked tool
+        # dimension is reached that way, so the remedy names that edit.
         _install(monkeypatch,
                  params={"tool_fluteLength": FakeParam("tool_fluteLength", "25.", editable=False)})
         msg = ce.handler(operation="Adaptive1", parameters={"tool_fluteLength": "40"})["message"]
-        assert "reaches only operations created AFTER it" in msg
-        assert "cam_edit_operation(tool_scope, tool_index)" in msg
+        assert "document-library entry this operation runs" in msg
+        assert "cam_edit_tools(action='edit', scope='document')" in msg
 
     def test_every_non_editable_parameter_is_named_in_one_error(self, monkeypatch):
         _install(monkeypatch,
@@ -1532,6 +1564,35 @@ class TestRename:
         # the clash is a PRE-flight: the parameter in the same call was never applied
         assert target.parameters.itemByName("tool_stepover").expression == "2."
 
+    def test_a_twin_in_ANOTHER_setup_is_renamed_and_read_back(self, monkeypatch):
+        # MEASURED: Fusion dedupes Operation.name within a setup only and ACCEPTS the same name on
+        # operations in two different setups, so a document-wide scan refuses a rename the platform
+        # takes. The landed name is the read-back, exactly as asked for.
+        other = FakeOp("Face1", {"tool_stepover": "2."})
+        target = FakeOp("Drill1", {"tool_stepover": "2."})
+        _install_two_setups(monkeypatch, [other], [target])
+        out = _payload(ce.handler(operation="Drill1", rename="Face1"))
+        assert target.name == "Face1" and other.name == "Face1"
+        assert out["operation"] == "Face1" and out["renamed"] is True
+        assert "name_deduped" not in out
+
+    def test_a_twin_in_the_SAME_setup_still_refuses_before_any_write(self, monkeypatch):
+        # The scoping is the operation's OWN setup, not "any setup": a second setup standing beside
+        # it changes nothing about the twin sharing its own.
+        other = FakeOp("Face1", {"tool_stepover": "2."})
+        target = FakeOp("Drill1", {"tool_stepover": "2."})
+        _install_two_setups(monkeypatch, [other, target],
+                            [FakeOp("Slot1", {"tool_stepover": "2."})])
+        res = ce.handler(operation="Drill1", rename="Face1",
+                         parameters={"tool_stepover": "1.5"})
+        assert res["isError"] is True
+        assert "already answer to 'Face1'" in res["message"]
+        assert "a twin in another setup is accepted" in res["message"]
+        # the refusal NAMES the scope it read, which is this operation's own setup
+        assert "in setup 'Setup1'" in res["message"]
+        assert target.name == "Drill1"
+        assert target.parameters.itemByName("tool_stepover").expression == "2."
+
     def test_renaming_onto_the_name_it_already_reads_writes_nothing(self, monkeypatch):
         # A rename onto the current name is a NO-OP, not a dedupe: writing it again makes the
         # platform dedupe the operation against itself ('Face1' -> 'Face11', measured).
@@ -1742,7 +1803,7 @@ class TestQuotedStringParameter:
         assert "Invalid enumeration value" in res["message"]      # the platform's own text, relayed
         assert "the expression written was 'sillhouette'" in res["message"]
         # names the read that shows the parameter's own expression, like every sibling refusal
-        assert "cam_get(include=['parameters'], operation=...)" in res["message"]
+        assert ce.PARAM_READ in res["message"]
 
     def test_an_unrelated_setter_failure_carries_no_enumeration_clause(self, monkeypatch):
         # The clause is minted from the platform's own message, so a failure that never named an
@@ -1780,7 +1841,7 @@ class TestEnumerationRefusalNamesTheChoices:
                  params={"boundaryMode": EnumRefusingParam("boundaryMode", "'silhouette'")})
         res = ce.handler(operation="Adaptive1", parameters={"boundaryMode": "sillhouette"})
         assert "own values:" not in res["message"]
-        assert "cam_get(include=['parameters'], operation=...)" in res["message"]
+        assert ce.PARAM_READ in res["message"]
 
 
 class _StuckAfterFirstWrite(FakeParam):

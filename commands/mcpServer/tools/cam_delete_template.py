@@ -9,7 +9,7 @@ from ..mcp_primitives.registry import register
 from ._common import named_with_remainder, ok, error, safe
 # The shared CAM substrate: the ONE leafName-or-stem asset matcher every library DELETE addresses
 # its target with - the same reads cam_delete_machine resolves on.
-from ._cam_common import asset_key, asset_leaf, assets_named, library_assets
+from ._cam_common import asset_key, asset_leaf, assets_named, library_assets, unique_by_url
 from ._cam_templates import _find_template_by_name, _location_enum, _template_library
 
 # How many local asset names a refusal spells out before named_with_remainder counts the rest.
@@ -17,24 +17,46 @@ _ASSET_NAMES_CAP = 12
 
 
 def _local_template_assets(lib):
-    """(assets, truncated) under the LOCAL template library root, or (None, None) when that root
-    does not resolve. Folders are recursed by the ONE bounded library walk every CAM library read
-    uses. A build carrying no LocalLibraryLocation member is refused earlier, by the by-name search
-    that resolves the same root."""
+    """(assets, truncated) under the LOCAL template library root with each url ONCE, or (None, None)
+    when that root does not resolve - folders recursed by the ONE bounded library walk every CAM
+    library read uses. A build carrying no LocalLibraryLocation member is refused earlier, by the
+    by-name search that resolves the same root."""
     root = safe(lambda: lib.urlByLocation(_location_enum("local")))
     if root is None:
         return None, None
-    return library_assets(lib, root)
+    assets, truncated = library_assets(lib, root)
+    return unique_by_url(assets), truncated
 
 
-def handler(name: str = "", confirm_name: str = "") -> dict:
+def _assets_at_url(assets, url_text):
+    """The Local assets whose url IS `url_text` - the library's own url object, which is what
+    deleteAsset and templateAtURL take. A deduped walk answers at most one."""
+    return [a for a in assets if str(asset_key(a)) == url_text]
+
+
+def _addressed_template(lib, url):
+    """(the name the asset's own template answers to, None) or (None, refusal) - an asset is
+    deletable only as a template that loads and says what it is."""
+    at = safe(lambda: lib.templateAtURL(url))
+    if at is None:
+        return None, (f"The Local library asset '{asset_leaf(url)}' does not load a template, so "
+                      "what it holds cannot be confirmed. Nothing was deleted.")
+    return (safe(lambda: at.name) or "").strip(), None
+
+
+def handler(name: str = "", confirm_name: str = "", template_url: str = "") -> dict:
     """Delete one template from the LOCAL template library; see TOOL_DESCRIPTION for the
     confirm_name gate."""
     name = (name or "").strip()
     confirm_name = (confirm_name or "").strip()
-    if not name:
-        return error("Provide 'name' - the template to delete, as "
-                     "cam_get(include=['templates'], template_location='local') lists it.")
+    template_url = (template_url or "").strip()
+    if name and template_url:
+        return error(f"Pass 'name' or 'template_url', not both - '{name}' searches the Local "
+                     f"library by name and '{template_url}' addresses one asset. Nothing was "
+                     "deleted.")
+    if not (name or template_url):
+        return error("Provide 'name' - the template to delete - or 'template_url', the url "
+                     "cam_get(include=['templates'], template_location='local') lists beside it.")
     if not confirm_name:
         return error("Provide 'confirm_name' - the template's exact name again, as a safety "
                      "confirmation. Template deletion is not undoable from this server.")
@@ -42,7 +64,42 @@ def handler(name: str = "", confirm_name: str = "") -> dict:
     lib, err = _template_library()
     if err:
         return error(err)
+    if template_url:
+        return _delete_by_url(lib, template_url, confirm_name)
+    return _delete_by_name(lib, name, confirm_name)
 
+
+def _delete_by_url(lib, url_text, confirm_name):
+    """Delete the ONE Local asset AT `url_text` - an address needs no name search, so a template a
+    listing answers for twice is still reachable. confirm_name is checked against the name the
+    template at that url answers to."""
+    assets, truncated = _local_template_assets(lib)
+    if assets is None:
+        return error("Could not resolve the Local template library location, so the template's "
+                     "asset cannot be addressed. Nothing was deleted.")
+    hits = _assets_at_url(assets, url_text)
+    if not hits:
+        return error(f"No asset at '{url_text}' in the Local template library - this tool deletes "
+                     "from the Local library only."
+                     + (" The walk hit its own bound before finishing, so an asset past that bound "
+                        "would not have been seen." if truncated else "")
+                     + " Re-read the url with cam_get(include=['templates'], "
+                       "template_location='local'). Nothing was deleted.")
+    url = hits[0]
+    label, aerr = _addressed_template(lib, url)
+    if aerr:
+        return error(aerr)
+    # Case-SENSITIVE, against the name the ADDRESSED template answers to rather than the request.
+    if label != confirm_name:
+        return error(f"Name mismatch - refusing to delete. The asset at '{url_text}' holds the "
+                     f"template '{label}', but confirm_name was '{confirm_name}'. Pass "
+                     f"confirm_name='{label}' if you really mean this template.")
+    return _delete_and_confirm(lib, url, label, lambda pool: _assets_at_url(pool, url_text))
+
+
+def _delete_by_name(lib, name, confirm_name):
+    """Delete the ONE Local template answering to `name` - refused where the name, or the asset
+    carrying it, is not shown to be a single one."""
     # ONE resolve, LOCAL-only, through the same by-name search cam_apply_template runs: a name
     # several templates answer to is REFUSED rather than resolved to the first folder walked.
     template, where = _find_template_by_name(lib, "local", name)
@@ -79,8 +136,8 @@ def handler(name: str = "", confirm_name: str = "") -> dict:
     if len(hits) > 1:
         return error(f"'{label}' names {len(hits)} assets in the Local template library "
                      f"({named_with_remainder([str(asset_key(a)) for a in hits], cap=_ASSET_NAMES_CAP)})"
-                     " - refusing to guess which one to delete. Remove the duplicate in Fusion's "
-                     "template library first.")
+                     " - refusing to guess which one to delete. Pass template_url=<one of those "
+                     "urls> to delete exactly that asset.")
     # An INCOMPLETE walk cannot support the one-asset conclusion above: a second asset of the same
     # name beyond the walk's bound would have been refused, and this delete is irreversible - so it
     # fails CLOSED rather than firing on one of an unknown number.
@@ -92,16 +149,20 @@ def handler(name: str = "", confirm_name: str = "") -> dict:
     url = hits[0]
     # The asset is only deletable as the template the caller confirmed: load it back and compare the
     # name, so an asset whose FILE name matches while it holds another template is refused.
-    at_url = safe(lambda: lib.templateAtURL(url))
-    if at_url is None:
-        return error(f"The Local library asset '{asset_leaf(url)}' does not load a template, so "
-                     "what it holds cannot be confirmed. Nothing was deleted.")
-    at_name = (safe(lambda: at_url.name) or "").strip()
+    at_name, aerr = _addressed_template(lib, url)
+    if aerr:
+        return error(aerr)
     if at_name.lower() != label.lower():
         return error(f"The Local library asset '{asset_leaf(url)}' holds the template '{at_name}', "
                      f"not '{label}' - refusing to delete an asset that is not the template that "
                      "was confirmed.")
+    return _delete_and_confirm(lib, url, label, lambda pool: assets_named(pool, wanted_names))
 
+
+def _delete_and_confirm(lib, url, label, match):
+    """The delete both routes end in: deleteAsset on ONE addressed asset, then the library's own
+    asset walk (searched with the SAME `match` the target was found with) and the url itself read
+    back - the two reads the 'deleted' claim is made from."""
     # deleteAsset addresses a stored asset by url; importTemplate stores a template under a leafName
     # whose STEM is the template's name. A False is reported as the refusal it is, and the
     # read-backs below are what the claim is made from.
@@ -123,7 +184,7 @@ def handler(name: str = "", confirm_name: str = "") -> dict:
                         else "asset walk hit its own bound before finishing")
                      + ", so the delete could not be read back and is UNCONFIRMED. Re-read with "
                        "cam_get(include=['templates'], template_location='local').")
-    still_listed = [asset_leaf(a) for a in assets_named(after, wanted_names)]
+    still_listed = [asset_leaf(a) for a in match(after)]
     if still_listed:
         return error(f"deleteAsset returned true but the Local template library still lists "
                      f"'{still_listed[0]}' - the delete did not take. Re-read with "
@@ -152,14 +213,16 @@ def handler(name: str = "", confirm_name: str = "") -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Delete a template from the LOCAL toolpath template library by name; 'confirm_name' must match "
-    "the resolved name exactly. Counterpart to cam_save_template."
+    "Delete a template from the LOCAL toolpath template library by name, or by the 'template_url' "
+    "cam_get(include=['templates']) lists; 'confirm_name' must match the resolved name exactly. "
+    "Counterpart to cam_save_template."
 )
 
 tool = (
     Tool.create_simple(name="cam_delete_template", description=TOOL_DESCRIPTION)
     .add_input_property("name", {"type": "string"})
     .add_input_property("confirm_name", {"type": "string"})
+    .add_input_property("template_url", {"type": "string"})
     .strict_schema()
 )
 item = Item.create_tool_item(

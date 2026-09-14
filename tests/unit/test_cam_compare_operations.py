@@ -26,6 +26,19 @@ def _op(name, params, tool_desc="Tool1"):
                          tool=FakeTool(description=tool_desc))
 
 
+class _Native:
+    """The physical entity a selection wrapper stands for - a FRESH object per read, so nothing
+    here can compare by object. MEASURED on a face off a drill's holeFaces set: it is an occurrence
+    PROXY whose own entityToken differs from its native's, and NEITHER carries parentComponent or
+    parentDesign - the document is one hop further on, through .body."""
+
+    def __init__(self, token, urn):
+        self.entityToken = token
+        self.body = SimpleNamespace(parentComponent=SimpleNamespace(
+            parentDesign=SimpleNamespace(parentDocument=SimpleNamespace(
+                dataFile=SimpleNamespace(id=urn)))))
+
+
 @pytest.fixture
 def install(monkeypatch):
     """Wire a set of operations into the tool's get_cam seam; patches undo themselves."""
@@ -358,13 +371,39 @@ class TestCaps:
 
 # ── the GEOMETRY half: what is SELECTED, which no parameter expression carries ────────────────────
 
+class _Ent:
+    """A selected BRep entity - no measured SHAPE dump names one, so this is a local double.
+    `token` is what its NATIVE answers and `wrapper` the proxy's own token, which a CAM selection
+    reads differently; `urn` is the source document. No token leaves only the bounding box the
+    reading falls back to."""
+
+    def __init__(self, token=None, wrapper=None, urn="doc-1", centre=(0.0, 0.0, 0.0)):
+        self._token, self._urn = token, urn
+        if token is not None:
+            self.entityToken = wrapper if wrapper is not None else token + ":proxy"
+        self.boundingBox = SimpleNamespace(
+            minPoint=SimpleNamespace(x=centre[0] - 1, y=centre[1] - 1, z=centre[2] - 1),
+            maxPoint=SimpleNamespace(x=centre[0] + 1, y=centre[1] + 1, z=centre[2] + 1))
+
+    @property
+    def nativeObject(self):
+        return None if self._token is None else _Native(self._token, self._urn)
+
+
+def _entities(spec, label):
+    """The entity list a fake selection holds: a COUNT makes that many entities carrying stable
+    tokens (so two equal selections read equal), a list is taken as passed."""
+    return ([_Ent(token=f"{label}:{i}") for i in range(spec)]
+            if isinstance(spec, int) else list(spec))
+
+
 class _CurveSelection:
     """One CAM curve selection: the read-back channel (outputGeometry, value) plus the per-kind
     properties this one answers - an unset name raises, the way a class not carrying it does."""
 
     def __init__(self, segments=(), entities=0, **props):
         self.outputGeometry = [SimpleNamespace(count=n) for n in segments]
-        self.value = list(range(entities))
+        self.value = _entities(entities, "sel")
         for key, value in props.items():
             setattr(self, key, value)
 
@@ -396,7 +435,26 @@ class _ObjectSetParam(FakeCAMParameter):
 
     def __init__(self, name, entities=0):
         super().__init__(name)
-        self.value = SimpleNamespace(value=list(range(entities)))
+        self.value = SimpleNamespace(value=_entities(entities, name))
+
+
+class _Group:
+    """One MachineAvoidSelectionBase as the compare reads it - no measured SHAPE dump names this
+    type, so it is a local double. A fresh direct group reads machineMode Machine (measured)."""
+
+    def __init__(self, entities=0, over_holes=False, mode="Machine_MachiningMode"):
+        self.value = _entities(entities, "grp")
+        self.machineOverHoles = over_holes
+        self.machineMode = getattr(cc.adsk.cam.MachiningMode, mode)
+
+
+class _GroupsParam(FakeCAMParameter):
+    """checkSurfaceSelectionSets: its value answers getMachineAvoidGroups()."""
+
+    def __init__(self, groups=(), editable=True):
+        super().__init__(cc.AVOID_GROUPS_PARAM, editable=editable)
+        coll = _CurveSelections(groups)        # count + item, the bounded walk shape
+        self.value = SimpleNamespace(getMachineAvoidGroups=lambda: coll)
 
 
 def _geo_op(name, params):
@@ -473,13 +531,13 @@ class TestGeometryDiff:
         out = _payload(cc.handler(operation_a="A", operation_b="B"))
         assert out["geometry_difference_count"] == 1
         row = out["geometry_differences"][0]
-        assert row["operation_a"] == {"entities": 3} and row["operation_b"] == {"entities": 7}
+        assert row["operation_a"]["entities"] == 3 and row["operation_b"]["entities"] == 7
 
     def test_a_set_only_one_side_carries_reads_not_present(self, install):
         install([_geo_op("A", [_ObjectSetParam("driveSurfaces", 2)]), _geo_op("B", [])])
         out = _payload(cc.handler(operation_a="A", operation_b="B"))
         row = next(r for r in out["geometry_differences"] if r["parameter"] == "driveSurfaces")
-        assert row["operation_a"] == {"entities": 2} and row["operation_b"] == "(not present)"
+        assert row["operation_a"]["entities"] == 2 and row["operation_b"] == "(not present)"
 
     def test_matching_selections_are_counted_same_not_reported(self, install):
         install([_geo_op("A", [_ObjectSetParam("holeFaces", 3)]),
@@ -491,7 +549,7 @@ class TestGeometryDiff:
         install([_geo_op("A", [_ObjectSetParam("holeFaces", 3)]),
                  _geo_op("B", [_ObjectSetParam("holeFaces", 3)])])
         out = _payload(cc.handler(operation_a="A", operation_b="B"))
-        assert "not read here" in out["note"] and "open both operations in Fusion" in out["note"]
+        assert "reads OPENED matching" in out["note"] and "entity readings" in out["note"]
         assert out["geometry_properties_read"] == list(cc._SELECTION_PROPS)
 
     def test_no_selection_set_answering_is_a_different_zero(self, install):
@@ -517,7 +575,124 @@ class TestGeometryDiff:
         install([_geo_op("A", [_ObjectSetParam("holeFaces", 3)]),
                  _geo_op("B", [_ObjectSetParam("holeFaces", 4)])])
         out = _payload(cc.handler(operation_a="A", operation_b="B"))
-        assert "not read here" not in out["note"] and "geometry_properties_read" not in out
+        assert "reads OPENED matching" not in out["note"]
+        assert "geometry_properties_read" not in out
+
+    def test_the_same_count_on_different_entities_is_a_difference(self, install):
+        # two selections with identical settings on DIFFERENT faces read the same count; the count
+        # alone does not tell them apart.
+        install([_geo_op("A", [_ObjectSetParam("holeFaces", [_Ent(token="boss-top")])]),
+                 _geo_op("B", [_ObjectSetParam("holeFaces", [_Ent(token="pocket-floor")])])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        assert out["geometry_difference_count"] == 1
+        row = out["geometry_differences"][0]
+        assert row["parameter"] == "holeFaces"
+        assert row["operation_a"]["entities"] == row["operation_b"]["entities"] == 1
+        assert row["entity_verdict"] == cc._PICKS_DIFFER
+        assert row["operation_a"]["entity_bases"] == [cc._NATIVE_BASIS]
+
+    def test_two_proxy_readings_of_ONE_face_are_not_a_difference(self, install):
+        # MEASURED: a face read off a CAM selection set is an occurrence PROXY whose own token
+        # differs from its nativeObject's. Keying on the wrapper's token would report two
+        # operations cutting the SAME face as cutting different geometry.
+        install([_geo_op("A", [_ObjectSetParam("holeFaces",
+                                               [_Ent(token="boss-top", wrapper="proxy-a")])]),
+                 _geo_op("B", [_ObjectSetParam("holeFaces",
+                                               [_Ent(token="boss-top", wrapper="proxy-b")])])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        assert out["geometry_difference_count"] == 0 and out["same_geometry_count"] == 1
+
+    def test_one_token_out_of_two_xrefs_is_still_a_difference(self, install):
+        # the other half of the identity: two DISTINCT entities out of two x-refs read
+        # byte-identical tokens (measured), and the source document's urn is what separates them.
+        install([_geo_op("A", [_ObjectSetParam("holeFaces", [_Ent(token="Frame", urn="doc-1")])]),
+                 _geo_op("B", [_ObjectSetParam("holeFaces", [_Ent(token="Frame", urn="doc-2")])])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        assert out["geometry_differences"][0]["entity_verdict"] == cc._PICKS_DIFFER
+
+    def test_the_same_entities_on_a_curve_selection_are_counted_same(self, install):
+        install([_geo_op("A", [_CurveParam("contours", [_CurveSelection([4], 4)])]),
+                 _geo_op("B", [_CurveParam("contours", [_CurveSelection([4], 4)])])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        assert out["geometry_difference_count"] == 0 and out["same_geometry_count"] == 1
+
+    def test_a_curve_selection_on_other_edges_differs_at_equal_counts(self, install):
+        install([_geo_op("A", [_CurveParam("contours",
+                                           [_CurveSelection([4], [_Ent(token="e1")])])]),
+                 _geo_op("B", [_CurveParam("contours",
+                                           [_CurveSelection([4], [_Ent(token="e9")])])])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        row = out["geometry_differences"][0]
+        assert row["operation_a"]["entities"] == row["operation_b"]["entities"] == 1
+        assert row["entity_verdict"] == cc._PICKS_DIFFER
+
+    def test_one_shared_entity_cannot_cover_an_unshared_one(self, install):
+        # equal counts where A holds ONE face twice (two selections can reference it) and B holds
+        # it once beside another: every A identity IS present in B, so a containment test reads
+        # MATCHING. The two identity MULTISETS are what differ.
+        shared = _Ent(token="shared")
+        install([_geo_op("A", [_ObjectSetParam("holeFaces", [shared, shared])]),
+                 _geo_op("B", [_ObjectSetParam("holeFaces", [shared, _Ent(token="only-b")])])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        row = out["geometry_differences"][0]
+        assert row["operation_a"]["entities"] == row["operation_b"]["entities"] == 2
+        assert row["entity_verdict"] == cc._PICKS_DIFFER
+
+    def test_an_entity_with_no_identity_publishes_its_box_centre_in_the_payloads_units(self,
+                                                                                       install):
+        # the fallback names a PLACE, in the units the payload declares - Fusion answers a bounding
+        # box in cm. It may NOT carry the resolves-to-different-geometry claim.
+        install([_geo_op("A", [_ObjectSetParam("holeFaces", [_Ent(centre=(1.0, 0.0, 0.0))])]),
+                 _geo_op("B", [_ObjectSetParam("holeFaces", [_Ent(centre=(9.0, 0.0, 0.0))])])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        row = out["geometry_differences"][0]
+        bases = row["operation_a"]["entity_bases"] + row["operation_b"]["entity_bases"]
+        assert all(b.startswith("box") for b in bases) and bases[0] != bases[1]
+        assert "entity_verdict" not in row
+        # 1.0 cm reads 10.0 in the mm the payload names, not the raw cm
+        assert out["geometry_units"] == "mm" and bases[0] == "box(10.0, 0.0, 0.0)"
+
+    def test_the_box_fallback_follows_the_units_the_caller_asked_for(self, install):
+        install([_geo_op("A", [_ObjectSetParam("holeFaces", [_Ent(centre=(2.54, 0.0, 0.0))])]),
+                 _geo_op("B", [_ObjectSetParam("holeFaces", [_Ent(centre=(9.0, 0.0, 0.0))])])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B", units="in"))
+        row = out["geometry_differences"][0]
+        assert out["geometry_units"] == "in"
+        assert row["operation_a"]["entity_bases"] == ["box(1.0, 0.0, 0.0)"]
+
+    def test_an_identity_on_one_side_only_carries_no_verdict(self, install):
+        install([_geo_op("A", [_ObjectSetParam("holeFaces", [_Ent(token="e1")])]),
+                 _geo_op("B", [_ObjectSetParam("holeFaces", [_Ent(centre=(9.0, 0.0, 0.0))])])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        row = out["geometry_differences"][0]
+        assert row["operation_a"]["entity_bases"] == [cc._NATIVE_BASIS]
+        assert row["operation_b"]["entity_bases"][0].startswith("box")
+        assert "entity_verdict" not in row
+
+    def test_the_entity_bases_are_capped_one_over_and_not_at_the_cap(self, install):
+        cap = cc._ENTITY_BASES_CAP
+        install([_geo_op("A", [_ObjectSetParam("holeFaces", cap)]),
+                 _geo_op("B", [_ObjectSetParam("holeFaces", cap + 1)])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        row = out["geometry_differences"][0]
+        assert len(row["operation_a"]["entity_bases"]) == cap
+        assert "entity_bases_truncated" not in row["operation_a"]
+        assert len(row["operation_b"]["entity_bases"]) == cap
+        assert row["operation_b"]["entity_bases_truncated"] is True
+
+    def test_a_zero_answer_whose_readings_were_capped_refuses_the_matching_claim(self, install):
+        # two sets agreeing over the first `cap` entities and differing past it emit NO row, so the
+        # truncation flag never reaches the caller through one - and a bare 0/0 would read as a
+        # match over sets this call never finished comparing.
+        cap = cc._ENTITY_BASES_CAP
+        shared = [_Ent(token=f"f{i}") for i in range(cap)]
+        install([_geo_op("A", [_ObjectSetParam("holeFaces", shared + [_Ent(token="only-a")])]),
+                 _geo_op("B", [_ObjectSetParam("holeFaces", shared + [_Ent(token="only-b")])])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        assert out["geometry_difference_count"] == 0
+        assert out["entity_bases_truncated"] == ["holeFaces"]
+        assert "NOT shown to match" in out["note"]
+        assert "reads OPENED matching" not in out["note"]
 
     def test_the_selection_rows_are_capped_one_over_and_not_at_the_cap(self, install):
         cap = cc._SELECTION_ROWS_CAP
@@ -533,3 +708,110 @@ class TestGeometryDiff:
         assert row["operation_b"]["selections"] == cap + 1
         assert len(row["operation_b"]["properties"]) == cap
         assert row["operation_b"]["properties_truncated"] is True
+
+
+class TestComposedWireLength:
+    """A note assembled at RUN TIME is not a literal, so test_prose_budget cannot measure it. What
+    this tool COMPOSES is its own tails plus the cap clause; STRATEGY_PAIR_NOTE is the shared head
+    cam_get sends too, so the full-note ceiling is the budget PLUS that head rather than a pinned
+    number."""
+
+    _BUDGET = 400                                    # test_prose_budget.NOTE_BUDGET_CHARS
+
+    @pytest.fixture
+    def cap_clause(self, install):
+        """The cap clause the handler FORMATS, measured rather than transcribed: one compare run
+        capped and uncapped differs by exactly that clause."""
+        def _pair():
+            return [_op("A", {f"p{i}": "a" for i in range(3)}),
+                    _op("B", {f"p{i}": "b" for i in range(3)})]
+        install(_pair())
+        capped = _payload(cc.handler(operation_a="A", operation_b="B", max_results=1))["note"]
+        install(_pair())
+        whole = _payload(cc.handler(operation_a="A", operation_b="B"))["note"]
+        assert len(capped) > len(whole)
+        return len(capped) - len(whole)
+
+    @pytest.mark.parametrize("tail", ["_NO_GEOMETRY_NOTE", "_NOTHING_DIFFERED_NOTE",
+                                      "_TRUNCATED_PICKS_NOTE"])
+    def test_this_tools_own_composed_prose_fits_the_budget(self, cap_clause, tail):
+        own = cap_clause + len(getattr(cc, tail))
+        assert own <= self._BUDGET, f"{tail}: {own} composed chars of its own"
+
+    def test_the_cap_clause_and_the_zero_note_cannot_ride_together(self, install):
+        # the two longest fragments exclude each other: the cap fires only where differences were
+        # dropped, and the zero note only where there were none. So neither worst case carries both.
+        install([_geo_op("A", [_ObjectSetParam("holeFaces", 3)]),
+                 _geo_op("B", [_ObjectSetParam("holeFaces", 3)])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B", max_results=1))
+        assert out["truncated"] is False and "reads OPENED matching" in out["note"]
+
+    def test_the_worst_full_note_stays_within_the_budget_plus_the_shared_head(self, install):
+        # the worst a caller can see: the cap clause AND the zero-geometry disclosure. The ceiling
+        # is the budget plus STRATEGY_PAIR_NOTE, which cam_get sends too and this tool does not own.
+        install([_op("A", {f"p{i}": "a" for i in range(3)}),
+                 _op("B", {f"p{i}": "b" for i in range(3)})])
+        out = _payload(cc.handler(operation_a="A", operation_b="B", max_results=1))
+        assert out["truncated"] is True and "NO selection set answered" in out["note"]
+        ceiling = self._BUDGET + len(cc.STRATEGY_PAIR_NOTE)
+        assert len(out["note"]) <= ceiling, len(out["note"])
+
+
+class TestSurfaceGroupDiff:
+    """A surface group's flags live on the group objects, not in any parameter expression: two flat
+    operations differing only in a group's machine_over_holes read 0 parameter differences."""
+
+    def test_a_group_flag_difference_is_a_geometry_difference(self, install):
+        install([_geo_op("A", [_GroupsParam([_Group(2, over_holes=False)])]),
+                 _geo_op("B", [_GroupsParam([_Group(2, over_holes=True)])])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        assert out["difference_count"] == 0
+        row = next(r for r in out["geometry_differences"]
+                   if r["parameter"] == cc.AVOID_GROUPS_PARAM)
+        assert row["operation_a"]["rows"][0]["machine_over_holes"] is False
+        assert row["operation_b"]["rows"][0]["machine_over_holes"] is True
+
+    def test_a_group_machining_mode_difference_is_a_geometry_difference(self, install):
+        install([_geo_op("A", [_GroupsParam([_Group(1, mode="Machine_MachiningMode")])]),
+                 _geo_op("B", [_GroupsParam([_Group(1, mode="Avoid_MachiningMode")])])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        row = next(r for r in out["geometry_differences"]
+                   if r["parameter"] == cc.AVOID_GROUPS_PARAM)
+        assert row["operation_a"]["rows"][0]["machine_mode"] == "machine"
+        assert row["operation_b"]["rows"][0]["machine_mode"] == "avoid"
+
+    def test_a_group_count_difference_is_a_geometry_difference(self, install):
+        install([_geo_op("A", [_GroupsParam([_Group(1)])]),
+                 _geo_op("B", [_GroupsParam([_Group(1), _Group(2)])])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        row = next(r for r in out["geometry_differences"]
+                   if r["parameter"] == cc.AVOID_GROUPS_PARAM)
+        assert row["operation_a"]["groups"] == 1 and row["operation_b"]["groups"] == 2
+
+    def test_identical_groups_are_counted_same(self, install):
+        install([_geo_op("A", [_GroupsParam([_Group(2, over_holes=True)])]),
+                 _geo_op("B", [_GroupsParam([_Group(2, over_holes=True)])])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        assert out["geometry_difference_count"] == 0 and out["same_geometry_count"] == 1
+
+    def test_a_set_that_does_not_read_editable_is_still_READ(self, install):
+        # A set refusing a WRITE still answers what it holds. Gating this read on the write's
+        # editability published "(not present)" for an operation that plainly carries the
+        # parameter. (No strategy on the C7 document reads it non-editable, so the asymmetric
+        # state is a guard, not something seen there; the sets do swap editability elsewhere.)
+        install([_geo_op("A", [_GroupsParam([_Group(2)], editable=True)]),
+                 _geo_op("B", [_GroupsParam([_Group(2)], editable=False)])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        row = next(r for r in out["geometry_differences"]
+                   if r["parameter"] == cc.AVOID_GROUPS_PARAM)
+        assert row["operation_b"] != "(not present)"
+        assert row["operation_a"]["groups"] == row["operation_b"]["groups"] == 1
+        assert row["operation_a"]["editable"] is True
+        assert row["operation_b"]["editable"] is False
+
+    def test_an_operation_carrying_no_group_parameter_at_all_reads_not_present(self, install):
+        install([_geo_op("A", [_GroupsParam([_Group(1)])]), _geo_op("B", [])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B"))
+        row = next(r for r in out["geometry_differences"]
+                   if r["parameter"] == cc.AVOID_GROUPS_PARAM)
+        assert row["operation_b"] == "(not present)"

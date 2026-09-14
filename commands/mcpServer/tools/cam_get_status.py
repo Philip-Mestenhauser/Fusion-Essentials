@@ -51,9 +51,9 @@ _ORIENTATION_TRIAGE = (
 
 def _collect_op_health(ops, labels=None):
     """{"warnings": [{name, warning}], "errors": [{name, error}], "empty": [name],
-    "empty_rail": [name]} over THESE operations, each row named by `labels` where given (an
-    operation name is unique only within a setup)."""
-    out = {"warnings": [], "errors": [], "empty": [], "empty_rail": []}
+    "empty_rail": [name], "nonfinite": [name]} over THESE operations, each row named by `labels`
+    where given (an operation name is unique only within a setup)."""
+    out = {"warnings": [], "errors": [], "empty": [], "empty_rail": [], "nonfinite": []}
     labels = list(labels or [])
     cam, _cerr = _cam_common.get_cam()
     for i, o in enumerate(ops or []):
@@ -64,6 +64,8 @@ def _collect_op_health(ops, labels=None):
         if _cam_common.counts_as_warning(facts):
             out["warnings"].append({"name": name,
                                     "warning": (safe(lambda o=o: o.warning) or "").strip()})
+        if facts["nonfinite_toolpath"]:
+            out["nonfinite"].append(name)
         if _cam_common.is_empty_toolpath(facts):
             out["empty"].append(name)
             if _cam_common.is_rail_driven(o):
@@ -158,9 +160,11 @@ def _attach_op_health(payload: dict, nodes, scope_label: str) -> str:
     payload["operations_with_warnings"] = health["warnings"]   # [{name, warning}]
     payload["operations_with_errors"] = health["errors"]       # [{name, error}]
     payload["empty_toolpaths"] = health["empty"]               # generated but 0 toolpath length
+    payload["nonfinite_toolpaths"] = health["nonfinite"]       # generated, motion not a number
     payload["counts"] = {"with_warnings": len(health["warnings"]),
                          "with_errors": len(health["errors"]),
-                         "empty_toolpaths": len(health["empty"])}
+                         "empty_toolpaths": len(health["empty"]),
+                         "nonfinite_toolpaths": len(health["nonfinite"])}
     payload["health_scope"] = scope_label      # WHICH operations the three lists above describe
     shared = (" Repeated names show as 'Setup / op' paths, then by position."
               if any(label != n.name for label, n in zip(labels, nodes)) else "")
@@ -376,17 +380,18 @@ def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
     return ok(payload)
 
 
-def _op_tally(ops) -> dict:
+def _op_tally(ops, cam=None) -> dict:
     """A live_readiness-shaped tally scoped to just these ops, via the shared _cam_common.op_state_tally
     (the ONE per-op walk live_readiness's whole-document scan also uses) - this scoped poll just adds
     the setups_errored/programs_errored/samples shape a document-level poll carries (always 0/None
     here: a single setup/operation target has no setup- or program-level error of its own to report)."""
-    t = _cam_common.op_state_tally(ops)
+    t = _cam_common.op_state_tally(ops, cam)
     # warnings + warning_sample travel with the tally: they are what stops this SCOPED verdict
     # reading plainly ready over a job the document-level one would demote.
     return {"valid": t["valid"], "out_of_date": t["out_of_date"], "errored": t["errored"],
             "generating": t["generating"], "generating_settled": t["generating_settled"],
             "suppressed": t["suppressed"], "unread": t["unread"],
+            "nonfinite": t["nonfinite"], "nonfinite_names": t["nonfinite_names"],
             "warnings": t["warnings"], "total": t["total"],
             "active": t["active"], "setups_errored": 0, "programs_errored": 0,
             # the OWNING setup's blocked_by, filled by _scope_state - a scoped verdict reads the
@@ -401,14 +406,18 @@ def _scope_readiness(t: dict, ops=()) -> str:
     _cam_common.ready_verdict - the ONE builder live_readiness and cam_get's summary also end on -
     so a scoped poll cannot say 'ready to post' over warnings, or over a blocked owning setup,
     that the document poll would name."""
-    active_total = t["valid"] + t["out_of_date"] + t["errored"]
+    nonfinite = t.get("nonfinite", 0)
+    active_total = t["valid"] + t["out_of_date"] + t["errored"] + nonfinite
     unsettled = _cam_common.unsettled_count(t)
     unread = t.get("unread", 0)
     measure = (f"{t['valid']} of {active_total} active ops valid" if active_total else
                f"{t['total']} operation(s) in scope")
     if t["errored"]:
-        return (f"BLOCKER: {t['errored']} operation(s) have errors - "
-                "the job will not post until fixed.")
+        # ONE sentence for both readiness surfaces: a scoped poll has no setup- or program-level
+        # error of its own to count, so it names the operation kind alone.
+        return _cam_common.errored_verdict(0, 0, t["errored"])
+    if nonfinite:
+        return _cam_common.nonfinite_verdict(measure, t.get("nonfinite_names") or [])
     if unread:
         return _cam_common.unread_verdict(measure, unread, unsettled, t["out_of_date"])
     if active_total and t["valid"] == active_total:
@@ -437,7 +446,7 @@ def _scope_state(cam, target: str):
     # one name.
     nodes = [node] if kind == "operation" else _cam_common.operation_nodes_under(node)
     ops = [n.obj for n in nodes]
-    tally = _op_tally(ops)
+    tally = _op_tally(ops, cam)
     # A folder or operation is posted through its setup, so that setup's blocked_by gates this
     # verdict too.
     owner = _cam_common.owning_setup(node)

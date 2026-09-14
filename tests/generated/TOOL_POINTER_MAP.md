@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 191  |  **description breadcrumbs:** 279  |  **note/error breadcrumbs:** 620
+**Tools:** 191  |  **description breadcrumbs:** 281  |  **note/error breadcrumbs:** 621
   |  **guidance smells flagged:** 8
 ## Blindspots to engineer
 
@@ -17,8 +17,8 @@ close orphans, factor duplicated guards into shared helpers.
 **Read/Acquire (8)** - higher concern, a check-your-work tool nothing points to:
   `cam_compare_operations`, `cam_find_holes`, `cam_find_pockets`, `cam_inspect_toolpaths`, `drawing_get_status`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`
 
-**Edit (48)** - usually leaf actions, scan for genuine gaps:
-  `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_set_nc_comment`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_remove_feature`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_insert_image`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_plane_cut`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_sweep`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
+**Edit (47)** - usually leaf actions, scan for genuine gaps:
+  `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_remove_feature`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_dimension`, `drawing_insert_image`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_plane_cut`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_sweep`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
 - **51x** across 50 module(s): "No active design. Create or open a document first (see doc_new)."
@@ -40,7 +40,7 @@ close orphans, factor duplicated guards into shared helpers.
 - `find_geometry`  <- 49  (desc 13, note 36)
 - `design_delete_feature`  <- 40  (desc 16, note 24)
 - `view_screenshot`  <- 34  (desc 5, note 29)
-- `cam_get`  <- 29  (desc 12, note 17)
+- `cam_get`  <- 30  (desc 13, note 17)
 - `data_get`  <- 25  (desc 10, note 15)
 - `model_inspect`  <- 24  (desc 3, note 21)
 - `doc_open`  <- 23  (desc 5, note 18)
@@ -389,8 +389,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `cam_compare_operations`
 - Provide both 'operation_a' and 'operation_b' (operation names).
-- 0 differences is what these reads OPENED matching: the parameter expressions, each selection set's counts, and the per-selection properties in geometry_properties_read. WHICH edges, faces or bodies...
-- NO selection set answered on either operation - neither carries one this read reaches, or the reads did not answer. So nothing here compares what the two CUT, whatever the parameter rows say; the g...
+- 0 differences, and entity_bases_truncated names the set(s) whose entity readings stopped at the first {cap} - what those sets hold past that bound was not compared, so they are NOT shown to match. ...
+- 0 differences is what these reads OPENED matching: the parameter expressions, each selection set's counts and entity readings, and the surface groups' flags and modes. A property no selection answe...
+- NO selection set answered on either operation - neither carries one this read reaches, or the reads did not answer. The geometry counts are absent evidence about what the two CUT, not agreement.
 - {n} of the 2 named operations still {verb} generating to do ({names}), so nothing was compared. This read walks the selection objects on both operations, and one such call on a document still regen...
 
 ### `cam_create_machine`
@@ -442,9 +443,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Its strategy reads isAdditiveStrategy true, so this call assigned no cutting tool. Read what it carries with cam_get(include=['parameters'], operation=...), then cam_generate.
 - It rest-machines: with no reference it errors 'No valid reference tool nor valid reference stock model'. Set restMaterialFromJob true with cam_edit_operation, then cam_generate.
 - Strategy '' needs a PROBE and the requested tool reads tool_type , so nothing was created. A face mill on a probing strategy generated with 'Tool (face mill) is not supported for the strategy.' Tak...
-- operation(s) already answer to ''. Operation.name dedupes rather than refusing, so it would land as something like '1' - a name nothing asked for. Pick one no operation carries; cam_get(include=['o...
 - Strategy '{strategy}' reads isGenerationAllowed false in setup '{setup}', so nothing was created. Creating it would have SUCCEEDED and then never generated, carrying no toolpath and no error or war...
 - hole recognition picks holes for a drilling cycle - create 'drill' (or 'bore') and aim it with cam_select_geometry(selection='holes')
+- Strategy '' is not an operation, so nothing was created: operations.add answers with a name while the setup's operation count stays where it was. Instead, .
 - A drilling cycle cuts along the SETUP's Z: a hole off it errored 'Cylindrical face not in tool orientation!'. Aim it with cam_edit_setup(wcs={'z_axis': <face>}) and wcs_orientation_flipZ.
 - Strategy '' reads isAdditiveStrategy true, and this tool assigns no cutting tool to one, so nothing was created. Drop 'tool_scope', 'tool_library_url' and 'tool_index' and retry.
 - operations.add returned '' but the setup's operation count could not be read  the add, so the operation's landing is UNCONFIRMED. Re-read the setup with cam_get(include=['operations']).
@@ -473,13 +474,19 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - setups.add returned a setup for '' but Setup.operationType reads back , which is not the type this call asked for. Remove it with cam_delete and retry.
 
 ### `cam_delete`
-- Provide 'entity' - the CAM item name to delete (see cam_get / cam_get(include=['operations']) / cam_edit_folders).
+- Provide 'entity' - the CAM item name to delete (see cam_get / cam_get(include=['operations']) / cam_get(include=['nc_programs'])).
 - Fusion declined to delete '
 - ' (deleteMe returned false). It may be locked, referenced, or not deletable in its current state.
-- deleteMe returned true but '
-- ' still resolves in the CAM tree - the delete did not take. Re-read with cam_get.
-- CAM entity removed - verified gone by a re-resolve over the tree. (design_delete_* don't reach CAM - this is the CAM-side delete.)
+- deleteMe returned true but the node deleted for '
+- ' still reads its name ('
+- ') - the delete did not take. Re-read with cam_get.
+- deleteMe returned true for '
+- CAM item(s) still carry the name '
+- ', as many as before the delete - it did not take. Re-read with cam_get.
+- CAM item(s) still carry that name. (design_delete_* don't reach CAM - this is the CAM-side delete.)
 - Fusion declined to delete '' (deleteMe returned false). It may be locked, referenced, or not deletable in its current state.
+- deleteMe returned true but the node deleted for '' still reads its name ('') - the delete did not take. Re-read with cam_get.
+- deleteMe returned true for '' but  CAM item(s) still carry the name '', as many as before the delete - it did not take. Re-read with cam_get.
 
 ### `cam_delete_machine`
 - Machine deleted from the Local machine library: its asset '
@@ -530,7 +537,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - A re-resolve of '' now answers nothing, which on its own proves nothing - MEASURED, the library query is keyed on vendor/model and does not reach a machine by a description that is not its model - ...
 
 ### `cam_delete_template`
-- Provide 'name' - the template to delete, as cam_get(include=['templates'], template_location='local') lists it.
+- Pass 'name' or 'template_url', not both - '
+- ' searches the Local library by name and '
+- ' addresses one asset. Nothing was deleted.
+- Provide 'name' - the template to delete - or 'template_url', the url cam_get(include=['templates'], template_location='local') lists beside it.
 - Provide 'confirm_name' - the template's exact name again, as a safety confirmation. Template deletion is not undoable from this server.
 - ' in the LOCAL template library - this tool deletes from the Local library only.
 - Name mismatch - refusing to delete. '
@@ -542,31 +552,22 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - The walk hit its own bound, so this list is incomplete.
 - No asset in the Local template library is named '
 - assets in the Local template library (
-- ) - refusing to guess which one to delete. Remove the duplicate in Fusion's template library first.
+- ) - refusing to guess which one to delete. Pass template_url=<one of those urls> to delete exactly that asset.
 - The Local template library walk hit its own bound before it finished, so '
 - ' cannot be shown to name only ONE asset - a duplicate past the bound would not have been seen. Nothing was deleted.
 - The Local library asset '
-- ' does not load a template, so what it holds cannot be confirmed. Nothing was deleted.
 - ' holds the template '
 - ' - refusing to delete an asset that is not the template that was confirmed.
-- Fusion declined to delete '
-- ' from the Local template library (deleteAsset returned false) - it is still there.
-- , so the delete could not be read back and is UNCONFIRMED. Re-read with cam_get(include=['templates'], template_location='local').
-- deleteAsset returned true for '
-- ', but the Local template library
-- location no longer resolves
-- asset walk hit its own bound before finishing
-- deleteAsset returned true but the Local template library still lists '
-- ' - the delete did not take. Re-read with cam_get(include=['templates'], template_location='local').
-- deleteAsset returned true and '
-- ' is gone from the Local template library's asset walk, but a template still loads from its url (
-- ) - the two reads disagree, so the delete is UNCONFIRMED.
-- Template deleted from the Local template library: its asset '
-- ' is gone from a re-walk of the library's own assets, and nothing loads from its url any more. cam_save_template writes a new one; cam_get(include=['templates'], template_location='local') lists wh...
-- ' from the Local template library failed:
+- Re-read the url with cam_get(include=['templates'], template_location='local'). Nothing was deleted.
+- ' in the Local template library - this tool deletes from the Local library only.
+- The walk hit its own bound before finishing, so an asset past that bound would not have been seen.
+- Name mismatch - refusing to delete. The asset at '
+- Pass 'name' or 'template_url', not both - '' searches the Local library by name and '' addresses one asset. Nothing was deleted.
+- No asset at '' in the Local template library - this tool deletes from the Local library only. Re-read the url with cam_get(include=['templates'], template_location='local'). Nothing was deleted.
+- Name mismatch - refusing to delete. The asset at '' holds the template '', but confirm_name was ''. Pass confirm_name='' if you really mean this template.
 - No template named '' in the LOCAL template library - this tool deletes from the Local library only.  Nothing was deleted.
 - Name mismatch - refusing to delete. '' resolves to the template '', but confirm_name was ''. Pass confirm_name='' if you really mean this template.
-- '' names  assets in the Local template library () - refusing to guess which one to delete. Remove the duplicate in Fusion's template library first.
+- '' names  assets in the Local template library () - refusing to guess which one to delete. Pass template_url=<one of those urls> to delete exactly that asset.
 - The Local template library walk hit its own bound before it finished, so '' cannot be shown to name only ONE asset - a duplicate past the bound would not have been seen. Nothing was deleted.
 - The Local library asset '' holds the template '', not '' - refusing to delete an asset that is not the template that was confirmed.
 - deleteAsset returned true for '', but the Local template library , so the delete could not be read back and is UNCONFIRMED. Re-read with cam_get(include=['templates'], template_location='local').
@@ -596,7 +597,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide 'parameters' - at least one name=value to set (e.g. {'tool_feedCutting': '3000'}) - or 'preset', a preset on this operation's tool, 'tool_index' (with 'tool_scope=document' or 'tool_library...
 - ' parameters cannot be read before assignment; no write was attempted. Re-read it with cam_get(include=['parameters']).
 - ' has no parameter(s):
-- . cam_get(include=['parameters'], operation=...) lists the rows Fusion SHOWS and counts the rest as hidden_count: a row behind a switch reads isEnabled false and is absent from that list, yet still...
+- lists the rows Fusion SHOWS and counts the rest as hidden_count: a row behind a switch reads isEnabled false and is absent from that list, yet still lands when the switch rides the SAME call - so a...
 - parameter(s), each restored expression re-read.
 - ' parameters cannot be read after tool/preset assignment; no explicit parameter write was attempted.
 - ' lost parameter(s) after tool/preset assignment:
@@ -610,14 +611,14 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Setting the name generates the operation where its strategy can: a 'face' op went no_toolpath to valid with no cam_generate call. cam_get_status reads what this rename left.
 - toolPreset now reads '' on '' - the preset this operation runs. cam_get(include=['tool'], operation='', preset='') reads its cutting expressions. The toolpath is now OUT OF DATE - regenerate it wit...
 - operationState did not answer after the edit; re-read with cam_get(include=['operations']) in the Manufacture workspace.
-- Operation '{operation}' does not accept a write to: {names} (isEditable reads False on each{after}). {applied} cam_get(include=['parameters'], operation=...) marks each refusing row editable false;...
+- Operation '{operation}' does not accept a write to: {names} (isEditable reads False on each{after}). {applied}  marks each refusing row editable false; set a row it does not mark.
 - This call WROTE {n} parameter(s) on the operation and then restored each one - every restored expression reads back what it held. No other state was read, so re-read the operation with cam_get(incl...
 - This call WROTE {n} parameter(s) on the operation and restored each one, but {bad} did NOT come back: {rows}. The operation is left holding those values - set each one back by hand.
-- A row another parameter in the SAME call unlocks is written after it - deburr's numberOfStepovers reads editable once doMultiplePasses is true. For a cutting-TOOL dimension, a cam_edit_tools edit r...
+- A cutting-TOOL dimension is edited on the document-library entry this operation runs - cam_edit_tools(action='edit', scope='document') - which it reads at once, leaving the toolpath out of date.
+- A row another parameter in the SAME call unlocks is written after it - deburr's numberOfStepovers reads editable once doMultiplePasses is true.
 - ; hasToolpath read True before the set and False after - the suppression DISCARDED the toolpath, and the operation carries none until it is regenerated. Restore it with suppressed=false, then regen...
 - Operation '' parameters cannot be read before assignment; no write was attempted. Re-read it with cam_get(include=['parameters']).
-- Operation '' has no parameter(s): . cam_get(include=['parameters'], operation=...) lists the rows Fusion SHOWS and counts the rest as hidden_count: a row behind a switch reads isEnabled false and i...
-- (For a cutting-TOOL dimension, a cam_edit_tools edit reaches only operations created AFTER it - re-assign this one with cam_edit_operation(tool_scope, tool_index).)
+- Operation '' has no parameter(s): .  lists the rows Fusion SHOWS and counts the rest as hidden_count: a row behind a switch reads isEnabled false and is absent from that list, yet still lands when ...
 
 ### `cam_edit_setup`
 - Setup edited. Existing toolpaths are now OUT OF DATE - regenerate with cam_generate. A WCS bound via 'wcs' is a LIVE reference to the selected geometry or Joint Origin (bound_entities), so the WCS ...
@@ -652,9 +653,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not strip the simulation model from '
 - Could not set WCS mode '
 - Could not enable fixtures on setup '
-- A row marked name_in_both_locations names TWO machines and an assignment by it reaches the local one - delete that copy to reach the shipped one.
-- Pass a machine's exact 'name' to cam_edit_setup(machine=...); machine_type='milling' narrows past the additive printers.
-- The listing was CAPPED, so name_in_both_locations is read over the listed rows only - a copy past the cap is not marked.
+- Machine '' landed on setup '' and moved its job_type to '' (Setup.operationType ); putting it back did not take. Set it with cam_edit_setup(parameters={'job_type': ""}), or assign a machine of this...
 - 'wcs' must be an object like {'origin': <handle-or-JO>, 'z_axis': <handle>} - a find_geometry handle or a Joint Origin per axis you want to bind.
 - wcs.: a Joint Origin can bind the WCS ORIGIN only - the platform rejects one as an axis. Bind z_axis/x_axis to a face (its normal) or a straight edge via a find_geometry handle; to center a WCS on ...
 - '' cannot be an empty list - clearing that setup selection is unsupported by this tool. Omit the field to leave it unchanged, or pass one or more bodies or occurrences to replace it.
@@ -712,11 +711,16 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ) reported failure - preset '
 - preset(s) of that name survive on the tool - the removal did not take.
 - 'where_used' is only available for the document library (scope='document') - a shared library has no operations.
+- operationsByTool did not answer for the tool at index
+- , so which operations run it is UNKNOWN - that is not 'used by none'. Re-read the library with action='list' and retry.
 - Operations that use this tool.
 - This tool is not used by any operation.
 - Every parameter's name/expression/value (value is null where unreadable). 'formula_source' marks a parameter tracking another (editing it overwrites that relationship). Set one with action='edit'.
 - scope='{scope}' is the libraries this Fusion installation ships, which this tool only READS - '{action}' was refused. Copy the tool out instead: action='list' at this scope for its libraries and th...
 - Summary rows only (diameter/flutes/type/description/number/product identity). For a tool's FULL parameter list - every dimension by name/expression/value - call action='parameters' with that tool's...
+- '{diameter}' was not applied and nothing was added: this tool reads {flag} true, and a 'diameter' override writes only the cutting diameter (tool_isMill/tool_isDrill) or the nozzle (tool_isJet). Th...
+- '{diameter}' was not applied and nothing was added: every one of {flags} reads false on this tool and its '{dia}' does not read isEditable true, so no row here reads as the size it cuts at and the ...
+- '{diameter}' was not applied and nothing was added: {flags} did not read on this tool, so which row carries its size is unknown and the override was not guessed at. A tool copied from a library who...
 - Set tool_diameter to  on a plain-shank sample but its shoulder diameter read back  against a cutter of  (cm) - the shoulder did not follow, and the tool was not added.
 - A 'sized' row whose shoulder_diameter_mm differs from its diameter_mm kept the sample's own stepped shoulder - set tool_shoulderDiameter with action='edit' to change it.
 - updateToolLibrary reported success but the library re-read from its url holds  tool(s), not  - the persist did not land.
@@ -724,8 +728,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Auto-assigned free tool number(s)  (next free per tool, so multiple adds do not collide - cam_post refuses duplicate tool numbers).
 - '' was formula-derived (expression was '', tracking that parameter) - this edit overwrites that internal relationship; the tool no longer keeps '' equal to ''.
 - Tool : expression did not evaluate - . Rolled back all  parameter(s) and did not commit, so the library keeps what it held. (A tool expression must reference parameters this tool carries and resolv...
-- Operations already created keep their own copy of this tool - cam_edit_operation(tool_scope, tool_index) re-assigns one.
+- operationsByTool names  operation(s) running this entry - 'invalidated_operations' lists them; regenerate them with cam_generate.
 - , and read back from the document tool library - a document read-back shows the change is present, not that it was stored; doc_save stores the document.
+- operationsByTool did not answer for the tool at index , so which operations run it is UNKNOWN - that is not 'used by none'. Re-read the library with action='list' and retry.
 
 ### `cam_find_holes`
 - Omitted 'bodies' scans every solid body. Each hole's 'faces' lists handles PER SEGMENT, in the group's 'segments' order - pass handles to cam_select_geometry(selection='holes', handles=[...]), whic...
@@ -751,13 +756,15 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Omit 'target' to generate the whole document.
 - Failed to launch generation for
 - Pass skip_valid=false to force-regenerate it.
+- Triage: nonfinite_triage.
 - No generation launched in
 - : every operation outside the
 - that read isGenerationAllowed false failed to launch (
 - Generation is launched and runs in the background at its own pace - the compute is often minutes. Check cam_get_status(handle) at whatever cadence you need the progress, until completed=true. opera...
 - Check the Manufacturing Extension entitlement, or replace one: cam_delete + cam_create_operation with an allowed strategy (cam_get(include=['strategies']) lists them).
-- launch_reasons tallies the state each operation read BEFORE this launch, and launched_operations names them: out_of_date, no_toolpath (never generated), errored, valid_forced (valid, and covered an...
-- skip_valid was requested but NOT applied: this launch names a {scope}, and generateToolpath regenerates its whole target whatever the flag says - the valid_forced rows are that, not a stale read. O...
+- launch_reasons tallies the state each operation read BEFORE this launch, and launched_operations names them: out_of_date, no_toolpath (never generated), errored, nonfinite (its motion read NaN), va...
+- skip_valid was requested but NOT applied: this launch names one {scope}, and generateToolpath regenerates its whole target whatever the flag says - the valid_forced rows are that, not a stale read....
+- This sweep passed over them: skip_valid skips a path whose operationState reads valid, and these read valid with a motion that is not a number.  Change what one cuts, then regenerate that operation...
 
 ### `cam_generate_setup_sheet`
 - Setup sheet written. The file is named after the DOCUMENT, not the scope, so another call into this folder OVERWRITES it - use a distinct output_folder per sheet you want to keep.
@@ -843,7 +850,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' posted AS-IS from its stored configuration -
 - file(s), nothing reconfigured. 'readiness' carries its health.
 - file(s). 'readiness' carries its health.
-- Provide 'program_name' - the NC Program name or number (some posts require a number).
+- Provide 'program_name' - the NC Program's listing NAME; an existing program of that name is reused.
 - An as-is post uses the program's stored output units; omit 'units' or pass units='document' before posting it unchanged.
 - Provide 'output_folder' - the directory where the NC file(s) will be written.
 - Pass 'scope' or 'setups', not both - 'scope' names ONE setup/folder/operation and 'setups' names the several setups one program holds.
@@ -930,6 +937,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - . The selection is saved - fix the cause, then run cam_generate(target='
 - selection must be one of
 - selection='pocket_recognition' is disabled by default because native pocket recognition can terminate Fusion. Pass allow_pocket_recognition=true for an explicit diagnostic attempt; use selection='p...
+- stock_faces names the STOCK's own analytic faces, so it takes no model geometry -
+- was passed beside it. Pass stock_faces alone, or drop it and select model faces with 'handles'.
 - '. Use mm, cm, or in.
 - Selection applied but the operation reports 0 selections - the geometry was rejected. Check the geometry matches the strategy (edges for chain, the pocket floor face for pocket, bodies for silhouet...
 - chain_groups requires selection='chain' and replaces handles.
@@ -940,6 +949,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - 'handles' cannot be checked for one chain - an edge's vertices did not read. Pass chain_groups, one list per contour. No heights or selections were changed.
 - chains that share no vertex (
 - ) - a flat list is taken as ONE connected chain. Pass chain_groups, one list per contour, to group them yourself. No heights or selections were changed.
+- Box stock answers Top / Bottom / Left / Right / Front / Back; cylinder and tube stock answer Top / Bottom / Outside / Inside.
 - Selection applied; generation was NOT launched - strategy '{strategy}' reads isGenerationAllowed false. Check the Manufacturing Extension entitlement, or replace the operation: cam_delete, then cam...
 - 'pocket_filter.min_hole_diameter' needs holes=true - the API accepts the hole diameter bound only while holes are being interpreted as pockets.
 - The operation now holds this rejected selection - the previous one did not read back as restored; select its geometry again.
@@ -947,35 +957,47 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Fusion resolved a contour of  segment(s) missing  of the  selected edge(s). Pass chain_groups to say which edges form the contour, or select edges of one loop.
 - Fusion resolved a contour this call could not check against the  selected edge(s) - the resolved curves or an edge's own vertex points did not read. Pass chain_groups to take the grouping yourself,...
 - Fusion rejected the  selection: . The operation's previous selection was cleared before this one was applied, so it now holds only the rejected selection - select its geometry again.
-- The selection landed on the operation's , but the operation has no '' parameter, so this call cannot confirm the  is engaged - set  in the Fusion UI, or re-check that the strategy is the one you me...
-- Could not set ='' to engage the : . The selection is NOT confirmed engaged - set ='' with cam_edit_operation, then regenerate.
+- the operation has no '' parameter, so the  cannot be confirmed engaged - set  in the Fusion UI, or re-check that the strategy is the one you meant.
 - cannot be read back after being set to '', so the  engagement is UNCONFIRMED - re-read the operation with cam_get(include=['operations']).
-- Setting ='' did not take - it reads back '' (it held ''), so the selected  is NOT engaged - set ='' with cam_edit_operation, then regenerate.
+- setting ='' did not take - it reads back '' (it held ''), so the  is NOT engaged - set ='' with cam_edit_operation, then retry.
 - '' is a RAIL PAIR -  reference(s) were passed and it needs , the LOWER rail first. One contour makes the operation report 'Invalid contours.' at generate, while two applied lower-rail-first produce...
+- '' takes a PAIR of drive curves -  reference(s) were passed and it needs , one CurveSelection each. Fewer makes the operation report 'Incorrect number of drive curves' at generate.
 - Operation '' carries  but it did not read isEditable true, so the '' selection is not offered on it. Select this geometry in the Fusion UI, or use an operation whose set reads editable.
+- Operation '' carries '' but it did not read isEditable true after probe_mode was engaged, so stock_faces is not offered on it. Select the stock faces in the Fusion UI instead.
+- Operation '' sits in setup '', whose  reads '' - that stock carries no analytic faces, so stock_faces read back empty. Nothing was changed. Give the setup a box, cylinder or tube stock (cam_edit_se...
+- Operation '' has no '' parameter, so it cannot probe the stock. Nothing was changed - drop stock_faces and pass model face handles instead.
 - Operation '' carries no SETTABLE surface set -  did not read isEditable true, so this call will not assign faces there. Select this strategy's surfaces in the Fusion UI, or use an operation whose s...
 - Operation '' carries none of the surface sets () - the 'surfaces' selection is for a surface-driven strategy (geodesic, multi-axis finishing/roughing, ...).
 - 'surface_target' is needed here: operation '' has no '' parameter to default to. It carries  - pass whichever of those these faces are.
-- Operation '' carries '' but it did not read isEditable true, so no surface group is offered on it. Group these faces in the Fusion UI instead.
 - The group this call added REMAINS on the operation ({held}): putting the previous groups back did not read back. Take it off in the operation's Surface Groups in Fusion.
+- machine_mode='' is not available in this Fusion build - adsk.cam.MachiningMode carries no such member. Nothing was applied.
+- applyMachineAvoidGroups failed: . Nothing was applied - drop machine_mode, then machine_over_holes, and retry to find which of them this strategy refuses at the commit.
 - The surface groups could not be read back after applyMachineAvoidGroups, so the group is UNCONFIRMED - re-read the operation with .
 - The height setting(s)  were applied BEFORE this failure and REMAIN on the operation - this call did not undo them; set them back if the selection is not going to be applied.
+- stock_faces names the STOCK's own analytic faces, so it takes no model geometry -  was passed beside it. Pass stock_faces alone, or drop it and select model faces with 'handles'.
 - 'handles' holds  chains that share no vertex () - a flat list is taken as ONE connected chain. Pass chain_groups, one list per contour, to group them yourself. No heights or selections were changed.
 - Selection applied but generation failed to launch: . The selection is saved - fix the cause, then run cam_generate(target='').
 - Selection applied; generation is launched - check cam_get_status(target='') until completed=true. has_toolpath False on completion means no path was produced, and the warning channel can be silent ...
 
 ### `cam_set_nc_comment`
-- Provide a non-empty 'comment' (and/or 'set_name') - the value(s) to write. Refusing: an empty comment with no name would blank the comment on every matched NC program.
+- Provide a non-empty 'comment' (and/or 'set_name' / 'set_number') - the value(s) to write. Refusing: an empty comment with neither would blank the comment on every matched NC program.
 - This document has no NC programs.
 - No NC program named '
-- NC program comment/name updated. Most posts emit the Comment near the top of the G-code. (No re-post is performed.)
+- would write one value to all
+- matched NC programs; refusing before any change (nothing was modified). Name one program with 'program'.
+- An NC program's name does not read, so a rename on it could not be confirmed; aborting before any change (nothing was modified). Name one program with 'program'.
 - ' parameter; aborting before any change.
 - Comment on NC program '
 - ' is not editable; aborting before any change (nothing was modified).
-- ' is not editable/found; aborting before any change (nothing was modified).
+- Program number on NC program '
+- ' is not editable/found ('
+- '); aborting before any change (nothing was modified).
 - Failed to set comment on NC program '
 - . NOTE: any programs processed before this one were already changed.
-- Failed to set name on NC program '
+- Failed to set the name of NC program '
+- Failed to set the program number on NC program '
+- NC program updated. 'set_name' moves NCProgram.name - the listing name cam_post's 'program_name' addresses a program by; 'set_number' moves the nc_program_name parameter, the number the post emits....
+- would write one value to all  matched NC programs; refusing before any change (nothing was modified). Name one program with 'program'.
 
 ### `cam_show_toolpath`
 - Toolpath shown. Toolpaths render in the Manufacture workspace; pair with view_screenshot.
@@ -2637,6 +2659,8 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - The arrange input exposes no 'definition' on this Fusion version, so move_originals, rotation, quantity and part_in_part cannot be set.
 - ) appears to need a Fusion extension on this account:
 - . Try solver='rectangular', or enable the extension.
+- No face of these shapes reads a plane, which solver='{label}' needs: {names}. Nothing was created. Drop them from 'shapes' to nest the rest, or pass solver='3d', which packed a body with no planar ...
+- Arrange (solver='{label}') failed with '{code}': a shape it holds carries no planar face and the platform names none of them. The feature is gone from the timeline, so nothing was created. Arrange ...
 - Pass exactly ONE envelope: 'boundary_sketch' (a sketch profile), or 'envelope_plane' with 'envelope_length' and 'envelope_width'. Given boundary_sketch='', envelope_plane=''.
 - solver='3d' packs into a 3D envelope: pass 'envelope_plane' with 'envelope_length', 'envelope_width' and 'envelope_height' instead of 'boundary_sketch' ('').
 - 'envelope_origin' offsets a SIZED envelope from its plane's origin, and the profile envelope this call takes from sketch '' carries no origin offsets. Drop it, or pass 'envelope_plane' with its sizes.

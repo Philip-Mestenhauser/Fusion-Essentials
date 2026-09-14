@@ -49,13 +49,13 @@ _SPLIT_LAUNCH_NOTE = "Launched - check cam_get_status(handle) until completed=tr
 _REASONS_NOTE = (
     " launch_reasons tallies the state each operation read BEFORE this launch, and "
     "launched_operations names them: out_of_date, no_toolpath (never generated), errored, "
-    "valid_forced (valid, and covered anyway) or state_unread.")
+    "nonfinite (its motion read NaN), valid_forced (valid, and covered anyway) or state_unread.")
 
 # MEASURED: cam.generateToolpath over a SETUP regenerated all four of its operations - two of them
 # already valid - under skip_valid=true. The flag narrows the DOCUMENT sweep only, so a scoped
 # launch says so rather than leaving the caller to read valid_forced rows as a fault.
 _SKIP_VALID_UNUSED = (
-    " skip_valid was requested but NOT applied: this launch names a {scope}, and generateToolpath "
+    " skip_valid was requested but NOT applied: this launch names one {scope}, and generateToolpath "
     "regenerates its whole target whatever the flag says - the valid_forced rows are that, not a "
     "stale read. Omit 'target' for the document sweep, which the flag does narrow.")
 
@@ -87,23 +87,52 @@ def _launch_reason(facts) -> str:
     """The reason one operation is in this launch - its own pre-launch state, named."""
     if facts.get("has_error"):
         return "errored"
+    if facts.get("nonfinite_toolpath"):
+        return "nonfinite"
     return _LAUNCH_REASON.get(facts.get("operation_state"), "state_unread")
 
 
-def _launch_set(rows, skip_valid):
+def _launch_set(rows, skip_valid, cam=None):
     """(the (label, node, reason) rows a launch builds a toolpath for, suppressed count,
     already-valid count) - a suppressed operation carries no toolpath to build, and skip_valid
-    passes over the ones already reading operationState IsValid (0)."""
+    passes over the ones already reading operationState IsValid (0). A path whose own motion is not
+    a number reads that state and is NOT already valid: it is what the caller came to redo."""
     covered, parked, already_valid = [], 0, 0
     for label, node in rows:
-        facts = _cam_common.op_state_facts(node.obj)
+        facts = _cam_common.op_state_facts(node.obj, cam)
         if _cam_common.op_is_suppressed(facts):
             parked += 1
-        elif skip_valid and facts["operation_state"] == 0:
+        elif (skip_valid and facts["operation_state"] == 0
+                and not facts.get("nonfinite_toolpath")):
             already_valid += 1
         else:
             covered.append((label, node, _launch_reason(facts)))
     return covered, parked, already_valid
+
+
+# The teaching for the operations a document sweep leaves behind, in its own key the way the status
+# read's triages are - the note names the key and stops. NONFINITE_POST is the one home for what the
+# post did.
+_NONFINITE_TRIAGE = (
+    "This sweep passed over them: skip_valid skips a path whose operationState reads valid, and "
+    "these read valid with a motion that is not a number. " + _cam_common.NONFINITE_POST
+    + " Change what one cuts, then regenerate that operation by name - a targeted "
+    "cam_generate(target=...) regenerates its whole target whatever the flag says.")
+
+
+def _stranded_keys(payload, stranded) -> dict:
+    """Attach the operations a DOCUMENT sweep passed over: named (capped like the launched rows),
+    with the triage they earn beside them and the note naming that key. `payload` is returned
+    unchanged where the sweep passed over none."""
+    if not stranded:
+        return payload
+    names = [label for label, _node, _reason in stranded]
+    payload["nonfinite_not_relaunched"] = names[:_LAUNCH_ROWS_CAP]
+    if len(names) > _LAUNCH_ROWS_CAP:
+        payload["nonfinite_not_relaunched_truncated"] = True
+    payload["nonfinite_triage"] = _NONFINITE_TRIAGE
+    payload["note"] = (payload.get("note", "") + " Triage: nonfinite_triage.").strip()
+    return payload
 
 
 def _launch_rows(payload, covered):
@@ -119,21 +148,24 @@ def _launch_rows(payload, covered):
         payload["launched_operations_truncated"] = True
 
 
-def _nothing_to_launch(target_desc, parked, already_valid) -> dict:
+def _nothing_to_launch(target_desc, parked, already_valid, stranded=0) -> dict:
     """The payload for a scope no launch was made over - the ONE builder both arms return, so a
     skip cannot read one way here and another there. No Future is minted, so this reports skipped
     rather than sending the caller to poll a generation nobody started, and the hint names whatever
-    left the scope empty: an exclusion, or the scope holding no operations at all."""
+    left the scope empty: an exclusion, a sweep that passes over a path, or no operations at all."""
     payload = {"launched": False, "skipped": True, "target": target_desc}
-    if not parked and not already_valid:
+    if not parked and not already_valid and not stranded:
         payload["reason"] = "no operations in scope - there is nothing to generate."
         payload["hint"] = ("Add one with cam_create_operation, or read what the document holds "
                            "with cam_get(include=['operations']).")
         return payload
-    payload["reason"] = (f"nothing in scope needed a launch ({already_valid} already valid, "
-                         f"{parked} suppressed).")
+    counted_out = [f"{already_valid} already valid", f"{parked} suppressed"]
+    if stranded:
+        counted_out.append(f"{stranded} nonfinite")
+    payload["reason"] = f"nothing in scope needed a launch ({', '.join(counted_out)})."
     payload["hint"] = ("Pass skip_valid=false to force-regenerate the valid one(s)."
                        if already_valid else
+                       "nonfinite_triage says what the nonfinite path(s) need." if stranded else
                        "Restore a suppressed operation with cam_edit_operation(suppressed=false), "
                        "then re-run.")
     return payload
@@ -145,7 +177,7 @@ def _launch_around_blocked(cam, keep, blocked, skip_valid, scope, target_desc, r
     regenerates NOTHING over such a scope, so every operation that did not read false is launched on
     its own, all under one handle."""
     futures, failures, launched = [], [], []
-    covered, parked, already_valid = _launch_set(keep, skip_valid)
+    covered, parked, already_valid = _launch_set(keep, skip_valid, cam)
     for label, node, reason in covered:
         try:
             fut = cam.generateToolpath(node.obj)
@@ -205,8 +237,11 @@ def handler(target: str = "", skip_valid: bool = True) -> dict:
         if rerr:
             return error(rerr + " Omit 'target' to generate the whole document.")
         # generateToolpath has no skip_valid flag; it regenerates the given target. When the
-        # caller asked to skip valid and this single target is already valid+current, short out.
-        if skip_valid and node.kind == "operation" and safe(lambda: node.obj.operationState) == 0:
+        # caller asked to skip valid and this single target is already valid+current, short out -
+        # but a path whose own motion is not a number reads that state and is not current at all.
+        facts = _cam_common.op_state_facts(node.obj, cam) if node.kind == "operation" else {}
+        if (skip_valid and facts.get("operation_state") == 0
+                and not facts.get("nonfinite_toolpath")):
             return ok({"launched": False, "skipped": True, "target": want,
         "reason": "operation already valid and up to date (skip_valid=true).",
         "hint": "Pass skip_valid=false to force-regenerate it."})
@@ -234,9 +269,16 @@ def handler(target: str = "", skip_valid: bool = True) -> dict:
     # The count is this call's OWN walk, not future.numberOfOperations - that counter reads a
     # different collection (2 over a six-operation turning setup, measured) - and it runs BEFORE
     # the launch, which moves the operation_state the walk reads.
-    covered, parked, already_valid = _launch_set(list(zip(labels, nodes)), narrowing)
+    covered, parked, already_valid = _launch_set(list(zip(labels, nodes)), narrowing, cam)
+    # MEASURED on the document sweep: generateAllToolpaths(true) regenerated the out-of-date
+    # operation beside it and did NOT touch the nonfinite one, whose state, machining time and
+    # distances read the same after. The flag passes over it, so this launch does not count it.
+    stranded = [row for row in covered if row[2] == "nonfinite"] if narrowing else []
+    if stranded:
+        covered = [row for row in covered if row[2] != "nonfinite"]
     if not covered:
-        return ok(_nothing_to_launch(target_desc, parked, already_valid))
+        return ok(_stranded_keys(
+            _nothing_to_launch(target_desc, parked, already_valid, len(stranded)), stranded))
 
     try:
         future = (cam.generateAllToolpaths(bool(skip_valid)) if node is None
@@ -259,6 +301,7 @@ def handler(target: str = "", skip_valid: bool = True) -> dict:
         "note": _LAUNCH_NOTE + _REASONS_NOTE,
     }
     _launch_rows(payload, covered)
+    _stranded_keys(payload, stranded)
     if skip_valid and node is not None:
         payload["skip_valid_applied"] = False    # absent = the flag narrowed this launch
         payload["note"] += _SKIP_VALID_UNUSED.format(scope=scope)

@@ -237,12 +237,13 @@ def _slice_library_types(cam):
     return _unwrap(cam_edit_tools._do_list_types())
 
 
-def _slice_machines(cam, vendor, machine_type):
+def _slice_machines(cam, vendor, machine_type, max_results):
     """The machine catalog cam_edit_setup's 'machine' input can resolve from (Local + Fusion360
     locations), each row name/vendor/model/location/kind/simulation_ready. 'vendor' and
-    'machine_type' (milling/turning/cutting/additive) filter."""
+    'machine_type' (milling/turning/cutting/additive) filter; 'max_results' caps."""
     from . import cam_edit_setup
-    return _unwrap(cam_edit_setup.read_machines(vendor or "", machine_type or ""))
+    return _unwrap(cam_edit_setup.read_machines(vendor or "", machine_type or "",
+                                                clamp_rows(max_results, 100, 400)))
 
 
 _PRINT_SETTINGS_NOTE = (
@@ -820,7 +821,7 @@ def handler(include=None, setup: str = "", operation: str = "", preset: str = ""
         if e:
             return e
     if "machines" in inc:                       # the machine catalog (names cam_edit_setup accepts)
-        out["machines"], e = _slice_machines(cam, vendor, machine_type)
+        out["machines"], e = _slice_machines(cam, vendor, machine_type, max_results)
         if e:
             return e
     if "print_settings" in inc:                 # what an ADDITIVE setup prints with
