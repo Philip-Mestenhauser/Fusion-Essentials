@@ -123,8 +123,8 @@ def handler() -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Refresh stale references in the active 2D drawing from its saved source. "
-    "Does not save; call doc_save."
+    "Refresh the active 2D drawing's stale references from its saved source. "
+    "Then doc_save."
 )
 
 FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)

@@ -240,11 +240,11 @@ FULL_DESCRIPTION = TOOL_DESCRIPTION + "\n" + _outputs.produces_block(RETURNS)
 tool = (
     Tool.create_simple(name="drawing_insert_image", description=FULL_DESCRIPTION)
     .add_input_property("image_path", {"type": "string",
-            "description": "Local path of the image file."})
+            "description": "Local path of the image."})
     .add_input_property("x", {"type": "number",
-            "description": "Sheet x position, in the sheet's own coordinate unit."})
+            "description": "Sheet x, in the sheet's coordinate unit."})
     .add_input_property("y", {"type": "number",
-            "description": "Sheet y position, in the sheet's own coordinate unit."})
+            "description": "Sheet y, in the sheet's coordinate unit."})
     .add_input_property("scale", {"type": "number",
             "description": "Multiplies the image's natural size."})
     .add_input_property("rotate_deg", {"type": "number",

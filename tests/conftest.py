@@ -138,8 +138,9 @@ from tests.fakes.design import make_timeline  # noqa: E402
 from tests.fakes.sketch import FakeSketchPoint, Profile, Sketch, SketchCurves  # noqa: E402
 from tests.fakes.sketch import make_sketch, make_sketch_curve, sketch_curves_edit  # noqa: E402
 from tests.fakes.cam import FakeCAMFolder, FakeCAMParameter, FakeCAMParameters  # noqa: E402
-from tests.fakes.cam import FakeMachine, FakeOperation, FakeSetup, FakeSetupInput  # noqa: E402
-from tests.fakes.cam import FakeSetups, FakeTool, _InspMeasure, _InspPath  # noqa: E402
+from tests.fakes.cam import FakeMachine, FakeOperation, FakePrintSetting, FakeSetup  # noqa: E402
+from tests.fakes.cam import (ADDITIVE_SETUP_SEEDS, FakeSetupInput, FakeSetups,  # noqa: E402
+                             FakeTool, _InspMeasure, _InspPath)  # noqa: E402
 from tests.fakes.cam import _InspPoint, _Strategy, make_cam, make_cam_parameters  # noqa: E402
 from tests.fakes.cam import make_gated_cam, make_inspection_cam, strategy_factory  # noqa: E402
 from tests.fakes.cam import resolved_path, wcs_params  # noqa: E402

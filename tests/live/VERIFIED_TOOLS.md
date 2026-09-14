@@ -29,8 +29,8 @@ recomputes the hash and fails on any difference, so a green suite cannot ride on
 run that never saw the current code or a weakened predicate. Only a run with zero
 FAIL/blocked/pass* steps rewrites this file.
 
-Stamp: source 2396930b24a1c74ae9766b3250c14571800573b35ecc2ca2d3bd2849b421e9e4 | Fusion 2705.1.15 | verified 2026-09-13
-Loaded: implementation 9a5fbf72c0b410fd8dcc60c2bfbbebf709eb00c771299e346b044e0b5025b5b2 | schema bbb2a14dade22c4f1f175e7573b8d746f1161a620174aadcbccd367d5d73793f | load 78404036876044678e5e21544bd60cef | session 9d7a9375378c41119a8bce74c5386b74
+Stamp: source d7afa6158e38a37eac55be683727aa4c17677712f556673faea703c7a9c152ab | Fusion 2705.1.15 | verified 2026-09-14
+Loaded: implementation e9e7a01392be3cb98ee6c85dca7a9601a5018307e2e012d9eb4c745ad6a4da51 | schema 9e0a26e68183ba11a61ae1e6b56a2812d276fa8aa8ef05dd44a56a681953515c | load 2192912e4a054007b0629943d5501bb2 | session 58bd298dbea54c1d84a4a7c07c0d11cd
 
 184 covered / 0 called / 1 refusals-only / 6 skipped(reason) / 0 pending
 
@@ -74,6 +74,7 @@ Loaded: implementation 9a5fbf72c0b410fd8dcc60c2bfbbebf709eb00c771299e346b044e0b5
 | ACT 10c12 - CAM: THE EXTENSION FAMILIES READ | narrative |
 | ACT 10c13 - CAM: THE ROTARY FAMILIES | narrative |
 | ACT 10c14 - CAM: THE ROTARY FAMILIES READ | narrative |
+| ACT 10c15 - CAM: THE ADDITIVE BUILD | narrative |
 | ACT 10d - CAM: THE SECOND SETUP | narrative |
 | ACT 10e - CAM: MULTI-SETUP POST | narrative |
 | ACT 10f - CAM: THE TREE LEFT BEHIND | narrative |

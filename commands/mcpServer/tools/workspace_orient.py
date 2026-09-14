@@ -463,7 +463,7 @@ def _cam_pointer(cam):
     return "toolpaths look generated." + parked
 
 
-# MEASURED: a base license reads 33 of 54 milling strategies allowed and the Machining Extension
+# MEASURED: a base license reads 33 of 54 milling strategies allowed and the Manufacturing Extension
 # 50, and these four sit in the 17 the extension adds. The probe needs no document, CAM product or
 # setup (64 probes measured at 0.7ms), so it rides every orient.
 _CAPABILITY_SENTINELS = (

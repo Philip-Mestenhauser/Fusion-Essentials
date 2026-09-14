@@ -307,14 +307,14 @@ def handler(surface=None, trim_tool=None, keep=None) -> dict:
 
 
 TOOL_DESCRIPTION = (
-"Trim an open surface body against a tool that intersects it; only the target's cells are removed."
+"Trim a surface body with an intersecting tool; only the target loses cells."
 )
 tool = (
     Tool.create_simple(name="surface_trim", description=TOOL_DESCRIPTION)
     .add_input_property("surface", _SURFACE.schema())
     .add_input_property("trim_tool", _TRIM_TOOL.schema())
     .add_input_property("keep", {"type": ["string", "array"],
-            "description": "'larger' (default), 'smaller', or cell index number(s)."})
+            "description": "'larger' (default), 'smaller', or cell indexes."})
     .add_required_input("surface")
     .add_required_input("trim_tool")
     .strict_schema()

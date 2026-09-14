@@ -2915,6 +2915,46 @@ def _surfaces_applied(count, target, param):
     return check
 
 
+def _surface_group_applied(count, over_holes):
+    """cam_select_geometry(surface_group): what the applied group reads BACK - its own face count,
+    the machine-over-holes flag, and the group count the operation now holds. The op's OWN default
+    group is group 1, so a landed direct group makes that count 2."""
+    def check(p):
+        group = p.get("surface_group") or {}
+        return _measured(f"{count} face(s) on a surface group reading machine_over_holes "
+                         f"{over_holes}",
+                         {"selections": p.get("selections"), "surface_group": group,
+                          "surface_group_count": p.get("surface_group_count")},
+                         p.get("selections") == count and group.get("entities") == count
+                         and group.get("machine_over_holes") is over_holes
+                         and p.get("surface_group_count") == 2)
+    return check
+
+
+def _corner_rest_disclosed(setup):
+    """cam_create_operation('corner'): the created operation plus the two disclosures this create
+    carries - the rest-machining note naming the parameter that gave a corner op a reference, and
+    the tool_axis block read off the operation's own parameters (measured on a fresh corner:
+    multiAxisMachiningType 'three_axis' editable, toolAxisMode carried and NOT editable)."""
+    def check(p):
+        note = p.get("note") or ""
+        axis = p.get("tool_axis") or {}
+        machining = axis.get("machining_type") or {}
+        mode = axis.get("tool_axis_mode") or {}
+        return _measured(f"a corner operation in '{setup}' disclosing its rest reference and axis",
+                         {"operation": p.get("operation"), "strategy": p.get("strategy"),
+                          "tool_axis": axis},
+                         p.get("strategy") == "corner" and bool(p.get("operation"))
+                         and "restMaterialFromJob" in note
+                         and "No valid reference tool nor valid reference stock model" in note
+                         and "tool_axis" in note
+                         and machining.get("value") == "three_axis"
+                         and machining.get("editable") is True
+                         and mode.get("editable") is False
+                         and "five_axis" in (machining.get("choices") or []))
+    return check
+
+
 def _scoped_body_selected(qualified):
     """cam_select_geometry(silhouette) with a component SCOPE narrowing a shared body name:
     'selected' is the qualified '<occurrence>:<body>' spelling of the entity that reached
@@ -3298,6 +3338,35 @@ _CAM_EXTENSION = [
                                        "handles": _ctx_get(c, "sw_faces", "the frustum faces"),
                                        "surface_target": "drive", "generate": False},
      _surfaces_applied(5, "drive", "driveSurfaces"), None),
+    # THE CORNER: created for the two disclosures its create carries - the rest reference and the
+    # tool axis - then deleted, because a corner pass wants concave corners the drafted frustum has
+    # none of and would otherwise generate into the setup launch below.
+    ("cam_create_operation", lambda c: {"setup": _SW_SETUP, "strategy": "corner",
+                                        "tool_scope": "document",
+                                        "tool_index": _ctx_get(c, "sw_mill",
+                                                               "the flat mill's index") + 1,
+                                        "generate": False},
+     _corner_rest_disclosed(_SW_SETUP),
+     ("corner_op", _recall("corner_op", lambda p: p["operation"]))),
+    # THE SURFACE GROUP, on that corner: the frustum's five faces on a direct group of their own,
+    # cutting across their holes and pockets. The operation's OWN default group stays group 1 - on
+    # adaptive, contour3d and drill its machineOverHoles setter raised, so the faces get their own.
+    ("cam_select_geometry", lambda c: {"operation": _ctx_get(c, "corner_op", "the corner op"),
+                                       "selection": "surface_group",
+                                       "handles": _ctx_get(c, "sw_faces", "the frustum faces"),
+                                       "machine_over_holes": True, "generate": False},
+     _surface_group_applied(5, True), None),
+    # the rest reference itself: the ONE rest-machining parameter a call reaches - restMaterialSource
+    # and restMaterialTool both read isEditable false, so the refusal below is what a caller meets.
+    ("cam_edit_operation", lambda c: {"operation": _ctx_get(c, "corner_op", "the corner op"),
+                                      "parameters": {"restMaterialFromJob": "true"}},
+     _param_landed("restMaterialFromJob", "true"), None),
+    ("cam_edit_operation", lambda c: {"operation": _ctx_get(c, "corner_op", "the corner op"),
+                                      "parameters": {"restMaterialSource": "previousOperations"}},
+     _refused("does not accept a write to", "restMaterialSource"), None),
+    ("cam_delete", lambda c: {"entity": _ctx_get(c, "corner_op", "the corner op")},
+     lambda p: p["deleted"] is True and p["entity"] == _RECALL.get("corner_op")
+     and p["entity_type"] == "operation", None),
     # THE SIMULTANEOUS STRATEGIES, in a setup of their own: the rail program spans the swarf setup
     # and the cameo's plain milling one, and the 3-axis post it is written through refuses a 5-axis
     # toolpath - so these three ride a setup that program never reaches.
@@ -3420,6 +3489,19 @@ _CAM_SCOPE = [
                                        "selection": "silhouette", "bodies": [_SW_COMP],
                                        "generate": False},
      lambda p: p["setup_models_selected"] is False, None),
+    # REFUSED, on any licence: a surface GROUP on the one milling family measured to carry no
+    # checkSurfaceSelectionSets at all. The frustum's top face is a real face handle, so the refusal
+    # is the parameter read and not an input guard ahead of it.
+    ("find_geometry", {"target": _SW_COMP, "kind": "planar_face",
+                       "nearest_to": [_SW_CX, _SW_CY, _SW_H + 10], "max_results": 1},
+     _face_facing("facing +Z", lambda n: n[2] > 0.999), _fg("scope_top_face")),
+    ("cam_select_geometry", lambda c: {"operation": _ctx_get(c, "setup2_op",
+                                                            "the second setup's op"),
+                                       "selection": "surface_group",
+                                       "handles": [_ctx_get(c, "scope_top_face",
+                                                            "the frustum's top")],
+                                       "generate": False},
+     _refused("has no 'checkSurfaceSelectionSets' parameter", "lists what it does carry"), None),
     ("cam_generate", {"target": _SW_SETUP2, "skip_valid": False}, _launched_on(_SW_SETUP2), None),
 ]
 

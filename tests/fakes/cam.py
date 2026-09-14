@@ -382,28 +382,50 @@ class FakeMachine:
         self.hasSimulationModel = has_simulation_model
 
 
+@fusion_fake(live_type="PrintSetting", facts=("shape-cam-print-setting",))
+class FakePrintSetting:
+    """A print setting from the library or off an additive setup: the name a request resolves by,
+    the technology a filter reads, and the description - the one member two shipped settings that
+    agree on everything else differ in, so it is what says WHICH one landed."""
+    def __init__(self, name, technology="SLM", description="a print setting"):
+        self.name = name
+        self.technology = technology
+        self.description = description
+
+
 @fusion_fake(live_type="SetupInput", facts=("shape-dump-cam-job-world",))
 class FakeSetupInput:
     """The input cam.setups.createInput() hands back: the operationType it was created for, and the
-    name/models/machine/stockMode a create assigns before add() consumes it."""
+    name/models/machine/printSetting/stockMode a create assigns before add() consumes it.
+    printSetting is the ADDITIVE half - a milling create leaves it None."""
     def __init__(self, operation_type=None, parameters=None):
         self.operationType = operation_type
         self.name = ""
         self.models = []
         self.machine = None
+        self.printSetting = None
         self.stockMode = None
         self.parameters = FakeCAMParameters() if parameters is None else parameters
+
+
+# MEASURED on 2705.1.15: an AdditiveOperation setup lands already holding these two operations, so
+# a create on that arm reads a non-zero operation_count that is the PLATFORM's, not the call's.
+ADDITIVE_SETUP_SEEDS = ("Body Preset1", "Additive Toolpath1")
 
 
 @fusion_fake(live_type="Setups", facts=("shape-dump-cam-job-world", "shape-dump-cam-world"))
 class FakeSetups:
     """cam.setups: the counted/by-name walk plus createInput/add. add() appends `new_setup` - or a
     FakeSetup named after the input - and hands it back, so a create read-back finds the setup in
-    the walk the way live does."""
-    def __init__(self, setups=(), new_setup=None, setup_input=None):
+    the walk the way live does. `seeds` names the operations the PLATFORM puts in a setup of its
+    own accord (ADDITIVE_SETUP_SEEDS below), so a fake additive create is not born empty the way no
+    live one is."""
+
+    def __init__(self, setups=(), new_setup=None, setup_input=None, seeds=()):
         self._setups = list(setups)
         self._new = new_setup
         self._input = setup_input
+        self._seeds = tuple(seeds)
         self._added = []
 
     @property
@@ -423,6 +445,13 @@ class FakeSetups:
         self._added.append(setup_input)
         setup = (self._new if self._new is not None
                  else FakeSetup(getattr(setup_input, "name", "") or "Setup1"))
+        # The created setup CARRIES what the input was given: live, Setup.operationType /
+        # .machine / .printSetting are what a create reads back to prove the assignment took.
+        for member in ("operationType", "machine", "printSetting"):
+            if getattr(setup_input, member, None) is not None:
+                setattr(setup, member, getattr(setup_input, member))
+        for seeded in self._seeds:
+            setup.operations._items.append(FakeOperation(seeded, has_toolpath=False, valid=False))
         self._setups.append(setup)
         return setup
 

@@ -229,7 +229,7 @@ def handler(target: str = "", material: str = "", library: str = "",
 
 
 _DESC = (
-"Assign a PHYSICAL (density-bearing) material; appearance_set does color.\n"
+"Assign a PHYSICAL material; appearance_set does color.\n"
 + _outputs.produces_block(RETURNS)
 )
 
@@ -241,7 +241,7 @@ tool = (
     .add_input_property("library", {"type": "string",
             "description": "Library name/id, or 'document'."})
     .add_input_property("material_id", {"type": "string",
-            "description": "Source asset id; combine with material name."})
+            "description": "Source asset id, with 'material'."})
     .strict_schema()
 )
 item = Item.create_tool_item(

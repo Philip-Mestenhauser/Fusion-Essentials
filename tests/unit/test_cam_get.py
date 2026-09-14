@@ -54,6 +54,9 @@ def stub_slices(monkeypatch):
     monkeypatch.setattr(cg, "_slice_library_types", lambda cam: ({"type_count": 0, "types": []}, None))
     monkeypatch.setattr(cg, "_slice_machines",
                         lambda cam, vendor, machine_type: ({"count": 0, "machines": []}, None))
+    monkeypatch.setattr(cg, "_slice_print_settings",
+                        lambda cam, technology, max_results: (
+                            {"count": 0, "print_settings": []}, None))
     monkeypatch.setattr(cg, "_slice_templates",
                         lambda cam, loc, url, depth: ({"node_count": 0, "tree": {}}, None))
     monkeypatch.setattr(cg, "_slice_inspection",
@@ -795,6 +798,63 @@ class TestLibrarySlice:
         out = _payload(cg.handler(include=["machines"], vendor="Haas", machine_type="milling"))
         assert out["machines"]["count"] == 2
         assert seen == {"vendor": "Haas", "machine_type": "milling"}
+
+    def test_router_includes_print_settings_and_passes_the_technology_filter(self, monkeypatch,
+                                                                            stub_slices):
+        seen = {}
+        monkeypatch.setattr(cg, "_slice_print_settings",
+                            lambda cam, technology, max_results: (
+                                seen.update(technology=technology, max_results=max_results)
+                                or ({"count": 3, "print_settings": []}, None)))
+        out = _payload(cg.handler(include=["print_settings"], technology="FFF", max_results=25))
+        assert out["print_settings"]["count"] == 3
+        assert seen == {"technology": "FFF", "max_results": 25}
+
+    def test_print_settings_slice_delegates_to_the_shared_catalog(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(cg._cc, "print_setting_catalog",
+                            lambda technology, max_results: (
+                                seen.update(technology=technology, max_results=max_results)
+                                or ([{"name": "HP - MJF", "technology": "MJF"}], False, None)))
+        out, err = cg._slice_print_settings(object(), "MJF", 0)
+        assert err is None and out["count"] == 1 and out["truncated"] is False
+        assert seen == {"technology": "MJF", "max_results": 100}   # 0 falls back to the default
+        assert "name_shared" in out["note"] and "not an address" in out["note"]
+
+    def test_a_truncated_print_setting_listing_says_the_shared_mark_is_partial(self, monkeypatch):
+        # name_shared is read over the LISTED rows, so a twin past the cap leaves its row unmarked -
+        # an unmarked row in a capped listing is not proof the name is unique.
+        monkeypatch.setattr(cg._cc, "print_setting_catalog",
+                            lambda technology, max_results: ([{"name": "x"}], True, None))
+        out, err = cg._slice_print_settings(object(), "", 0)
+        assert err is None and out["truncated"] is True and "CAPPED" in out["note"]
+
+    def test_a_print_setting_library_that_does_not_read_is_an_error(self, monkeypatch):
+        monkeypatch.setattr(cg._cc, "print_setting_catalog",
+                            lambda technology, max_results: (None, False, "no library"))
+        out, err = cg._slice_print_settings(object(), "", 0)
+        assert out is None and err["isError"] is True
+
+    def test_a_technology_that_matched_nothing_reports_the_ones_that_exist(self, monkeypatch):
+        # The technology vocabulary is the platform's, so nothing in a wire string can be checked
+        # against it - an empty filtered listing names what the libraries DID read back instead.
+        monkeypatch.setattr(cg._cc, "print_setting_catalog",
+                            lambda technology, max_results: ([], False, None))
+        monkeypatch.setattr(cg._cc, "print_setting_technologies", lambda: ["FFF", "MJF", "SLM"])
+        out, err = cg._slice_print_settings(object(), "DLP", 0)
+        assert err is None and out["technologies_seen"] == ["FFF", "MJF", "SLM"]
+        assert "'DLP'" in out["note"] and "FFF" in out["note"]
+
+    def test_an_unfiltered_empty_listing_does_not_name_a_technology(self, monkeypatch):
+        # the boundary: with no 'technology' asked for there is no spelling to correct, so the
+        # sentence stays off and the extra library read is never paid for.
+        reads = []
+        monkeypatch.setattr(cg._cc, "print_setting_catalog",
+                            lambda technology, max_results: ([], False, None))
+        monkeypatch.setattr(cg._cc, "print_setting_technologies",
+                            lambda: reads.append(1) or ["FFF"])
+        out, err = cg._slice_print_settings(object(), "", 0)
+        assert err is None and "technologies_seen" not in out and reads == []
 
     def test_machines_slice_delegates_to_read_machines(self, monkeypatch):
         # _slice_machines unwraps cam_edit_setup.read_machines' ok() payload (the read lives with the

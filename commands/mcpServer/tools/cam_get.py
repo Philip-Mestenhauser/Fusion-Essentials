@@ -15,8 +15,9 @@ from ..mcp_primitives.item import Item
 from ..mcp_primitives.registry import register
 from ._common import (CM_TO_UNIT, iter_collection, measured, named_with_remainder, ok, error,
                       read_flag, safe, terse)
-from ._cam_common import (STRATEGY_PAIR_NOTE, choice_expressions, expression_error, get_cam,
-                          find_setup, resolve_cam_node, resolve_operation, strategy_pair)
+from ._cam_common import (STRATEGY_PAIR_NOTE, choice_expressions, clamp_rows, expression_error,
+                          get_cam, find_setup, resolve_cam_node, resolve_operation, strategy_pair)
+from . import _cam_common as _cc
 from ._cam_presets import _preset_names, _presets_named
 from ..guidance.loader import STRATEGY_RECIPE_ID
 from . import _inputs
@@ -25,7 +26,8 @@ from . import _cam_read as _cr
 app = adsk.core.Application.get()
 
 _SLICES = ("operations", "strategies", "parameters", "tool", "references", "nc_programs", "time",
-           "tools", "library", "library_types", "machine", "machines", "templates", "inspection")
+           "tools", "library", "library_types", "machine", "machines", "print_settings",
+           "templates", "inspection")
 
 # The orientation slice's own names in include=. Any deep include omits that slice unless one of
 # these rides beside it, so a deep read carries what was asked for and not the default again.
@@ -237,6 +239,41 @@ def _slice_machines(cam, vendor, machine_type):
     'machine_type' (milling/turning/cutting/additive) filter."""
     from . import cam_edit_setup
     return _unwrap(cam_edit_setup.read_machines(vendor or "", machine_type or ""))
+
+
+_PRINT_SETTINGS_NOTE = (
+    "Pass a row's exact 'name' to cam_create_setup(operation_type='additive', print_setting=...); "
+    "'technology' narrows this listing. A row marked name_shared is one of SEVERAL rows of that "
+    "name and the resolver refuses it - two shipped settings can match on name, technology, id "
+    "and location, so those rows alone carry 'description', the one member separating them. 'id' "
+    "is not an address.")
+
+# Said where the filter matched nothing: the technologies are the platform's own, read back off the
+# settings, so an empty listing names them instead of leaving the caller to guess a spelling.
+_NO_TECHNOLOGY = (
+    " No setting reads technology '{asked}'. The technologies these libraries carry: {seen}.")
+
+
+def _slice_print_settings(cam, technology, max_results):
+    """The print settings an ADDITIVE setup can print with (Local + Fusion360 locations), each row
+    name/technology/id/location. 'technology' filters; 'max_results' caps."""
+    rows, truncated, err = _cc.print_setting_catalog(
+        technology or "", clamp_rows(max_results, 100, 400))
+    if err:
+        return None, error(err)
+    note = _PRINT_SETTINGS_NOTE
+    if truncated:
+        note += (" The listing was CAPPED and name_shared is read over the listed rows only, so a "
+                 "twin past the cap leaves its row unmarked - narrow with 'technology', or raise "
+                 "max_results.")
+    out = {"print_settings": rows, "count": len(rows), "truncated": truncated}
+    if (technology or "").strip() and not rows:
+        seen = _cc.print_setting_technologies()
+        out["technologies_seen"] = seen
+        note += _NO_TECHNOLOGY.format(asked=technology,
+                                      seen=named_with_remainder(seen) or "(none read)")
+    out["note"] = note
+    return out, None
 
 
 def _slice_inspection(cam, measure, max_results, units):
@@ -704,7 +741,7 @@ _VALIDITY_NOTE = ("Readable from any workspace; operation validity is trustworth
 
 def handler(include=None, setup: str = "", operation: str = "", preset: str = "",
             scope: str = "", library: str = "", tool_type: str = "", vendor: str = "",
-            machine_type: str = "",
+            machine_type: str = "", technology: str = "",
             template_location: str = "", template_url: str = "", template_depth: int = 0,
             measure: str = "", max_results: int = 0, units: str = "mm",
             parameter_names=None, include_unavailable=None, unavailable_offset=None) -> dict:
@@ -784,6 +821,10 @@ def handler(include=None, setup: str = "", operation: str = "", preset: str = ""
         out["machines"], e = _slice_machines(cam, vendor, machine_type)
         if e:
             return e
+    if "print_settings" in inc:                 # what an ADDITIVE setup prints with
+        out["print_settings"], e = _slice_print_settings(cam, technology, max_results)
+        if e:
+            return e
     if "templates" in inc:                      # the CAM toolpath template library tree
         out["templates"], e = _slice_templates(cam, template_location, template_url, template_depth)
         if e:
@@ -856,6 +897,8 @@ tool = (
     .add_input_property("vendor", {"type": "string"})
     .add_input_property("machine_type", {"type": "string",
             "enum": ["milling", "turning", "cutting", "additive"]})
+    .add_input_property("technology", {"type": "string",
+            "description": "'print_settings' filter."})
     .add_input_property("template_location", {"type": "string",
             "description": "Default cloud."})
     .add_input_property("template_url", {"type": "string"})

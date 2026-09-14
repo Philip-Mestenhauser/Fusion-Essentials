@@ -181,8 +181,8 @@ def handler(bodies=None, attack_vector=None, include_bosses: bool = False, units
 
 
 TOOL_DESCRIPTION = (
-    "Recognize solid bodies' pockets down an attack vector - depth, bottom type, loops, and the "
-    "face handles cam_select_geometry(selection='pocket') takes.\n"
+    "Recognize solid bodies' pockets down an attack vector, for "
+    "cam_select_geometry(selection='pocket').\n"
     + _outputs.produces_block(RETURNS)
 )
 
@@ -192,7 +192,7 @@ tool = (
     .add_input_property("attack_vector", {"type": "array", "items": {"type": "number"},
             "description": "[x,y,z] in the design frame; default [0,0,-1]."})
     .add_input_property("include_bosses", {"type": "boolean",
-            "description": "Also report bosses, through the boss-aware route."})
+            "description": "Also report bosses."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("max_results", {"type": "integer",
             "description": f"Pocket rows, max {_POCKETS_MAX}."})

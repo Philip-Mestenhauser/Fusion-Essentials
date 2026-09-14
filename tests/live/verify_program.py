@@ -23,8 +23,8 @@ from verify_acts_census import (
 from verify_acts_doc import _FINALE, _OVERTURE, _SHOWCASE
 from verify_acts_dump import _HUB_CONTOUR, _HUB_DUMP, _MX_DUMP
 from verify_acts_hub import (
-    HUB_MILL_SETUP, HUB_ROT_SETUP, HUB_TURN_SETUP, _HUB, _HUB_JOB, _HUB_ROTARY, _HUB_ROTARY_READ,
-    _HUB_TURNED_READ)
+    HUB_MILL_SETUP, HUB_ROT_SETUP, HUB_TURN_SETUP, _HUB, _HUB_ADDITIVE, _HUB_JOB, _HUB_ROTARY,
+    _HUB_ROTARY_READ, _HUB_TURNED_READ)
 from verify_acts_mesh import _MACHINING, _MESH, _NESTING
 from verify_acts_model import (
     _DETAILS, _DETAILS_FB, _RESIZE, _RESIZE_FB, _SOLIDS, _SOLIDS_FB)
@@ -167,6 +167,10 @@ _ACT_PROGRAM = [
     # IS a revolve about that axis, on a 4-axis machine this act builds and takes back out.
     ("ACT 10c13 - CAM: THE ROTARY FAMILIES", None, _HUB_ROTARY, []),
     ("ACT 10c14 - CAM: THE ROTARY FAMILIES READ", None, _HUB_ROTARY_READ, []),
+    # THE ADDITIVE HALF of the same extension, on the same hub: a metal printer, its print setting,
+    # and the arrange/orient/support families - built and taken back out, so the whole-document
+    # tallies the later CAM acts read are the ones the milling and turning jobs leave.
+    ("ACT 10c15 - CAM: THE ADDITIVE BUILD", None, _HUB_ADDITIVE, []),
     # The last two acts machine the PART - the flip setup and the program that spans it and the
     # first - so each is gated on the job ACT 10a built, and falls back to nothing rather than to a
     # scratch world: every tool they drive is driven again by the scratch-stock fallbacks above, so
@@ -265,6 +269,7 @@ ACT_NEEDS = {
     "ACT 10c12 - CAM: THE EXTENSION FAMILIES READ": MACHINING_EXTENSION,
     "ACT 10c13 - CAM: THE ROTARY FAMILIES": MACHINING_EXTENSION,
     "ACT 10c14 - CAM: THE ROTARY FAMILIES READ": MACHINING_EXTENSION,
+    "ACT 10c15 - CAM: THE ADDITIVE BUILD": MACHINING_EXTENSION,
 }
 
 # Post-act hook run() fires after an act completes: the bounded generation poll between a CAM job

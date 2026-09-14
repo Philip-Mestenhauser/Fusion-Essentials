@@ -74,7 +74,7 @@ Produces: feature -> design_delete_feature. |
 | ✎ | `model_revolve` | Revolve a sketch profile about an axis; sketch one half - the profile must not cross the axis. |
 | ✎ | `model_scale` | Resize solid bodies about an anchor point that stays put.
 Produces: feature -> design_delete_feature, volume_ratio, scale_check. |
-| ✎ | `model_set_material` | Assign a PHYSICAL (density-bearing) material; appearance_set does color.
+| ✎ | `model_set_material` | Assign a PHYSICAL material; appearance_set does color.
 Produces: material -> model_inspect, density_kg_per_m3. |
 | ✎ | `model_shell` | Hollow a solid; 'remove_faces' opens the shell.
 Produces: feature. |
@@ -104,7 +104,7 @@ Produces: feature -> design_delete_feature. |
 Produces: feature, reversed_confirmed. |
 | ✎ | `surface_revolve` | Revolve an open profile into a sheet body; model_revolve makes a solid. |
 | ✎ | `surface_thicken` | Thicken faces into a solid wall. |
-| ✎ | `surface_trim` | Trim an open surface body against a tool that intersects it; only the target's cells are removed. |
+| ✎ | `surface_trim` | Trim a surface body with an intersecting tool; only the target loses cells. |
 | ✎ | `surface_untrim` | Restore trimmed faces to their natural extent, or remove an internal hole loop.
 Produces: feature, area_after. |
 
@@ -157,18 +157,18 @@ Produces: entity_refs -> sketch_constrain/sketch_dimension. |
 | · | `cam_compare_operations` | Compare two CAM operations by name: which parameters and which geometry selections differ, with the value on each side. |
 | ✎ | `cam_create_machine` | Create a MACHINE in the LOCAL machine library from a Fusion machine template, so cam_edit_setup(machine=...) can assign it by name. |
 | ✎ | `cam_create_operation` | Create a CAM milling operation in a setup, with a cutting tool from cam_edit_tools |
-| ✎ | `cam_create_setup` | Create a CAM (Manufacture) setup, then add toolpaths with cam_create_operation. |
+| ✎ | `cam_create_setup` | Create a CAM (Manufacture) setup - milling, turning, or additive on a printer from cam_get(include=['machines']) - then add toolpaths with cam_create_operation. |
 | ⚠ | `cam_delete` | Delete a CAM setup, operation, folder or pattern by name (design_delete_* do not reach CAM data). |
 | ⚠ | `cam_delete_machine` | Delete a machine from the LOCAL machine library by name; 'confirm_name' must match the resolved name exactly |
 | ⚠ | `cam_delete_template` | Delete a template from the LOCAL toolpath template library by name; 'confirm_name' must match the resolved name exactly |
-| ✎ | `cam_edit_folders` | Manage a CAM setup's folders: list, create, rename, or move operations into one |
+| ✎ | `cam_edit_folders` | Manage a CAM setup's folders: list, create, rename, or move operations into one. |
 | ✎ | `cam_edit_operation` | Edit a CAM operation: its parameters (the feeds/speeds/depths no other CAM tool reaches), its cutting tool, preset, name or suppression |
 | ✎ | `cam_edit_setup` | Edit a CAM SETUP: its machine, its model/fixture/stock selections (bodies or occurrence names, each REPLACED), its WCS, any other setup parameter, or its name |
 | ✎ | `cam_edit_tools` | Read and manage CAM TOOL LIBRARIES and their tools - list, add, remove or edit tools, manage presets, or create a library |
-| · | `cam_find_holes` | Recognize solid bodies' holes as GROUPS of similar geometry - per-hole segments, each with its face handles, for cam_select_geometry(selection='holes').
-Produce... |
-| · | `cam_find_pockets` | Recognize solid bodies' pockets down an attack vector - depth, bottom type, loops, and the face handles cam_select_geometry(selection='pocket') takes.
-Produces:... |
+| · | `cam_find_holes` | Recognize solid bodies' holes, GROUPED by similar geometry, for cam_select_geometry(selection='holes').
+Produces: faces -> cam_select_geometry. |
+| · | `cam_find_pockets` | Recognize solid bodies' pockets down an attack vector, for cam_select_geometry(selection='pocket').
+Produces: faces -> cam_select_geometry. |
 | ✎ | `cam_generate` | Launch CAM toolpath (re)generation from the MANUFACTURE workspace.
 Produces: handle -> cam_get_status. |
 | ✎ | `cam_generate_setup_sheet` | Generate a machinist SETUP SHEET, named after the DOCUMENT - a second call to the same folder overwrites it.
@@ -275,17 +275,17 @@ Produces: file_path, size_bytes. |
 |---|---|---|
 | ✎ | `drawing_add_sketch` | Draw 2D geometry on a NEW sketch on a sheet of the active 2D drawing document.
 Produces: sketch_name, curves_landed. |
-| ✎ | `drawing_create` | Create a 2D drawing from the active design via Fusion's automatic generator |
+| ✎ | `drawing_create` | Create a 2D drawing from the active design |
 | ✎ | `drawing_dimension` | Auto-dimension one view on a named sheet of the active drawing - the API's route to dimensions.
 Produces: document_modified. |
 | ⚠ | `drawing_edit_sheet` | Manage the active 2D drawing's sheets - add, copy, delete, rename, set_size, set_orientation, or tidy_up (lay a sheet's views out again). |
-| ✎ | `drawing_export` | Export the active 2D drawing to a PDF, DXF or DWG file on local disk - open the drawing first (doc_open by file_id).
+| ✎ | `drawing_export` | Export the active 2D drawing to PDF, DXF or DWG on local disk - open the drawing first (doc_open by file_id).
 Produces: file_path, size_bytes. |
 | · | `drawing_get` | Read the ACTIVE 2D drawing: standard, units, and a sheet listing with per-sheet facts and a 1-based collection_index (export order unavailable). |
 | · | `drawing_get_status` | Poll deferred drawing_create, drawing_update, or drawing_export by caller-known request_key |
 | ✎ | `drawing_insert_image` | Place an image file from local disk onto the active drawing's active sheet.
 Produces: document_modified. |
-| ✎ | `drawing_update` | Refresh stale references in the active 2D drawing from its saved source |
+| ✎ | `drawing_update` | Refresh the active 2D drawing's stale references from its saved source |
 
 ### param
 
@@ -347,7 +347,7 @@ Produces: handle -> jo... |
 
 | | Tool | Summary |
 |---|---|---|
-| · | `sys_capability_map` | Start here for help: an overview of every tool FAMILY, its entry tool and tool count, plus each capability name beside the tool whose read answers it |
+| · | `sys_capability_map` | Start here for help: an overview of every tool FAMILY, its entry tool and count, and each capability beside the tool that answers it |
 | ⚠ | `sys_execute_script` | Run Fusion API Python in the live session; prefer a typed tool (sys_find_tool). |
 | · | `sys_find_tool` | Search this server's tools by keyword when you don't know the name; sys_capability_map lists the families. |
 | · | `sys_get_api_doc` | Search installed Fusion API declarations and full docs |

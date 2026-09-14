@@ -221,7 +221,7 @@ def handler(format: str = "pdf", file_path: str = "", sheet_range: str = "",
 
 
 TOOL_DESCRIPTION = (
-    "Export the active 2D drawing to a PDF, DXF or DWG file on local disk - open the drawing "
+    "Export the active 2D drawing to PDF, DXF or DWG on local disk - open the drawing "
     "first (doc_open by file_id)."
 )
 
@@ -231,7 +231,7 @@ tool = (
     Tool.create_simple(name="drawing_export", description=FULL_DESCRIPTION)
     .add_input_property(*_FORMAT.as_property())
     .add_input_property("file_path", {"type": "string",
-            "description": "Local output path."})
+            "description": "Output path."})
     .add_input_property("sheet_range", {"type": "string",
             "description": "Sheets, e.g. '1-3'; omit for all. Run it FIRST: after another export "
                            "of the same drawing it can block the main thread and the file never "

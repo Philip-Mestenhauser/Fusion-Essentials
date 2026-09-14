@@ -12,7 +12,8 @@ from types import SimpleNamespace
 import adsk.cam
 import adsk.fusion
 
-from conftest import BRepBody, FakeSetup, FakeSetups, MakeComp, install, load_tool, make_design
+from conftest import (ADDITIVE_SETUP_SEEDS, BRepBody, FakePrintSetting, FakeSetup, FakeSetups,
+                      MakeComp, install, load_tool, make_design)
 
 cs = load_tool("cam_create_setup")
 
@@ -180,6 +181,31 @@ class TestNamingAndGuards:
         res = cs.handler()
         assert res["isError"] is True and "CAM" in res["message"]
 
+    def test_no_cam_product_is_reported_before_any_library_is_read(self, monkeypatch):
+        # The machine and print-setting resolves are LIBRARY reads (seconds against a catalog of
+        # hundreds). A document with no CAM product cannot use their answer, so it meets the CAM
+        # refusal instead of paying for them.
+        reads = []
+        _install(monkeypatch, has_cam=False)
+        monkeypatch.setattr(cs, "resolve_machine",
+                            lambda req: reads.append(req) or (None, None, "no machine"))
+        monkeypatch.setattr(cs, "resolve_print_setting",
+                            lambda req: reads.append(req) or (None, None, "no setting"))
+        res = cs.handler(operation_type="additive", machine="EOS|M 290",
+                         print_setting="316L_040_FlexM291 1.00")
+        assert res["isError"] is True and "CAM" in res["message"]
+        assert reads == []                        # neither library was walked
+
+    def test_a_subtractive_machine_is_refused_without_reading_a_library(self, monkeypatch):
+        # the same ordering on the cheap side: a cross-FIELD refusal needs no catalog either.
+        reads = []
+        _install(monkeypatch, has_cam=False)
+        monkeypatch.setattr(cs, "resolve_machine",
+                            lambda req: reads.append(req) or (None, None, "no machine"))
+        res = cs.handler(operation_type="milling", machine="EOS|M 290")
+        assert res["isError"] is True and "cam_edit_setup" in res["message"]
+        assert reads == []
+
 
 # ── output fields ────────────────────────────────────────────────────────────
 
@@ -206,3 +232,195 @@ class TestOutputFields:
         res = cs.handler()
         assert res["isError"] is True
         assert "kaboom" in res["message"] and "milling" in res["message"]
+
+
+# ── additive: the machine + print setting arm ────────────────────────────────
+# Measured on 2705.1.15 (EOS M 290 + '316L_040_FlexM291 1.00'): the setup lands carrying both, and
+# an input with NO machine raises '3 : Setup creation failed' with the count unmoved.
+
+def _swallowing_add(cam, landed):
+    """Make setups.add land `landed` AS GIVEN - the input's assignments never copied onto it, which
+    is the swallowed-assignment shape the read-backs exist to catch."""
+    def add(setup_input):
+        cam.setups._added.append(setup_input)
+        cam.setups._setups.append(landed)
+        return landed
+    cam.setups.add = add
+
+
+def _additive(monkeypatch, kinds=("additive",), machine_err=None, setting_err=None,
+              setting=None, **kwargs):
+    """The additive arm wired: a resolvable printer, a resolvable setting, and the capability read.
+    The setups collection SEEDS the two operations the platform puts in an additive setup, unless
+    the caller brought its own."""
+    kwargs.setdefault("setups", FakeSetups(seeds=ADDITIVE_SETUP_SEEDS))
+    design, cam, comp = _install(monkeypatch, **kwargs)
+    machine = SimpleNamespace(description="EOS M 290")
+    monkeypatch.setattr(cs, "resolve_machine",
+                        lambda req: ((None, None, machine_err) if machine_err
+                                     else (machine, "EOS M 290", None)))
+    monkeypatch.setattr(cs, "machine_kinds", lambda m: list(kinds))
+    monkeypatch.setattr(cs, "machine_label", lambda m: getattr(m, "description", None))
+    chosen = setting if setting is not None else FakePrintSetting("316L_040_FlexM291 1.00")
+    monkeypatch.setattr(cs, "resolve_print_setting",
+                        lambda req, desc="": ((None, None, setting_err) if setting_err
+                                              else (chosen, chosen.name, None)))
+    return design, cam, machine, chosen
+
+
+class TestAdditive:
+    def test_additive_setup_carries_the_machine_and_print_setting(self, monkeypatch):
+        _, cam, machine, setting = _additive(monkeypatch)
+        out = _payload(cs.handler(operation_type="additive", machine="EOS|M 290",
+                                  print_setting="316L_040_FlexM291 1.00"))
+        landed = cam.setups._added[-1]
+        assert landed.operationType == adsk.cam.OperationTypes.AdditiveOperation
+        assert landed.machine is machine and landed.printSetting is setting
+        assert out["operation_type"] == "additive"
+        assert out["machine"] == "EOS M 290"
+        assert out["print_setting"] == "316L_040_FlexM291 1.00"
+        assert out["print_setting_technology"] == "SLM"
+
+    def test_additive_without_a_machine_is_refused_before_the_add(self, monkeypatch):
+        # Measured: setups.add of a machineless additive input RAISES and no setup lands, so the
+        # ask happens here rather than surfacing that raise.
+        _, cam, _m, _s = _additive(monkeypatch)
+        res = cs.handler(operation_type="additive")
+        assert res["isError"] is True
+        assert "Setup creation failed" in res["message"]
+        assert cam.setups.count == 0
+
+    def test_a_machine_that_does_not_print_is_refused(self, monkeypatch):
+        _, cam, _m, _s = _additive(monkeypatch, kinds=("milling", "turning"))
+        res = cs.handler(operation_type="additive", machine="Haas|VF-2")
+        assert res["isError"] is True
+        assert "isAdditiveSupported false" in res["message"]
+        assert "milling, turning" in res["message"]
+        assert cam.setups.count == 0
+
+    def test_machine_on_a_milling_setup_is_refused(self, monkeypatch):
+        _, cam, _m, _s = _additive(monkeypatch)
+        res = cs.handler(operation_type="milling", machine="EOS|M 290")
+        assert res["isError"] is True
+        assert "'machine'" in res["message"] and "cam_edit_setup" in res["message"]
+        assert cam.setups.count == 0
+
+    def test_print_setting_on_a_turning_setup_is_refused(self, monkeypatch):
+        _, cam, _m, _s = _additive(monkeypatch)
+        res = cs.handler(operation_type="turning", print_setting="ABS (Direct Drive)")
+        assert res["isError"] is True and "'print_setting'" in res["message"]
+        assert cam.setups.count == 0
+        # The machine remedy belongs to the MACHINE field: cam_edit_setup takes no print setting,
+        # so naming it here would send a caller to a call that has no such input.
+        assert "cam_edit_setup" not in res["message"]
+
+    def test_the_machine_field_keeps_the_remedy_the_others_drop(self, monkeypatch):
+        # the other side of the same per-field split - the machine refusal still names the route.
+        _, _cam, _m, _s = _additive(monkeypatch)
+        for field, kwargs, expect in (
+                ("machine", {"machine": "EOS|M 290"}, True),
+                ("print_setting", {"print_setting": "ABS"}, False),
+                ("print_setting_description", {"print_setting_description": "Fuse"}, False)):
+            msg = cs.handler(operation_type="milling", **kwargs)["message"]
+            assert f"'{field}'" in msg
+            assert ("cam_edit_setup(machine=...)" in msg) is expect, field
+
+    def test_the_description_qualifier_reaches_the_resolver_and_reads_back(self, monkeypatch):
+        # The qualifier is the only route to one of two shipped settings sharing a name, so the
+        # payload publishes the description the SETUP carries - the read that says which landed.
+        seen = {}
+        _, cam, _m, _s = _additive(
+            monkeypatch, setting=FakePrintSetting("Formlabs SLS", "FORMLABS_SLS"))
+        inner = cs.resolve_print_setting
+        monkeypatch.setattr(cs, "resolve_print_setting",
+                            lambda req, desc="": seen.update(req=req, desc=desc) or inner(req, desc))
+        out = _payload(cs.handler(operation_type="additive", machine="EOS|M 290",
+                                  print_setting="Formlabs SLS",
+                                  print_setting_description="Fuse 1+ 30 W"))
+        assert seen == {"req": "Formlabs SLS", "desc": "Fuse 1+ 30 W"}
+        assert out["print_setting_description"] == "a print setting"
+
+    def test_a_setting_that_reads_back_another_DESCRIPTION_is_an_error(self, monkeypatch):
+        # The name matches on both twins, so a name read-back alone cannot catch the wrong one -
+        # only the description can, which is why it is compared and not merely published.
+        _, cam, machine, _s = _additive(
+            monkeypatch, setting=FakePrintSetting("Formlabs SLS", "FORMLABS_SLS"))
+        landed = FakeSetup("Setup1", machine=machine)
+        landed.printSetting = FakePrintSetting("Formlabs SLS", "FORMLABS_SLS")
+        landed.printSetting.description = "Generic Print Setting for Formlabs Fuse 1 machines."
+        _swallowing_add(cam, landed)
+        res = cs.handler(operation_type="additive", machine="EOS|M 290",
+                         print_setting="Formlabs SLS",
+                         print_setting_description="Fuse 1+ 30 W")
+        assert res["isError"] is True and "is described" in res["message"]
+        assert "the one that landed is not the one picked" in res["message"]
+
+    def test_the_qualifier_without_a_name_is_refused(self, monkeypatch):
+        _, cam, _m, _s = _additive(monkeypatch)
+        res = cs.handler(operation_type="additive", machine="EOS|M 290",
+                         print_setting_description="Fuse 1+ 30 W")
+        assert res["isError"] is True and "qualifies 'print_setting'" in res["message"]
+        assert cam.setups.count == 0
+
+    def test_the_qualifier_on_a_milling_setup_is_refused(self, monkeypatch):
+        _, cam, _m, _s = _additive(monkeypatch)
+        res = cs.handler(operation_type="milling", print_setting_description="Fuse 1+ 30 W")
+        assert res["isError"] is True and "'print_setting_description'" in res["message"]
+        assert cam.setups.count == 0
+
+    def test_an_unresolvable_print_setting_refuses_before_the_add(self, monkeypatch):
+        _, cam, _m, _s = _additive(monkeypatch, setting_err="names 2 print settings")
+        res = cs.handler(operation_type="additive", machine="EOS|M 290", print_setting="Nylon")
+        assert res["isError"] is True and "names 2 print settings" in res["message"]
+        assert cam.setups.count == 0
+
+    def test_additive_without_a_print_setting_still_creates(self, monkeypatch):
+        _, cam, _m, _s = _additive(monkeypatch)
+        out = _payload(cs.handler(operation_type="additive", machine="EOS|M 290"))
+        assert cam.setups._added[-1].printSetting is None
+        assert out["machine"] == "EOS M 290" and "print_setting" not in out
+
+    def test_a_machine_that_does_not_read_back_is_an_error_not_a_note(self, monkeypatch):
+        # A swallowed machine assignment must not report created=true: the setup would print on a
+        # printer nothing asked for.
+        _, cam, _m, _s = _additive(monkeypatch)
+        _swallowing_add(cam, FakeSetup("Setup1", machine=None))
+        res = cs.handler(operation_type="additive", machine="EOS|M 290")
+        assert res["isError"] is True and "Setup.machine reads" in res["message"]
+
+    def test_a_print_setting_that_reads_back_as_another_is_an_error(self, monkeypatch):
+        _, cam, machine, _s = _additive(monkeypatch)
+        landed = FakeSetup("Setup1", machine=machine)
+        landed.printSetting = FakePrintSetting("ABS (Direct Drive)", "FFF")
+        _swallowing_add(cam, landed)
+        res = cs.handler(operation_type="additive", machine="EOS|M 290",
+                         print_setting="316L_040_FlexM291 1.00")
+        assert res["isError"] is True and "Setup.printSetting reads" in res["message"]
+
+    def test_a_setup_landing_as_another_operation_type_is_an_error(self, monkeypatch):
+        # createInput took AdditiveOperation; a setup reading back MillingOperation is not what was
+        # asked for, and reporting created=true would hand back a job of the wrong kind.
+        _, cam, machine, _s = _additive(monkeypatch)
+        landed = FakeSetup("Setup1", machine=machine)
+        landed.operationType = adsk.cam.OperationTypes.MillingOperation
+        _swallowing_add(cam, landed)
+        res = cs.handler(operation_type="additive", machine="EOS|M 290")
+        assert res["isError"] is True and "Setup.operationType reads back" in res["message"]
+
+    def test_the_seeded_operations_are_counted_and_disclosed(self, monkeypatch):
+        # MEASURED: an additive setup lands already holding 'Body Preset1' and 'Additive Toolpath1',
+        # so the milling sentence "no operations yet" would be false and the count is not this
+        # call's own work.
+        _additive(monkeypatch)
+        out = _payload(cs.handler(operation_type="additive", machine="EOS|M 290"))
+        assert out["operation_count"] == 2
+        assert "no operations yet" not in out["note"]
+        assert "It is not empty" in out["note"]
+
+    def test_a_setup_that_lands_empty_is_not_called_non_empty(self, monkeypatch):
+        # the boundary of the same clause: a count that read 0 gets no "not empty" sentence, which
+        # would otherwise describe a setup the payload itself reports as holding nothing.
+        _additive(monkeypatch, setups=FakeSetups())          # no seeds
+        out = _payload(cs.handler(operation_type="additive", machine="EOS|M 290"))
+        assert out["operation_count"] == 0
+        assert "It is not empty" not in out["note"]

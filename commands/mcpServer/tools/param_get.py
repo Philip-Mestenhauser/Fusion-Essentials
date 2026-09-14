@@ -436,9 +436,9 @@ def handler(name: str = "", include_model_parameters: bool = False,
 
 
 TOOL_DESCRIPTION = (
-"Read the active design's parameters - name, expression, value, unit, comment. The authored user "
-"parameters by default, or 'name' fetches one; trace=true reads what a parameter drives, direct "
-"hop plus a 'reach' count. Change one with param_set."
+"Read the active design's parameters - name, expression, value, unit, comment. The user parameters "
+"by default; 'name' fetches one; trace=true reads what a parameter drives, direct hop plus a "
+"'reach' count. Change one with param_set."
 )
 
 tool = (

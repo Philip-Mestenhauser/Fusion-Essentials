@@ -746,12 +746,22 @@ CENSUS = _LONG + (
     ("blend", SKIPPED, "two or more drive curves - no route", "ball end mill",
      "'Drive Curves: Incorrect number of drive curves. Select two or more drive curves.' - and the "
      "chain kind lands on this operation's machining BOUNDARY instead"),
-    ("corner", SKIPPED, "none - the setup's model", "ball end mill",
-     "'No valid reference tool nor valid reference stock model' - it is a rest-machining family"),
+    ("corner", MEASURED, "none - the setup's model", "ball end mill",
+     "a rest-machining family: it answers 'No valid reference tool nor valid reference stock model' "
+     "until it has a reference. Driven by hand on a pocketed block as the ONLY operation in its "
+     "setup - no preceding operation, no stock body - restMaterialFromJob 'true' (the one rest "
+     "input reading isEditable true, where restMaterialSource and restMaterialTool read false) took "
+     "it from that error to 4456.1 s of toolpath, so the setup's own stock is reference enough. ACT "
+     "10c creates one for the create's rest and tool-axis disclosures and deletes it, because the "
+     "drafted cameo it would ride has no concave corner to rest-machine"),
     ("feature_construction", SKIPPED, "base surface + feature - no route", "-",
      "'Base: No base surface was selected / Feature: No feature was selected' - an additive family"),
-    ("inspect_surface", SKIPPED, "inspectSurfacePositions - no route", "probe",
-     "no API write lands a point on the surface (ledger INSPECT-1)"),
+    ("inspect_surface", SKIPPED, "inspectSurfacePositions - no route for the FIRST point", "probe",
+     "CadMultiPointOnSurfaceParameterValue carries appendPoint / insertInterpolatedPointAfter / "
+     "removePointAt, and every one of them EDITS a list that already holds a point: on the empty "
+     "set appendPoint answered False, assigning a face to .value read back 0, assigning Point3Ds "
+     "to .values read back 0, and the parameter's expression set to 'true' read back 'false' "
+     "(ledger INSPECT-1)"),
     ("morph", PROVEN, "chain -> curves (a curve PAIR)", "ball end mill",
      "ACT 10c7 MorphPair across the flange's two rim circles, machining time read in ACT 10c8; it "
      "wants a PAIR, one CurveSelection each - both circles fed to a single selection walk into one "

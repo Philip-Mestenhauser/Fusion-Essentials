@@ -117,8 +117,8 @@ def handler() -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Start here for help: an overview of every tool FAMILY, its entry tool and tool count, plus "
-    "each capability name beside the tool whose read answers it. Then workspace_orient."
+    "Start here for help: an overview of every tool FAMILY, its entry tool and count, and each "
+    "capability beside the tool that answers it. Then workspace_orient."
 )
 
 tool = Tool.create_simple(name="sys_capability_map", description=TOOL_DESCRIPTION).strict_schema()

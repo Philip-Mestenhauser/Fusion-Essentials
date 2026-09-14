@@ -56,8 +56,10 @@ def _run(label, cmd, repair):
 
 
 def _fusion_up():
+    # GET /health recomputes the loaded attestation over the whole import closure on every call -
+    # seconds of hashing - so a tight timeout reads a live Fusion as absent.
     try:
-        with urllib.request.urlopen(HEALTH, timeout=3) as resp:
+        with urllib.request.urlopen(HEALTH, timeout=10) as resp:
             return b"Fusion-Essentials" in resp.read()
     except Exception:
         return False

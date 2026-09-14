@@ -199,8 +199,8 @@ def handler(bodies=None, include_partial: bool = False, min_diameter: float = No
 
 
 TOOL_DESCRIPTION = (
-    "Recognize solid bodies' holes as GROUPS of similar geometry - per-hole segments, each with "
-    "its face handles, for cam_select_geometry(selection='holes').\n"
+    "Recognize solid bodies' holes, GROUPED by similar geometry, for "
+    "cam_select_geometry(selection='holes').\n"
     + _outputs.produces_block(RETURNS)
 )
 

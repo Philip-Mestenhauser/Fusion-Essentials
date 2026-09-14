@@ -1079,10 +1079,10 @@ def register_future(future, target, scope, skip_valid, target_name="", also=()):
 
 # ── machine library: the locations, the catalog, and the by-name resolver ───────────────────────
 
-# Non-network machine library locations searched for a machine by vendor/model (Fusion360 = the
-# bundled sample machines; Local = the user's saved ones). The cloud/network locations are skipped so
-# a headless assignment never blocks on a fetch.
-_MACHINE_LOCATIONS = ("LocalLibraryLocation", "Fusion360LibraryLocation")
+# The non-network locations every CAM library walk here searches - machines and print settings both
+# (Fusion360 = the bundled assets; Local = the user's saved ones). The cloud/network locations are
+# skipped so a headless read never blocks on a fetch.
+_LIBRARY_LOCATIONS = ("LocalLibraryLocation", "Fusion360LibraryLocation")
 
 # Machine.capabilities flags -> the 'kind' vocabulary (the bundled library is DOMINATED by
 # additive printers, so an unfiltered read floods - machine_type narrows to the relevant kind).
@@ -1319,7 +1319,7 @@ def spindle_check(op, machine_max):
 def _walk_machine_locations(lib, vendor, model, visit):
     """Run the (vendor, model) query in each non-network location in turn, handing
     `visit(location_label, matches)` its matches; `visit` returns True to stop the walk."""
-    for loc_name in _MACHINE_LOCATIONS:
+    for loc_name in _LIBRARY_LOCATIONS:
         loc = getattr(adsk.cam.LibraryLocations, loc_name, None)
         if loc is None:
             continue
@@ -1378,19 +1378,22 @@ def machine_catalog(vendor: str = "", machine_type: str = "", max_results: int =
         return False                  # every location is listed, so the walk never stops early
 
     _walk_machine_locations(lib, vendor, "", visit)
-    _mark_shared_names(rows)
+    mark_shared_names(rows, "name_in_both_locations")
     return rows, total[0] > len(rows), None
 
 
-def _mark_shared_names(rows):
-    """Flag every listed row whose NAME another location also lists: that name addresses two
-    machines, and nothing in a row tells the copies apart. Read over the LISTED rows only."""
+def mark_shared_names(rows, flag, by="location"):
+    """Flag every listed row under `flag` whose NAME another listed row carries - by='location'
+    counts distinct locations (the machine catalog), by='row' any second row (the print settings,
+    where two shipped entries share one). Read over the LISTED rows, so a twin past a cap is
+    unmarked."""
     seen = {}
-    for r in rows:
-        seen.setdefault((r["name"] or "").lower(), set()).add(r["location"])
+    for i, r in enumerate(rows):
+        seen.setdefault((r["name"] or "").lower(), set()).add(
+            r["location"] if by == "location" else i)
     for r in rows:
         if len(seen[(r["name"] or "").lower()]) > 1:
-            r["name_in_both_locations"] = True   # absent = this name is listed in one location
+            r[flag] = True                       # absent = one listed row carries this name
 
 
 # WALL-CLOCK budget for the by-description walk, which enumerates both locations UNFILTERED. It is
@@ -1575,6 +1578,190 @@ def resolve_machine(machine):
         return None, None, (f"Ambiguous machine '{machine}' - {len(cands)} matches: "
                             f"{', '.join(names[:8])}. Pass the full line as shown.")
     return cands[0][0], cands[0][1], None
+
+
+# ── the print setting catalog: what an ADDITIVE setup prints with ────────────────────────────────
+# PrintSettingLibrary hangs off the same libraryManager as the machine library. Measured on the
+# shipped library: several settings answer to ONE .id, so the NAME is what addresses a single one.
+
+
+def print_setting_library():
+    """The shared PrintSettingLibrary - CAMManager.get().libraryManager.printSettingLibrary, no open
+    CAM job needed. Returns (library, None) or (None, error)."""
+    lib = safe(lambda: adsk.cam.CAMManager.get().libraryManager.printSettingLibrary)
+    if lib is None:
+        return None, ("Could not access the print setting library "
+                      "(CAMManager.libraryManager.printSettingLibrary).")
+    return lib, None
+
+
+def _print_settings_at(lib, loc_name, name=""):
+    """Every print setting one non-network location answers, narrowed by the query's own `name`
+    filter where one is asked for - [] when the location or the query does not answer."""
+    loc = getattr(adsk.cam.LibraryLocations, loc_name, None)
+    if loc is None:
+        return []
+    try:
+        query = lib.createQuery(loc)
+        if name:
+            query.name = name
+        return list(query.execute() or [])
+    except Exception:
+        return []
+
+
+def print_setting_ident(s):
+    """(name, technology, id, description) for ONE PrintSetting - the row a catalog listing and a
+    refusal share. The DESCRIPTION is in it because two shipped settings are identical on every
+    other member; adsk.cam.PrintSetting carries no vendor or material member at all."""
+    return (safe(lambda: s.name) or "", safe(lambda: s.technology) or "",
+            safe(lambda: s.id) or "", safe(lambda: s.description) or "")
+
+
+def print_setting_catalog(technology: str = "", max_results: int = 100):
+    """(rows, truncated, error) - the print settings the 'print_setting' input resolves from, over
+    the Local and Fusion360 locations, each row {name, technology, id, location}. The DESCRIPTION
+    rides only on a row marked name_shared, the rows it tells apart."""
+    lib, lerr = print_setting_library()
+    if lerr:
+        return None, False, lerr
+    want_tech = (technology or "").strip().lower()
+    rows, total = [], 0
+    for loc_name in _LIBRARY_LOCATIONS:
+        label = loc_name.replace("LibraryLocation", "").lower()
+        for s in _print_settings_at(lib, loc_name):
+            nm, tech, sid, desc = print_setting_ident(s)
+            if want_tech and str(tech).lower() != want_tech:
+                continue
+            total += 1
+            if len(rows) >= max_results:
+                continue
+            rows.append({"name": nm, "technology": tech, "id": sid, "location": label,
+                         "description": desc})
+    mark_shared_names(rows, "name_shared", by="row")
+    # The description is read for EVERY row, because marking needs the whole listing, and then
+    # dropped from the rows it discriminates nothing on - measured, one shipped pair shares a name
+    # and the other 409 descriptions would be 45 KB of listing no caller can act on.
+    for r in rows:
+        if not r.get("name_shared"):
+            r.pop("description", None)
+    return rows, total > len(rows), None
+
+
+def print_setting_technologies():
+    """Every DISTINCT technology the two libraries' settings read back, sorted - what a 'technology'
+    that matched nothing is answered with, since the vocabulary is the platform's and no list here
+    can be checked against it."""
+    lib, lerr = print_setting_library()
+    if lerr:
+        return []
+    seen = set()
+    for loc_name in _LIBRARY_LOCATIONS:
+        for s in _print_settings_at(lib, loc_name):
+            tech = print_setting_ident(s)[1]
+            if tech:
+                seen.add(str(tech))
+    return sorted(seen)
+
+
+# MEASURED: two shipped 'Formlabs SLS' settings share name, technology, id AND location, and only
+# the DESCRIPTION separates them; a Local copy of a shipped setting matches on the other four. Both
+# members are in the key or one of those pairs collapses to a silently-picked single hit.
+def _setting_key(nm, tech, sid, loc_name, desc):
+    return (nm.lower(), tech, sid, loc_name, desc)
+
+
+def _exact_print_settings(lib, want, filtered):
+    """Every DISTINCT setting whose stored name equals `want` case-insensitively, over the query's
+    own name filter when `filtered`, else over the whole listing."""
+    hits, keys = [], set()
+    for loc_name in _LIBRARY_LOCATIONS:
+        for s in _print_settings_at(lib, loc_name, want if filtered else ""):
+            nm, tech, sid, desc = print_setting_ident(s)
+            key = _setting_key(nm, tech, sid, loc_name, desc)
+            if nm.lower() != want.lower() or key in keys:
+                continue
+            keys.add(key)
+            hits.append((s, nm, tech, loc_name.replace("LibraryLocation", "").lower(), desc))
+    return hits
+
+
+# How much of a description a refusal prints per hit - enough to carry the discriminating words,
+# which sit mid-sentence ('Fuse 1+ 30 W machine' against 'Fuse 1 machines'), and short enough that
+# the shipped pair's refusal composes inside the wire budget.
+_SETTING_DESC_CHARS = 60
+
+
+def _setting_rows(hits, described=True):
+    """One '<name> [<tech>] in the <loc> library' line per hit, the description appended only where
+    it DISCRIMINATES - repeating one identical description across every row separates nothing and
+    is the bulk of the message."""
+    rows = [f"{nm} [{tech}] in the {loc} library" for _s, nm, tech, loc, _d in hits]
+    if not described:
+        return rows
+    return [f"{row}, described '{(desc or '(no description)')[:_SETTING_DESC_CHARS]}'"
+            for row, (_s, _n, _t, _l, desc) in zip(rows, hits)]
+
+
+def _ambiguous_setting(want, hits):
+    """The refusal for a name several settings answer to - the clause naming what separates them and
+    the remedy that reaches one, keyed on what actually DIFFERS between the hits."""
+    if len({desc for _s, _n, _t, _l, desc in hits}) > 1:
+        return (f"'{want}' names {len(hits)} print settings; only their description tells them "
+                f"apart: {named_with_remainder(_setting_rows(hits))}. Pass "
+                "'print_setting_description' with a substring of one.")
+    listed = named_with_remainder(_setting_rows(hits, described=False))
+    # The LIBRARIES must differ for this clause, not merely include a local one: two LOCAL rows of
+    # one name and one description sit in a single library, and there is no shipped one to reach.
+    if len({loc for _s, _n, _t, loc, _d in hits}) > 1:
+        return (f"'{want}' names {len(hits)} print settings reading the SAME description, so only "
+                f"the library they sit in tells them apart: {listed}. Delete the local copy to "
+                "reach the shipped one by name, or rename it.")
+    return (f"'{want}' names {len(hits)} print settings alike on name, technology, description and "
+            f"library: {listed}. They differ only on members no input here addresses, so "
+            "'print_setting_description' cannot separate them either. "
+            "cam_get(include=['print_settings']) shows what each one carries.")
+
+
+def _matching_description(hits, want_desc):
+    """(the hits whose description CONTAINS `want_desc`, case-insensitively) - the qualifier that
+    picks one of a shared name's settings."""
+    needle = want_desc.strip().lower()
+    return [h for h in hits if needle in (h[4] or "").lower()]
+
+
+def resolve_print_setting(name, description=""):
+    """(PrintSetting, its own name, None) for the ONE setting whose stored name equals `name`
+    case-insensitively, else (None, None, refusal). `description` is a SUBSTRING qualifier that must
+    match exactly one of that name's settings - the only route to a shipped twin."""
+    want = (name or "").strip()
+    if not want:
+        return None, None, "Provide 'print_setting' - a print setting name."
+    lib, lerr = print_setting_library()
+    if lerr:
+        return None, None, lerr
+    hits = _exact_print_settings(lib, want, True) or _exact_print_settings(lib, want, False)
+    if not hits:
+        return None, None, (f"No print setting named '{want}' in the Local or Fusion360 print "
+                            "setting libraries. cam_get(include=['print_settings']) lists them; "
+                            "'technology' narrows that listing.")
+    qualifier = (description or "").strip()
+    if qualifier:
+        # Applied even where the NAME already resolves: a qualifier that matches nothing means the
+        # caller is addressing a setting this one is not, and picking anyway is the silent wrong pick
+        # the whole qualifier exists to prevent.
+        narrowed = _matching_description(hits, qualifier)
+        if len(narrowed) != 1:
+            which = "none" if not narrowed else str(len(narrowed))
+            return None, None, (
+                f"'print_setting_description' {qualifier!r} matches {which} of the {len(hits)} "
+                f"print setting(s) named '{want}': "
+                f"{named_with_remainder(_setting_rows(hits))}. "
+                "Pass a substring of exactly one.")
+        hits = narrowed
+    if len(hits) > 1:
+        return None, None, _ambiguous_setting(want, hits)
+    return hits[0][0], hits[0][1], None
 
 
 # ── CAM LIBRARY folder walks - the ONE traversal the tool / post / template libraries share ──────

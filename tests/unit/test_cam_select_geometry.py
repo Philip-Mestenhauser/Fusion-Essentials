@@ -2990,6 +2990,296 @@ class TestSurfaceSelection:
         assert res["isError"] is True
         assert "surface_target" in res["message"] and "'chain'" in res["message"]
 
+
+# ── surface groups (checkSurfaceSelectionSets) ───────────────────────────────
+
+class _AvoidGroup:
+    """One MachineAvoidSelectionBase. A DEFAULT group is parameter-driven: its machineOverHoles
+    setter raises, exactly as the live operation's own group does."""
+    def __init__(self, default=False, over_holes_setter_raises=False):
+        self.inputGeometry = None
+        self.value = []
+        self._over_holes = False
+        self.is_default = default
+        self._raises = over_holes_setter_raises or default
+
+    @property
+    def machineOverHoles(self):
+        return self._over_holes
+
+    @machineOverHoles.setter
+    def machineOverHoles(self, flag):
+        if self._raises:
+            raise RuntimeError("3 : The 'machine over holes/pockets' option is not enabled for "
+                               "this group.")
+        self._over_holes = bool(flag)
+
+
+class _AvoidGroups:
+    """The MachineAvoidGroups collection handed back by getMachineAvoidGroups - detached, so
+    nothing it holds reaches the operation until applyMachineAvoidGroups."""
+    def __init__(self, groups):
+        self._groups = list(groups)
+
+    @property
+    def count(self):
+        return len(self._groups)
+
+    def item(self, i):
+        return self._groups[i] if 0 <= i < len(self._groups) else None
+
+    def createNewMachineAvoidDirectSelectionGroup(self):
+        group = _AvoidGroup()
+        self._groups.append(group)
+        return group
+
+
+class _AvoidGroupsParamValue:
+    """A CadMachineAvoidGroupsParameterValue. get hands back a DETACHED copy; apply is what commits
+    it, and `applied_faces` records what each committed group took."""
+    def __init__(self, groups=None, drop_faces=False, apply_raises=False, extra_faces=0,
+                 extra_groups=0):
+        self._committed = list(groups if groups is not None else [_AvoidGroup(default=True)])
+        self._drop_faces = drop_faces
+        self._apply_raises = apply_raises
+        self._extra_faces = extra_faces
+        self._extra_groups = extra_groups
+
+    def getMachineAvoidGroups(self):
+        return _AvoidGroups(self._committed)
+
+    def applyMachineAvoidGroups(self, groups):
+        if self._apply_raises:
+            raise RuntimeError("applyMachineAvoidGroups refused this combination")
+        self._committed = [groups.item(i) for i in range(groups.count)]
+        for group in self._committed:
+            taken = list(group.inputGeometry or group.value)
+            if self._drop_faces and taken:
+                taken = taken[:-1]
+            group.value = taken + [object() for _ in range(self._extra_faces)]
+        # a commit that lands MORE groups than the collection carried - the platform's own doing,
+        # not this call's. One-shot, so a rollback apply is not handed the same surprise again.
+        self._committed += [_AvoidGroup() for _ in range(self._extra_groups)]
+        self._extra_groups = 0
+
+
+class _UnreadableAvoidGroupsParamValue(_AvoidGroupsParamValue):
+    """Takes the apply; the collection then will not read back at all."""
+    def applyMachineAvoidGroups(self, groups):
+        super().applyMachineAvoidGroups(groups)
+        self.getMachineAvoidGroups = lambda: None
+
+
+def _group_op(name="Adaptive1", value=None, editable=True, **kw):
+    """An op carrying the surface-group parameter every milling strategy reads (measured: adaptive,
+    corner, drill, contour3d and the multi-axis families carry it; inspect_surface does not)."""
+    return _Op(name, {"checkSurfaceSelectionSets":
+                      _Param(value if value is not None else _AvoidGroupsParamValue(),
+                             editable=editable)}, **kw)
+
+
+class TestSurfaceGroup:
+    def test_faces_land_on_a_new_group_beside_the_operations_own(self, monkeypatch):
+        op = _group_op()
+        cam = _CAM([_Setup([op])])
+        faces = [_Face(), _Face()]
+        _install(monkeypatch, cam, faces)
+        out = _payload(cg.handler(operation="Adaptive1", selection="surface_group",
+                                  handles=["a", "b"], generate=False))
+        # the op's OWN default group is left standing - the new one is added beside it
+        assert out["surface_group_count"] == 2
+        assert out["surface_group"]["entities"] == 2 and out["selections"] == 2
+        groups = op.parameters.itemByName("checkSurfaceSelectionSets").value.getMachineAvoidGroups()
+        assert groups.item(0).is_default is True and groups.item(1).is_default is False
+
+    def test_machine_over_holes_is_set_and_read_back_off_the_applied_group(self, monkeypatch):
+        op = _group_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        out = _payload(cg.handler(operation="Adaptive1", selection="surface_group", handles=["a"],
+                                  machine_over_holes=True, generate=False))
+        assert out["surface_group"]["machine_over_holes"] is True
+
+    def test_a_group_that_refuses_machine_over_holes_is_an_error_and_applies_nothing(
+            self, monkeypatch):
+        # MEASURED: the setter raises "the 'machine over holes/pockets' option is not enabled for
+        # this group". Nothing reaches the operation until applyMachineAvoidGroups, so the refusal
+        # has to leave the committed collection where it was.
+        value = _AvoidGroupsParamValue(groups=[_AvoidGroup(default=True)])
+        op = _group_op(value=value)
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        monkeypatch.setattr(_AvoidGroups, "createNewMachineAvoidDirectSelectionGroup",
+                            lambda self: self._groups.append(_AvoidGroup(over_holes_setter_raises=True))
+                            or self._groups[-1])
+        res = cg.handler(operation="Adaptive1", selection="surface_group", handles=["a"],
+                         machine_over_holes=True, generate=False)
+        assert res["isError"] is True
+        assert "machine_over_holes is not offered on this group" in res["message"]
+        assert "Nothing was applied" in res["message"]
+        assert value.getMachineAvoidGroups().count == 1
+
+    def test_a_group_count_that_did_not_move_is_an_error_not_a_false_ok(self, monkeypatch):
+        # the apply not raising is no evidence: a collection that commits nothing would otherwise
+        # be published as a landed surface group. Nothing committed, so nothing is left behind and
+        # the refusal must not claim a residue the operation is not carrying.
+        op = _group_op(value=_AvoidGroupsParamValue(apply_raises=False))
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        monkeypatch.setattr(_AvoidGroupsParamValue, "applyMachineAvoidGroups",
+                            lambda self, groups: None)
+        res = cg.handler(operation="Adaptive1", selection="surface_group", handles=["a"],
+                         generate=False)
+        assert res["isError"] is True and "did not land" in res["message"]
+        assert "held 1 group(s)" in res["message"] and "reads 1 after" in res["message"]
+        assert "REMAINS" not in res["message"]
+
+    def test_a_group_keeping_fewer_faces_than_assigned_is_rolled_back(self, monkeypatch):
+        # THE BITE: the group is COMMITTED by the time this reads back, so a refusal that only says
+        # the faces are wrong leaves the operation carrying a group the next generate machines.
+        # MEASURED: re-applying the collection fetched before the add takes it off (2 -> 1).
+        op = _group_op(value=_AvoidGroupsParamValue(drop_faces=True))
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face(), _Face(), _Face()])
+        res = cg.handler(operation="Adaptive1", selection="surface_group",
+                         handles=["a", "b", "c"], generate=False)
+        assert res["isError"] is True
+        assert "took 2 of the 3 face(s)" in res["message"]
+        assert "taken back off - the operation reads the 1 surface group(s) it held before" \
+            in res["message"]
+        # the claim is re-read, not assumed: the operation really is back to its own default group
+        groups = op.parameters.itemByName("checkSurfaceSelectionSets").value.getMachineAvoidGroups()
+        assert groups.count == 1 and groups.item(0).is_default is True
+
+    def test_a_rollback_that_does_not_read_back_names_the_residue_instead(self, monkeypatch):
+        # a restore that did not take has to be NAMED - claiming the group is gone when it is not
+        # is the same false-ok the gate exists to refuse.
+        value = _AvoidGroupsParamValue(drop_faces=True)
+        op = _group_op(value=value)
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face(), _Face(), _Face()])
+        applied = []
+        commit = _AvoidGroupsParamValue.applyMachineAvoidGroups
+
+        def _deaf(self, groups):
+            # the first apply commits; the rollback is swallowed
+            if applied:
+                return
+            applied.append(1)
+            commit(self, groups)
+
+        monkeypatch.setattr(_AvoidGroupsParamValue, "applyMachineAvoidGroups", _deaf)
+        res = cg.handler(operation="Adaptive1", selection="surface_group",
+                         handles=["a", "b", "c"], generate=False)
+        assert res["isError"] is True
+        assert "REMAINS on the operation (holding 2 of the 3 face(s) asked for)" in res["message"]
+        assert "Surface Groups" in res["message"]
+        assert value.getMachineAvoidGroups().count == 2      # and it really does remain
+
+    def test_a_group_holding_more_faces_than_assigned_is_an_error_too(self, monkeypatch):
+        # the other side of the exact count: a group that swept in a face nobody named is machining
+        # geometry this call did not ask for, which reads the same in the payload as a clean land.
+        op = _group_op(value=_AvoidGroupsParamValue(extra_faces=1))
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face(), _Face()])
+        res = cg.handler(operation="Adaptive1", selection="surface_group", handles=["a", "b"],
+                         generate=False)
+        assert res["isError"] is True
+        assert "took 3 of the 2 face(s)" in res["message"]
+        assert "taken back off" in res["message"]
+
+    def test_more_groups_than_this_call_added_is_rolled_back_too(self, monkeypatch):
+        # the exact boundary on the group count: before+1 is the pass, and anything ABOVE it is a
+        # commit that left more than this call asked for - not the 'did not land' branch below it.
+        op = _group_op(value=_AvoidGroupsParamValue(extra_groups=1))
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Adaptive1", selection="surface_group", handles=["a"],
+                         generate=False)
+        assert res["isError"] is True
+        assert "left the operation holding 3 surface group(s) where 1 plus this call's one" \
+            in res["message"]
+        assert "taken back off" in res["message"]
+
+    def test_a_committed_group_whose_faces_do_not_read_is_unconfirmed_and_names_the_residue(
+            self, monkeypatch):
+        # the apply committed, so this refusal cannot read as a no-op either - it says the count is
+        # unread AND that the group is on the operation.
+        class _BlindGroup(_AvoidGroup):
+            @property
+            def value(self):
+                raise RuntimeError("the group's faces are unreadable")
+
+            @value.setter
+            def value(self, _v):
+                pass
+
+        op = _group_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        monkeypatch.setattr(_AvoidGroups, "createNewMachineAvoidDirectSelectionGroup",
+                            lambda self: self._groups.append(_BlindGroup()) or self._groups[-1])
+        res = cg.handler(operation="Adaptive1", selection="surface_group", handles=["a"],
+                         generate=False)
+        assert res["isError"] is True and "UNCONFIRMED" in res["message"]
+        assert "taken back off" in res["message"]
+
+    def test_groups_that_cannot_be_read_back_are_unconfirmed(self, monkeypatch):
+        op = _group_op(value=_UnreadableAvoidGroupsParamValue())
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Adaptive1", selection="surface_group", handles=["a"],
+                         generate=False)
+        assert res["isError"] is True and "UNCONFIRMED" in res["message"]
+
+    def test_an_apply_that_raises_is_an_error(self, monkeypatch):
+        op = _group_op(value=_AvoidGroupsParamValue(apply_raises=True))
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Adaptive1", selection="surface_group", handles=["a"],
+                         generate=False)
+        assert res["isError"] is True
+        assert "applyMachineAvoidGroups failed" in res["message"]
+
+    def test_an_operation_carrying_no_surface_groups_is_refused(self, monkeypatch):
+        # the refusal names the operation and the parameter it has not got, and sends the caller at
+        # the read that lists what it does carry - a strategy census here would go stale silently.
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="2D Contour1", selection="surface_group", handles=["a"],
+                         generate=False)
+        assert res["isError"] is True
+        assert "has no 'checkSurfaceSelectionSets' parameter" in res["message"]
+        assert "cam_get(include=['parameters'], operation=<name>) lists what it does carry" \
+            in res["message"]
+
+    def test_a_non_editable_surface_group_parameter_is_refused(self, monkeypatch):
+        op = _group_op(editable=False)
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Adaptive1", selection="surface_group", handles=["a"],
+                         generate=False)
+        assert res["isError"] is True
+        assert "did not read isEditable true" in res["message"]
+
+    def test_machine_over_holes_on_another_selection_kind_is_refused(self, monkeypatch):
+        op = _curve_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["a"],
+                         machine_over_holes=True, generate=False)
+        assert res["isError"] is True
+        assert "machine_over_holes" in res["message"] and "'chain'" in res["message"]
+
+    def test_the_group_kind_takes_faces_not_edges_or_bodies(self, monkeypatch):
+        op = _group_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Adaptive1", selection="surface_group", bodies=["B"],
+                         generate=False)
+        assert res["isError"] is True and "'handles'" in res["message"]
+
     def test_the_surfaces_kind_takes_its_geometry_from_handles(self, monkeypatch):
         op = _geodesic_op()
         cam = _CAM([_Setup([op])])

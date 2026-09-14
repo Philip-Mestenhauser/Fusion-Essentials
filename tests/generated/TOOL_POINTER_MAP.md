@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 191  |  **description breadcrumbs:** 273  |  **note/error breadcrumbs:** 616
+**Tools:** 191  |  **description breadcrumbs:** 278  |  **note/error breadcrumbs:** 619
   |  **guidance smells flagged:** 8
 ## Blindspots to engineer
 
@@ -40,7 +40,7 @@ close orphans, factor duplicated guards into shared helpers.
 - `find_geometry`  <- 49  (desc 13, note 36)
 - `design_delete_feature`  <- 40  (desc 16, note 24)
 - `view_screenshot`  <- 34  (desc 5, note 29)
-- `cam_get`  <- 28  (desc 11, note 17)
+- `cam_get`  <- 29  (desc 12, note 17)
 - `data_get`  <- 25  (desc 10, note 15)
 - `model_inspect`  <- 24  (desc 3, note 21)
 - `doc_open`  <- 23  (desc 5, note 18)
@@ -428,21 +428,26 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - the add, so the operation's landing is UNCONFIRMED. Re-read the setup with cam_get(include=['operations']).
 - ' but the setup's operation count did not increase (
 - after) - the operation did not land.
+- Operation created but toolpath generation errored:
+- Operation created; toolpath generation started (async). Poll it with cam_get_status(handle='
+- '), or confirm with cam_get(include=['operations']) once generation completes.
+- ' reads isAdditiveStrategy true, and this tool assigns no cutting tool to one, so nothing was created. Drop 'tool_scope', 'tool_library_url' and 'tool_index' and retry.
 - ' but Operation.tool reads back null - it carries no cutting tool and cannot generate. Assign one with cam_edit_operation(tool_scope/tool_library_url, tool_index), or remove it with cam_delete.
 - ' but Operation.tool reads
 - , which does not name the requested
 - - it carries a tool this call did not ask for. Re-assign it with cam_edit_operation(tool_scope/tool_library_url, tool_index), or remove it with cam_delete.
-- Operation created but toolpath generation errored:
-- Operation created; toolpath generation started (async). Poll it with cam_get_status(handle='
-- '), or confirm with cam_get(include=['operations']) once generation completes.
 - Provide a tool reference: 'tool_scope=document' + 'tool_index', OR 'tool_library_url' + 'tool_index' (from cam_edit_tools).
 - Could not assign the tool to a '
 - Provide 'tool_index' (with 'tool_scope=document' for this doc's library, or 'tool_library_url' for a shared one) - both from cam_edit_tools.
+- Its first inspection point is UI-only: on an empty inspectSurfacePositions, appendPoint answered False, and assigning a face to .value or points to .values read back 0 - place the first point in Fu...
+- Its strategy reads isAdditiveStrategy true, so this call assigned no cutting tool. Read what it carries with cam_get(include=['parameters'], operation=...), then cam_generate.
+- It rest-machines: with no reference it errors 'No valid reference tool nor valid reference stock model'. restMaterialFromJob is its one rest input reading editable - set it true with cam_edit_opera...
 - Strategy '' needs a PROBE and the requested tool reads tool_type , so nothing was created. A face mill on a probing strategy generated with 'Tool (face mill) is not supported for the strategy.' Tak...
 - operation(s) already answer to ''. Operation.name dedupes rather than refusing, so it would land as something like '1' - a name nothing asked for. Pick one no operation carries; cam_get(include=['o...
 - Strategy '{strategy}' reads isGenerationAllowed false in setup '{setup}', so nothing was created. Creating it would have SUCCEEDED and then never generated, carrying no toolpath and no error or war...
 - hole recognition picks holes for a drilling cycle - create 'drill' (or 'bore') and aim it with cam_select_geometry(selection='holes')
 - A drilling cycle cuts along the SETUP's Z: a hole off that Z errored 'Cylindrical face not in tool orientation!', and binding Z to that face traded it for 'Selected face may not be safe for cutting...
+- Strategy '' reads isAdditiveStrategy true, and this tool assigns no cutting tool to one, so nothing was created. Drop 'tool_scope', 'tool_library_url' and 'tool_index' and retry.
 - operations.add returned '' but the setup's operation count could not be read  the add, so the operation's landing is UNCONFIRMED. Re-read the setup with cam_get(include=['operations']).
 - operations.add returned '' but the setup's operation count did not increase ( before,  after) - the operation did not land.
 - Created operation '' in setup '' but Operation.tool reads back null - it carries no cutting tool and cannot generate. Assign one with cam_edit_operation(tool_scope/tool_library_url, tool_index), or...
@@ -450,13 +455,24 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Operation created; toolpath generation started (async). Poll it with cam_get_status(handle=''), or confirm with cam_get(include=['operations']) once generation completes.
 
 ### `cam_create_setup`
-- Setup created (no operations yet). Add toolpaths with cam_apply_template (a COMPATIBLE template - a milling setup needs a milling template), then cam_generate. Be in the Manufacture workspace befor...
 - No active design. Open or create a document first (see doc_new).
 - No bodies to machine. The root component holds no bodies - add geometry first, or pass 'models' = body handles/names (a body inside a sub-component is not in the default set).
 - Setup creation returned nothing.
+- setups.add returned a setup for '
+- ' but Setup.operationType reads back
+- , which is not the type this call asked for. Remove it with cam_delete and retry.
 - setups.add returned '
 - ' but it does not appear when the setups are re-listed - the setup did not land.
 - setup(s) already answer to ''. Setup.name dedupes rather than refusing, so it would land as something like '1' - a name nothing asked for. Pick one no setup carries; cam_get lists them.
+- operation_type='additive' needs 'machine' - a printer. Without one setups.add raised '3 : Setup creation failed' and no setup landed. Pick one cam_get(include=['machines'], machine_type='additive')...
+- Machine '' reads isAdditiveSupported false, so an additive setup cannot be built on it (it supports: ). cam_get(include=['machines'], machine_type='additive') lists the printers.
+- 'print_setting_description' qualifies 'print_setting' - it picks among the settings that name answers to - so it does nothing on its own. Pass the name too, or drop it.
+- Setup created (no operations yet). Add toolpaths with cam_apply_template (a COMPATIBLE template - a milling setup needs a milling template), then cam_generate. Be in the Manufacture workspace befor...
+- Additive setup created. It offers the additive strategies - cam_get(include=['strategies'], setup=...) lists them with the isGenerationAllowed flag - and cam_create_operation adds one, then cam_gen...
+- The additive setup landed but Setup.machine reads , not the requested  - it carries a printer this call did not ask for. Remove it with cam_delete and retry.
+- The additive setup landed but Setup.printSetting reads , not the requested  - it prints with a setting this call did not ask for. Remove it with cam_delete and retry.
+- The additive setup landed but Setup.printSetting is described , not  -  names several settings and the one that landed is not the one picked. Remove it with cam_delete and retry.
+- setups.add returned a setup for '' but Setup.operationType reads back , which is not the type this call asked for. Remove it with cam_delete and retry.
 
 ### `cam_delete`
 - Provide 'entity' - the CAM item name to delete (see cam_get / cam_get(include=['operations']) / cam_edit_folders).
@@ -741,7 +757,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - : every operation outside the
 - that read isGenerationAllowed false failed to launch (
 - Generation is launched and runs in the background at its own pace - the compute is often minutes. Check cam_get_status(handle) at whatever cadence you need the progress, until completed=true. opera...
-- Check the Machining Extension entitlement, or replace one: cam_delete + cam_create_operation with an allowed strategy (cam_get(include=['strategies']) lists them).
+- Check the Manufacturing Extension entitlement, or replace one: cam_delete + cam_create_operation with an allowed strategy (cam_get(include=['strategies']) lists them).
 - launch_reasons tallies the state each operation read BEFORE this launch, and launched_operations names them: out_of_date, no_toolpath (never generated), errored, valid_forced (valid, and covered an...
 - skip_valid was requested but NOT applied: this launch names a {scope}, and generateToolpath regenerates its whole target whatever the flag says - the valid_forced rows are that, not a stale read. O...
 
@@ -778,6 +794,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Counted {found} referenced component(s) among the entries the {setups} setup(s) SELECT DIRECTLY - named in the top-level setups[] slice as selected_models / fixtures / stock_solids - only an entry ...
 - the model/fixture/stock entries each setup selects directly, and of those only the ones that are themselves referenced components
 - references_truncated is set on at least one setup, so even that selected-entry census is incomplete - a selection list would not read, or its cap was hit.
+- Pass a row's exact 'name' to cam_create_setup(operation_type='additive', print_setting=...); 'technology' narrows this listing. A row marked name_shared is one of SEVERAL rows of that name and the ...
+- The listing was CAPPED and name_shared is read over the listed rows only, so a twin past the cap leaves its row unmarked - narrow with 'technology', or raise max_results.
 - Only a row carrying editable false refuses a write - cam_edit_operation and cam_edit_setup reject one by name before applying anything; a row with no editable key read isEditable True, and null mea...
 - A row's 'choices' are the values that parameter's own getChoices() answers - the only expressions it takes; pass one of them verbatim.
 - {n} more parameter(s) did not read visible+enabled and are NOT listed (hidden_count). A row behind a switch reads isEnabled FALSE until that switch is on, and cam_edit_operation writes such a row a...
@@ -924,7 +942,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - 'handles' cannot be checked for one chain - an edge's vertices did not read. Pass chain_groups, one list per contour. No heights or selections were changed.
 - chains that share no vertex (
 - ) - a flat list is taken as ONE connected chain. Pass chain_groups, one list per contour, to group them yourself. No heights or selections were changed.
-- Selection applied; generation was NOT launched - strategy '{strategy}' reads isGenerationAllowed false. Check the Machining Extension entitlement, or replace the operation: cam_delete, then cam_cre...
+- Selection applied; generation was NOT launched - strategy '{strategy}' reads isGenerationAllowed false. Check the Manufacturing Extension entitlement, or replace the operation: cam_delete, then cam...
 - 'pocket_filter.min_hole_diameter' needs holes=true - the API accepts the hole diameter bound only while holes are being interpreted as pockets.
 - The operation now holds this rejected selection - the previous one did not read back as restored; select its geometry again.
 - The operation held no selection before this call and Fusion refuses an empty one, so it now holds this rejected selection; select its geometry again.
@@ -940,6 +958,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Operation '' carries no SETTABLE surface set -  did not read isEditable true, so this call will not assign faces there. Select this strategy's surfaces in the Fusion UI, or use an operation whose s...
 - Operation '' carries none of the surface sets () - the 'surfaces' selection is for a surface-driven strategy (geodesic, multi-axis finishing/roughing, ...).
 - 'surface_target' is needed here: operation '' has no '' parameter to default to. It carries  - pass whichever of those these faces are.
+- Operation '' carries '' but it did not read isEditable true, so no surface group is offered on it. Group these faces in the Fusion UI instead.
+- The group this call added REMAINS on the operation ({held}): putting the previous groups back did not read back. Take it off in the operation's Surface Groups in Fusion.
+- The surface groups could not be read back after applyMachineAvoidGroups, so the group is UNCONFIRMED - re-read the operation with .
 - The height setting(s)  were applied BEFORE this failure and REMAIN on the operation - this call did not undo them; set them back if the selection is not going to be applied.
 - 'handles' holds  chains that share no vertex () - a flat list is taken as ONE connected chain. Pass chain_groups, one list per contour, to group them yourself. No heights or selections were changed.
 - Selection applied but generation failed to launch: . The selection is saved - fix the cause, then run cam_generate(target='').

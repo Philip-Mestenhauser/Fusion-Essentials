@@ -173,7 +173,7 @@ class Item:
             tool.add_input_property("deferred", {"type": "boolean",
                     "description": "True accepts durable work; poll drawing_get_status."})
             tool.add_input_property("request_key", {"type": "string",
-                    "description": "Caller-known idempotency key, required with deferred=true."})
+                    "description": "Idempotency key, required with deferred=true."})
         if write == "read":
             tool.reads()
         elif write == "write":

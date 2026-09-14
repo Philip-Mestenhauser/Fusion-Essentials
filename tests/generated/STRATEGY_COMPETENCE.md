@@ -12,7 +12,7 @@ declines it before mutating anything, and 'skipped' carries the message the plat
 answered with; nothing in either column is a guess about cause. Create with
 cam_create_operation, aim with cam_select_geometry.
 
-Counts: 54 proven, 1 measured, 1 created, 6 refused, 9 skipped, 71 strategies.
+Counts: 54 proven, 2 measured, 1 created, 6 refused, 8 skipped, 71 strategies.
 
 | Strategy | Verdict | Geometry kind (cam_select_geometry) | Tool | Proven on / the measured reason |
 |---|---|---|---|---|
@@ -27,7 +27,7 @@ Counts: 54 proven, 1 measured, 1 created, 6 refused, 9 skipped, 71 strategies.
 | circular | proven | holes -> circularFaces | flat end mill | ACT 10c7 Circular |
 | contour2d | proven | silhouette / chain | flat end mill | ACT 10a, ACT 10c5 |
 | contour3d | proven | none - the setup's model | ball end mill | ACT 10c7 Contour3D |
-| corner | skipped | none - the setup's model | ball end mill | 'No valid reference tool nor valid reference stock model' - it is a rest-machining family |
+| corner | measured | none - the setup's model | ball end mill | a rest-machining family: it answers 'No valid reference tool nor valid reference stock model' until it has a reference. Driven by hand on a pocketed block as the ONLY operation in its setup - no preceding operation, no stock body - restMaterialFromJob 'true' (the one rest input reading isEditable true, where restMaterialSource and restMaterialTool read false) took it from that error to 4456.1 s of toolpath, so the setup's own stock is reference enough. ACT 10c creates one for the create's rest and tool-axis disclosures and deletes it, because the drafted cameo it would ride has no concave corner to rest-machine |
 | deburr | proven | chain (edges) | ball end mill | ACT 10c (machining extension) |
 | drill | proven | holes -> holeFaces | drill / center drill | ACT 10a |
 | engrave | proven | sketch | chamfer mill | ACT 10a |
@@ -42,7 +42,7 @@ Counts: 54 proven, 1 measured, 1 created, 6 refused, 9 skipped, 71 strategies.
 | hole_recognition | refused | - | - | operations.add answered with a name and the setup's operation count did not move; refused live by ACT 10c7 |
 | horizontal | proven | none - the setup's model | flat end mill | ACT 10c7 Horizontal |
 | inclined_walls | refused | - | - | isGenerationAllowed reads false on this installation |
-| inspect_surface | skipped | inspectSurfacePositions - no route | probe | no API write lands a point on the surface (ledger INSPECT-1) |
+| inspect_surface | skipped | inspectSurfacePositions - no route for the FIRST point | probe | CadMultiPointOnSurfaceParameterValue carries appendPoint / insertInterpolatedPointAfter / removePointAt, and every one of them EDITS a list that already holds a point: on the empty set appendPoint answered False, assigning a face to .value read back 0, assigning Point3Ds to .values read back 0, and the parameter's expression set to 'true' read back 'false' (ledger INSPECT-1) |
 | manual | created | none | any | ACT 10c7 ManualNC creates it and reads the name back, then deletes it - a generated Manual NC answers '3 : Machining time could not be calculated.' on its time row and never appears in empty_toolpaths, so neither non-empty oracle can judge it |
 | morph | proven | chain -> curves (a curve PAIR) | ball end mill | ACT 10c7 MorphPair across the flange's two rim circles, machining time read in ACT 10c8; it wants a PAIR, one CurveSelection each - both circles fed to a single selection walk into one path and the operation reports 'No passes to link' |
 | morphed_spiral | proven | none - the setup's model | ball end mill | ACT 10c7 MorphedSpiral |

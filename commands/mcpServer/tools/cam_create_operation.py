@@ -13,7 +13,8 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import apply_rename, counted, named_with_remainder, ok, error, read_flag, safe
-from ._cam_common import get_cam, find_setup, operation_nodes, register_future, setups
+from ._cam_common import (choice_expressions, get_cam, find_setup, operation_nodes,
+                          register_future, setups, unquote_expression)
 # _read_tool_number is the one tool_number read; _tp is the one tool-parameter value read.
 from .cam_edit_tools import _read_tool_number, _tp
 
@@ -41,11 +42,18 @@ _INDEX_ABSENT = ("Provide 'tool_index' (with 'tool_scope=document' for this doc'
                  "'tool_library_url' for a shared one) - both from cam_edit_tools.")
 
 
+def index_given(value):
+    """Whether a 'tool_index' was actually PASSED - the schema's own default is not a request. Read
+    before the value is parsed, so text that cannot be an index still counts as one having been
+    asked for."""
+    return value is not None and value != _NO_INDEX
+
+
 def index_request_error(value):
     """The refusal for a 'tool_index' that cannot address a tool, or None when it can. An ABSENT
     index asks for one; a value that is PRESENT but not a whole number NAMES the offending value,
     since 'provide an index' reads as a bug report to a caller who provided one."""
-    if value is None or value == _NO_INDEX:
+    if not index_given(value):
         return _INDEX_ABSENT
     i = tool_index_of(value)
     if i is None:
@@ -137,11 +145,57 @@ _PROBE_TOOL_TYPE = "probe"
 
 _INSPECT_SURFACE = "inspect_surface"
 
-# MEASURED: inspectSurfacePositions takes no write through the API, so no call here lands the
-# operation's first inspection point.
+# On an empty inspectSurfacePositions: appendPoint answers False, and neither .value nor .values
+# takes an assignment that reads back.
 _INSPECT_POINTS_NOTE = (
-    " Its inspection points are UI-only: no API write lands one in inspectSurfacePositions - place "
-    "them in Fusion.")
+    " Its first inspection point is UI-only: on an empty inspectSurfacePositions, appendPoint "
+    "answered False, and assigning a face to .value or points to .values read back 0 - place the "
+    "first point in Fusion.")
+
+# The subtractive next step names a cutting tool and a geometry selection; an operation created off
+# an isAdditiveStrategy row was handed neither, so it gets its own sentence.
+_ADDITIVE_NEXT = (
+    "Its strategy reads isAdditiveStrategy true, so this call assigned no cutting tool. Read what "
+    "it carries with cam_get(include=['parameters'], operation=...), then cam_generate.")
+
+_CORNER = "corner"
+
+# MEASURED on a LONE corner - no preceding operation, the setup's own stock: it errors without a
+# reference and cuts once restMaterialFromJob reads true, with no geometry selection at all.
+_CORNER_NEXT = (
+    "It rest-machines: with no reference it errors 'No valid reference tool nor valid reference "
+    "stock model'. restMaterialFromJob is its one rest input reading editable - set it true with "
+    "cam_edit_operation, then cam_generate.")
+
+# The two parameters an operation's tool axis is read off. multiAxisMachiningType says how many axes
+# the op runs on; toolAxisMode says what decides the axis. Neither is fixed by the strategy name.
+_MACHINING_TYPE_PARAM = "multiAxisMachiningType"
+_TOOL_AXIS_MODE_PARAM = "toolAxisMode"
+
+_TOOL_AXIS_NOTE = (
+    " Its tool axis is read off its OWN parameters, published here as tool_axis - the strategy name "
+    "does not fix it.")
+
+
+def _axis_row(op, name):
+    """{value, choices, editable} for ONE tool-axis parameter, or None where the operation carries
+    none - each value unquoted, since a CAM choice stores its expression single-quoted."""
+    p = safe(lambda: op.parameters.itemByName(name))
+    if p is None:
+        return None
+    values = choice_expressions(p)
+    return {"value": unquote_expression(safe(lambda: p.expression)),
+            "choices": [unquote_expression(v) for v in values] if values else None,
+            "editable": read_flag(lambda: p.isEditable)}
+
+
+def _tool_axis_facts(op):
+    """The tool-axis parameters the created operation CARRIES, or None when it carries neither - a
+    key is absent where the operation has no such parameter, never null."""
+    rows = {"machining_type": _axis_row(op, _MACHINING_TYPE_PARAM),
+            "tool_axis_mode": _axis_row(op, _TOOL_AXIS_MODE_PARAM)}
+    kept = {key: row for key, row in rows.items() if row is not None}
+    return kept or None
 
 
 def _probe_tool_refusal(strategy, tool):
@@ -255,7 +309,7 @@ def read_strategies(setup: str = ""):
 _BLOCKED_STRATEGY = (
     "Strategy '{strategy}' reads isGenerationAllowed false in setup '{setup}', so nothing was "
     "created. Creating it would have SUCCEEDED and then never generated, carrying no toolpath and "
-    "no error or warning text of its own. Check this license's Machining Extension entitlement, or "
+    "no error or warning text of its own. Check this license's Manufacturing Extension, or "
     "pick one cam_get(include=['strategies'], setup='{setup}') reads as allowed.")
 
 # An unreadable entitlement flag is not a blocked strategy, so no refusal is fabricated from it.
@@ -318,27 +372,39 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
                      + (f"Compatible: {named_with_remainder([r['name'] for r in rows])}."
                         if rows else "The setup offers no compatible strategies at all."))
 
-    # tool: document library (by index) or a shared library (by url + index)
+    # tool: document library (by index) or a shared library (by url + index) - skipped whole for a
+    # row reading isAdditiveStrategy true. A strategy whose vocabulary did not read still asks for
+    # a tool: nothing said it was additive.
     tool_scope = (tool_scope or "").strip().lower()
-    # Never a bare comparison: the wire can deliver the index as TEXT, and '<' against text raises
-    # out of the handler instead of refusing.
-    ierr = index_request_error(tool_index)
-    if ierr:
-        return error(ierr)
-    asked_index = tool_index_of(tool_index)
-    if tool_scope == "document":
-        tool, terr = _doc_tool_at(cam, asked_index)
-    elif tool_library_url:
-        tool, terr = _tool_at(tool_library_url, asked_index)
+    toolless = chosen is not None and chosen.get("is_additive") is True
+    tool = None
+    if toolless:
+        # index_given, not a parse: a 'tool_index' this arm cannot read is still one the caller
+        # PASSED, and dropping it silently would accept a reference nothing here honours.
+        if tool_scope or tool_library_url or index_given(tool_index):
+            return error(f"Strategy '{strategy}' reads isAdditiveStrategy true, and this tool "
+                         "assigns no cutting tool to one, so nothing was created. Drop "
+                         "'tool_scope', 'tool_library_url' and 'tool_index' and retry.")
     else:
-        return error("Provide a tool reference: 'tool_scope=document' + 'tool_index', OR "
-                     "'tool_library_url' + 'tool_index' (from cam_edit_tools).")
-    if terr:
-        return error(terr)
+        # Never a bare comparison: the wire can deliver the index as TEXT, and '<' against text
+        # raises out of the handler instead of refusing.
+        ierr = index_request_error(tool_index)
+        if ierr:
+            return error(ierr)
+        asked_index = tool_index_of(tool_index)
+        if tool_scope == "document":
+            tool, terr = _doc_tool_at(cam, asked_index)
+        elif tool_library_url:
+            tool, terr = _tool_at(tool_library_url, asked_index)
+        else:
+            return error("Provide a tool reference: 'tool_scope=document' + 'tool_index', OR "
+                         "'tool_library_url' + 'tool_index' (from cam_edit_tools).")
+        if terr:
+            return error(terr)
 
-    perr = _probe_tool_refusal(strategy, tool)
-    if perr:
-        return error(perr)
+        perr = _probe_tool_refusal(strategy, tool)
+        if perr:
+            return error(perr)
 
     # The name is refused BEFORE the add, through the same check the rename arm runs: a deduped
     # name would otherwise land silently and the caller would address the operation by the wrong one.
@@ -359,10 +425,11 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
         return error(f"createInput('{strategy}') failed: {e}")
     if not opin:
         return error(f"createInput('{strategy}') returned nothing.")
-    try:
-        opin.tool = tool
-    except Exception as e:
-        return error(f"Could not assign the tool to a '{strategy}' operation: {e}")
+    if not toolless:
+        try:
+            opin.tool = tool
+        except Exception as e:
+            return error(f"Could not assign the tool to a '{strategy}' operation: {e}")
 
     # SkipGeneration is assigned explicitly rather than relying on the documented default, and read
     # back off the input: the setter can accept the value and keep the default, so an assignment
@@ -392,13 +459,14 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
         except Exception:
             name_on_input = False
 
-    # counted, not safe(): the landing gate COMPARES these two, and a non-int (an unmodelled
-    # property handing back a truthy object) is not a count either side of the add.
-    ops_before = counted(lambda: target.operations.count)
+    # counted, not safe(): a non-int is not a count either side of the add. allOperations, not
+    # operations: MEASURED on an additive setup, automatic_orientation and solid_volume_support
+    # land in the setup's own containers and .operations does not move.
+    ops_before = counted(lambda: target.allOperations.count)
     op = target.operations.add(opin)        # MUTATION
     if not op:
         return error("operations.add returned no operation.")
-    ops_after = counted(lambda: target.operations.count)
+    ops_after = counted(lambda: target.allOperations.count)
     # A count that does not READ cannot clear the landing, so it is UNCONFIRMED rather than a pass.
     if ops_before is None or ops_after is None:
         unread = " and ".join(word for word, value in (("before", ops_before), ("after", ops_after))
@@ -422,22 +490,25 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
         op_name, rename_warning = apply_rename(op, name)
 
     # The tool is read off the CREATED operation, never the request echoed back: the assignment was
-    # made on the OperationInput, and nothing before this read shows what the operation carries.
-    want_desc = _tool_facts(tool)[0]
-    carried = safe(lambda: op.tool)
-    if carried is None:
-        return error(f"Created operation '{op_name}' in setup '{setup}' but Operation.tool reads "
-                     "back null - it carries no cutting tool and cannot generate. Assign one with "
-                     "cam_edit_operation(tool_scope/tool_library_url, tool_index), or remove it "
-                     "with cam_delete.")
-    tool_desc, tool_number = _tool_facts(carried)
-    named = _names_the_same_tool(tool_desc, want_desc)
-    if named is False:
-        return error(f"Created operation '{op_name}' in setup '{setup}' but Operation.tool reads "
-                     f"{tool_desc!r}, which does not name the requested {want_desc!r} - it carries "
-                     "a tool this call did not ask for. Re-assign it with "
-                     "cam_edit_operation(tool_scope/tool_library_url, tool_index), or remove it "
-                     "with cam_delete.")
+    # made on the OperationInput, and nothing before this read shows what the operation carries. An
+    # additive operation was never given one, so there is nothing to read back and no tool to name.
+    tool_desc, tool_number, named = None, None, None
+    if not toolless:
+        want_desc = _tool_facts(tool)[0]
+        carried = safe(lambda: op.tool)
+        if carried is None:
+            return error(f"Created operation '{op_name}' in setup '{setup}' but Operation.tool reads "
+                         "back null - it carries no cutting tool and cannot generate. Assign one with "
+                         "cam_edit_operation(tool_scope/tool_library_url, tool_index), or remove it "
+                         "with cam_delete.")
+        tool_desc, tool_number = _tool_facts(carried)
+        named = _names_the_same_tool(tool_desc, want_desc)
+        if named is False:
+            return error(f"Created operation '{op_name}' in setup '{setup}' but Operation.tool reads "
+                         f"{tool_desc!r}, which does not name the requested {want_desc!r} - it carries "
+                         "a tool this call did not ask for. Re-assign it with "
+                         "cam_edit_operation(tool_scope/tool_library_url, tool_index), or remove it "
+                         "with cam_delete.")
 
     result = {
         "operation": op_name,
@@ -447,6 +518,8 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
         "tool_number": tool_number,
         "generation_started": False,
         "note": "Operation created. " + ("" if generate else
+                _ADDITIVE_NEXT if toolless else
+                _CORNER_NEXT if strategy == _CORNER else
                 "No toolpath yet: select the geometry it cuts with cam_select_geometry, THEN compute "
                 "it (cam_generate, or generate=true here). Generating before the geometry is "
                 "selected leaves it reading valid with a selection WARNING and no toolpath "
@@ -456,7 +529,7 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
         # The read-back is published only when it DISAGREED: absent = generationMode read back
         # SkipGeneration; present = what it read back instead, or why the assignment raised.
         result["generation_mode_note"] = mode_note
-    if named is None:
+    if named is None and not toolless:
         # absent = both descriptions read and the read-back names the requested tool
         result["tool_identity_checked"] = False
 
@@ -493,6 +566,17 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
         result["note"] += _DRILLING_AXIS_NOTE
     if strategy == _INSPECT_SURFACE:
         result["note"] += _INSPECT_POINTS_NOTE
+    if strategy == _CORNER and generate:
+        # generate=true REPLACED the note above, and a corner without a reference is what that
+        # launch fails on - so the rest input rides the generate arm too.
+        result["note"] += " " + _CORNER_NEXT
+    axis = _tool_axis_facts(op)
+    if axis is not None:
+        # absent = the operation carries neither tool-axis parameter, so it has no axis to disclose
+        result["tool_axis"] = axis
+        # The sentence names toolAxisMode, so it rides only the operations that carry one.
+        if "tool_axis_mode" in axis:
+            result["note"] += _TOOL_AXIS_NOTE
     if chosen is None:
         # absent = the read answered and the pre-flight ran, for both keys
         result["strategy_checked"] = False

@@ -4972,6 +4972,45 @@ ROWS = [
 """,
     },
     {
+        "id": "shape-cam-print-setting",
+        "claim": "The print-setting world dumps three types off CAMManager.get().libraryManager.printSettingLibrary - the PrintSettingLibrary itself, the PrintSettingQuery its createQuery(location) answers, and the first PrintSetting the Fusion360 location holds. It pins the members the catalog stands on: technology and description each answer a STRING (print_setting_catalog lower-cases the technology and the resolver prints the description, and a non-string in either would raise out of the walk rather than simply not match), and PrintSetting carries NO vendor, material or machineId member. Then the identity facts that decide the resolver's key, measured rather than assumed: how many settings share an .id with an earlier one, how many NAMES more than one setting in ONE location answers to, and - for each such name - which member still discriminates the rows. A name whose rows differ on NOTHING the API reads would make that name unresolvable, so the row reports the discriminating member instead of asserting a count",
+        "encoded_in": ("_cam_common.print_setting_ident, _setting_key, print_setting_catalog and "
+                       "resolve_print_setting read these members; cam_get's print_settings slice "
+                       "publishes name/technology/id/location/description off them"),
+        "body": """
+    lm = adsk.cam.CAMManager.get().libraryManager
+    lib = lm.printSettingLibrary
+    loc = adsk.cam.LibraryLocations.Fusion360LibraryLocation
+    query = lib.createQuery(loc)
+    settings = list(query.execute() or [])
+    first = settings[0] if settings else None
+    counts = [dump_shape("PrintSettingLibrary", lib), dump_shape("PrintSettingQuery", query),
+              dump_shape("PrintSetting", first)]
+    tech_types = sorted({type(s.technology).__name__ for s in settings})
+    desc_types = sorted({type(s.description).__name__ for s in settings})
+    absent = [m for m in ("vendor", "material", "machineId") if not hasattr(first, m)]
+    ids = [s.id for s in settings]
+    shared_ids = len(ids) - len(set(ids))
+    by_name = {}
+    for s in settings:
+        by_name.setdefault(s.name, []).append(s)
+    collided = {n: rows for n, rows in by_name.items() if len(rows) > 1}
+    discriminators = {}
+    for n, rows in collided.items():
+        members = [m for m in ("technology", "id", "description")
+                   if len({getattr(r, m) for r in rows}) > 1]
+        discriminators[n] = members or "NOTHING READ SEPARATES THEM"
+    emit(len(counts) == 3 and all(c > 0 for c in counts)
+         and tech_types == ["str"] and desc_types == ["str"] and len(absent) == 3
+         and all(isinstance(v, list) and v for v in discriminators.values()),
+         "shape-cam-print-setting: " + str(len(settings)) + " settings, technology types "
+         + str(tech_types) + ", description types " + str(desc_types) + ", absent members "
+         + str(absent) + ", " + str(shared_ids) + " share an id with an earlier one, "
+         + str(len(collided)) + " name(s) carried by more than one setting in this location: "
+         + str(discriminators))
+""",
+    },
+    {
         "id": "shape-dump-cam-job-world",
         "claim": "Five more CAM types dump non-empty attribute sets off the harness world: cam.setups is a Setups, setups.createInput(MillingOperation) a SetupInput, the bundled 'Milling Tools (Metric)' library's first entry a Tool, the first operation's parameters a CAMParameters whose item(0) is a CAMParameter, and the Fusion360 machine library's first entry a Machine. The dumped Machine is the LIBRARY's; what MeasureSetup's own machine property answered is reported in the detail and gates nothing, because the harness setup is built without a machine",
         "encoded_in": "tests/fakes/cam.py - the shared fakes for these CAM types",
@@ -5363,7 +5402,7 @@ ROWS = [
                   "different Fusion360 machines are refused alike. The row stands up its OWN "
                   "document and setup, because a setup that has already refused one such "
                   "assignment aborts the script on the next one"),
-        "encoded_in": ("_cam_common._MACHINE_LOCATIONS and cam_edit_setup's "
+        "encoded_in": ("_cam_common._LIBRARY_LOCATIONS and cam_edit_setup's "
                        "machine_strip_simulation refusal hint, which names the simulation model "
                        "and not the location it was read from"),
         "body": """

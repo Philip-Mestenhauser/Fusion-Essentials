@@ -20,7 +20,7 @@ from verify_acts_cam import (
 from verify_core import (
     EXPORT_DIR, _RECALL, _ctx_get, _datum, _drilled, _extruded, _face_up_at, _fg, _filleted,
     _joint_origin_computed, _made_component, _matched, _measured, _near, _num, _prof, _recall,
-    _revolved, _watch)
+    _refused, _revolved, _watch)
 
 # THE NAMES THE HUB BUILDS UNDER, in one place for the beats that address it.
 HUB_COMP = "Hub"                 # the turned flange - the model both setups machine
@@ -984,4 +984,194 @@ _HUB_ROTARY_READ = [
     ("cam_post", {"scope": HUB_ROT_SETUP, "post": _DUMP_POST, "post_scope": "fusion",
                   "output_folder": EXPORT_DIR + "/dump", "program_name": _ROT_PROGRAM},
      _dumped_rotary(HUB_ROT_SETUP, _ROT_PROGRAM), None),
+]
+
+
+# ACT 10c15: THE ADDITIVE BUILD - the other half of the Manufacturing Extension on the same hub.
+# A metal printer out of the shipped machine library, the print setting it lays powder by, and the
+# arrange / orient / support families, created tool-less and taken back out.
+_ADD_MACHINE = "EOS|M 290"          # vendor|model: an MPBF (metal powder bed) printer
+_ADD_SETTING = "316L_040_FlexM291 1.00"       # one SLM setting the library holds for it
+_ADD_SETUP = "HubBuild"
+# The DESCRIPTION that printer reads back, which is what Setup.machine publishes - a distinctive
+# fragment of it, because the description does not carry the model 'M 290' anywhere.
+_ADD_MACHINE_MARK = "high-performance metal components"
+# The SLM listing is wanted COMPLETE, so the shared-name mark covers every row; the shipped library
+# holds 411 settings across every technology, and the slice's own ceiling is 400.
+_ADD_SETTING_CAP = 400
+# The shipped pair that collides on every member but description - what the resolver must refuse,
+# and the substring that reaches ONE of them (the platform's own asset url reaches only the other).
+_TWIN_TECH = "FORMLABS_SLS"
+_TWIN_SETTING = "Formlabs SLS"
+_TWIN_PICK = "Fuse 1+ 30 W"
+
+
+def _printers_listed(vendor):
+    """cam_get(include=['machines'], machine_type='additive'): every listed row reads the additive
+    kind, which is what the filter CLAIMS - an unfiltered catalog is dominated by printers, so a
+    non-empty listing alone would pass without the filter working at all."""
+    def check(p):
+        rows = ((p.get("machines") or {}).get("machines") or [])
+        return _measured(f"{vendor}'s additive machines listed, every row an additive one",
+                         {"count": len(rows), "kinds": sorted({k for r in rows
+                                                               for k in (r.get("kind") or [])}),
+                          "first": rows[0].get("name") if rows else None},
+                         bool(rows) and all("additive" in (r.get("kind") or []) for r in rows)
+                         and all((r.get("vendor") or "").lower() == vendor.lower() for r in rows))
+    return check
+
+
+def _settings_listed(technology, wanted):
+    """cam_get(include=['print_settings']): the listing is COMPLETE (truncated false), carries
+    `wanted`, every row reads the asked technology, and NO row is marked name_shared - that mark is
+    read over the listed rows only, so it means nothing on a capped listing. With nothing marked,
+    no row carries a description either: it rides only where it tells two rows apart."""
+    def check(p):
+        slice_ = p.get("print_settings") or {}
+        rows = slice_.get("print_settings") or []
+        names = [r.get("name") for r in rows]
+        shared = [r.get("name") for r in rows if r.get("name_shared")]
+        described = [r.get("name") for r in rows if "description" in r]
+        return _measured(f"every {technology} print setting listed, '{wanted}' among them",
+                         {"count": len(rows), "truncated": slice_.get("truncated"),
+                          "has_wanted": wanted in names, "shared": shared[:3],
+                          "described": described[:3]},
+                         slice_.get("truncated") is False and wanted in names and not shared
+                         and not described
+                         and all((r.get("technology") or "") == technology for r in rows))
+    return check
+
+
+def _twins_told_apart(technology, name, count):
+    """cam_get(include=['print_settings']) over the technology whose shipped settings COLLIDE: the
+    listing carries `count` rows of one name, marks every one name_shared, and separates them on
+    DESCRIPTION - the only member that differs. A listing that showed them as one row, or as two
+    identical rows, is the collapse this row exists to catch."""
+    def check(p):
+        rows = [r for r in ((p.get("print_settings") or {}).get("print_settings") or [])
+                if r.get("name") == name]
+        descs = {r.get("description") for r in rows}
+        return _measured(f"the {count} shipped '{name}' settings listed and told apart",
+                         {"rows": len(rows), "marked": [r.get("name_shared") for r in rows],
+                          "distinct_descriptions": len(descs),
+                          "ids": sorted({r.get("id") for r in rows}),
+                          "locations": sorted({r.get("location") for r in rows})},
+                         len(rows) == count and all(r.get("name_shared") for r in rows)
+                         and len(descs) == count and all(d for d in descs)
+                         and len({r.get("id") for r in rows}) == 1)
+    return check
+
+
+def _twin_picked(setup, setting, pick):
+    """cam_create_setup with the description qualifier: the setup carries the named setting AND the
+    description read back off Setup.printSetting contains the substring asked for - the only read
+    that says which of two identically-named settings landed."""
+    def check(p):
+        desc = p.get("print_setting_description") or ""
+        return _measured(f"'{setup}' printing with the '{pick}' one of the '{setting}' pair",
+                         {"created": p.get("created"), "print_setting": p.get("print_setting"),
+                          "print_setting_description": desc[:120]},
+                         p.get("created") is True and p.get("print_setting") == setting
+                         and pick.lower() in desc.lower())
+    return check
+
+
+def _additive_setup_created(name, machine_mark, setting):
+    """cam_create_setup(operation_type='additive'): the type, the printer and the print setting all
+    read back off the CREATED Setup, plus the seeded operation_count. `machine_mark` is a fragment
+    of the printer's DESCRIPTION, which is what Setup.machine publishes - the model is not in it,
+    so a row comparing the model would assert nothing about which printer landed."""
+    def check(p):
+        machine = (p.get("machine") or "").lower()
+        return _measured(f"'{name}' created as an additive setup on a printer described "
+                         f"'...{machine_mark}...'",
+                         {"created": p.get("created"), "setup_name": p.get("setup_name"),
+                          "operation_type": p.get("operation_type"),
+                          "machine": p.get("machine"), "print_setting": p.get("print_setting"),
+                          "technology": p.get("print_setting_technology"),
+                          "operation_count": p.get("operation_count")},
+                         p.get("created") is True and p.get("setup_name") == name
+                         and p.get("operation_type") == "additive"
+                         and machine_mark.lower() in machine
+                         and p.get("print_setting") == setting
+                         and _num(p.get("operation_count")) and p["operation_count"] >= 1)
+    return check
+
+
+def _additive_op_created(setup, strategy):
+    """cam_create_operation on an additive strategy: it landed, and it carries NO cutting tool -
+    the whole point of the additive arm. 'tool' null is asserted, not merely absent."""
+    def check(p):
+        return _measured(f"a tool-less '{strategy}' operation created in '{setup}'",
+                         {"operation": p.get("operation"), "setup": p.get("setup"),
+                          "strategy": p.get("strategy"), "tool": p.get("tool"),
+                          "tool_number": p.get("tool_number")},
+                         bool(p.get("operation")) and p.get("setup") == setup
+                         and p.get("strategy") == strategy and p.get("tool") is None
+                         and p.get("tool_number") is None
+                         and p.get("generation_started") is False)
+    return check
+
+
+_HUB_ADDITIVE = [
+    _watch(HUB_COMP + ":1"),
+    # The catalog reads first: the names the setup below is built from are READ, not assumed.
+    ("cam_get", {"include": ["machines"], "vendor": "EOS", "machine_type": "additive"},
+     _printers_listed("EOS"), None),
+    ("cam_get", {"include": ["print_settings"], "technology": "SLM",
+                 "max_results": _ADD_SETTING_CAP},
+     _settings_listed("SLM", _ADD_SETTING), None),
+    # THE COLLIDING PAIR. Measured on the shipped library: two FORMLABS_SLS settings read the same
+    # name, technology, id AND location, so only the description separates them - the listing has
+    # to show both, and the name cannot resolve to either.
+    ("cam_get", {"include": ["print_settings"], "technology": _TWIN_TECH},
+     _twins_told_apart(_TWIN_TECH, _TWIN_SETTING, 2), None),
+    ("cam_create_setup", {"operation_type": "additive", "machine": _ADD_MACHINE,
+                          "print_setting": _TWIN_SETTING, "name": _ADD_SETUP + "Twin"},
+     _refused("names 2 print settings", "Fuse 1+", "Fuse 1 machines",
+              "print_setting_description"), None),
+    # And the remedy that refusal names, taken: the qualifier reaches the twin the platform's own
+    # asset url does not, and the setup's OWN description is what says which one landed.
+    ("cam_create_setup", {"operation_type": "additive", "machine": _ADD_MACHINE,
+                          "print_setting": _TWIN_SETTING,
+                          "print_setting_description": _TWIN_PICK,
+                          "models": [HUB_COMP + ":1"], "name": _ADD_SETUP + "Twin"},
+     _twin_picked(_ADD_SETUP + "Twin", _TWIN_SETTING, _TWIN_PICK), None),
+    ("cam_delete", {"entity": _ADD_SETUP + "Twin"},
+     lambda p: p.get("deleted") is True and p.get("entity") == _ADD_SETUP + "Twin", None),
+    # The machine is REQUIRED on this arm: measured, setups.add of a machineless additive input
+    # raises '3 : Setup creation failed' and nothing lands, so the tool asks before mutating.
+    ("cam_create_setup", {"operation_type": "additive", "name": _ADD_SETUP + "NoMachine"},
+     _refused("needs 'machine'", "Setup creation failed"), None),
+    # And it must be a PRINTER: the mill the hub's own acts use reads isAdditiveSupported false.
+    ("cam_create_setup", {"operation_type": "additive", "machine": "Haas|VF-2",
+                          "name": _ADD_SETUP + "NotAPrinter"},
+     _refused("isAdditiveSupported false", "machine_type='additive'"), None),
+    # The print setting is addressed by NAME, case-insensitively - its id is not an address, since
+    # several shipped settings answer to one.
+    ("cam_create_setup", {"operation_type": "additive", "machine": _ADD_MACHINE,
+                          "print_setting": _ADD_SETTING.lower(), "models": [HUB_COMP + ":1"],
+                          "name": _ADD_SETUP},
+     _additive_setup_created(_ADD_SETUP, _ADD_MACHINE_MARK, _ADD_SETTING), None),
+    ("cam_get", {"include": ["strategies"], "setup": _ADD_SETUP},
+     _offers(_ADD_SETUP, "additive_arrange", "automatic_orientation", "solid_volume_support"),
+     None),
+    # The three additive families, each created with no tool reference at all. Measured: the
+    # platform names them itself and lands the last two in the setup's own containers, where
+    # setup.operations never moves - the landing gate reads allOperations for that reason.
+    ("cam_create_operation", {"setup": _ADD_SETUP, "strategy": "additive_arrange"},
+     _additive_op_created(_ADD_SETUP, "additive_arrange"), None),
+    ("cam_create_operation", {"setup": _ADD_SETUP, "strategy": "automatic_orientation"},
+     _additive_op_created(_ADD_SETUP, "automatic_orientation"), None),
+    ("cam_create_operation", {"setup": _ADD_SETUP, "strategy": "solid_volume_support"},
+     _additive_op_created(_ADD_SETUP, "solid_volume_support"), None),
+    # A cutting tool handed to one is refused BEFORE the add - the other side of the same branch.
+    ("cam_create_operation", {"setup": _ADD_SETUP, "strategy": "bar_support",
+                              "tool_scope": "document", "tool_index": 0},
+     _refused("isAdditiveStrategy true", "Drop 'tool_scope'"), None),
+    # The build setup is taken back out: the hub's milling and turning jobs are what the later CAM
+    # acts post, and an additive setup left beside them changes every whole-document tally.
+    ("cam_delete", {"entity": _ADD_SETUP},
+     lambda p: p.get("deleted") is True and p.get("entity") == _ADD_SETUP
+     and p.get("entity_type") == "setup", None),
 ]

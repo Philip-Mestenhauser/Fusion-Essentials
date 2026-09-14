@@ -11,7 +11,8 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import CM_TO_UNIT, named_with_remainder, ok, error, safe, scale, set_verified
+from ._common import (CM_TO_UNIT, named_with_remainder, ok, error, read_flag, safe, scale,
+                      set_verified)
 from ._cam_common import (SWARF_CONTOURS_PARAM, enumeration_remedy, expression_error, get_cam,
                           matched_quoting, resolve_cam_node, register_future,
                           strategy_generation_allowed, unquote_expression)
@@ -33,8 +34,9 @@ _THREAD = "thread"
 _PROBE = "probe"
 _ORIENTATION = "orientation"
 _CHAMFER = "chamfer"
+_SURFACE_GROUP = "surface_group"
 _SELECTIONS = (_CHAIN, _POCKET, _FACE, _SILHOUETTE, _SKETCH, _POCKET_RECOGNITION, _HOLES,
-               _SURFACES, _GROOVE, _THREAD, _PROBE, _ORIENTATION, _CHAMFER)
+               _SURFACES, _GROOVE, _THREAD, _PROBE, _ORIENTATION, _CHAMFER, _SURFACE_GROUP)
 
 # Which operation parameter carries the selection: the first of these the op has, so the ORDER is
 # the routing. A deburr op carries edgeSel AND machiningBoundarySel, so the drive param is probed
@@ -129,10 +131,11 @@ _CURVE_BUILDER = {
 _GEOMETRY_INPUT = {_CHAIN: "handles", _POCKET: "handles", _FACE: "handles", _HOLES: "handles",
                    _SURFACES: "handles", _GROOVE: "handles", _THREAD: "handles",
                    _PROBE: "handles", _ORIENTATION: "handles", _CHAMFER: "handles",
+                   _SURFACE_GROUP: "handles",
                    _SILHOUETTE: "bodies", _POCKET_RECOGNITION: "bodies", _SKETCH: "sketches"}
 _HANDLE_REQUIRE = {_CHAIN: "edge", _POCKET: "face", _FACE: "face", _HOLES: "face",
                    _SURFACES: "face", _GROOVE: "edge", _THREAD: "face", _PROBE: "face",
-                   _ORIENTATION: "face", _CHAMFER: "edge"}
+                   _ORIENTATION: "face", _CHAMFER: "edge", _SURFACE_GROUP: "face"}
 _BODY_SELECTIONS = (_SILHOUETTE, _POCKET_RECOGNITION)
 # loopType/sideType exist on FaceContourSelection, SilhouetteSelection and SketchSelection only.
 _LOOP_SIDE_SELECTIONS = (_FACE, _SILHOUETTE, _SKETCH)
@@ -145,6 +148,11 @@ LOOP_TYPE = _inputs.Choice("loop_type", list(_LOOP_TYPE))
 SIDE_TYPE = _inputs.Choice("side_type", list(_SIDE_TYPE))
 SURFACE_TARGET = _inputs.Choice("surface_target", list(_SURFACE_TARGET_PARAM),
                                 description="Defaults to drive.")
+
+# The surface-GROUP parameter: a CadMachineAvoidGroupsParameterValue holding one group per set of
+# faces the toolpath treats alike. The operation's own default group is parameter-driven and its
+# machineOverHoles setter raises, so a caller's faces go on a direct group of their own.
+_AVOID_GROUPS_PARAM = "checkSurfaceSelectionSets"
 
 # pocket_recognition search criteria -> the PocketRecognitionSelection property each sets.
 _POCKET_FILTER_LENGTHS = (("min_hole_diameter", "minimumHoleDiameter"),
@@ -169,6 +177,7 @@ _KNOB_SELECTIONS = {"is_open": (_CHAIN,), "reverted": (_CHAIN,),
                     "pocket_filter": (_POCKET_RECOGNITION,),
                     "min_diameter": (_HOLES,), "max_diameter": (_HOLES,),
                     "surface_target": (_SURFACES,),
+                    "machine_over_holes": (_SURFACE_GROUP,),
                     # 'component' SCOPES the by-name geometry input a kind reads; on a handle-driven
                     # kind it narrows nothing, so it is refused there like any absent property.
                     "component": (_SKETCH,) + _BODY_SELECTIONS}
@@ -211,7 +220,7 @@ def _launch_generation(cam, op, op_name):
 # only the launch is withheld, on the same flag cam_generate excludes an operation from a sweep on.
 _BLOCKED_GENERATE = (
     "Selection applied; generation was NOT launched - strategy '{strategy}' reads "
-    "isGenerationAllowed false. Check the Machining Extension entitlement, or replace the "
+    "isGenerationAllowed false. Check the Manufacturing Extension entitlement, or replace the "
     "operation: cam_delete, then cam_create_operation with a strategy "
     "cam_get(include=['strategies']) reads as allowed.")
 
@@ -891,6 +900,125 @@ def _apply_surfaces(op, faces, target, extra):
     return count, None
 
 
+def _avoid_groups(op):
+    """(parameter value, groups collection, None) for the operation's surface groups, or
+    (None, None, error) - an operation that carries no such parameter, or whose own copy does not
+    read isEditable true, is refused rather than handed a group nothing would read."""
+    name = safe(lambda: op.name)
+    p = safe(lambda: op.parameters.itemByName(_AVOID_GROUPS_PARAM))
+    if p is None:
+        return None, None, (f"Operation '{name}' has no '{_AVOID_GROUPS_PARAM}' parameter, so it "
+                            f"takes no surface groups. {_PARAM_READ} lists what it does carry.")
+    if safe(lambda: p.isEditable) is not True:
+        return None, None, (f"Operation '{name}' carries '{_AVOID_GROUPS_PARAM}' but it did not "
+                            "read isEditable true, so no surface group is offered on it. Group "
+                            "these faces in the Fusion UI instead.")
+    pv = safe(lambda: p.value)
+    groups = safe(lambda: pv.getMachineAvoidGroups()) if pv is not None else None
+    if groups is None:
+        return None, None, (f"Operation '{name}' would not hand back its surface groups "
+                            "(getMachineAvoidGroups did not read), so none was added.")
+    return pv, groups, None
+
+
+def _group_record(group):
+    """{entities, machine_over_holes} read off ONE applied group, or None where the group did not
+    read back - the read-back the applied claim rests on."""
+    if group is None:
+        return None
+    return {"entities": safe(lambda: len(list(group.value))),
+            "machine_over_holes": read_flag(lambda: group.machineOverHoles)}
+
+
+# MEASURED: a collection fetched BEFORE the add does not follow a later commit - it kept its own
+# count while the operation went to 2 - so re-applying it is what takes the added group off again.
+_GROUP_RESTORED = (" The group this call added was taken back off - the operation reads the {n} "
+                   "surface group(s) it held before.")
+_GROUP_NOT_RESTORED = (
+    " The group this call added REMAINS on the operation ({held}): putting the previous groups back "
+    "did not read back. Take it off in the operation's Surface Groups in Fusion.")
+
+
+def _restore_groups(pv, previous, entities, wanted):
+    """The 'what this call left' clause for a refusal AFTER the commit: re-apply the collection
+    captured before the add, then RE-READ the count - a restore that did not take has to be named,
+    not assumed."""
+    held = ("its face count did not read" if entities is None
+            else f"holding {entities} of the {wanted} face(s) asked for")
+    want = safe(lambda: previous.count) if previous is not None else None
+    if not want:
+        return _GROUP_NOT_RESTORED.format(held=held)
+    try:
+        pv.applyMachineAvoidGroups(previous)      # MUTATION
+    except Exception:
+        return _GROUP_NOT_RESTORED.format(held=held)
+    back = safe(lambda: pv.getMachineAvoidGroups().count)
+    return (_GROUP_RESTORED.format(n=want) if back == want
+            else _GROUP_NOT_RESTORED.format(held=held))
+
+
+def _apply_surface_group(op, faces, over_holes, extra):
+    """(count, None) or (None, error) - put `faces` on a NEW surface group of the operation and read
+    the applied collection back. Nothing reaches the operation until applyMachineAvoidGroups, so
+    every refusal above it leaves the operation as it was found."""
+    pv, groups, gerr = _avoid_groups(op)
+    if gerr:
+        return None, gerr
+    # A SECOND fetch, kept as the operation holds it NOW: re-applying it is what undoes the add,
+    # and it does not follow the commit `groups` receives below.
+    previous = safe(lambda: pv.getMachineAvoidGroups())
+    before = safe(lambda: groups.count)
+    if before is None:
+        return None, "The operation's surface-group count did not read, so none was added."
+    group = safe(lambda: groups.createNewMachineAvoidDirectSelectionGroup())
+    if group is None:
+        return None, "createNewMachineAvoidDirectSelectionGroup returned nothing on this operation."
+    try:
+        group.inputGeometry = faces
+    except Exception as e:
+        return None, f"Could not set the surface group's inputGeometry: {e}"
+    if over_holes is not None:
+        try:
+            group.machineOverHoles = bool(over_holes)
+        except Exception as e:
+            # MEASURED: the setter raises where the group's own parameter table does not offer the
+            # option, and the operation's own default group is one that does not.
+            return None, (f"machine_over_holes is not offered on this group: {e}. Nothing was "
+                          "applied - drop machine_over_holes and retry.")
+    try:
+        pv.applyMachineAvoidGroups(groups)     # MUTATION
+    except Exception as e:
+        return None, f"applyMachineAvoidGroups failed: {e}"
+    applied = safe(lambda: pv.getMachineAvoidGroups())
+    after = safe(lambda: applied.count) if applied is not None else None
+    if after is None:
+        return None, ("The surface groups could not be read back after applyMachineAvoidGroups, so "
+                      f"the group is UNCONFIRMED - re-read the operation with {_PARAM_READ}.")
+    # Every gate below runs on a COMMITTED collection, so each one puts the group back and says so.
+    if after != before + 1:
+        if after > before:
+            return None, (f"applyMachineAvoidGroups left the operation holding {after} surface "
+                          f"group(s) where {before} plus this call's one was expected."
+                          + _restore_groups(pv, previous, None, len(faces)))
+        return None, (f"The surface group did not land - the operation held {before} group(s) "
+                      f"before applyMachineAvoidGroups and reads {after} after.")
+    rec = _group_record(safe(lambda: applied.item(after - 1)))
+    if rec is None or rec["entities"] is None:
+        return None, ("The applied surface group would not read back its faces, so the selection is "
+                      "UNCONFIRMED." + _restore_groups(pv, previous, None, len(faces)))
+    if rec["entities"] != len(faces):
+        return None, (f"The surface group took {rec['entities']} of the {len(faces)} face(s) "
+                      "assigned to it."
+                      + _restore_groups(pv, previous, rec["entities"], len(faces)))
+    if over_holes is not None and rec["machine_over_holes"] is not bool(over_holes):
+        return None, (f"The surface group reads machine_over_holes {rec['machine_over_holes']!r} "
+                      f"after {bool(over_holes)} was set - it did not take."
+                      + _restore_groups(pv, previous, rec["entities"], len(faces)))
+    extra["surface_group"] = rec
+    extra["surface_group_count"] = after
+    return rec["entities"], None
+
+
 def _filter_by_diameter(faces, min_d, max_d, factor):
     """Keep cylinder faces whose diameter (in display units; 'factor' = cm per unit) is within
     [min_d, max_d]. Non-cylinder faces are dropped. Returns (kept, non_cylinder, out_of_range)."""
@@ -995,6 +1123,7 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
             loop_type: str = None, side_type: str = None, pocket_filter=None,
             min_diameter: float = None, max_diameter: float = None,
             surface_target: str = None,
+            machine_over_holes: bool = None,
             top_mode: str = None, top_offset: str = None,
             bottom_mode: str = None, bottom_offset: str = None,
             units: str = "mm", generate: bool = True,
@@ -1022,6 +1151,7 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
     scope = (component or "").strip()
     knobs = {"is_open": is_open, "reverted": reverted, "pocket_filter": pocket_filter or None,
              "min_diameter": min_diameter, "max_diameter": max_diameter,
+             "machine_over_holes": machine_over_holes,
              "component": scope or None}
     for kind, raw in ((LOOP_TYPE, loop_type), (SIDE_TYPE, side_type),
                       (SURFACE_TARGET, surface_target)):
@@ -1117,7 +1247,10 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
     # 'quoted' names every parameter this call WRAPPED to match what it already stored - the mode
     # engage below appends to the same list. Absent means each request was written as it was sent.
     extra = {"quoted": wrapped} if wrapped else {}
-    if selection in _DIRECT_PARAM:
+    if selection == _SURFACE_GROUP:
+        count, aerr = _apply_surface_group(op, entities, machine_over_holes, extra)
+        record = None if aerr else {"selections": count}
+    elif selection in _DIRECT_PARAM:
         count, aerr = _apply_direct(op, selection, faces, extra)
         record = None if aerr else {"selections": count}
     elif selection == _SURFACES:
@@ -1189,7 +1322,8 @@ tool = (
     Tool.create_simple(name="cam_select_geometry", description=TOOL_DESCRIPTION)
     .add_input_property("operation", {"type": "string",
             "description": "Operation name (from cam_get)."})
-    .add_input_property("selection", {"type": "string", "enum": list(_SELECTIONS)})
+    .add_input_property("selection", {"type": "string", "enum": list(_SELECTIONS),
+            "description": "surface_group puts faces on a surface group of their own."})
     .add_input_property("handles", {"type": "array", "items": {"type": "string"}})
     .add_input_property(*BODIES.as_property())
     .add_input_property(*SKETCHES.as_property())
@@ -1208,6 +1342,8 @@ tool = (
             "description": "In 'units'; filters the handles passed, never discovers them."})
     .add_input_property("max_diameter", {"type": "number", "description": "In 'units'."})
     .add_input_property(*SURFACE_TARGET.as_property())
+    .add_input_property("machine_over_holes", {"type": "boolean",
+            "description": "surface_group: cut across the group's holes/pockets."})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("top_mode", {"type": "string", "description": "e.g. 'from stock top'."})
     .add_input_property("top_offset", {"type": "string"})
@@ -1215,8 +1351,7 @@ tool = (
     .add_input_property("bottom_offset", {"type": "string"})
     .add_input_property("generate", {"type": "boolean",
             "description": "Async - read cam_get_status."})
-    .add_input_property("allow_pocket_recognition", {"type": "boolean",
-            "description": "Required for native pocket recognition; defaults false."})
+    .add_input_property("allow_pocket_recognition", {"type": "boolean"})
     .strict_schema()
 )
 item = Item.create_tool_item(

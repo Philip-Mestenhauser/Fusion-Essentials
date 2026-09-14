@@ -4522,7 +4522,7 @@ def _caps(milling=False, turning=False, cutting=False, additive=False):
                            isCuttingSupported=cutting, isAdditiveSupported=additive)
 
 
-# The two NON-NETWORK locations _MACHINE_LOCATIONS searches, read from the seeded enum.
+# The two NON-NETWORK locations _LIBRARY_LOCATIONS searches, read from the seeded enum.
 _LOC_LOCAL = adsk.cam.LibraryLocations.LocalLibraryLocation
 _LOC_F360 = adsk.cam.LibraryLocations.Fusion360LibraryLocation
 
@@ -4553,6 +4553,396 @@ def install_library(monkeypatch):
 def drop_local_location(monkeypatch):
     """A build whose LibraryLocations does not carry the Local member (getattr -> None)."""
     monkeypatch.delattr(adsk.cam.LibraryLocations, "LocalLibraryLocation", raising=False)
+
+
+def _setting_stub(name, technology="SLM", setting_id="s1", description="a setting"):
+    """A PrintSetting as the library hands it back. adsk.cam.PrintSetting carries no vendor or
+    material member, so a stub that grew one would model a shape no read can reach - and it DOES
+    carry a description, which two shipped settings need to be told apart at all."""
+    return SimpleNamespace(name=name, technology=technology, id=setting_id,
+                           description=description)
+
+
+# MEASURED on the shipped Fusion360 library: two 'Formlabs SLS' settings read the same name,
+# technology, id AND location, and differ only in their description. A fixture giving them
+# different ids models a pair the library does not hold, and goes green for the wrong reason.
+def _shipped_twins():
+    return [_setting_stub("Formlabs SLS", "FORMLABS_SLS", "formlabs",
+                          description="Print setting for Formlabs Fuse 1+ 30 W machine."),
+            _setting_stub("Formlabs SLS", "FORMLABS_SLS", "formlabs",
+                          description="Print setting for Formlabs Fuse 1 machines.")]
+
+
+def _setting_lib(pools, raises=()):
+    """A PrintSettingLibrary whose createQuery serves one pool per location, filtered by the
+    query's own `name` - MEASURED: a name filter answers the setting spelled exactly that way."""
+    def create_query(loc):
+        if loc in raises:
+            raise RuntimeError("library location unreachable")
+        state = SimpleNamespace(name="")
+        state.execute = lambda: [s for s in pools.get(loc, [])
+                                 if not state.name or s.name == state.name]
+        return state
+    return SimpleNamespace(createQuery=create_query)
+
+
+@pytest.fixture
+def install_print_library(monkeypatch):
+    def _install(lib):
+        holder = SimpleNamespace(libraryManager=SimpleNamespace(printSettingLibrary=lib))
+        monkeypatch.setattr(adsk.cam.CAMManager, "get", staticmethod(lambda: holder), raising=False)
+    return _install
+
+
+class TestPrintSettingCatalog:
+    def _pools(self):
+        return {_LOC_LOCAL: [_setting_stub("My PETG", "FFF", "p1")],
+                _LOC_F360: [_setting_stub("316L_040_FlexM291 1.00", "SLM", "s2"),
+                            _setting_stub("PETG (Direct Drive)", "FFF", "shared"),
+                            _setting_stub("Nylon (Direct Drive)", "FFF", "shared")]}
+
+    def test_a_row_no_other_row_shares_a_name_with_carries_no_description(self,
+                                                                          install_print_library):
+        # The description is what tells two rows of ONE name apart; on a row nothing collides with
+        # it discriminates nothing, and 409 of the shipped 411 would be listing no caller can act
+        # on. The key is ABSENT there, not null.
+        install_print_library(_setting_lib(self._pools()))
+        rows, truncated, err = cc.print_setting_catalog()
+        assert err is None and truncated is False
+        assert rows[0] == {"name": "My PETG", "technology": "FFF", "id": "p1",
+                           "location": "local"}
+        assert all("description" not in r for r in rows)
+        assert [r["location"] for r in rows[1:]] == ["fusion360"] * 3
+
+    def test_two_shipped_settings_alike_but_for_their_description_both_carry_one(
+            self, install_print_library):
+        # MEASURED: the 'Formlabs SLS' pair matches on name, technology, id AND location, so a mark
+        # keyed on the location leaves both rows unmarked and the listing shows two rows a reader
+        # cannot separate. These rows are where the description earns its bytes.
+        install_print_library(_setting_lib({_LOC_F360: _shipped_twins()}))
+        rows, _t, _e = cc.print_setting_catalog()
+        assert len(rows) == 2 and all(r.get("name_shared") for r in rows)
+        assert all(r.get("description") for r in rows)
+        assert len({r["description"] for r in rows}) == 2      # the one member that differs
+
+    def test_technology_narrows_the_listing(self, install_print_library):
+        install_print_library(_setting_lib(self._pools()))
+        rows, _truncated, err = cc.print_setting_catalog(technology="slm")
+        assert err is None and [r["name"] for r in rows] == ["316L_040_FlexM291 1.00"]
+
+    def test_settings_sharing_one_id_are_still_separate_rows(self, install_print_library):
+        # MEASURED on the shipped library: eight FFF settings answer to ONE id, so the id addresses
+        # nothing - a listing keyed on it would collapse rows a caller has to tell apart.
+        install_print_library(_setting_lib(self._pools()))
+        rows, _t, _e = cc.print_setting_catalog(technology="FFF")
+        assert len([r for r in rows if r["id"] == "shared"]) == 2
+
+    def test_a_name_both_locations_list_is_marked_on_both_rows(self, install_print_library):
+        pools = self._pools()
+        pools[_LOC_LOCAL] = [_setting_stub("PETG (Direct Drive)", "FFF", "p1")]
+        install_print_library(_setting_lib(pools))
+        rows, _t, _e = cc.print_setting_catalog()
+        marked = [r["location"] for r in rows if r.get("name_shared")]
+        assert sorted(marked) == ["fusion360", "local"]
+
+    def test_a_name_only_one_setting_carries_is_not_marked(self, install_print_library):
+        install_print_library(_setting_lib(self._pools()))
+        rows, _t, _e = cc.print_setting_catalog()
+        assert all("name_shared" not in r for r in rows)
+
+    def test_both_catalogs_mark_a_shared_name_through_the_one_helper(self, install_print_library):
+        # The machine catalog and this one mark the same fact under different keys and different
+        # SCOPES; folding them means a rule change reaches both, so the fold itself is asserted.
+        rows = [{"name": "Twin", "location": "local"}, {"name": "Twin", "location": "fusion360"},
+                {"name": "Alone", "location": "local"}]
+        cc.mark_shared_names(rows, "name_shared", by="row")
+        assert [r.get("name_shared") for r in rows] == [True, True, None]
+        machines = [{"name": "Twin", "location": "local"}, {"name": "Twin", "location": "fusion360"}]
+        cc.mark_shared_names(machines, "name_in_both_locations")
+        assert all(r["name_in_both_locations"] for r in machines)
+
+    def test_the_row_scope_marks_a_pair_the_location_scope_misses(self, install_print_library):
+        # the boundary between the two scopes: two rows of ONE location. by='row' marks them,
+        # by='location' does not - which is why the print settings ask for the row scope.
+        pair = [{"name": "Formlabs SLS", "location": "fusion360"},
+                {"name": "Formlabs SLS", "location": "fusion360"}]
+        cc.mark_shared_names(pair, "name_shared", by="row")
+        assert all(r.get("name_shared") for r in pair)
+        same_location = [dict(r) for r in pair]
+        cc.mark_shared_names(same_location, "name_in_both_locations")
+        assert all("name_in_both_locations" not in r for r in same_location)
+
+    def test_a_technology_that_is_not_a_string_does_not_sink_the_filter(self,
+                                                                       install_print_library):
+        # the filter lower-cases what technology reads back; a non-string there would raise out of
+        # the walk instead of simply not matching.
+        install_print_library(_setting_lib({_LOC_F360: [_setting_stub("odd", 7),
+                                                        _setting_stub("ok", "SLM")]}))
+        rows, _t, err = cc.print_setting_catalog(technology="SLM")
+        assert err is None and [r["name"] for r in rows] == ["ok"]
+
+    def test_the_row_cap_truncates_while_the_total_stays_honest(self, install_print_library):
+        install_print_library(_setting_lib(self._pools()))
+        rows, truncated, err = cc.print_setting_catalog(max_results=2)
+        assert err is None and len(rows) == 2 and truncated is True
+
+    def test_exactly_the_cap_is_not_truncated(self, install_print_library):
+        # the boundary: 4 rows under a cap of 4 is a COMPLETE listing, and a truncated=true there
+        # would send a caller narrowing a filter that has nothing left to hide.
+        install_print_library(_setting_lib(self._pools()))
+        rows, truncated, err = cc.print_setting_catalog(max_results=4)
+        assert err is None and len(rows) == 4 and truncated is False
+
+    def test_a_failing_location_does_not_sink_the_other(self, install_print_library):
+        install_print_library(_setting_lib(self._pools(), raises=(_LOC_LOCAL,)))
+        rows, _t, err = cc.print_setting_catalog()
+        assert err is None and [r["location"] for r in rows] == ["fusion360"] * 3
+
+    def test_no_library_at_all_is_an_error_not_an_empty_catalog(self, monkeypatch):
+        holder = SimpleNamespace(libraryManager=SimpleNamespace(printSettingLibrary=None))
+        monkeypatch.setattr(adsk.cam.CAMManager, "get", staticmethod(lambda: holder), raising=False)
+        rows, _t, err = cc.print_setting_catalog()
+        assert rows is None and "print setting library" in err
+
+
+class TestPrintSettingTechnologies:
+    def test_the_distinct_technologies_are_read_off_the_settings(self, install_print_library):
+        install_print_library(_setting_lib({
+            _LOC_LOCAL: [_setting_stub("a", "FFF")],
+            _LOC_F360: [_setting_stub("b", "SLM"), _setting_stub("c", "FFF"),
+                        _setting_stub("d", "MJF")]}))
+        assert cc.print_setting_technologies() == ["FFF", "MJF", "SLM"]
+
+    def test_no_library_answers_an_empty_vocabulary_not_a_raise(self, monkeypatch):
+        holder = SimpleNamespace(libraryManager=SimpleNamespace(printSettingLibrary=None))
+        monkeypatch.setattr(adsk.cam.CAMManager, "get", staticmethod(lambda: holder), raising=False)
+        assert cc.print_setting_technologies() == []
+
+
+class TestResolvePrintSetting:
+    def _lib(self, *names):
+        return _setting_lib({_LOC_F360: [_setting_stub(n) for n in names]})
+
+    def test_an_exact_name_resolves(self, install_print_library):
+        install_print_library(self._lib("316L_040_FlexM291 1.00", "Other"))
+        setting, label, err = cc.resolve_print_setting("316L_040_FlexM291 1.00")
+        assert err is None and label == "316L_040_FlexM291 1.00"
+        assert setting.technology == "SLM"
+
+    def test_a_differently_cased_ask_still_resolves_through_the_full_listing(
+            self, install_print_library):
+        # What the platform's own name filter matches is UNREAD, so a filter that answers nothing
+        # cannot be read as "no such setting" - the whole listing decides. This fake's filter is
+        # case-SENSITIVE, which is the shape that would otherwise miss.
+        install_print_library(_setting_lib({_LOC_F360: [_setting_stub("ABS (Direct Drive)")]}))
+        setting, label, err = cc.resolve_print_setting("abs (direct drive)")
+        assert err is None and label == "ABS (Direct Drive)"
+        assert setting.technology == "SLM"
+
+    def test_the_fast_path_answers_without_the_full_listing(self, install_print_library):
+        # the other side: an exactly-spelled ask is served by the filter, so the common create does
+        # not pay for a whole-library read.
+        reads = []
+        pools = {_LOC_F360: [_setting_stub("HP - MJF", "MJF", "mjf")]}
+        lib = _setting_lib(pools)
+        inner = lib.createQuery
+
+        def counting_query(loc):
+            query = inner(loc)
+            outer = query.execute
+            query.execute = lambda: (reads.append(query.name), outer())[1]
+            return query
+        lib.createQuery = counting_query
+        install_print_library(lib)
+        _setting, label, err = cc.resolve_print_setting("HP - MJF")
+        assert err is None and label == "HP - MJF"
+        assert reads == ["HP - MJF"] * len(cc._LIBRARY_LOCATIONS)   # no unfiltered re-read
+
+    def test_a_miss_names_the_read_that_lists_them(self, install_print_library):
+        install_print_library(self._lib("Only One"))
+        setting, label, err = cc.resolve_print_setting("Nope")
+        assert setting is None and label is None
+        assert "'Nope'" in err and "include=['print_settings']" in err
+
+    def test_two_settings_of_one_name_are_REFUSED_not_picked(self, install_print_library):
+        install_print_library(_setting_lib({
+            _LOC_LOCAL: [_setting_stub("PETG (Direct Drive)", "FFF", "a")],
+            _LOC_F360: [_setting_stub("PETG (Direct Drive)", "SLM", "b")]}))
+        setting, _label, err = cc.resolve_print_setting("PETG (Direct Drive)")
+        assert setting is None
+        assert "names 2 print settings" in err
+        # each hit is NAMED, so the refusal is a listing rather than a bare count
+        assert "in the local library" in err and "in the fusion360 library" in err
+
+    def test_a_local_copy_of_a_shipped_setting_is_refused_not_collapsed(self, install_print_library):
+        # MEASURED: importing a shipped setting into Local unrenamed leaves a SECOND row carrying
+        # the same name, technology and id - the SLM listing went 298 to 299 - so a key over those
+        # three collapses the pair and the resolver silently picks one. The location separates them.
+        copied = _setting_stub("HP - MJF", "MJF", "mjf")
+        install_print_library(_setting_lib({_LOC_LOCAL: [copied], _LOC_F360: [copied]}))
+        setting, _label, err = cc.resolve_print_setting("HP - MJF")
+        assert setting is None and "names 2 print settings" in err
+        assert "in the local library" in err and "in the fusion360 library" in err
+        assert "Delete the local copy" in err
+        # A copy carries its SOURCE's description, so the description separates nothing here and a
+        # clause blaming it would send a caller to a qualifier that cannot work.
+        assert "only the library they sit in tells them apart" in err
+        assert "only their description tells them apart" not in err
+        assert "print_setting_description" not in err
+
+    def test_a_pair_separated_only_by_an_unaddressable_member_says_so(self, install_print_library):
+        # Neither remedy applies: same description, same library, differing only on the ID - which
+        # no input here takes. The refusal must not offer a qualifier that cannot work. (Two rows
+        # alike on ALL five members are one setting: the key dedupes them, by design.)
+        install_print_library(_setting_lib({_LOC_F360: [
+            _setting_stub("Ghost", "SLM", "g1", description="one description"),
+            _setting_stub("Ghost", "SLM", "g2", description="one description")]}))
+        setting, _label, err = cc.resolve_print_setting("Ghost")
+        assert setting is None and "no input here addresses" in err
+        assert "Delete the local copy" not in err
+        assert "Pass 'print_setting_description'" not in err
+
+    def test_two_LOCAL_rows_of_one_name_are_not_told_to_delete_the_local_copy(
+            self, install_print_library):
+        # Both hits sit in the Local library, so "only the library they sit in tells them apart" is
+        # false and "delete the local copy to reach the shipped one" names a shipped row that does
+        # not exist. A clause keyed on ANY local hit reaches this shape and lies twice.
+        install_print_library(_setting_lib({_LOC_LOCAL: [
+            _setting_stub("Mine", "SLM", "m1", description="one description"),
+            _setting_stub("Mine", "SLM", "m2", description="one description")]}))
+        setting, _label, err = cc.resolve_print_setting("Mine")
+        assert setting is None and "names 2 print settings" in err
+        assert "Delete the local copy" not in err
+        assert "only the library they sit in" not in err
+        assert "no input here addresses" in err
+
+    def test_one_asset_a_location_hands_back_twice_is_still_one_setting(self,
+                                                                       install_print_library):
+        # the other side of that key: alike on every readable member IS one setting, and refusing
+        # there would make it unreachable by its own name.
+        twin = _setting_stub("Ghost", "SLM", "g", description="one description")
+        install_print_library(_setting_lib({_LOC_F360: [twin, twin]}))
+        setting, label, err = cc.resolve_print_setting("Ghost")
+        assert err is None and label == "Ghost" and setting is twin
+
+    def test_a_local_and_a_shipped_row_of_one_description_DO_name_the_library(
+            self, install_print_library):
+        # the boundary of the same condition: hits SPANNING the two libraries are what that clause
+        # and its delete-the-copy remedy are for, and they must still fire there.
+        copied = _setting_stub("HP - MJF", "MJF", "mjf")
+        install_print_library(_setting_lib({_LOC_LOCAL: [copied], _LOC_F360: [copied]}))
+        setting, _label, err = cc.resolve_print_setting("HP - MJF")
+        assert setting is None
+        assert "only the library they sit in" in err and "Delete the local copy" in err
+
+    def test_two_SHIPPED_twins_alike_but_for_description_are_refused_not_collapsed(
+            self, install_print_library):
+        # MEASURED on the shipped library: the two 'Formlabs SLS' settings match on name,
+        # technology, id AND location. With the description out of the key they collapse to one hit
+        # and the resolver hands back whichever the walk reached first.
+        install_print_library(_setting_lib({_LOC_F360: _shipped_twins()}))
+        setting, _label, err = cc.resolve_print_setting("Formlabs SLS")
+        assert setting is None and "names 2 print settings" in err
+        assert "Fuse 1+ 30 W machine" in err and "Fuse 1 machines" in err
+
+    def test_the_all_shipped_remedy_is_the_qualifier_this_server_carries(self,
+                                                                        install_print_library):
+        # MEASURED: neither shipped twin can be renamed or deleted through this server, and the
+        # platform's asset url for the name resolves to ONE of them - so a remedy telling a caller
+        # to copy the other one out is unconsumable. The qualifier below is the route that exists.
+        install_print_library(_setting_lib({_LOC_F360: _shipped_twins()}))
+        setting, _label, err = cc.resolve_print_setting("Formlabs SLS")
+        assert setting is None
+        assert "Delete the local copy" not in err
+        assert "print_setting_description" in err
+        assert "Fuse 1+ 30 W machine" in err and "Fuse 1 machines" in err
+
+
+class TestPrintSettingDescriptionQualifier:
+    def _lib(self):
+        return _setting_lib({_LOC_F360: _shipped_twins()})
+
+    def test_a_substring_matching_one_hit_resolves_it(self, install_print_library):
+        install_print_library(self._lib())
+        setting, label, err = cc.resolve_print_setting("Formlabs SLS", "Fuse 1+ 30 W")
+        assert err is None and label == "Formlabs SLS"
+        assert "Fuse 1+ 30 W machine" in setting.description
+
+    def test_the_other_substring_resolves_the_other_twin(self, install_print_library):
+        # the pair is only useful if BOTH are reachable - a qualifier that always lands the same
+        # row would be the silent wrong pick wearing a new name.
+        install_print_library(self._lib())
+        setting, _label, err = cc.resolve_print_setting("Formlabs SLS", "Fuse 1 machines")
+        assert err is None and "Fuse 1 machines" in setting.description
+
+    def test_a_substring_matching_NONE_is_refused_naming_the_descriptions(self,
+                                                                         install_print_library):
+        install_print_library(self._lib())
+        setting, _label, err = cc.resolve_print_setting("Formlabs SLS", "Form 3")
+        assert setting is None and "matches none of the 2 print setting(s)" in err
+        assert "Fuse 1+ 30 W machine" in err and "Fuse 1 machines" in err
+
+    def test_a_substring_matching_SEVERAL_is_refused_naming_the_descriptions(self,
+                                                                            install_print_library):
+        # 'Fuse 1' is a substring of BOTH descriptions - the boundary between a qualifier that
+        # picks and one that only looks like it does.
+        install_print_library(self._lib())
+        setting, _label, err = cc.resolve_print_setting("Formlabs SLS", "Fuse 1")
+        assert setting is None and "matches 2 of the 2 print setting(s)" in err
+        assert "substring of exactly one" in err
+
+    def test_the_match_is_case_insensitive(self, install_print_library):
+        install_print_library(self._lib())
+        setting, _label, err = cc.resolve_print_setting("Formlabs SLS", "fuse 1+ 30 w")
+        assert err is None and "Fuse 1+ 30 W machine" in setting.description
+
+    def test_a_qualifier_that_misses_the_ONE_hit_is_refused_not_ignored(self,
+                                                                       install_print_library):
+        # A name that already resolves still checks the qualifier: a caller naming a description
+        # this setting does not carry is addressing a different one, and handing back this one is
+        # the wrong pick the qualifier exists to prevent.
+        install_print_library(_setting_lib({_LOC_F360: [_setting_stub("Solo", "SLM", "s",
+                                                                      description="A only")]}))
+        setting, _label, err = cc.resolve_print_setting("Solo", "B only")
+        assert setting is None and "matches none of the 1 print setting(s)" in err
+
+    def test_a_qualifier_that_matches_the_ONE_hit_still_resolves(self, install_print_library):
+        install_print_library(_setting_lib({_LOC_F360: [_setting_stub("Solo", "SLM", "s",
+                                                                      description="A only")]}))
+        setting, label, err = cc.resolve_print_setting("Solo", "A only")
+        assert err is None and label == "Solo" and setting is not None
+
+    def test_a_truncated_description_still_carries_the_discriminating_words(self,
+                                                                           install_print_library):
+        # The refusal cuts each description at a bound so the shipped pair's message composes
+        # inside the wire budget; the words that separate the pair sit mid-sentence, so the cut has
+        # to fall AFTER them.
+        install_print_library(_setting_lib({_LOC_F360: _shipped_twins()}))
+        _setting, _label, err = cc.resolve_print_setting("Formlabs SLS")
+        assert "Fuse 1+ 30 W" in err and "Fuse 1 machines" in err
+
+    def test_every_ambiguity_branch_composes_inside_the_wire_budget(self):
+        # These messages are BUILT, not literal, so the source-literal budget never measures what
+        # actually crosses the wire. The shipped pair's descriptions are the longest real input.
+        long_a = "Generic Print Setting for Formlabs Fuse 1+ 30 W machine and .form export."
+        long_b = "Generic Print Setting for Formlabs Fuse 1 machines and .form export."
+        branches = {
+            "descriptions differ": [(None, "Formlabs SLS", "FORMLABS_SLS", "fusion360", long_a),
+                                    (None, "Formlabs SLS", "FORMLABS_SLS", "fusion360", long_b)],
+            "libraries differ": [(None, "HP - MJF", "MJF", "local", long_b),
+                                 (None, "HP - MJF", "MJF", "fusion360", long_b)],
+            "nothing addressable": [(None, "Mine", "SLM", "local", long_b),
+                                    (None, "Mine", "SLM", "local", long_b)],
+        }
+        over = {name: len(cc._ambiguous_setting("Formlabs SLS", hits))
+                for name, hits in branches.items()
+                if len(cc._ambiguous_setting("Formlabs SLS", hits)) > 400}
+        assert not over, f"ambiguity refusals over the 400-char wire budget: {over}"
+
+
+    def test_an_empty_request_asks_for_one(self):
+        setting, _label, err = cc.resolve_print_setting("  ")
+        assert setting is None and "print_setting" in err
 
 
 class TestMachineLabel:

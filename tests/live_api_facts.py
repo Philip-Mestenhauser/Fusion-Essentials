@@ -5,7 +5,7 @@ from these values, so the mocks carry measured data, not hand-typed claims. Each
 owned by the measurement row of the same name in tests/live/VERIFIED_API_FACTS.md."""
 
 FUSION_VERSION = "2705.1.15"
-VERIFIED_ON = "2026-09-13"
+VERIFIED_ON = "2026-09-14"
 
 # '<adsk namespace>.<Class>' -> {member: int} - seeded onto the mock adsk modules.
 ENUMS = {
@@ -1244,6 +1244,23 @@ SHAPES = {
         "nodeCoordinatesAsFloat", "nodeCount", "nodeCountPerPolygon", "normalVectors", "normalVectorsAsDouble", "normalVectorsAsFloat",
         "objectType", "polygonCount", "polygonNodeIndices", "quadCount", "quadNodeIndices", "this",
         "thisown", "triangleCount", "triangleFaceGroupTempIds", "triangleNodeIndices", "wallThickness",
+    ],
+    "PrintSetting": [
+        "cast", "classType", "count", "createFromXML", "deletePrintSettingItem", "description",
+        "duplicatePrintSettingItem", "getDefaultPrintSettingItem", "id", "isCompatibleWithMachine", "isValid", "item",
+        "itemByName", "name", "objectType", "parameters", "setDefaultPrintSettingItem", "syncWithMachine",
+        "technology", "this", "thisown", "toXML",
+    ],
+    "PrintSettingLibrary": [
+        "assetTypeName", "cast", "childAssetURLs", "childFolderURLs", "childPrintSettings", "classType",
+        "createFolder", "createQuery", "deleteAsset", "deleteFolder", "displayName", "doesPathExist",
+        "importPrintSetting", "isValid", "objectType", "printSettingAtURL", "this", "thisown",
+        "updatePrintSetting", "urlByLocation",
+    ],
+    "PrintSettingQuery": [
+        "cast", "classType", "execute", "filamentDiameter", "isValid", "layerHeight",
+        "location", "machine", "material", "name", "objectType", "technology",
+        "this", "thisown", "url", "vendor",
     ],
     "Products": [
         "cast", "classType", "count", "isValid", "item", "itemByProductType",

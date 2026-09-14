@@ -202,10 +202,30 @@ class _Operations(_NamedCollection):
         return op
 
 
+class _SetupTree(_NamedCollection):
+    """Setup.allOperations: the setup's own operations plus whatever a CONTAINER took. Its count is
+    read off setup.operations.count, so a collection whose direct count will not read leaves this
+    one unreadable too - a superset cannot be counted while its subset cannot."""
+
+    def __init__(self, operations, extra):
+        super().__init__(list(operations) + list(extra))
+        self._operations = operations
+        self._extra = extra
+
+    @property
+    def count(self):
+        return self._operations.count + len(self._extra)
+
+
 class _Setup(FakeSetup):
     def __init__(self, name, strategies):
         super().__init__(name)
         self.operations = _Operations(strategies)
+
+    @property
+    def allOperations(self):
+        return _SetupTree(self.operations,
+                          [op for folder in self.folders for op in folder.operations])
 
 
 def _tool(desc, number=1, tool_type="flat end mill"):
@@ -976,6 +996,92 @@ class TestDrillingAxisNote:
         assert "generation started" in out["note"] and "cuts along the SETUP's Z" in out["note"]
 
 
+class _AxisOperation(_Operation):
+    """An operation carrying the two tool-axis parameters. MEASURED on 2705.1.15: a fresh contour3d
+    reads multiAxisMachiningType 'three_axis' with toolAxisMode isEditable false, and the same op at
+    'five_axis' reads it editable."""
+
+    def __init__(self, inp):
+        super().__init__(inp)
+        self.parameters = make_cam_parameters(
+            ("multiAxisMachiningType", "'three_axis'", None),
+            ("toolAxisMode", "'vertical'", None))
+
+
+class TestToolAxisDisclosure:
+    def _axis_setup(self, monkeypatch, op_class=_AxisOperation):
+        cam = _install(monkeypatch, strategies=("contour3d", "face"))
+        cam.setups.item(0).operations.op_class = op_class
+        return cam
+
+    def test_the_two_parameters_are_published_off_the_created_operation(self, monkeypatch):
+        self._axis_setup(monkeypatch)
+        out = _payload(cco.handler(setup="Setup1", strategy="contour3d",
+                                   tool_library_url="u", tool_index=0))
+        # unquoted: a CAM choice stores its expression single-quoted, and 'three_axis' with the
+        # quotes still on is not a value any later call can pass back.
+        assert out["tool_axis"]["machining_type"]["value"] == "three_axis"
+        assert out["tool_axis"]["tool_axis_mode"]["value"] == "vertical"
+        assert "tool_axis" in out["note"] and "the strategy name does not fix it" in out["note"]
+
+    def test_an_operation_carrying_neither_parameter_publishes_no_tool_axis(self, monkeypatch):
+        # a 2D or turning op has no tool-axis controls at all - an empty block would read as an op
+        # whose axis simply did not answer.
+        self._axis_setup(monkeypatch, op_class=_Operation)
+        out = _payload(cco.handler(setup="Setup1", strategy="face",
+                                   tool_library_url="u", tool_index=0))
+        assert "tool_axis" not in out and "tool_axis" not in out["note"]
+
+    def test_an_operation_carrying_only_the_machining_type_gets_the_block_and_not_the_note(
+            self, monkeypatch):
+        # The note names toolAxisMode, so an operation carrying only the machining type gets the
+        # block and not the sentence - otherwise the note teaches a parameter it has not got.
+        class _TypeOnly(_Operation):
+            def __init__(self, inp):
+                super().__init__(inp)
+                self.parameters = make_cam_parameters(
+                    ("multiAxisMachiningType", "'three_axis'", None))
+
+        self._axis_setup(monkeypatch, op_class=_TypeOnly)
+        out = _payload(cco.handler(setup="Setup1", strategy="contour3d",
+                                   tool_library_url="u", tool_index=0))
+        assert out["tool_axis"]["machining_type"]["value"] == "three_axis"
+        # absent, never null: the operation has no such parameter at all
+        assert "tool_axis_mode" not in out["tool_axis"]
+        assert "the strategy name does not fix it" not in out["note"]
+
+
+class TestCornerRestNote:
+    """What the corner create discloses: the error it answers with no reference, the one rest input
+    that reads editable, and the next step. The rig and the figure behind it are the census row's
+    single record - restating them here is how two accounts drift apart."""
+
+    def test_a_corner_create_names_the_parameter_that_gave_it_a_reference(self, monkeypatch):
+        _install(monkeypatch, strategies=("corner", "face"))
+        out = _payload(cco.handler(setup="Setup1", strategy="corner",
+                                   tool_library_url="u", tool_index=0))
+        assert "No valid reference tool nor valid reference stock model" in out["note"]
+        assert "restMaterialFromJob" in out["note"]
+        # it REPLACES the geometry-selection next step, which a corner does not take - so the
+        # composed note stays inside the wire budget instead of carrying both.
+        assert "select the geometry it cuts" not in out["note"]
+
+    def test_the_rest_input_rides_the_generate_arm_too(self, monkeypatch):
+        # generate=true REPLACES the note, and a corner with no reference is exactly what that
+        # launch fails on - so the one reachable input has to survive that arm.
+        _install(monkeypatch, strategies=("corner", "face"))
+        out = _payload(cco.handler(setup="Setup1", strategy="corner", generate=True,
+                                   tool_library_url="u", tool_index=0))
+        assert "generation started" in out["note"] and "restMaterialFromJob" in out["note"]
+
+    def test_another_strategy_carries_none_of_it(self, monkeypatch):
+        _install(monkeypatch, strategies=("corner", "face"))
+        out = _payload(cco.handler(setup="Setup1", strategy="face",
+                                   tool_library_url="u", tool_index=0))
+        assert "restMaterialFromJob" not in out["note"]
+        assert "select the geometry it cuts" in out["note"]
+
+
 class TestStrategyEntitlement:
     def test_a_generation_blocked_strategy_is_refused_and_nothing_is_created(self, monkeypatch):
         cam = _blocked_setup(monkeypatch)
@@ -1039,7 +1145,8 @@ class TestStrategyEntitlement:
         res = cco.handler(setup="Setup1", strategy="steep_and_shallow",
                           tool_library_url="u", tool_index=0)
         msg = res["message"]
-        assert "Machining Extension" in msg
+        # The extension name the refusal carries.
+        assert "Manufacturing Extension" in msg
         assert "cam_get(include=['strategies'], setup='Setup1')" in msg
 
     def test_the_refusal_states_the_measured_silent_failure_it_replaces(self, monkeypatch):
@@ -1352,3 +1459,115 @@ class TestName:
                                    tool_index=0, name="Rough Pocket"))
         assert out["operation"] == "Op1"
         assert "Rough Pocket" in out["rename_warning"] and "did not take" in out["rename_warning"]
+
+
+class _ContainerOperations(_Operations):
+    """add() lands the operation in a CONTAINER rather than in .operations - the shape MEASURED for
+    automatic_orientation and solid_volume_support on an additive setup, where the setup's own
+    'Orientations'/'Supports' children take it and .operations never moves."""
+
+    def __init__(self, strategies):
+        super().__init__(strategies)
+        self.container = _NamedCollection()
+
+    def add(self, inp):
+        op = self.op_class(inp)
+        self.container._items.append(op)
+        return op
+
+
+_ADD_STRATEGIES = ("face", _Strategy("additive_arrange", isAdditiveStrategy=True),
+                   _Strategy("solid_volume_support", isAdditiveStrategy=True,
+                             isSupportStrategy=True))
+
+
+def _additive_ops(cam, cls=_Operations):
+    """Re-home setup 0 onto `cls`, keeping the STRATEGY OBJECTS - _with_operations rebuilds from
+    names alone, which drops isAdditiveStrategy and makes every row read subtractive."""
+    setup = cam.setups.item(0)
+    setup.operations = cls(list(_ADD_STRATEGIES))
+    return setup
+
+
+def _additive_setup(cam):
+    """A setup whose add lands into a CONTAINER, hung off the setup as a folder so allOperations
+    reaches it the way the live flatten does."""
+    setup = _additive_ops(cam, _ContainerOperations)
+    setup.folders = _NamedCollection([FakeSetup("Supports")])
+    setup.folders.item(0).operations = setup.operations.container
+    return setup
+
+
+class TestAdditiveStrategies:
+    """MEASURED on an additive setup (EOS M 290): additive_arrange creates with NO tool reference,
+    and the operation reads Operation.tool null."""
+
+    def test_an_additive_strategy_creates_with_no_tool_reference(self, monkeypatch):
+        cam = _install(monkeypatch, strategies=_ADD_STRATEGIES)
+        out = _payload(cco.handler(setup="Setup1", strategy="additive_arrange"))
+        assert out["tool"] is None and out["tool_number"] is None
+        assert "tool_identity_checked" not in out         # there was no tool identity to check
+        assert cam.setups.item(0).operations.added[-1].tool is None
+
+    def test_a_subtractive_strategy_still_demands_a_tool(self, monkeypatch):
+        # the boundary of the same branch: dropping the tool reference on a MILLING strategy is the
+        # refusal it always was, so the additive skip cannot widen into one.
+        _install(monkeypatch, strategies=_ADD_STRATEGIES)
+        res = cco.handler(setup="Setup1", strategy="face")
+        assert res["isError"] is True and "tool_index" in res["message"]
+
+    def test_a_tool_handed_to_an_additive_strategy_is_refused_before_the_add(self, monkeypatch):
+        cam = _install(monkeypatch, strategies=_ADD_STRATEGIES)
+        res = cco.handler(setup="Setup1", strategy="additive_arrange",
+                          tool_library_url="u", tool_index=0)
+        assert res["isError"] is True and "isAdditiveStrategy true" in res["message"]
+        assert cam.setups.item(0).operations.count == 0
+
+    def test_an_unparseable_tool_index_is_refused_on_the_additive_arm_too(self, monkeypatch):
+        # The wire can deliver the index as TEXT. Reading it through a PARSE would drop 'abc' as
+        # "no index given" and create the operation anyway, so this arm reads whether one was
+        # PASSED - the subtractive arm refuses the same value by name.
+        cam = _install(monkeypatch, strategies=_ADD_STRATEGIES)
+        res = cco.handler(setup="Setup1", strategy="additive_arrange", tool_index="abc")
+        assert res["isError"] is True and "isAdditiveStrategy true" in res["message"]
+        assert cam.setups.item(0).operations.count == 0
+
+    def test_the_schema_default_index_is_not_a_tool_reference(self, monkeypatch):
+        # the boundary of the same read: -1 is what the schema sends when the caller named none, so
+        # it must NOT read as a tool handed to an additive strategy.
+        _install(monkeypatch, strategies=_ADD_STRATEGIES)
+        out = _payload(cco.handler(setup="Setup1", strategy="additive_arrange",
+                                   tool_index=cco._NO_INDEX))
+        assert out["tool"] is None
+
+    def test_a_strategy_whose_vocabulary_did_not_read_still_demands_a_tool(self, monkeypatch):
+        # `chosen is None` is no additive verdict: with no row to read, nothing said the strategy
+        # was additive, so the tool reference stays required.
+        cam = _install(monkeypatch, strategies=_ADD_STRATEGIES)
+        _additive_ops(cam, _DeafVocabulary)
+        res = cco.handler(setup="Setup1", strategy="additive_arrange")
+        assert res["isError"] is True and "tool_index" in res["message"]
+
+    def test_the_additive_note_replaces_the_cut_geometry_sentence(self, monkeypatch):
+        _install(monkeypatch, strategies=_ADD_STRATEGIES)
+        out = _payload(cco.handler(setup="Setup1", strategy="additive_arrange"))
+        assert "cam_select_geometry" not in out["note"]
+        assert "isAdditiveStrategy true" in out["note"]
+
+    def test_an_operation_landing_in_a_container_counts_as_landed(self, monkeypatch):
+        # MEASURED: solid_volume_support lands in the setup's 'Supports' container and
+        # setup.operations.count never moves - a gate reading that count calls it a failure while
+        # the document already carries the operation.
+        cam = _install(monkeypatch, strategies=_ADD_STRATEGIES)
+        setup = _additive_setup(cam)
+        out = _payload(cco.handler(setup="Setup1", strategy="solid_volume_support"))
+        assert setup.operations.count == 0                 # .operations never moved
+        assert setup.allOperations.count == 1              # the container carries it
+        assert out["operation"] == "Op1"
+
+    def test_an_operation_that_lands_nowhere_is_still_an_error(self, monkeypatch):
+        # the other side: allOperations does not move either, so nothing landed anywhere.
+        cam = _install(monkeypatch, strategies=_ADD_STRATEGIES)
+        _additive_ops(cam, _DeafOperations)
+        res = cco.handler(setup="Setup1", strategy="additive_arrange")
+        assert res["isError"] is True and "did not land" in res["message"]

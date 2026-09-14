@@ -184,8 +184,7 @@ def handler(action: str = "list", setup: str = "", name: str = "", folder: str =
 
 
 TOOL_DESCRIPTION = (
-    "Manage a CAM setup's folders: list, create, rename, or move operations into one. "
-    "Patterns are created in the Manufacture UI, not through the API."
+    "Manage a CAM setup's folders: list, create, rename, or move operations into one."
 )
 
 tool = (
@@ -193,7 +192,7 @@ tool = (
     .add_input_property("action", {"type": "string", "enum": list(_ACTIONS)})
     .add_input_property("setup", {"type": "string", "description": "Setup name (from cam_get)."})
     .add_input_property("name", {"type": "string", "description": "New folder name (create)."})
-    .add_input_property("folder", {"type": "string", "description": "Exact folder name; duplicate refusals return name#n selectors."})
+    .add_input_property("folder", {"type": "string", "description": "Exact folder name; duplicates get name#n selectors."})
     .add_input_property("new_name", {"type": "string", "description": "New name (rename)."})
     .add_input_property("operations", {"type": "array", "items": {"type": "string"},
             "description": "Operation names to move in (move)."})

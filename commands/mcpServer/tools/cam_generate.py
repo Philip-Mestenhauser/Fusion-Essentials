@@ -31,7 +31,7 @@ _LAUNCH_NOTE = ("Generation is launched and runs in the background at its own pa
 
 # The remedy for THIS call site: cam_generate takes no strategy, so the operation itself is what
 # changes - picking a different strategy is a create-time choice.
-_ENTITLEMENT_REMEDY = ("Check the Machining Extension entitlement, or replace one: cam_delete + "
+_ENTITLEMENT_REMEDY = ("Check the Manufacturing Extension entitlement, or replace one: cam_delete + "
                        "cam_create_operation with an allowed strategy "
                        "(cam_get(include=['strategies']) lists them).")
 

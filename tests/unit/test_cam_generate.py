@@ -385,7 +385,7 @@ class TestEntitlementPreflight:
         assert out["launch_reasons"] == {"out_of_date": 2}
         assert out["operations_to_generate"] == 2
         assert "isGenerationAllowed false" in out["note"] and "Cham" in out["note"]
-        assert "Machining Extension" in out["note"]          # the remedy cam_create_operation uses
+        assert "Manufacturing Extension" in out["note"]      # the remedy cam_create_operation uses
         assert "cam_get_status" in out["note"]               # this launch claims no completion either
 
     def test_one_handle_covers_every_future_the_split_launch_made(self, monkeypatch):
@@ -410,7 +410,7 @@ class TestEntitlementPreflight:
         res = gen.handler(target="")
         assert res["isError"] is True
         assert "Cham" in res["message"] and "Walls" in res["message"]
-        assert "Machining Extension" in res["message"]
+        assert "Manufacturing Extension" in res["message"]
         assert cam.generate_calls == []
 
     def test_a_blocked_operation_target_is_refused_by_name(self, monkeypatch):

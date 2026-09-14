@@ -652,7 +652,7 @@ def scope_remedy(input_name="component"):
 # The vocabulary half of the scope's description: what it accepts. Shared by every spelling of the
 # input, so a second scope on one tool cannot drift from the first. WHY it exists, and the
 # design_get pointer that mints an occurrence path, are in scope_component's refusals.
-_SCOPE_VOCABULARY = "a component name or an occurrence path/handle."
+_SCOPE_VOCABULARY = "a name, occurrence path or 'handle'."
 
 # The ONE wire declaration of that input: tool.add_input_property(*_sketch_detail.COMPONENT_SCOPE),
 # resolved through scoped_sketch / scoped_or_recent_sketch below.
