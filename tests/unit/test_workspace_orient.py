@@ -1590,14 +1590,14 @@ class TestCapabilityBlock:
         return FakeDesign(FakeRoot(top_occs=[FakeOcc("A:1")], all_count=1), timeline=[FakeTL(0)])
 
     def _all(self, value):
-        return {name: value for name in wo._CAPABILITY_SENTINELS}
+        return {name: value for name in wo._cam_common.CAPABILITY_SENTINELS}
 
     def test_every_sentinel_reads_true_when_generation_is_allowed(self, monkeypatch):
         des = self._small_design()
         _install(active_product=des, doc=_doc(design=des))
         monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(self._all(True)))
         og = _payload(wo.handler())["machining_capabilities"]["observed_generation"]
-        assert og == {name: True for name in wo._CAPABILITY_SENTINELS}
+        assert og == {name: True for name in wo._cam_common.CAPABILITY_SENTINELS}
 
     def test_blocked_strategies_read_false_not_null(self, monkeypatch):
         # false is an OBSERVED answer (the base license declines it), distinct from an unread probe's
@@ -1640,7 +1640,7 @@ class TestCapabilityBlock:
         _install(active_product=des, doc=_doc(design=des))
         monkeypatch.setattr(wo._cam_common, "_create_strategy", strategy_factory(self._all(True)))
         og = _payload(wo.handler())["machining_capabilities"]["observed_generation"]
-        assert set(og) == set(wo._CAPABILITY_SENTINELS)
+        assert set(og) == set(wo._cam_common.CAPABILITY_SENTINELS)
         assert len(og) == 4                         # compact - a few keys, not the 54-row dump
 
     def test_the_note_cites_the_flag_and_asserts_no_license_tier(self, monkeypatch):
@@ -1691,7 +1691,7 @@ class TestCapabilityBlock:
             "multiaxis_roughing", "probe_geometry", "rotary_contour", "rotary_finishing",
             "rotary_pocket", "steep_and_shallow", "swarf", "three_plus_two"}
         assert len(extension_unblocked) == 17
-        stray = set(wo._CAPABILITY_SENTINELS) - extension_unblocked
+        stray = set(wo._cam_common.CAPABILITY_SENTINELS) - extension_unblocked
         assert not stray, f"sentinel(s) not in the measured extension-unblocked set: {sorted(stray)}"
 
     def test_the_block_reads_the_flag_through_the_shared_seam(self, monkeypatch):
@@ -1707,9 +1707,9 @@ class TestCapabilityBlock:
         # sys_capability_map points a cold agent here for this ONE verdict. A bare all() over the
         # flags would fold an unread None into False - a confident 'not entitled' for a probe that
         # never answered, which is the opposite of what null means on the wire.
-        assert wo._entitled_over([True, True, True, True]) is True
-        assert wo._entitled_over([True, False, True, True]) is False
-        assert wo._entitled_over([True, None, True, True]) is None
+        assert wo._cam_common.entitled_over([True, True, True, True]) is True
+        assert wo._cam_common.entitled_over([True, False, True, True]) is False
+        assert wo._cam_common.entitled_over([True, None, True, True]) is None
 
     def test_the_orient_publishes_the_verdict_beside_the_flags(self, monkeypatch):
         # The pointer sys_capability_map hands out has to land on a FIELD: an agent that had to

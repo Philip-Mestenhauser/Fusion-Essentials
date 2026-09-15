@@ -252,28 +252,47 @@ _PRINT_SETTINGS_NOTE = (
     "its 'description' separates them. 'id' is not an address.")
 
 # Said where the filter matched nothing: the technologies are the platform's own, read back off the
-# settings, so an empty listing names them instead of leaving the caller to guess a spelling.
-_NO_TECHNOLOGY = (
-    " No setting reads technology '{asked}'. The technologies these libraries carry: {seen}.")
+# settings, so an empty listing names them instead of leaving the caller to guess a spelling. Split
+# around the listing itself so its own length can be budget-capped against what already precedes it.
+_NO_TECHNOLOGY_LEAD = " No setting reads technology '{asked}'. The technologies these libraries carry: "
+_NO_TECHNOLOGY_TAIL = "."
 
 
-def _slice_print_settings(cam, technology, max_results):
+def _slice_print_settings(cam, technology, max_results, vendor="", material=""):
     """The print settings an ADDITIVE setup can print with (Local + Fusion360 locations), each row
-    name/technology/id/location. 'technology' filters; 'max_results' caps."""
+    name/technology/id/location. 'technology' filters the listing; 'vendor'/'material' filter the
+    library QUERY itself before it runs; 'max_results' caps."""
+    facets = {k: v for k, v in (("vendor", vendor), ("material", material)) if (v or "").strip()}
     rows, truncated, err = _cc.print_setting_catalog(
-        technology or "", clamp_rows(max_results, 100, 400))
+        technology or "", clamp_rows(max_results, 100, 400), **facets)
     if err:
         return None, error(err)
     note = _PRINT_SETTINGS_NOTE
+    if facets:
+        # 'vendor'/'material' only - a fixed, short vocabulary, so this prefix's own worst case is
+        # known and bounded (see test_the_worst_composed_note_with_every_facet...).
+        note = f"Facets: {','.join(sorted(facets))}. " + note
     if truncated:
         note += (" The listing was CAPPED, so name_shared is read over the listed rows only - "
                  "narrow with 'technology', or raise max_results.")
     out = {"print_settings": rows, "count": len(rows), "truncated": truncated}
-    if (technology or "").strip() and not rows:
+    asked_tech = (technology or "").strip()
+    if not rows and facets:
+        # PrintSetting carries no vendor/material member to enumerate the legal values from, so
+        # this names what was asked rather than what would answer; a technology ALSO asked folds
+        # into this ONE sentence rather than adding the separate enumeration below.
+        asked = ", ".join(f"{k} '{v}'" for k, v in sorted(facets.items()))
+        note += (f" No setting reads {asked} with technology '{asked_tech}'."
+                 if asked_tech else f" No setting reads {asked}.")
+        if asked_tech:
+            out["technologies_seen"] = _cc.print_setting_technologies()
+    elif asked_tech and not rows:
         seen = _cc.print_setting_technologies()
         out["technologies_seen"] = seen
-        note += _NO_TECHNOLOGY.format(asked=technology,
-                                      seen=named_with_remainder(seen) or "(none read)")
+        lead = note + _NO_TECHNOLOGY_LEAD.format(asked=technology)
+        listed = (named_with_remainder(seen, cap=_cc._length_capped(seen, lead, _NO_TECHNOLOGY_TAIL))
+                 if seen else "(none read)")
+        note = lead + listed + _NO_TECHNOLOGY_TAIL
     out["note"] = note
     return out, None
 
@@ -729,7 +748,7 @@ _VALIDITY_NOTE = "Readable from any workspace; operation validity only in Manufa
 
 def handler(include=None, setup: str = "", operation: str = "", preset: str = "",
             scope: str = "", library: str = "", tool_type: str = "", vendor: str = "",
-            machine_type: str = "", technology: str = "",
+            machine_type: str = "", technology: str = "", material: str = "",
             template_location: str = "", template_url: str = "", template_depth: int = 0,
             measure: str = "", max_results: int = 0, units: str = "mm",
             parameter_names=None, include_unavailable=None, unavailable_offset=None) -> dict:
@@ -812,7 +831,8 @@ def handler(include=None, setup: str = "", operation: str = "", preset: str = ""
         if e:
             return e
     if "print_settings" in inc:                 # what an ADDITIVE setup prints with
-        out["print_settings"], e = _slice_print_settings(cam, technology, max_results)
+        out["print_settings"], e = _slice_print_settings(
+            cam, technology, max_results, vendor, material)
         if e:
             return e
     if "templates" in inc:                      # the CAM toolpath template library tree
@@ -887,6 +907,8 @@ tool = (
             "enum": ["milling", "turning", "cutting", "additive"]})
     .add_input_property("technology", {"type": "string",
             "description": "'print_settings' filter."})
+    .add_input_property("material", {"type": "string",
+            "description": "print_settings filter."})
     .add_input_property("template_location", {"type": "string",
             "description": "Default cloud."})
     .add_input_property("template_url", {"type": "string",

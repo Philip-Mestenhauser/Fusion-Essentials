@@ -612,6 +612,8 @@ class TestIsEmptyToolpath:
         assert cc.is_empty_toolpath(self._facts(has_error=True)) is False
 
     def test_a_generating_op_is_not_empty(self):
+        # This IS the CAM-STATUS-INFLIGHT-1 shape: a first generation reads has_toolpath False
+        # with isGenerating true from the moment the launch lands until the path lands.
         assert cc.is_empty_toolpath(self._facts(is_generating=True)) is False
 
     def test_an_out_of_date_op_is_not_empty(self):
@@ -2797,6 +2799,21 @@ class TestSettledOverTheGeneratingFlag:
         assert cc.op_settled({"has_error": False, "is_suppressed": False, "operation_state": 0,
                               "has_toolpath": False, "is_toolpath_valid": True,
                               "strategy": "contour2d", "is_generating": False}) is True
+
+    def test_a_state_zero_op_still_generating_with_no_toolpath_yet_is_not_settled(self):
+        # MEASURED on a FIRST generation (no prior toolpath): state reads 0 and isToolpathValid
+        # true from the moment the launch lands - has_toolpath explicitly False (not unread) with
+        # isGenerating true is the in-flight shape a completed poll must not settle on.
+        assert cc.op_settled({"has_error": False, "is_suppressed": False, "operation_state": 0,
+                              "has_toolpath": False, "is_toolpath_valid": True,
+                              "strategy": "contour2d", "is_generating": True}) is False
+
+    def test_a_manual_op_settles_once_it_is_not_generating(self):
+        # Manual NC never reads is_toolpath_valid true, so is_empty_toolpath always excludes it by
+        # strategy - isGenerating not-true is the ONE signal that settles a manual op.
+        assert cc.op_settled({"has_error": False, "is_suppressed": False, "operation_state": 0,
+                              "has_toolpath": False, "is_toolpath_valid": False,
+                              "strategy": "manual", "is_generating": False}) is True
 
     def test_a_settled_op_under_a_raised_flag_buckets_valid_not_generating(self):
         # THE BITE the sweep caught: cam_inspect_toolpaths read 7 of 12 operations as 'generating'
@@ -5232,6 +5249,36 @@ class TestPrintSettingCatalog:
         install_print_library(_setting_lib(self._pools(), raises=(_LOC_LOCAL,)))
         rows, _t, err = cc.print_setting_catalog()
         assert err is None and [r["location"] for r in rows] == ["fusion360"] * 3
+
+    def _query_spy(self, seen):
+        """A PrintSettingLibrary whose createQuery's execute() SNAPSHOTS the query's own
+        vendor/material facets at the moment it runs, appending the snapshot (not the live query
+        object) to `seen` - so a facet assigned AFTER execute() (measured: 886 tests stayed green
+        when the assignments moved below the execute() call) reads absent in the snapshot instead
+        of present after the fact. PrintSetting itself carries no vendor/material member
+        (shape-cam-print-setting)."""
+        def create_query(loc):
+            state = SimpleNamespace(name="")
+
+            def execute():
+                seen.append({"vendor": getattr(state, "vendor", None),
+                             "material": getattr(state, "material", None)})
+                return self._pools().get(loc, [])
+            state.execute = execute
+            return state
+        return SimpleNamespace(createQuery=create_query)
+
+    def test_vendor_material_thread_to_the_query_before_execute(self, install_print_library):
+        seen = []
+        install_print_library(self._query_spy(seen))
+        cc.print_setting_catalog(vendor="Autodesk", material="PLA")
+        assert seen == [{"vendor": "Autodesk", "material": "PLA"}] * len(seen)
+
+    def test_an_omitted_facet_never_reaches_the_query(self, install_print_library):
+        seen = []
+        install_print_library(self._query_spy(seen))
+        cc.print_setting_catalog(vendor="Autodesk")
+        assert seen and all(s == {"vendor": "Autodesk", "material": None} for s in seen)
 
     def test_no_library_at_all_is_an_error_not_an_empty_catalog(self, monkeypatch):
         holder = SimpleNamespace(libraryManager=SimpleNamespace(printSettingLibrary=None))

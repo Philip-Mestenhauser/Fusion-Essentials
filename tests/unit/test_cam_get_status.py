@@ -1294,12 +1294,44 @@ class TestSameDocumentIdentity:
 
 # ── status_handler live-poll path: NO cam_generate handle (inline / UI generation) ──────────────────
 
-def _live_op(name, state=0, generating=False, error=False, state_readable=True):
+def _live_op(name, state=0, generating=False, error=False, state_readable=True, has_toolpath=True):
     """One op as the live tally reads it - generating is the flag the poll waits on."""
     op = SharedOp(name, operation_state=state, has_error=error,
-                  error="broken" if error else "", state_readable=state_readable)
+                  error="broken" if error else "", state_readable=state_readable,
+                  has_toolpath=has_toolpath)
     op.isGenerating = generating
     return op
+
+
+class TestTargetPollInFlightGeneration:
+    """CAM-STATUS-INFLIGHT-1: the NO-HANDLE target poll must not call a first generation done
+    while it is still landing - state 0, isToolpathValid true (SharedOp's own default), hasToolpath
+    false, isGenerating true is IN FLIGHT, neither settled nor empty."""
+
+    def _install(self, monkeypatch, *setups):
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        cam = _FakeCAM(list(setups))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        return cam
+
+    def test_an_in_flight_first_generation_reads_not_completed_with_no_empty_entry(
+            self, monkeypatch):
+        self._install(monkeypatch, _setup("FlipSetup", [
+            _live_op("FlipContour", state=0, generating=True, has_toolpath=False)]))
+        out = _payload(st.handler(target="FlipSetup"))
+        assert out["completed"] is False
+        assert "empty_toolpaths" not in out
+        assert "Still generating in the background" in out["note"]
+
+    def test_the_same_op_completes_once_has_toolpath_flips(self, monkeypatch):
+        self._install(monkeypatch, _setup("FlipSetup", [
+            _live_op("FlipContour", state=0, generating=True, has_toolpath=True)]))
+        out = _payload(st.handler(target="FlipSetup"))
+        assert out["completed"] is True
+        # settled_clause still reports this shape correctly - the flag stuck AFTER the toolpath
+        # landed, which is a different fact than the in-flight case above.
+        assert "read isGenerating true while their own state reads valid" in out["note"]
 
 
 def _warn_op(name, state=0, warning="Contour Selection: contours are missing selections.",

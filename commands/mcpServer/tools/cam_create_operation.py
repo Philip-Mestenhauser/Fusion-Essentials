@@ -14,9 +14,10 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import apply_rename, counted, named_with_remainder, ok, error, read_flag, safe
-from ._cam_common import (CREATE_DEDUPE, _MANUAL_NC_STRATEGY, choice_expressions, get_cam,
-                          find_setup, operation_nodes, operation_name_clash, register_future,
-                          setups, unquote_expression)
+from ._cam_common import (CREATE_DEDUPE, _MANUAL_NC_STRATEGY, _length_capped, capability_entitled,
+                          choice_expressions, get_cam, find_setup, operation_nodes,
+                          operation_name_clash, register_future, setups, unquote_expression,
+                          walk_cam_tree)
 # _read_tool_number is the one tool_number read; _tp is the one tool-parameter value read.
 from .cam_edit_tools import _read_tool_number, _tp
 
@@ -295,6 +296,27 @@ _BLOCKED_STRATEGY = (
     "no error or warning text of its own. Check this license's Manufacturing Extension, or "
     "pick one cam_get(include=['strategies'], setup='{setup}') reads as allowed.")
 
+# No 'Check this license' remedy here: this branch fires only where the entitlement probe already
+# read True, so the fixed lead + siblings tail is length-capped to the wire budget below.
+_BLOCKED_STRATEGY_ENTITLED_LEAD = (
+    "Strategy '{strategy}' reads isGenerationAllowed false in setup '{setup}', though the "
+    "Manufacturing Extension reads entitled on this install. Creating it would have SUCCEEDED "
+    "and then never generated, carrying no toolpath and no error or warning text of its own. "
+    "This setup reads allowed instead: ")
+
+
+def _blocked_strategy_message(strategy, setup, rows):
+    """The refusal for a strategy this install will not generate - the Manufacturing Extension
+    named as a remedy only where capability_entitled() does NOT read True, else the sibling
+    strategies this setup itself reads allowed, capped to the wire budget."""
+    if capability_entitled() is True:
+        lead = _BLOCKED_STRATEGY_ENTITLED_LEAD.format(strategy=strategy, setup=setup)
+        names = [r["name"] for r in (rows or []) if r["allowed"] is True]
+        siblings = (named_with_remainder(names, cap=_length_capped(names, lead, "."))
+                   if names else "none read allowed in this setup")
+        return lead + siblings + "."
+    return _BLOCKED_STRATEGY.format(strategy=strategy, setup=setup)
+
 # An unreadable entitlement flag is not a blocked strategy, so no refusal is fabricated from it.
 _UNCHECKED_ENTITLEMENT = " isGenerationAllowed did not read - no pre-flight ran."
 
@@ -337,6 +359,21 @@ _DRILLING_AXIS_NOTE = (
 _MANUAL_NO_TOOL = ("A manual NC operation takes no tool - drop 'tool_scope', 'tool_library_url' "
                    "and 'tool_index' and retry.")
 _MANUAL_NEXT = "It takes no cutting tool: manual NC carries no toolpath by construction."
+
+
+def _own_autoname_dedupe(cam, rename_warning, op_name, want_name, strategy):
+    """The rename_warning naming Fusion's own auto-name as the cause when the landed name is
+    exactly the requested spelling's dedupe AND no node of ANY kind in the CAM tree carries it -
+    operations.add dedupes document-wide against every node it lands beside, not operations
+    alone. Else `rename_warning` as is."""
+    if not (rename_warning and op_name == f"{want_name} (2)"):
+        return rename_warning
+    want = want_name.strip().lower()
+    if any((n.name or "").lower() == want for n in walk_cam_tree(cam)):
+        return rename_warning
+    return (f"created, but the requested name '{want_name}' did not take - it equals Fusion's "
+           f"own auto-name for a '{strategy}' operation, and the platform deduped the request "
+           f"against it. Named '{op_name}'; omitting 'name' takes the auto-name.")
 
 
 def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
@@ -419,7 +456,7 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
     # is the flag that would not read, and refusing on that invents a verdict. No row at all means
     # the vocabulary never read, which is not a verdict either.
     if chosen is not None and chosen["allowed"] is False:
-        return error(_BLOCKED_STRATEGY.format(strategy=strategy, setup=setup))
+        return error(_blocked_strategy_message(strategy, setup, rows))
 
     # createInput can raise on an invalid strategy despite the check (be safe), so guard the mutation.
     try:
@@ -491,6 +528,7 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
                               f"named '{op_name}'.")
     else:
         op_name, rename_warning = apply_rename(op, name)
+    rename_warning = _own_autoname_dedupe(cam, rename_warning, op_name, want_name, strategy)
 
     # The tool is read off the CREATED operation, never the request echoed back: the assignment was
     # made on the OperationInput, and nothing before this read shows what the operation carries. An

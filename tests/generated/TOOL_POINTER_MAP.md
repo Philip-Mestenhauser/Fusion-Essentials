@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 192  |  **description breadcrumbs:** 285  |  **note/error breadcrumbs:** 622
+**Tools:** 192  |  **description breadcrumbs:** 287  |  **note/error breadcrumbs:** 621
   |  **guidance smells flagged:** 8
 ## Blindspots to engineer
 
@@ -40,7 +40,7 @@ close orphans, factor duplicated guards into shared helpers.
 - `find_geometry`  <- 49  (desc 13, note 36)
 - `design_delete_feature`  <- 40  (desc 16, note 24)
 - `view_screenshot`  <- 34  (desc 5, note 29)
-- `cam_get`  <- 31  (desc 14, note 17)
+- `cam_get`  <- 32  (desc 15, note 17)
 - `data_get`  <- 25  (desc 10, note 15)
 - `doc_open`  <- 24  (desc 5, note 19)
 - `model_inspect`  <- 24  (desc 3, note 21)
@@ -444,9 +444,11 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - It rest-machines: with no reference it errors 'No valid reference tool nor valid reference stock model'. Set restMaterialFromJob true with cam_edit_operation, then cam_generate.
 - Strategy '' needs a PROBE and the requested tool reads tool_type , so nothing was created. A face mill on a probing strategy generated with 'Tool (face mill) is not supported for the strategy.' Tak...
 - Strategy '{strategy}' reads isGenerationAllowed false in setup '{setup}', so nothing was created. Creating it would have SUCCEEDED and then never generated, carrying no toolpath and no error or war...
+- Strategy '{strategy}' reads isGenerationAllowed false in setup '{setup}', though the Manufacturing Extension reads entitled on this install. Creating it would have SUCCEEDED and then never generate...
 - hole recognition picks holes for a drilling cycle - create 'drill' (or 'bore') and aim it with cam_select_geometry(selection='holes')
 - Strategy '' is not an operation, so nothing was created: operations.add answers with a name while the setup's operation count stays where it was. Instead, .
 - A drilling cycle cuts along the SETUP's Z: a hole off it errored 'Cylindrical face not in tool orientation!'. Aim it with cam_edit_setup(wcs={'z_axis': <face>}) and wcs_orientation_flipZ.
+- created, but the requested name '' did not take - it equals Fusion's own auto-name for a '' operation, and the platform deduped the request against it. Named ''; omitting 'name' takes the auto-name.
 - Strategy '' reads isAdditiveStrategy true, and this tool assigns no cutting tool to one, so nothing was created. Drop 'tool_scope', 'tool_library_url' and 'tool_index' and retry.
 - operations.add returned '' but the setup's operation count could not be read  the add, so the operation's landing is UNCONFIRMED. Re-read the setup with cam_get(include=['operations']).
 - operations.add returned '' but the setup's operation count did not increase ( before,  after) - the operation did not land.
@@ -1003,10 +1005,10 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide 'operation' - the operation name to
 - Use cam_show_toolpath(list) to see every operation.
 - isLightBulbOn did not take for '
-- This operation has no generated toolpath yet - nothing to display. Generate it first (cam_generate).
 - Provide 'folder' - the folder or setup name to show.
 - Use cam_show_toolpath(list) or cam_get(include=['operations']).
 - ' still reads isVisible=true after hide - the write did not take.
+- This operation carries no toolpath by construction - cam_get(include=['parameters'], operation=...) reads what it carries.
 - activate() ran but setup '' still reads isActive=false - the viewport still shows another setup's models, not this operation's part.
 - activate() ran but isActive cannot be read on setup '', so the activation is UNCONFIRMED - the viewport may still show another setup's models rather than this operation's part.
 - Activated setup '' (the operation's own): the viewport renders only the ACTIVE setup's models, so the toolpath would otherwise sit beside another setup's part.

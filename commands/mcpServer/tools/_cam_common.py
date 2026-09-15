@@ -665,20 +665,19 @@ def op_is_suppressed(facts: dict) -> bool:
 
 
 def op_settled(facts: dict) -> bool:
-    """Whether an operation has nothing left to generate: error or suppressed, or IsValid (0) with a
-    toolpath to show for it - hasToolpath True, or the empty class's own flag shape. The isGenerating
-    FLAG can read true over such an operation, so no poll settles on that flag alone."""
+    """Whether an operation has nothing left to generate: error/suppressed, or IsValid (0) with
+    either a toolpath to show for it or isGenerating reading not-true - the FLAG alone never
+    settles a poll by itself."""
     if facts.get("has_error") or op_is_suppressed(facts):
         return True
-    # MEASURED across one regeneration: the state leaves 0 the instant a launch lands (0 -> 3 -> 1)
-    # and returns to 0 only once the work is done, while isGenerating stayed true for a further
-    # 1.1 s after the Future completed - so the state leads the flag and cannot complete early.
+    # MEASURED on a REgeneration: the state leaves 0 the instant a launch lands (0 -> 3 -> 1) and
+    # returns to 0 only once the work is done, while isGenerating stayed true 1.1 s past the
+    # Future's own completion.
     if facts.get("operation_state") != 0:
         return False
-    # A state-0 op with NO toolpath has produced nothing yet, so the second signal is what separates
-    # 'finished' from 'about to start' - is_empty_toolpath covers the op that generated and cuts
-    # nothing, which is finished too.
-    return facts.get("has_toolpath") is True or is_empty_toolpath(facts)
+    # MEASURED on a FIRST generation (no prior toolpath): the state reads 0 AT ONCE and stays there
+    # the whole run - isGenerating true is the only signal a still-landing path leaves at state 0.
+    return facts.get("has_toolpath") is True or facts.get("is_generating") is not True
 
 
 def unsettled_count(tally: dict) -> int:
@@ -742,6 +741,12 @@ def time_reading(mt):
 _MANUAL_NC_STRATEGY = "manual"
 
 
+def is_additive_setup(setup) -> bool:
+    """Whether a Setup's operationType reads AdditiveOperation - what takes no cutting tool and no
+    spindle by design, the same way a manual NC operation takes no toolpath."""
+    return safe(lambda: setup.operationType) == adsk.cam.OperationTypes.AdditiveOperation
+
+
 def _machining_time(cam, op, state, has_toolpath):
     """(seconds, nonfinite) for ONE operation - the seconds None where they were not read or read
     the band, and nonfinite True where this reading says the motion is not a number."""
@@ -778,16 +783,20 @@ def op_state_facts(op, cam=None) -> dict:
     }
 
 
-def is_empty_toolpath(facts: dict) -> bool:
-    """True for the EMPTY class: an operation that generated, is not suppressed, and cuts nothing."""
+def is_empty_toolpath(facts: dict, additive: bool = False) -> bool:
+    """True for the EMPTY class: an operation that generated, is not suppressed, and cuts nothing.
+    `additive` joins the manual-NC exclusion - an additive build op carries no toolpath by
+    construction too, the caller's own read of is_additive_setup on its owning setup."""
     # 'valid' is answered off operationState IsValid (0) only, so the empty claim rests on a state
     # that was READ; a state that raised buckets _UNREAD_STATE and stops here.
     if (facts.get("strategy") == _MANUAL_NC_STRATEGY
+            or additive
             or op_primary_state(facts) != "valid"
             or facts.get("is_toolpath_valid") is not True):
         return False
     if facts.get("has_toolpath") is False:
-        return True
+        # A path still landing (isGenerating true) is IN FLIGHT, not empty.
+        return facts.get("is_generating") is not True
     # Only a time that READ 0.0 says the operation cut nothing; an unread time is no measurement.
     return facts.get("has_toolpath") is True and facts.get("machining_time") == 0.0
 
@@ -968,6 +977,26 @@ def strategy_generation_allowed(name):
     if strat is None:
         return None
     return read_flag(lambda: strat.isGenerationAllowed)
+
+
+# The strategies whose isGenerationAllowed verdicts this install's Manufacturing Extension
+# entitlement - needs no document or setup.
+CAPABILITY_SENTINELS = ("steep_and_shallow", "multiaxis_finishing", "swarf", "probe_geometry")
+
+
+def entitled_over(flags) -> object:
+    """True/False/None over an iterable of isGenerationAllowed flags - True only where every one
+    reads true, None where any did not read, so an unread flag never folds into a confident False."""
+    values = list(flags)
+    if any(v is None for v in values):
+        return None
+    return all(values)
+
+
+def capability_entitled():
+    """This install's Manufacturing Extension verdict - entitled_over the CAPABILITY_SENTINELS'
+    own isGenerationAllowed flags, probed fresh."""
+    return entitled_over(strategy_generation_allowed(name) for name in CAPABILITY_SENTINELS)
 
 
 def entitlement_flags(ops) -> list:
@@ -1798,9 +1827,11 @@ def print_setting_library():
     return lib, None
 
 
-def _print_settings_at(lib, loc_name, name=""):
-    """Every print setting one non-network location answers, narrowed by the query's own `name`
-    filter where one is asked for - [] when the location or the query does not answer."""
+def _print_settings_at(lib, loc_name, name="", vendor="", material=""):
+    """Every print setting one non-network location answers, narrowed by the query's own
+    name/vendor/material filters where each is given - [] when the location or the query does not
+    answer. No 'machine' facet: measured live, 'M 290'/'EOS M 290'/'M291' each read 0 rows while
+    vendor and material narrow non-empty, and nothing backs a legal spelling for it."""
     loc = getattr(adsk.cam.LibraryLocations, loc_name, None)
     if loc is None:
         return []
@@ -1808,6 +1839,10 @@ def _print_settings_at(lib, loc_name, name=""):
         query = lib.createQuery(loc)
         if name:
             query.name = name
+        if vendor:
+            query.vendor = vendor
+        if material:
+            query.material = material
         return list(query.execute() or [])
     except Exception:
         return []
@@ -1821,9 +1856,11 @@ def print_setting_ident(s):
             safe(lambda: s.id) or "", safe(lambda: s.description) or "")
 
 
-def print_setting_catalog(technology: str = "", max_results: int = 100):
+def print_setting_catalog(technology: str = "", max_results: int = 100, vendor: str = "",
+                          material: str = ""):
     """(rows, truncated, error) - the print settings the 'print_setting' input resolves from, over
-    the Local and Fusion360 locations, each row {name, technology, id, location}. The DESCRIPTION
+    the Local and Fusion360 locations, each row {name, technology, id, location}. vendor/material
+    narrow the QUERY before execute(); technology narrows the RESULT in Python. The DESCRIPTION
     rides only on a row marked name_shared, the rows it tells apart."""
     lib, lerr = print_setting_library()
     if lerr:
@@ -1832,7 +1869,7 @@ def print_setting_catalog(technology: str = "", max_results: int = 100):
     rows, total = [], 0
     for loc_name in _LIBRARY_LOCATIONS:
         label = loc_name.replace("LibraryLocation", "").lower()
-        for s in _print_settings_at(lib, loc_name):
+        for s in _print_settings_at(lib, loc_name, vendor=vendor, material=material):
             nm, tech, sid, desc = print_setting_ident(s)
             if want_tech and str(tech).lower() != want_tech:
                 continue

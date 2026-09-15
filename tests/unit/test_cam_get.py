@@ -13,8 +13,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import (FakeCAMFolder, FakeCAMParameter, FakeCAMParameters, FakeOperation,
-                      FakeSetup, _NamedCollection, error_message, load_tool, make_cam)
+from conftest import (FakeApplication, FakeCAMFolder, FakeCAMParameter, FakeCAMParameters,
+                      FakeFusionDocument, FakeOperation, FakeProducts, FakeSetup,
+                      FakeUserInterface, _NamedCollection, error_message, load_tool, make_cam)
 
 cg = load_tool("cam_get")
 
@@ -56,7 +57,7 @@ def stub_slices(monkeypatch):
                         lambda cam, vendor, machine_type, max_results: (
                             {"count": 0, "machines": []}, None))
     monkeypatch.setattr(cg, "_slice_print_settings",
-                        lambda cam, technology, max_results: (
+                        lambda cam, technology, max_results, vendor="", material="": (
                             {"count": 0, "print_settings": []}, None))
     monkeypatch.setattr(cg, "_slice_templates",
                         lambda cam, loc, url, depth: ({"node_count": 0, "tree": {}}, None))
@@ -779,6 +780,87 @@ class TestBounding:
         assert prog["post_parameter_count"] == 65 and "post_parameters" not in prog
 
 
+class TestAdditiveOperationRows:
+    """An ADDITIVE setup's operations never carry tool_unselected or a spindle_check key, and are
+    never counted as an empty toolpath - the exclusion a manual NC operation already gets, since
+    neither strategy takes a cutting tool or a spindle by construction. Exercises the real
+    _cam_read walk (not the mocked handler TestBounding patches), so the fix is proven end to end."""
+
+    def _install(self, *setups, machining_times=None):
+        cam = make_cam(*setups, machining_times=machining_times)
+        cc = load_tool("_cam_common")
+        ui = FakeUserInterface(active_workspace=SimpleNamespace(id="CAMEnvironment"))
+        cc.app = FakeApplication(
+            active_document=FakeFusionDocument(products=FakeProducts(cam=cam)),
+            user_interface=ui)
+        import adsk.cam
+        adsk.cam.CAM.cast = lambda x: x if x is cam else None
+        return cam
+
+    def test_an_additive_row_keeps_none_of_the_milling_only_flags_or_remedy(self):
+        import adsk.cam
+        machine = SimpleNamespace(description="Test Machine")   # no kinematics -> spindle unread
+        additive_op = FakeOperation("AutoOrient", has_toolpath=False, valid=True,
+                                    operation_state=0, tool=None,
+                                    strategy="automatic_orientation")
+        additive_setup = FakeSetup("Build", [additive_op], machine=machine,
+                                   operation_type=adsk.cam.OperationTypes.AdditiveOperation)
+        milling_op = FakeOperation("Face1", has_toolpath=False, valid=True,
+                                   operation_state=0, tool=None, strategy="face")
+        milling_setup = FakeSetup("Mill", [milling_op], machine=machine)
+        self._install(additive_setup, milling_setup)
+        payload = _payload(cg._cr.get_cam_operations_handler())
+        rows_by_setup = {s["setup"]: s for s in payload["setups"]}
+        add_row = rows_by_setup["Build"]["operations"][0]
+        mill_row = rows_by_setup["Mill"]["operations"][0]
+        # the additive row: none of the milling-only flags
+        assert "tool_unselected" not in add_row["blocked_by"]
+        assert "spindle_check" not in add_row and "spindle_over_machine_max" not in add_row
+        assert "empty_toolpath" not in add_row
+        # built the SAME way in a milling setup, all three still fire - the fix is additive-scoped
+        assert "tool_unselected" in mill_row["blocked_by"]
+        assert mill_row["spindle_check"] == "machine_max_unavailable"
+        assert mill_row["empty_toolpath"] is True
+        # the readiness sentence never sends an additive row to cam_edit_operation for a tool
+        assert "assigns a tool" not in rows_by_setup["Build"]["summary"]["readiness"]
+        assert "assigns a tool" in rows_by_setup["Mill"]["summary"]["readiness"]
+
+    def test_an_additive_setup_is_held_out_of_the_time_slice_entirely(self):
+        import adsk.cam
+        additive_op = FakeOperation("AutoOrient", has_toolpath=False, valid=True,
+                                    operation_state=0, tool=None,
+                                    strategy="automatic_orientation")
+        additive_setup = FakeSetup("Build", [additive_op],
+                                   operation_type=adsk.cam.OperationTypes.AdditiveOperation)
+        # machining_times carries NO entry for "AutoOrient" - the fake RAISES if getMachiningTime
+        # is ever called for it (either the per-op or the whole-collection call), proving the
+        # additive op never reaches either.
+        self._install(additive_setup, machining_times={})
+        row = _payload(cg._cr.get_machining_time_handler())["setups"][0]
+        assert row["machining_time_seconds"] is None
+        assert row["operations"] == []
+        assert row["total_excludes_operations"] == ["AutoOrient"]
+        assert "setup_total_unavailable" not in row and "error" not in row
+
+    def test_nc_program_held_ops_excludes_additive_ops_by_their_own_setup(self):
+        # A held list can draw from several setups (Setup.parentSetup, not the program), so an
+        # additive op's OWN owner decides the exclusion, one op at a time.
+        import adsk.cam
+        additive_setup = FakeSetup("Build",
+                                   operation_type=adsk.cam.OperationTypes.AdditiveOperation)
+        milling_setup = FakeSetup("Mill")
+        additive_op = FakeOperation("AutoOrient", has_toolpath=False, valid=True,
+                                    operation_state=0, strategy="automatic_orientation")
+        additive_op.parentSetup = additive_setup
+        milling_op = FakeOperation("Face1", has_toolpath=False, valid=True, operation_state=0,
+                                   strategy="face")
+        milling_op.parentSetup = milling_setup
+        nc = SimpleNamespace(filteredOperations=[additive_op, milling_op])
+        out = cg._cr._program_held_ops(nc)
+        assert out["empty_toolpath_count"] == 1
+        assert out["empty_toolpaths"] == ["Face1"]
+
+
 class TestLibrarySlice:
     """include=['library'] = a tool-library catalog (the tools you can ADD), delegated to
     cam_edit_tools.read_library (the READ half of that tool); add/remove/edit stay on cam_edit_tools."""
@@ -855,12 +937,22 @@ class TestLibrarySlice:
                                                                             stub_slices):
         seen = {}
         monkeypatch.setattr(cg, "_slice_print_settings",
-                            lambda cam, technology, max_results: (
+                            lambda cam, technology, max_results, vendor="", material="": (
                                 seen.update(technology=technology, max_results=max_results)
                                 or ({"count": 3, "print_settings": []}, None)))
         out = _payload(cg.handler(include=["print_settings"], technology="FFF", max_results=25))
         assert out["print_settings"]["count"] == 3
         assert seen == {"technology": "FFF", "max_results": 25}
+
+    def test_router_passes_vendor_material_to_the_print_settings_slice(self, monkeypatch,
+                                                                        stub_slices):
+        seen = {}
+        monkeypatch.setattr(cg, "_slice_print_settings",
+                            lambda cam, technology, max_results, vendor="", material="": (
+                                seen.update(vendor=vendor, material=material)
+                                or ({"count": 1, "print_settings": []}, None)))
+        cg.handler(include=["print_settings"], vendor="Autodesk", material="PLA")
+        assert seen == {"vendor": "Autodesk", "material": "PLA"}
 
     def test_print_settings_slice_delegates_to_the_shared_catalog(self, monkeypatch):
         seen = {}
@@ -923,6 +1015,68 @@ class TestLibrarySlice:
                             lambda: reads.append(1) or ["FFF"])
         out, err = cg._slice_print_settings(object(), "", 0)
         assert err is None and "technologies_seen" not in out and reads == []
+
+    def test_facets_thread_to_the_shared_catalog_and_name_themselves_in_the_note(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(cg._cc, "print_setting_catalog",
+                            lambda technology, max_results, **kw: (
+                                seen.update(kw) or ([{"name": "x"}], False, None)))
+        out, err = cg._slice_print_settings(object(), "", 0, vendor="Autodesk", material="PLA")
+        assert err is None
+        assert seen == {"vendor": "Autodesk", "material": "PLA"}
+        assert "vendor" in out["note"] and "material" in out["note"]
+        assert "vendor" not in out["print_settings"][0]   # the shape carries no such member
+
+    def test_a_left_out_facet_does_not_reach_the_query_or_the_note(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(cg._cc, "print_setting_catalog",
+                            lambda technology, max_results, **kw: (
+                                seen.update(kw) or ([{"name": "x"}], False, None)))
+        out, err = cg._slice_print_settings(object(), "", 0, vendor="Autodesk")
+        assert err is None and seen == {"vendor": "Autodesk"}
+        assert "vendor" in out["note"] and "material" not in out["note"]
+
+    def test_an_unmatched_facet_names_itself_and_the_offending_value(self, monkeypatch):
+        # measured live: vendor='ZZZNOSUCHVENDOR' returned count 0 with no disclosure at all - the
+        # miss must name the facet and the value asked for, not just repeat the 'pass a name'
+        # pointer as if a row existed to pass.
+        monkeypatch.setattr(cg._cc, "print_setting_catalog",
+                            lambda technology, max_results, **kw: ([], False, None))
+        out, err = cg._slice_print_settings(object(), "", 0, vendor="ZZZNOSUCHVENDOR")
+        assert err is None and out["count"] == 0
+        assert "No setting reads vendor 'ZZZNOSUCHVENDOR'" in out["note"]
+
+    def test_an_unmatched_facet_combination_names_every_facet(self, monkeypatch):
+        monkeypatch.setattr(cg._cc, "print_setting_catalog",
+                            lambda technology, max_results, **kw: ([], False, None))
+        out, err = cg._slice_print_settings(object(), "", 0, vendor="X", material="Y")
+        assert "No setting reads material 'Y', vendor 'X'." in out["note"]
+
+    def test_a_matched_facet_carries_no_miss_disclosure(self, monkeypatch):
+        monkeypatch.setattr(cg._cc, "print_setting_catalog",
+                            lambda technology, max_results, **kw: ([{"name": "x"}], False, None))
+        out, err = cg._slice_print_settings(object(), "", 0, vendor="Autodesk")
+        assert "No setting reads" not in out["note"]
+
+    def test_the_worst_composed_note_with_every_facet_fits_the_wire_budget(self, monkeypatch):
+        # facets combine with EITHER existing optional clause (unlike each other, they are not
+        # mutually exclusive), so both combinations are measured with both facets given at once -
+        # the technology-miss case also carries the facet-miss clause, the true worst case.
+        monkeypatch.setattr(cg._cc, "print_setting_catalog",
+                            lambda technology, max_results, **kw: ([{"name": "x"}], True, None))
+        capped, _err = cg._slice_print_settings(object(), "", 0, vendor="Autodesk", material="PLA")
+        assert capped["truncated"] is True
+        assert len(capped["note"]) <= 400, len(capped["note"])
+        monkeypatch.setattr(cg._cc, "print_setting_catalog",
+                            lambda technology, max_results, **kw: ([], False, None))
+        monkeypatch.setattr(cg._cc, "print_setting_technologies",
+                            lambda: [f"TECH{i}" for i in range(12)])
+        missed, _e2 = cg._slice_print_settings(object(), "DLP", 0, vendor="Autodesk",
+                                               material="PLA")
+        assert "technologies_seen" in missed
+        assert "No setting reads material 'PLA', vendor 'Autodesk' with technology 'DLP'." in (
+            missed["note"])
+        assert len(missed["note"]) <= 400, len(missed["note"])
 
     def test_machines_slice_delegates_to_read_machines(self, monkeypatch):
         # _slice_machines unwraps cam_edit_setup.read_machines' ok() payload (the read lives with the

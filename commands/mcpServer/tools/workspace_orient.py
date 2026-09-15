@@ -492,13 +492,6 @@ def _cam_pointer(cam):
 # MEASURED: a base license reads 33 of 54 milling strategies allowed and the Manufacturing Extension
 # 50, and these four sit in the 17 the extension adds. The probe needs no document, CAM product or
 # setup (64 probes measured at 0.7ms), so it rides every orient.
-_CAPABILITY_SENTINELS = (
-    "steep_and_shallow",      # advanced 3D steep-and-shallow finishing
-    "multiaxis_finishing",    # simultaneous 4/5-axis finishing (multi-axis)
-    "swarf",                  # swarf / flank multi-axis machining (multi-axis)
-    "probe_geometry",         # on-machine probing
-)
-
 _CAPABILITY_NOTE = (
     "observed_generation[strategy] is that strategy's isGenerationAllowed flag, probed with no "
     "document or setup - it describes the INSTALLATION, not the open document. false = the "
@@ -524,24 +517,16 @@ def _sentinel_flags():
     """{sentinel strategy: its isGenerationAllowed}, read through the shared _cam_common seam - the
     same one cam_generate's launch pre-flight excludes on, so the two cannot disagree about one
     strategy."""
-    return {name: _cam_common.strategy_generation_allowed(name) for name in _CAPABILITY_SENTINELS}
-
-
-def _entitled_over(flags):
-    """True / False / None over the sentinel flags: true where every one reads true, false where
-    one reads false, None where any did not read - an unread flag is no entitlement, and a bare
-    all() would fold it into a confident false."""
-    if any(flag is None for flag in flags):
-        return None
-    return all(flags)
+    return {name: _cam_common.strategy_generation_allowed(name)
+            for name in _cam_common.CAPABILITY_SENTINELS}
 
 
 def _capability_block():
-    """One observed_generation entry per sentinel (see _CAPABILITY_SENTINELS), the single entitled
-    verdict over them, plus the note - the flags probed ONCE for both."""
+    """One observed_generation entry per sentinel (_cam_common.CAPABILITY_SENTINELS), the single
+    entitled verdict over them, plus the note - the flags probed ONCE for both."""
     flags = _sentinel_flags()
     return {"observed_generation": flags,
-            "entitled": _entitled_over(flags.values()),
+            "entitled": _cam_common.entitled_over(flags.values()),
             "note": _capability_note()}
 
 

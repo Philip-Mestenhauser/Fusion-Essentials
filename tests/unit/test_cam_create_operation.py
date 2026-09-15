@@ -9,8 +9,8 @@ Plus the guards (no CAM, setup not found, bad strategy, tool ref out of range).
 
 import json
 
-from conftest import (FakeOperation, FakeSetup, FakeTool, _NamedCollection, _Strategy as _Entitled,
-                      load_tool, make_cam, make_cam_parameters)
+from conftest import (FakeCAMFolder, FakeOperation, FakeSetup, FakeTool, _NamedCollection,
+                      _Strategy as _Entitled, load_tool, make_cam, make_cam_parameters)
 
 cco = load_tool("cam_create_operation")
 _cam = load_tool("_cam_common")
@@ -757,6 +757,13 @@ class TestDocumentToolScope:
 # offers 54 strategies, 33 reading isGenerationAllowed true and 21 false.
 
 
+def _force_entitlement(monkeypatch, value):
+    """Patch _cam_common._create_strategy so capability_entitled() reads exactly `value`
+    (True/False/None), independent of a setup's own compatibleStrategies vocabulary - the
+    unconfigured mock factory otherwise reads every sentinel as an auto-truthy Mock."""
+    monkeypatch.setattr(_cam, "_create_strategy", lambda name: _Entitled(value))
+
+
 def _blocked_setup(monkeypatch, extra=()):
     """A setup offering one allowed strategy, one generation-blocked one, and whatever else a test
     adds. Returns the cam."""
@@ -1159,6 +1166,9 @@ class TestStrategyEntitlement:
 
     def test_the_refusal_names_the_entitlement_and_the_slice_that_lists_the_allowed_ones(
             self, monkeypatch):
+        # NOT entitled (the default probe result nothing here overrides is True - a raw Mock
+        # factory reads every unconfigured sentinel as truthy - so this wording needs False forced).
+        _force_entitlement(monkeypatch, False)
         _blocked_setup(monkeypatch)
         res = cco.handler(setup="Setup1", strategy="steep_and_shallow",
                           tool_library_url="u", tool_index=0)
@@ -1166,6 +1176,46 @@ class TestStrategyEntitlement:
         # The extension name the refusal carries.
         assert "Manufacturing Extension" in msg
         assert "cam_get(include=['strategies'], setup='Setup1')" in msg
+
+    def test_an_unread_entitlement_probe_keeps_the_manufacturing_extension_wording(
+            self, monkeypatch):
+        # None (unread) is not a positive entitlement verdict either - only a probe that reads
+        # exactly True switches the wording. Both wordings say "Manufacturing Extension", so the
+        # discriminating pin is the ACTIONABLE remedy clause versus the "reads entitled" fact
+        # clause - a bare "Manufacturing Extension" substring cannot tell them apart, and an
+        # `is not False` mutant would build the entitled sentence from a flag that never read.
+        _force_entitlement(monkeypatch, None)
+        _blocked_setup(monkeypatch)
+        msg = cco.handler(setup="Setup1", strategy="steep_and_shallow",
+                          tool_library_url="u", tool_index=0)["message"]
+        assert "Check this license's Manufacturing Extension" in msg
+        assert "reads entitled" not in msg
+
+    def test_an_entitled_install_names_the_sibling_strategies_instead(self, monkeypatch):
+        # MEASURED: 'lateral_support' read isGenerationAllowed false WITH the Manufacturing
+        # Extension entitled - naming the extension there would point at a license already held.
+        _force_entitlement(monkeypatch, True)
+        _blocked_setup(monkeypatch)
+        res = cco.handler(setup="Setup1", strategy="steep_and_shallow",
+                          tool_library_url="u", tool_index=0)
+        msg = res["message"]
+        # the ACTIONABLE remedy is gone - the extension is still named, but as an observed fact
+        # ("reads entitled"), never as something to go check.
+        assert "Check this license's Manufacturing Extension" not in msg
+        assert "cam_get(include=['strategies']" not in msg
+        assert "reads entitled" in msg
+        assert "reads allowed instead: face." in msg
+
+    def test_the_worst_composed_entitled_refusal_fits_the_wire_budget(self, monkeypatch):
+        _force_entitlement(monkeypatch, True)
+        long_names = tuple(_Strategy(f"additive_individual_strategy_variant_number_{i:02d}",
+                                     allowed=True) for i in range(10))
+        _install(monkeypatch, strategies=(
+            _Strategy("steep_and_shallow", allowed=False, is3DStrategy=True),
+        ) + long_names)
+        msg = cco.handler(setup="Setup1", strategy="steep_and_shallow",
+                          tool_library_url="u", tool_index=0)["message"]
+        assert len(msg) <= 400, (len(msg), msg)
 
     def test_the_refusal_states_the_measured_silent_failure_it_replaces(self, monkeypatch):
         # the whole value of the guard: a caller who does not know that a blocked create SUCCEEDS
@@ -1534,6 +1584,58 @@ class TestName:
                                    tool_index=0, name="Rough Pocket"))
         assert out["operation"] == "Op1"
         assert "Rough Pocket" in out["rename_warning"] and "did not take" in out["rename_warning"]
+
+
+class TestOwnAutonameDedupe:
+    """MEASURED: cam_create_operation(strategy='face', name='Face1') on an EMPTY setup landed
+    'Face1 (2)' - Fusion mints 'Face1' as its own auto-name for the first face operation and
+    dedupes the request against it, with no OTHER node of any kind carrying the name to blame.
+    _own_autoname_dedupe is the pure decision the rename_warning runs through either landing path
+    (name-on-input or the post-add apply_rename fallback); it walks the WHOLE CAM tree for the
+    cause-check, since operations.add dedupes document-wide against everything it lands beside
+    (a folder or pattern included), not operations alone - the pre-add refusal stays operation-
+    scoped (operation_name_clash), matching what that dedupe actually keys on."""
+
+    def test_a_landed_dedupe_with_no_carrier_anywhere_names_the_cause(self):
+        cam = make_cam(FakeSetup("Setup1"))
+        warning = cco._own_autoname_dedupe(
+            cam, "created, but the requested name 'Face1' did not take - it is named 'Face1 (2)'.",
+            "Face1 (2)", "Face1", "face")
+        assert "Fusion's own auto-name" in warning and "'face' operation" in warning
+        assert "omitting 'name'" in warning and "Face1 (2)" in warning
+
+    def test_a_dedupe_against_an_existing_operation_twin_keeps_todays_text(self):
+        cam = make_cam(FakeSetup("Setup1", [FakeOperation("Face1")]))
+        today = "created, but the requested name 'Face1' did not take - it is named 'Face1 (2)'."
+        warning = cco._own_autoname_dedupe(cam, today, "Face1 (2)", "Face1", "face")
+        assert warning == today
+
+    def test_a_folder_of_that_name_ALSO_keeps_todays_text(self):
+        # the pre-add refusal (operation_name_clash) only checks OPERATIONS, but the CAUSE-check
+        # must walk every kind - a folder named 'Face1' is an equally real carrier operations.add's
+        # dedupe could be reacting to, and blaming Fusion's auto-name here would be a guess.
+        cam = make_cam(FakeSetup("Setup1", folders=[FakeCAMFolder("Face1")]))
+        today = "created, but the requested name 'Face1' did not take - it is named 'Face1 (2)'."
+        warning = cco._own_autoname_dedupe(cam, today, "Face1 (2)", "Face1", "face")
+        assert warning == today
+
+    def test_a_landed_name_that_is_not_the_plain_dedupe_shape_is_untouched(self):
+        # a platform '<name>1' dedupe (measured on a different shape) is not the '(2)' spelling
+        # this cause is named for.
+        cam = make_cam(FakeSetup("Setup1"))
+        today = "created, but the requested name 'Bore' did not take - it is named 'Bore1'."
+        assert cco._own_autoname_dedupe(cam, today, "Bore1", "Bore", "bore") == today
+
+    def test_no_warning_at_all_stays_none(self):
+        cam = make_cam(FakeSetup("Setup1"))
+        assert cco._own_autoname_dedupe(cam, None, "Face1", "Face1", "face") is None
+
+    def test_the_worst_composed_cause_message_fits_the_wire_budget(self):
+        cam = make_cam(FakeSetup("Setup1"))
+        want = "a_fairly_long_requested_operation_name_50chars_x"
+        warning = cco._own_autoname_dedupe(
+            cam, "some warning", f"{want} (2)", want, "additive_individual_strategies")
+        assert len(warning) <= 400, (len(warning), warning)
 
 
 class _ContainerOperations(_Operations):

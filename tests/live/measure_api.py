@@ -5025,6 +5025,30 @@ ROWS = [
 """,
     },
     {
+        "id": "print-setting-query-facets",
+        "claim": ("PrintSettingQuery.vendor set BEFORE execute() narrows what a Fusion360-location "
+                  "query returns against the bare listing: fewer hits, every one of them inside "
+                  "the bare set by id (PrintSetting itself carries no vendor member to read back "
+                  "per row, confirmed by shape-cam-print-setting, so the id set is the check)"),
+        "encoded_in": "_cam_common.print_setting_catalog and cam_get's print_settings slice",
+        "read_only": True,
+        "body": """
+    lm = adsk.cam.CAMManager.get().libraryManager
+    lib = lm.printSettingLibrary
+    loc = adsk.cam.LibraryLocations.Fusion360LibraryLocation
+    bare = list(lib.createQuery(loc).execute() or [])
+    vendor_query = lib.createQuery(loc)
+    vendor_query.vendor = "Autodesk"
+    narrowed = list(vendor_query.execute() or [])
+    bare_ids = set(s.id for s in bare)
+    narrowed_ids = set(s.id for s in narrowed)
+    subset = narrowed_ids <= bare_ids
+    emit(len(bare) > 0 and len(narrowed) < len(bare) and subset,
+         "print-setting-query-facets: bare=" + str(len(bare)) + " vendor='Autodesk'-narrowed="
+         + str(len(narrowed)) + " subset_of_bare=" + str(subset))
+""",
+    },
+    {
         "id": "shape-dump-cam-job-world",
         "claim": "Five more CAM types dump non-empty attribute sets off the harness world: cam.setups is a Setups, setups.createInput(MillingOperation) a SetupInput, the bundled 'Milling Tools (Metric)' library's first entry a Tool, the first operation's parameters a CAMParameters whose item(0) is a CAMParameter, and the Fusion360 machine library's first entry a Machine. The dumped Machine is the LIBRARY's; what MeasureSetup's own machine property answered is reported in the detail and gates nothing, because the harness setup is built without a machine",
         "encoded_in": "tests/fakes/cam.py - the shared fakes for these CAM types",

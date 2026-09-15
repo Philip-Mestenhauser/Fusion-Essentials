@@ -12,11 +12,19 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, read_flag, safe
-from ._cam_common import get_cam, resolve_cam_node, operation_nodes, operations_under, find_setup
+from ._cam_common import (get_cam, resolve_cam_node, operation_nodes, operations_under, find_setup,
+                          is_additive_setup, owning_setup)
 
 app = adsk.core.Application.get()
 
 _ACTIONS = ("show", "hide", "isolate", "show_folder", "hide_all", "list")
+
+_NO_TOOLPATH_WARNING = ("This operation has no generated toolpath yet - nothing to display. "
+                        "Generate it first (cam_generate).")
+
+# An additive build op never has a toolpath to generate - nothing here regenerates it.
+_ADDITIVE_NO_TOOLPATH = ("This operation carries no toolpath by construction - "
+                         "cam_get(include=['parameters'], operation=...) reads what it carries.")
 
 
 def _set_bulb(o, on):
@@ -256,9 +264,10 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
         return error(f"isLightBulbOn did not take for '{name}' - it reads back {_bulb_word(now)}.")
     if not safe(lambda: o.hasToolpath):
         app.activeViewport.refresh()
+        owner = owning_setup(onode)
+        additive = owner is not None and is_additive_setup(owner)
         out = {"action": action, "operation": name,
-        "warning": "This operation has no generated toolpath yet - nothing to display. "
-        "Generate it first (cam_generate).",
+        "warning": _ADDITIVE_NO_TOOLPATH if additive else _NO_TOOLPATH_WARNING,
         "has_toolpath": False}
         # an isolate that reached here still ran its mass-hide, so its read-backs are disclosed on
         # this arm too rather than dropped with the early return

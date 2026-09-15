@@ -12,10 +12,11 @@ import adsk.fusion
 from ._common import (CM_TO_UNIT, counted, measured, ok, error, iter_collection, safe, told_apart)
 from ._cam_common import (_MANUAL_NC_STRATEGY, _SETUP_BLOCKER_REMEDY, _segment, _setup_node,
                           _walk_children, blocked_setup_records, clamp_rows, counts_as_warning,
-                          first_line, get_cam, is_empty_toolpath, machine_label, machine_limits,
-                          machine_spindle_max, op_primary_state, op_state_facts, operations_under,
-                          ready_verdict, resolve_cam_node, setup_blockers, setups, spindle_check,
-                          stock_mode_name, time_reading, toolpath_present_tally, validity_basis)
+                          first_line, get_cam, is_additive_setup, is_empty_toolpath, machine_label,
+                          machine_limits, machine_spindle_max, op_primary_state, op_state_facts,
+                          operations_under, ready_verdict, resolve_cam_node, setup_blockers, setups,
+                          spindle_check, stock_mode_name, time_reading, toolpath_present_tally,
+                          validity_basis)
 
 MAP_BLURB = (
     "the per-slice READ cores behind cam_get(include=[...]) - get_cam_setups_handler, "
@@ -262,9 +263,10 @@ _GENERATE_REQUIRES = {"tool": "cam_generate", "workspace": "Manufacture"}
 _UNREAD_REQUIRES = {"tool": "cam_get", "workspace": "Manufacture"}
 
 
-def _op_blocked_by(summary):
+def _op_blocked_by(summary, additive=False):
     """(blocked_by, requires) for one op - reason codes (present-and-empty when nothing blocks),
-    read off the row's own state bucket, and the tool/workspace that unblocks them."""
+    read off the row's own state bucket, and the tool/workspace that unblocks them. `additive`
+    excludes tool_unselected the way _MANUAL_NC_STRATEGY does - neither takes a cutting tool."""
     if summary.get("state") == "suppressed":
         return [], None                    # suppressed = excluded from posting; blocks nothing
     blocked = []
@@ -276,7 +278,8 @@ def _op_blocked_by(summary):
     if summary.get("state") == "nonfinite":
         # It reads IsValid with a toolpath, so every other flag on this row says it is postable.
         blocked.append("toolpath_nonfinite")
-    if summary.get("tool") is None and summary.get("strategy") != _MANUAL_NC_STRATEGY:
+    if (summary.get("tool") is None and summary.get("strategy") != _MANUAL_NC_STRATEGY
+            and not additive):
         blocked.append("tool_unselected")  # real refusal: "Toolpath requires tool to be selected"
     if summary.get("is_out_of_date"):
         blocked.append("toolpath_out_of_date")
@@ -484,6 +487,7 @@ def _operations_in(setup_obj, machine_max=None, cam=None) -> tuple:
     means INCOMPLETE (cap hit or the walk raised)."""
     ops = []
     truncated = False
+    additive = is_additive_setup(setup_obj)
     root = _setup_node(setup_obj)
     nodes = [root]
     try:
@@ -505,7 +509,7 @@ def _operations_in(setup_obj, machine_max=None, cam=None) -> tuple:
             operation = adsk.cam.Operation.cast(node.obj)
             if not operation:
                 continue
-            ops.append(_operation_summary(operation, machine_max, node, cam))
+            ops.append(_operation_summary(operation, machine_max, node, cam, additive=additive))
     except Exception:
         # A row read that dies left an INCOMPLETE list - flagged, never passed off as the full read.
         truncated = True
@@ -526,7 +530,7 @@ def _parent_key(node):
     return (key, _segment(node.parent.name)) if key else (None, None)
 
 
-def _operation_summary(op, machine_max=None, node=None, cam=None) -> dict:
+def _operation_summary(op, machine_max=None, node=None, cam=None, additive=False) -> dict:
     tool_desc = None
     try:
         t = op.tool
@@ -554,8 +558,9 @@ def _operation_summary(op, machine_max=None, node=None, cam=None) -> dict:
     "has_warning": has_warn,
     "has_error": has_err,
     }
-    # An op that generated EMPTY still reads state 'valid' beside has_toolpath true.
-    if is_empty_toolpath(facts):
+    # An op that generated EMPTY still reads state 'valid' beside has_toolpath true. An additive
+    # build op carries no toolpath by construction and joins the manual-NC exclusion instead.
+    if is_empty_toolpath(facts, additive=additive):
         summary["empty_toolpath"] = True
     if has_warn:
         summary["warning"] = (safe(lambda: op.warning) or "").strip()
@@ -573,7 +578,7 @@ def _operation_summary(op, machine_max=None, node=None, cam=None) -> dict:
             summary["invalidation_param_changes"] = param_changes
         if machine_changed:
             summary["machine_changed"] = True
-    blocked, requires = _op_blocked_by(summary)
+    blocked, requires = _op_blocked_by(summary, additive=additive)
     summary["blocked_by"] = blocked
     if requires:
         summary["requires"] = requires
@@ -588,6 +593,10 @@ def _operation_summary(op, machine_max=None, node=None, cam=None) -> dict:
     # A suppressed op does not post, so its spindle comparison is withheld rather than answered.
     if summary["state"] == "suppressed":
         summary["spindle_check"] = _SUPPRESSED_NOT_COMPARED
+        return summary
+    if additive:
+        # An additive operation takes no cutting tool and no spindle by design - the comparison is
+        # not made at all, rather than answered unreadable.
         return summary
     over, requested, marker = spindle_check(op, machine_max)
     summary["spindle_over_machine_max"] = over
@@ -770,12 +779,15 @@ _TIME_NOTE = (
     "operations_time_summed rows.")
 
 
-def _op_time_rows(cam, ops, args, factor) -> tuple:
-    """(rows, truncated, nonfinite ops) - one getMachiningTime call per operation carrying a valid
-    toolpath, distances scaled out of CM; an EMPTY-toolpath op is named rather than timed, and one
-    whose reading is not a number is marked rather than published as a figure."""
+def _op_time_rows(cam, ops, args, factor, additive=False) -> tuple:
+    """(rows, truncated, held-out ops) - one getMachiningTime call per operation carrying a valid
+    toolpath; EMPTY is named rather than timed, NONFINITE is marked rather than published, and an
+    ADDITIVE setup's ops are held out entirely - has_toolpath reads false by construction and
+    getMachiningTime raises on such an operation."""
     rows = []
     unreadable = []
+    if additive:
+        return rows, False, list(ops)
     for op in ops:
         facts = op_state_facts(op)
         if not (is_empty_toolpath(facts) or safe(lambda op=op: op.isToolpathValid, False)):
@@ -815,11 +827,12 @@ _TOTAL_UNAVAILABLE_NOTE = (
     "that setup is out of total_machining_time_seconds, and total_excludes_setups names it.")
 
 
-def _op_time_block(cam, ops, args, factor) -> tuple:
-    """(the per-operation half of a setup row, the operations whose reading is not a number): the
+def _op_time_block(cam, ops, args, factor, additive=False) -> tuple:
+    """(the per-operation half of a setup row, the operations held out of the collection): the
     rows, their sum and how many were summed. This sum is NOT the setup total - that is one call
-    over the whole collection - and a nonfinite row carries no figure, so it enters neither."""
-    rows, truncated, unreadable = _op_time_rows(cam, ops, args, factor)
+    over the whole collection - and a nonfinite or additive op carries no figure, so it enters
+    neither."""
+    rows, truncated, unreadable = _op_time_rows(cam, ops, args, factor, additive=additive)
     timed = [r["machining_time_seconds"] for r in rows
              if isinstance(r.get("machining_time_seconds"), (int, float))]
     block = {"operations": rows, "operations_time_sum_seconds": round(sum(timed), 1),
@@ -876,6 +889,7 @@ def get_machining_time_handler(setup: str = "", units: str = "mm") -> dict:
     grand = 0.0
     for label, obj in targets:
         ops, suppressed = _timeable_ops(obj)
+        additive = is_additive_setup(obj)
         # getMachiningTime needs at least one VALID toolpath in the target. The failure raises
         # catchably here, but through sys_execute_script it takes the whole invocation down, so
         # the precondition is checked before the call.
@@ -885,10 +899,10 @@ def get_machining_time_handler(setup: str = "", units: str = "mm") -> dict:
                          "out-of-date or ungenerated. Run cam_generate (in the Manufacture "
                          "workspace), then retry."})
             continue
-        # The per-operation pass runs FIRST: an operation whose own reading is not a number
-        # saturates the whole-collection figure too (measured), so it is held out of the collection
-        # and named instead.
-        block, unreadable = _op_time_block(cam, ops, args, factor)
+        # The per-operation pass runs FIRST: a NaN reading saturates the whole-collection figure
+        # too (measured), so it is held out and named instead - an ADDITIVE setup's ops the same
+        # way, never reaching either getMachiningTime call.
+        block, unreadable = _op_time_block(cam, ops, args, factor, additive=additive)
         timed_ops = [op for op in ops if not any(op is bad for bad in unreadable)]
         held_out = [safe(lambda o=o: o.name) for o in unreadable]
         if not timed_ops:
@@ -1003,7 +1017,10 @@ def _program_held_ops(nc, cam=None) -> dict:
         if op is None:
             continue
         facts = op_state_facts(op, cam)
-        if is_empty_toolpath(facts):
+        # A held list can draw from several setups, so each op's OWN owner decides the exclusion -
+        # not the program's.
+        additive = is_additive_setup(safe(lambda op=op: op.parentSetup))
+        if is_empty_toolpath(facts, additive=additive):
             empty_count += 1
             empty_rows.append((facts["name"], _held_row_label(facts["name"], position)))
     out["empty_toolpath_count"] = empty_count

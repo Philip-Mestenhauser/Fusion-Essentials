@@ -63,6 +63,12 @@ _DENYLIST = {
     # launch pre-flight come to disagree about one strategy.
     "create_strategy": ("_cam_common", "def"),
     "strategy_generation_allowed": ("_cam_common", "def"),
+    # The ONE sentinel-strategy vocabulary and the ONE True-only-if-every-flag-read-true collapse
+    # over it: workspace_orient's capability block and cam_create_operation's blocked-strategy
+    # refusal both judge one install's Manufacturing Extension entitlement through them, so a second
+    # copy is how the two come to disagree about whether this install is entitled.
+    "CAPABILITY_SENTINELS": ("_cam_common", "assign"),
+    "entitled_over": ("_cam_common", "def"),
     "validity_basis": ("_cam_common", "def"),
     # The ONE 'max_results' clamp every capped read runs under (CAM and non-CAM alike): one home so
     # the not-a-number fallback and the 1..ceiling hold cannot be right in one read and stale in the

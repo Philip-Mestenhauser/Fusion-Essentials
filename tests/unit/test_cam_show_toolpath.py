@@ -439,6 +439,27 @@ class TestToggleCheckedBeforeToolpath:
         assert out["has_toolpath"] is False and "no generated toolpath" in out["warning"]
         assert sa._activate_calls == 0 and sb.isActive is True
 
+    def test_a_pathless_additive_op_warns_by_construction_not_generate_it_first(self):
+        # an additive build op never has a toolpath to generate - "Generate it first" would send
+        # an agent to run a step that changes nothing.
+        import adsk.cam
+        build = FakeOp("Body Preset1", has_toolpath=False)
+        additive = FakeSetup("Build", [build], is_active=True,
+                             operation_type=adsk.cam.OperationTypes.AdditiveOperation)
+        _install([additive])
+        out = _payload(st.handler(action="show", operation="Body Preset1"))
+        assert out["has_toolpath"] is False
+        assert "by construction" in out["warning"]
+        assert "Generate it first" not in out["warning"]
+
+    def test_a_pathless_milling_op_keeps_the_generate_it_first_warning(self):
+        # the milling arm of the SAME branch must stay untouched - the exclusion is additive-only.
+        drill = FakeOp("Drill", has_toolpath=False)
+        milling = FakeSetup("Mill", [drill], is_active=True)
+        _install([milling])
+        out = _payload(st.handler(action="show", operation="Drill"))
+        assert "Generate it first" in out["warning"] and "by construction" not in out["warning"]
+
 
 class TestActivateOwningSetup:
     def test_no_setup_name_is_a_silent_noop(self):

@@ -1204,6 +1204,38 @@ def _settings_listed(technology, wanted):
     return check
 
 
+def _facet_narrowed(bare_count):
+    """cam_get(include=['print_settings'], vendor=...): a smaller, non-empty listing than the
+    unfaceted SLM read named in `bare_count` - the vendor facet narrows the query server-side
+    (measured live: vendor='Autodesk' 400 -> 17), proven again here against the real catalog."""
+    def check(p):
+        count = (p.get("print_settings") or {}).get("count")
+        return _measured("the vendor facet narrows the SLM listing without emptying it",
+                         {"bare": bare_count, "narrowed": count},
+                         _num(count) and _num(bare_count) and 0 < count < bare_count)
+    return check
+
+
+def _additive_no_tool_blockers(setup, op_name):
+    """cam_get(include=['operations']): an ADDITIVE row never carries tool_unselected or a
+    spindle_check, and the setup's own readiness names no tool remedy - additive operations take
+    no cutting tool and no spindle by design."""
+    def check(p):
+        rec = next((r for r in ((p.get("operations") or {}).get("setups") or [])
+                    if r.get("setup") == setup), None)
+        rows = (rec or {}).get("operations") or []
+        row = next((r for r in rows if r.get("name") == op_name), None)
+        readiness = ((rec or {}).get("summary") or {}).get("readiness") or ""
+        return _measured(f"'{op_name}' in '{setup}' carries no tool_unselected or spindle_check",
+                         {"blocked_by": (row or {}).get("blocked_by"),
+                          "spindle_check": (row or {}).get("spindle_check"),
+                          "readiness": readiness[:160]},
+                         bool(row) and "tool_unselected" not in (row.get("blocked_by") or [])
+                         and "spindle_check" not in row
+                         and "assigns a tool" not in readiness)
+    return check
+
+
 def _twins_told_apart(technology, name, count):
     """cam_get(include=['print_settings']) over the technology whose shipped settings COLLIDE: the
     listing carries `count` rows of one name, marks every one name_shared, and separates them on
@@ -1327,7 +1359,13 @@ _HUB_ADDITIVE = [
      _printers_listed("EOS"), None),
     ("cam_get", {"include": ["print_settings"], "technology": "SLM",
                  "max_results": _ADD_SETTING_CAP},
-     _settings_listed("SLM", _ADD_SETTING), None),
+     _settings_listed("SLM", _ADD_SETTING),
+     ("slm_count", _recall("slm_count", lambda p: (p.get("print_settings") or {}).get("count")))),
+    # PrintSettingQuery.vendor, set before execute(), narrows the catalog server-side (measured
+    # live) - this facet call is read against the SLM baseline the row above just recalled.
+    ("cam_get", {"include": ["print_settings"], "technology": "SLM", "vendor": "Autodesk",
+                 "max_results": _ADD_SETTING_CAP},
+     lambda p: _facet_narrowed(_RECALL["slm_count"])(p), None),
     # THE COLLIDING PAIR. Measured on the shipped library: two FORMLABS_SLS settings read the same
     # name, technology, id AND location, so only the description separates them - the listing has
     # to show both, and the name cannot resolve to either.
@@ -1380,6 +1418,11 @@ _HUB_ADDITIVE = [
     ("cam_get", {"include": ["operations", "default"], "setup": _ADD_SETUP},
      lambda p: _container_rows(_ADD_SETUP, (_RECALL["add_orient_op"],
                                             _RECALL["add_support_op"]))(p), None),
+    # An additive row never carries tool_unselected or a spindle_check, and the setup's own
+    # readiness never sends it to cam_edit_operation for a tool - additive rows take neither by
+    # construction, the manual-NC exclusion's additive sibling.
+    ("cam_get", {"include": ["operations"], "setup": _ADD_SETUP},
+     lambda p: _additive_no_tool_blockers(_ADD_SETUP, _RECALL["add_orient_op"])(p), None),
     # and the address that reaches one: the support operation deleted BY ITS OWN NAME.
     ("cam_delete",
      lambda c: {"entity": _ctx_get(c, "add_support_op", "the support operation")},
