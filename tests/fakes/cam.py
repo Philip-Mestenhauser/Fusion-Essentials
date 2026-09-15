@@ -145,7 +145,9 @@ class FakeSetup(FakeCAMFolder):
     `machine=None` is the measured "no machine assigned" answer (what setup_blockers calls
     no_machine_selected), and `has_error=False` the plain no-fault answer live_readiness reads.
     `operation_type` is unset the same way; pass adsk.cam.OperationTypes.AdditiveOperation for the
-    additive exclusions (is_additive_setup)."""
+    additive exclusions (is_additive_setup). `models` is unset the same way too - a setup whose
+    Setup.models does not read (measured: it can raise) stays a testable state; pass a list of
+    objects each carrying `entityToken` to model the bodies this setup's stock is defined against."""
 
     _UNSET = object()
 
@@ -153,7 +155,7 @@ class FakeSetup(FakeCAMFolder):
 
     def __init__(self, name, ops=(), folders=(), patterns=(), others=(), parameters=None,
                  is_active=False, activate_ok=True, activate_lies=False, machine=_UNSET,
-                 has_error=_UNSET, error=_UNSET, operation_type=_UNSET):
+                 has_error=_UNSET, error=_UNSET, operation_type=_UNSET, models=_UNSET):
         super().__init__(name, ops=ops, folders=folders, patterns=patterns, others=others)
         self.parameters = parameters
         if machine is not FakeSetup._UNSET:
@@ -164,6 +166,8 @@ class FakeSetup(FakeCAMFolder):
             self.error = error
         if operation_type is not FakeSetup._UNSET:
             self.operationType = operation_type
+        if models is not FakeSetup._UNSET:
+            self.models = models
         self.isActive = is_active
         self._activate_ok = activate_ok
         self._activate_lies = activate_lies

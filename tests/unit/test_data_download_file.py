@@ -276,6 +276,13 @@ class TestFailureIsNeverASuccess:
         assert target.read_bytes() == b"previous"
         assert _staging_dirs(tmp_path) == []
 
+    def test_a_false_return_remedy_names_both_completion_signals(self, resolves, tmp_path):
+        resolves(_cloud_file(returns=False))
+        msg = error_message(
+            ddf.handler(file="urn:lin:AAA", destination_folder=str(tmp_path)))
+        assert "state.is_complete" in msg
+        assert "data_get_upload_status" in msg
+
     def test_a_raising_download_after_a_partial_write_keeps_the_prior_file(
             self, resolves, tmp_path):
         target = tmp_path / "probe_note.txt"

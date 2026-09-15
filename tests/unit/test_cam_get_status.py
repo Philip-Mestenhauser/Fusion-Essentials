@@ -11,6 +11,7 @@ handle. ``_live_op_tally`` is pinned in test_tier2_misc.py.
 import json
 from types import SimpleNamespace
 
+import adsk.cam
 import pytest
 
 from conftest import FakeCAMParameter, FakeCAMParameters, FakeMachine, load_tool, make_cam
@@ -148,6 +149,14 @@ class TestCollectOpHealth:
         ops = [_op("parked", has_toolpath=False, toolpath_valid=False, suppressed=True, state=2)]
         assert st._collect_op_health(ops)["empty"] == []
 
+    def test_an_additive_op_with_no_toolpath_is_not_empty(self):
+        # An additive build op carries no toolpath BY CONSTRUCTION - the same carve-out
+        # cam_get(include=['operations']) applies, read off THIS op's own setup.
+        op = _op("Body Preset1", has_toolpath=False)
+        op.parentSetup = SharedSetup(
+            "Build", operation_type=adsk.cam.OperationTypes.AdditiveOperation)
+        assert st._collect_op_health([op])["empty"] == []
+
     def test_warning_text_stripped(self):
         out = st._collect_op_health([_op("a", warning="  padded  ")])
         assert out["warnings"][0]["warning"] == "padded"
@@ -227,6 +236,32 @@ class TestRailTriageRidesTheEmptyToolpathDisclosure:
         assert "empty_rail_toolpaths" not in payload
 
 
+class TestEmptyTriageRidesTheEmptyToolpathDisclosure:
+    """The general empty-toolpath triage fires only for a row rail_triage does not already cover -
+    the two never double up on one operation, which is what keeps their combined note in budget."""
+
+    def _attach(self, monkeypatch, empty, empty_rail):
+        monkeypatch.setattr(st, "_collect_op_health",
+                            lambda ops, labels=None: {"warnings": [], "errors": [],
+                                                      "empty": empty, "empty_rail": empty_rail,
+                                                      "nonfinite": []})
+        payload = {}
+        return payload, st._attach_op_health(payload, [], "document")
+
+    def test_a_non_rail_empty_toolpath_gets_the_general_triage(self, monkeypatch):
+        payload, note = self._attach(monkeypatch, ["Contour1"], [])
+        assert "empty_triage" in note
+        assert "cam_generate(target=<op>)" in payload["empty_triage"]
+
+    def test_an_empty_toolpath_fully_covered_by_rail_triage_gets_no_second_pointer(self, monkeypatch):
+        payload, note = self._attach(monkeypatch, ["Swarf1"], ["Swarf1"])
+        assert "empty_triage" not in payload and "empty_triage" not in note
+
+    def test_no_empty_toolpath_carries_no_general_triage(self, monkeypatch):
+        payload, note = self._attach(monkeypatch, [], [])
+        assert "empty_triage" not in payload and "empty_triage" not in note
+
+
 class TestOrientationTriageRidesTheErrorItTriages:
     """MEASURED on a milling setup whose Z is the world Z, drilling a hole across it: the generate
     errors 'Cylindrical face not in tool orientation!', binding Z to that hole's face trades it for
@@ -277,6 +312,52 @@ class TestOrientationTriageRidesTheErrorItTriages:
         payload, _note = self._attach(monkeypatch, [
             {"name": "Swarf1", "error": "Tool orientation could not be computed for this pass."}])
         assert "orientation_triage" not in payload
+
+
+class TestLeadCollisionTriageRidesTheWarningItTriages:
+    """MEASURED on a milling setup (a vise-clamped part): a silhouette contour2d generated VALID
+    but EMPTY with this exact platform warning, and machined clean once doLeadIn and doLeadOut
+    were both set false before the launch - the leads, not the contour, were colliding."""
+
+    def _attach(self, monkeypatch, warnings):
+        monkeypatch.setattr(st, "_collect_op_health",
+                            lambda ops, labels=None: {"warnings": warnings, "errors": [],
+                                                      "empty": [], "empty_rail": [], "nonfinite": []})
+        payload = {}
+        return payload, st._attach_op_health(payload, [], "document")
+
+    def test_the_lead_collision_warning_publishes_the_triage_and_the_note_names_it(
+            self, monkeypatch):
+        payload, note = self._attach(monkeypatch, [
+            {"name": "Contour1",
+             "warning": "A contour was not machined because the given lead parameters would "
+                        "cause a collision!"}])
+        assert "lead_collision_triage" in note
+        assert payload["operations_with_lead_collisions"] == ["Contour1"]
+        triage = payload["lead_collision_triage"]
+        assert "doLeadIn" in triage and "doLeadOut" in triage and "cam_edit_operation" in triage
+        assert len(triage) <= 400
+
+    def test_another_warning_carries_no_lead_collision_triage(self, monkeypatch):
+        payload, note = self._attach(monkeypatch, [
+            {"name": "Rough1", "warning": "Chip load is high."}])
+        assert "lead_collision_triage" not in payload and "lead_collision_triage" not in note
+
+    def test_the_worst_case_combined_note_holds_the_wire_budget(self, monkeypatch):
+        # Realistic co-occurrence: a lead collision (warning) alongside an orientation fault
+        # (error) - the two triage pointers a document can carry at once from these classifiers.
+        monkeypatch.setattr(st, "_collect_op_health",
+                            lambda ops, labels=None: {
+                                "warnings": [{"name": "Contour1",
+                                             "warning": "lead parameters would cause a "
+                                                        "collision"}],
+                                "errors": [{"name": "Drill1",
+                                           "error": "Cylindrical face not in tool orientation!"}],
+                                "empty": [], "empty_rail": [], "nonfinite": []})
+        payload = {}
+        note = st._attach_op_health(payload, [], "document")
+        assert "lead_collision_triage" in note and "orientation_triage" in note
+        assert len(note) <= 400, len(note)
 
 
 # ── status_handler: guards, handle resolution, clamp, stall warning ─────────────────────────────────

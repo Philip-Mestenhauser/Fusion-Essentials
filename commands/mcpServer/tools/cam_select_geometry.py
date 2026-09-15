@@ -203,6 +203,8 @@ _KNOB_SELECTIONS = {"is_open": (_CHAIN,), "reverted": (_CHAIN,),
                     "surface_target": (_SURFACES,),
                     "machine_over_holes": (_SURFACE_GROUP,),
                     "machine_mode": (_SURFACE_GROUP,),
+                    "radial_offset": (_SURFACE_GROUP,), "axial_offset": (_SURFACE_GROUP,),
+                    "combined_offset": (_SURFACE_GROUP,),
                     "stock_faces": (_PROBE,),
                     # 'component' SCOPES the by-name geometry input a kind reads; on a handle-driven
                     # kind it narrows nothing, so it is refused there like any absent property.
@@ -1096,7 +1098,14 @@ def _restore_groups(pv, previous, entities, wanted):
             else _GROUP_NOT_RESTORED.format(held=held))
 
 
-def _apply_surface_group(op, faces, over_holes, mode_key, extra):
+# radialOffset/axialOffset/combinedOffset: plain floats with no documented unit. MEASURED: stored
+# in MILLIMETRES regardless of the document's display units, unlike an operation parameter (cm).
+_OFFSET_KNOBS = (("radial_offset", "radialOffset"), ("axial_offset", "axialOffset"),
+                 ("combined_offset", "combinedOffset"))
+_OFFSET_KNOBS_KEYS = tuple(k for k, _prop in _OFFSET_KNOBS)
+
+
+def _apply_surface_group(op, faces, over_holes, mode_key, extra, offsets, units_key):
     """(count, None) or (None, error) - put `faces` on a NEW surface group of the operation and read
     the applied collection back. Nothing reaches the operation until applyMachineAvoidGroups, so
     every refusal above it leaves the operation as it was found."""
@@ -1134,12 +1143,22 @@ def _apply_surface_group(op, faces, over_holes, mode_key, extra):
         except Exception as e:
             return None, (f"machine_mode is not offered on this group: {e}. Nothing was applied - "
                           "drop machine_mode and retry.")
+    mm_per_unit = scale(units_key) * 10        # offsets are stored in mm - see _OFFSET_KNOBS
+    for key, prop in _OFFSET_KNOBS:
+        value = offsets.get(key)
+        if value is None:
+            continue
+        try:
+            setattr(group, prop, float(value) * mm_per_unit)
+        except Exception as e:
+            return None, (f"{key} is not offered on this group: {e}. Nothing was applied - drop "
+                          f"{key} and retry.")
     try:
         pv.applyMachineAvoidGroups(groups)     # MUTATION
     except Exception as e:
         return None, (f"applyMachineAvoidGroups failed: {e}. Nothing was applied - drop "
-                      "machine_mode, then machine_over_holes, and retry to find which of them "
-                      "this strategy refuses at the commit.")
+                      "machine_mode, machine_over_holes and the offsets one at a time to find "
+                      "which this strategy refuses at the commit.")
     applied = safe(lambda: pv.getMachineAvoidGroups())
     after = safe(lambda: applied.count) if applied is not None else None
     if after is None:
@@ -1153,7 +1172,7 @@ def _apply_surface_group(op, faces, over_holes, mode_key, extra):
                           + _restore_groups(pv, previous, None, len(faces)))
         return None, (f"The surface group did not land - the operation held {before} group(s) "
                       f"before applyMachineAvoidGroups and reads {after} after.")
-    rec = group_record(safe(lambda: applied.item(after - 1)))
+    rec = group_record(safe(lambda: applied.item(after - 1)), units_key)
     if rec is None or rec["entities"] is None:
         return None, ("The applied surface group would not read back its faces, so the selection is "
                       "UNCONFIRMED." + _restore_groups(pv, previous, None, len(faces)))
@@ -1169,6 +1188,12 @@ def _apply_surface_group(op, faces, over_holes, mode_key, extra):
         return None, (f"The surface group reads machine_mode {rec['machine_mode']!r} after "
                       f"'{mode_key}' was set - it did not take."
                       + _restore_groups(pv, previous, rec["entities"], len(faces)))
+    for key, _prop in _OFFSET_KNOBS:
+        value = offsets.get(key)
+        if value is not None and rec[key] != round(float(value), 6):
+            return None, (f"The surface group reads {key} {rec[key]!r} after {value!r} was set - "
+                          "it did not take."
+                          + _restore_groups(pv, previous, rec["entities"], len(faces)))
     extra["surface_group"] = rec
     extra["surface_group_count"] = after
     return rec["entities"], None
@@ -1309,6 +1334,8 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
             min_diameter: float = None, max_diameter: float = None,
             surface_target: str = None,
             machine_over_holes: bool = None, machine_mode: str = None,
+            radial_offset: float = None, axial_offset: float = None,
+            combined_offset: float = None,
             stock_faces=None,
             top_mode: str = None, top_offset: str = None,
             bottom_mode: str = None, bottom_offset: str = None,
@@ -1338,6 +1365,8 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
     knobs = {"is_open": is_open, "reverted": reverted, "pocket_filter": pocket_filter or None,
              "min_diameter": min_diameter, "max_diameter": max_diameter,
              "machine_over_holes": machine_over_holes, "stock_faces": stock_faces or None,
+             "radial_offset": radial_offset, "axial_offset": axial_offset,
+             "combined_offset": combined_offset,
              "component": scope or None}
     for kind, raw in ((LOOP_TYPE, loop_type), (SIDE_TYPE, side_type),
                       (SURFACE_TARGET, surface_target), (MACHINE_MODE, machine_mode)):
@@ -1446,8 +1475,9 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
     # engage below appends to the same list. Absent means each request was written as it was sent.
     extra = {"quoted": wrapped} if wrapped else {}
     if selection == _SURFACE_GROUP:
+        offsets = {k: knobs.get(k) for k in _OFFSET_KNOBS_KEYS}
         count, aerr = _apply_surface_group(op, entities, machine_over_holes,
-                                           knobs.get("machine_mode"), extra)
+                                           knobs.get("machine_mode"), extra, offsets, units_key)
         record = None if aerr else {"selections": count}
     elif stock_names:
         count, aerr = _apply_probe_stock(op, stock_names, extra, owning_setup(node))
@@ -1547,6 +1577,9 @@ tool = (
     .add_input_property("machine_over_holes", {"type": "boolean",
             "description": "surface_group: cut across the group's holes/pockets."})
     .add_input_property(*MACHINE_MODE.as_property())
+    .add_input_property("radial_offset", {"type": "number"})
+    .add_input_property("axial_offset", {"type": "number"})
+    .add_input_property("combined_offset", {"type": "number"})
     .add_input_property("stock_faces", {"type": "array",
             "items": {"type": "string", "enum": list(_STOCK_FACE_NAMES)},
             "description": "probe: the STOCK's faces, instead of handles."})

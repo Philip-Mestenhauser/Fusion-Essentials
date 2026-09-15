@@ -12,8 +12,8 @@ import time
 import adsk.core
 import adsk.cam
 
-from ._common import (counted, measured, named_with_remainder, iter_collection, read_flag, safe,
-                      told_apart)
+from ._common import (counted, measured, named_with_remainder, native_identity, iter_collection,
+                      read_flag, safe, scale, told_apart)
 from ._write_guard import _active_identity, document_key, on_key_renamed
 from . import _inputs
 from . import _view_common
@@ -796,6 +796,42 @@ def is_additive_setup(setup) -> bool:
     return safe(lambda: setup.operationType) == adsk.cam.OperationTypes.AdditiveOperation
 
 
+def _model_identities(setup):
+    """The native identities of one Setup's `models`, or None where the collection did not read -
+    Setup.models raises on some setups, so a caller comparing setups treats None as unknown."""
+    collection = safe(lambda: setup.models)
+    if collection is None:
+        return None
+    ids = set()
+    try:
+        for m in collection:
+            ident = native_identity(m)
+            if ident is not None:
+                ids.add(ident)
+    except Exception:
+        return None
+    return ids
+
+
+def setups_sharing_models(cam, setup):
+    """Names of every OTHER non-additive Setup sharing a model body with `setup` (native
+    identity) - [] if none share one, or `setup`'s own models did not read."""
+    mine = _model_identities(setup)
+    if not mine:
+        return []
+    # Excluded BY NAME, never `is`/`==` on the wrapper: an unread or misclassified operationType
+    # must not report `setup` as sharing a model with itself.
+    my_name = safe(lambda: setup.name)
+    shared = []
+    for s in setups(cam):
+        if is_additive_setup(s) or safe(lambda s=s: s.name) == my_name:
+            continue
+        theirs = _model_identities(s)
+        if theirs and mine & theirs:
+            shared.append(safe(lambda s=s: s.name))
+    return shared
+
+
 def _machining_time(cam, op, state, has_toolpath):
     """(seconds, nonfinite) for ONE operation - the seconds None where they were not read or read
     the band, and nonfinite True where this reading says the motion is not a number."""
@@ -1134,13 +1170,18 @@ def errored_verdict(setups: int, programs: int, operations: int) -> str:
 # The one home - every surface that names a nonfinite path ends on this sentence.
 NONFINITE_POST = "The post failed 'Number to be formatted is not a number (NaN)' on such a path."
 
+# The one home of the empty-toolpath remedy - every surface naming an empty toolpath ends on this.
+EMPTY_TOOLPATH_REMEDY = ("cam_generate(target=<op>) relaunches it; if it is still empty, check "
+                         "the heights and the selection.")
+
 
 def nonfinite_verdict(measure: str, names) -> str:
     """The readiness verdict for operations whose toolpath motion is not a number - they read
     IsValid with a toolpath, so nothing else in the tally demotes them."""
-    return (f"BLOCKER: {measure}; {len(names)} operation(s) read a toolpath whose motion is NOT A "
-            f"NUMBER: {named_with_remainder(names)}. " + NONFINITE_POST
-            + " Change what they cut and regenerate before posting.")
+    lead = (f"BLOCKER: {measure}; {len(names)} operation(s) read a toolpath whose motion is NOT A "
+            "NUMBER: ")
+    tail = ". " + NONFINITE_POST + " Change what they cut and regenerate before posting."
+    return lead + named_with_remainder(names, cap=_length_capped(names, lead, tail)) + tail
 
 
 def live_readiness():
@@ -2089,15 +2130,24 @@ def machine_mode_key(value):
     return next((k for k in MACHINE_MODE_MEMBERS if machine_mode_value(k) == value), value)
 
 
-def group_record(group):
-    """{entities, machine_over_holes, machine_mode} read off ONE surface group, or None where the
-    group did not read back - the read-back an applied claim rests on, and the row a compare diffs.
-    A parameter-driven DEFAULT group answers machine_mode while its machineOverHoles setter raises."""
+def group_record(group, units="mm"):
+    """{entities, machine_over_holes, machine_mode, radial_offset, axial_offset, combined_offset}
+    off ONE surface group in 'units' - the three offsets are stored in mm regardless of display
+    units, converted back on read. None where the group did not read back."""
     if group is None:
         return None
+    mm_per_unit = (scale(units) or 0.1) * 10
+
+    def _off(prop):
+        raw = safe(lambda: getattr(group, prop))
+        return None if raw is None else round(raw / mm_per_unit, 6)
+
     return {"entities": safe(lambda: len(list(group.value))),
             "machine_over_holes": read_flag(lambda: group.machineOverHoles),
-            "machine_mode": machine_mode_key(safe(lambda: group.machineMode))}
+            "machine_mode": machine_mode_key(safe(lambda: group.machineMode)),
+            "radial_offset": _off("radialOffset"),
+            "axial_offset": _off("axialOffset"),
+            "combined_offset": _off("combinedOffset")}
 
 
 def avoid_groups(op, writable=True):

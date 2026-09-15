@@ -97,7 +97,8 @@ def handler(file: str = "", project: str = "", folder: str = "", destination_fol
                 failure = (f"DataFile.download returned false for '{name}' - no file was "
                            "published. Fusion designs cannot be downloaded (use design_export); "
                            "check the file is fully processed (data_get(file=...) reports "
-                           "state.is_complete).")
+                           "state.is_complete; for a file this session uploaded, "
+                           "data_get_upload_status).")
             else:
                 _size, landed_error = _export.verify_written(stage_path)
                 if landed_error:

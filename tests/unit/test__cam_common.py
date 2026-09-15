@@ -916,6 +916,15 @@ class TestNonfiniteToolpath:
         assert "Number to be formatted is not a number (NaN)" in line
         assert len(line) <= 400, len(line)
 
+    def test_the_worst_case_composed_verdict_holds_the_wire_budget(self):
+        # eight 40-char names under a long measure - the row's own repro: the unmodified
+        # function lists all eight inline and crosses the 400-char budget.
+        names = [f"Op{i}_" + "x" * 36 for i in range(8)]
+        line = cc.nonfinite_verdict("12 of 20 active ops valid", names)
+        assert len(line) <= 400, len(line)
+        assert names[0] in line
+        assert "more not listed" in line
+
 
 class TestErroredVerdictNamesWhatIsBlocked:
     """MEASURED in one session: an NC program reading hasError ('Invalid NC Program') was present
@@ -4503,7 +4512,21 @@ class TestNcProgramPostedOperations:
     def test_the_note_tells_the_two_lists_apart(self, install):
         install(SimpleNamespace(ncPrograms=_NamedCollection([])))
         note = _payload(cr.get_nc_programs_handler())["note"]
-        assert "filteredOperations" in note and "empty_toolpath_count" in note
+        assert "operation_count" in note and "empty_toolpath_count" in note
+
+    def test_an_empty_toolpath_earns_the_relaunch_remedy(self, install, operation_cast_passthrough):
+        empty = _row_op("Rest Wall Finishing 1")
+        empty.hasToolpath = False
+        install(SimpleNamespace(ncPrograms=_NamedCollection([self._program([empty])])))
+        note = _payload(cr.get_nc_programs_handler())["note"]
+        assert "cam_generate(target=<op>)" in note
+        assert len(note) <= 400, len(note)
+
+    def test_no_empty_toolpath_carries_no_relaunch_remedy(self, install,
+                                                          operation_cast_passthrough):
+        install(SimpleNamespace(ncPrograms=_NamedCollection([self._program([_row_op("Cut")])])))
+        note = _payload(cr.get_nc_programs_handler())["note"]
+        assert "cam_generate(target=<op>)" not in note
 
     def _empty(self, name):
         op = _row_op(name)

@@ -255,8 +255,9 @@ A rich read has three knobs:
 
 Hard rules:
 - The default is always bounded and safe blind. Flags only ADD cost the agent opted into.
-- The default's `note`/`pointers` MUST name its own `include=` slices — a flag is invisible unless
-  advertised.
+- The default's `note`/`pointers` MUST name its own `include=` slices, or point at the `include`
+  enum when naming them all would push the note past its budget (cam_get's fifteen) — a flag is
+  invisible unless advertised.
 - The handler is a thin router over small `_slice_xxx(...)` helpers — one per slice — so the file
   stays readable-whole and each slice is independently testable. No 600-line god-handler.
 - Fold only passive structure reads. Async pollers (`cam_get_status`), Edits, and Acquire tools

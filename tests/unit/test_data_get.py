@@ -178,10 +178,10 @@ class TestFileScope:
         assert out["seen"] == {"file": "notes.txt", "project": "P1", "project_id": "",
                                "folder": "Docs"}
 
-    def test_file_note_advertises_the_extension_trap_and_the_read_only_link_state(self, stub):
+    def test_file_note_advertises_the_extension_trap_and_the_download_pointer(self, stub):
         note = _payload(dge.handler(file="urn:adsk.wipprod:fs.file:vf.abc"))["note"]
         assert "NAME carries the true extension" in note
-        assert "data_download_file" in note and "data_move_file" in note
+        assert "data_download_file" in note
 
     def test_a_name_matched_in_a_capped_listing_gets_the_uniqueness_caveat(self, stub, monkeypatch):
         stub_tool_module(monkeypatch, "_data_read",
@@ -202,12 +202,36 @@ class TestFileScope:
                 lambda **kw: _ok({"matched_by": "name", "name_scope_folders_unreadable": 2,
                                   "file": {"name": "notes.txt"}}))}))
         note = _payload(dge.handler(file="notes.txt", project="P1"))["note"]
-        assert "2 folder(s) could not be READ" in note
+        assert "may not be unique" in note
         assert "lineage URN" in note                  # the exact reference that dodges the hole
 
     def test_a_match_over_a_fully_read_scope_carries_no_unsearched_caveat(self, stub):
-        assert "could not be READ" not in _payload(
+        assert "may not be unique" not in _payload(
             dge.handler(file="notes.txt", project="P1"))["note"]
+
+    def test_a_handler_note_is_carried_forward_not_overwritten(self, stub, monkeypatch):
+        # An assignment (`=`) here would drop whatever file_facts_handler attached (e.g. the
+        # state.is_complete signal); the router must APPEND its own note instead.
+        stub_tool_module(monkeypatch, "_data_read",
+            type("DR", (), {"file_facts_handler": staticmethod(
+                lambda **kw: _ok({"matched_by": "urn", "file": {"name": "notes.txt"},
+                                  "note": "a fact only file_facts_handler could have read."}))}))
+        note = _payload(dge.handler(file="urn:lin:AAA"))["note"]
+        assert "a fact only file_facts_handler could have read." in note
+        assert "NAME carries the true extension" in note     # the router's own note, not replaced
+
+    def test_the_worst_case_composed_note_holds_the_wire_budget(self, stub, monkeypatch):
+        # The router's own base sentence + its uniqueness caveat + the handler's carried-forward
+        # note, all three present at once - composed for real, not a guessed arithmetic sum.
+        stub_tool_module(monkeypatch, "_data_read",
+            type("DR", (), {"file_facts_handler": staticmethod(
+                lambda **kw: _ok({"matched_by": "name", "name_scope_truncated": True,
+                                  "name_scope_folders_unreadable": 2,
+                                  "file": {"name": "notes.txt"}, "note": dops._IS_COMPLETE_NOTE}))}))
+        note = _payload(dge.handler(file="notes.txt", project="P1"))["note"]
+        assert len(note) <= 400, len(note)
+        assert "may not be unique" in note
+        assert "data_get_upload_status" in note
 
     def test_file_with_include_is_refused_rather_than_silently_ignored(self, stub):
         res = dge.handler(file="notes.txt", project="P1", include=["folders"])

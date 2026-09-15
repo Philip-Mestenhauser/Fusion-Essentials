@@ -369,6 +369,14 @@ def _public_link_facts(df):
     return {"available": False, "reason": "the file reports an empty public link."}
 
 
+# MEASURED: an uploaded image read this flag false long after data_get_upload_status read
+# 'complete' - the flag is no completion signal for a non-CAD upload. The one home of this
+# wording - data_get's file-scope note appends it rather than restating it.
+_IS_COMPLETE_NOTE = (
+    "is_complete: true once a design's save publishes; a non-CAD upload can read false after "
+    "data_get_upload_status already reads 'complete', the real signal there.")
+
+
 def file_facts_handler(file: str = "", project: str = "", project_id: str = "",
                        folder: str = "") -> dict:
     """One cloud file's metadata + link state, resolved from a lineage URN or a name in a project."""
@@ -384,8 +392,9 @@ def file_facts_handler(file: str = "", project: str = "", project_id: str = "",
     parent_project = safe(lambda: df.parentProject)
     created = safe(lambda: df.dateCreated)
     modified = safe(lambda: df.dateModified)
+    is_complete = safe(lambda: df.isComplete)
 
-    return ok({
+    payload = {
         "matched_by": meta.get("matched_by"),
         "name_scope_truncated": bool(meta.get("scope_truncated")),
         # Folders whose enumeration RAISED while this name was resolved: a hole in the search space
@@ -421,11 +430,14 @@ def file_facts_handler(file: str = "", project: str = "", project_id: str = "",
         "state": {
             "is_read_only": safe(lambda: df.isReadOnly),
             "is_in_use": safe(lambda: df.isInUse),
-            "is_complete": safe(lambda: df.isComplete),
+            "is_complete": is_complete,
         },
         "shared_link": _shared_link_facts(df),
         "public_link": _public_link_facts(df),
-    })
+    }
+    if is_complete is not True:
+        payload["note"] = _IS_COMPLETE_NOTE
+    return ok(payload)
 
 
 # ---------------------------------------------------------------------------

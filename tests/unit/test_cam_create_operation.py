@@ -8,6 +8,7 @@ Plus the guards (no CAM, setup not found, bad strategy, tool ref out of range).
 """
 
 import json
+from types import SimpleNamespace
 
 from conftest import (FakeCAMFolder, FakeOperation, FakeSetup, FakeTool, _NamedCollection,
                       _Strategy as _Entitled, load_tool, make_cam, make_cam_parameters)
@@ -1754,6 +1755,71 @@ class TestAdditiveStrategies:
         _additive_ops(cam, _DeafOperations)
         res = cco.handler(setup="Setup1", strategy="additive_arrange")
         assert res["isError"] is True and "did not land" in res["message"]
+
+
+class TestAdditiveArrangeStalesMillingSetups:
+    """MEASURED: generating an additive_arrange moved the CAM model pose - a milling setup sharing
+    that body flipped out_of_date on that generation alone; other additive strategies left it
+    valid, so only this one strategy warns."""
+
+    def _body(self, token):
+        return SimpleNamespace(entityToken=token)
+
+    def test_two_setups_sharing_a_body_get_the_key_and_clause(self, monkeypatch):
+        cam = _install(monkeypatch, setups=("Setup1", "Mill2"), strategies=_ADD_STRATEGIES)
+        shared = self._body("body-A")
+        cam.setups.item(0).models = [shared]
+        cam.setups.item(1).models = [shared]
+        out = _payload(cco.handler(setup="Setup1", strategy="additive_arrange"))
+        assert out["milling_setups_on_models"] == ["Mill2"]
+        assert "Mill2" in out["note"]
+        assert "cam_generate(target=<setup>)" in out["note"]
+
+    def test_no_shared_body_gets_neither_key_nor_clause(self, monkeypatch):
+        cam = _install(monkeypatch, setups=("Setup1", "Mill2"), strategies=_ADD_STRATEGIES)
+        cam.setups.item(0).models = [self._body("body-A")]
+        cam.setups.item(1).models = [self._body("body-B")]
+        out = _payload(cco.handler(setup="Setup1", strategy="additive_arrange"))
+        assert "milling_setups_on_models" not in out
+        assert "re-poses these models" not in out["note"]
+
+    def test_a_models_read_that_raises_never_fails_the_create(self, monkeypatch):
+        # Setup1's own .models is left UNSET (FakeSetup's declared-absence shape) - reading it
+        # raises exactly as a live setup whose Setup.models property does not answer.
+        cam = _install(monkeypatch, setups=("Setup1", "Mill2"), strategies=_ADD_STRATEGIES)
+        cam.setups.item(1).models = [self._body("body-A")]
+        out = _payload(cco.handler(setup="Setup1", strategy="additive_arrange"))
+        assert "milling_setups_on_models" not in out
+
+    def test_an_unexpected_raise_in_the_walk_never_fails_the_create(self, monkeypatch):
+        # Exercises the HANDLER's own guard specifically, not setups_sharing_models's internal
+        # safe() reads: the create must land even if the walk itself misbehaves.
+        _install(monkeypatch, setups=("Setup1",), strategies=_ADD_STRATEGIES)
+        monkeypatch.setattr(cco, "setups_sharing_models",
+                            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
+        out = _payload(cco.handler(setup="Setup1", strategy="additive_arrange"))
+        assert "milling_setups_on_models" not in out
+
+    def test_a_non_arrange_additive_strategy_never_checks_shared_models(self, monkeypatch):
+        # solid_volume_support lands in a container, not .operations - MEASURED live it leaves a
+        # sharing setup valid, so only additive_arrange runs this walk at all.
+        cam = _install(monkeypatch, setups=("Setup1", "Mill2"), strategies=_ADD_STRATEGIES)
+        setup = _additive_setup(cam)
+        shared = self._body("body-A")
+        setup.models = [shared]
+        cam.setups.item(1).models = [shared]
+        out = _payload(cco.handler(setup="Setup1", strategy="solid_volume_support"))
+        assert "milling_setups_on_models" not in out
+
+    def test_the_worst_case_note_composition_holds_the_wire_budget(self, monkeypatch):
+        names = tuple(f"Mill_Station_{i:02d}" for i in range(12))
+        cam = _install(monkeypatch, setups=("Setup1",) + names, strategies=_ADD_STRATEGIES)
+        shared = self._body("body-A")
+        for i in range(len(names) + 1):
+            cam.setups.item(i).models = [shared]
+        out = _payload(cco.handler(setup="Setup1", strategy="additive_arrange"))
+        assert len(out["note"]) <= 400, len(out["note"])
+        assert "more not listed" in out["note"]
 
 
 class TestManualStrategy:

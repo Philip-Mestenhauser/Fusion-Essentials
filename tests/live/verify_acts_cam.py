@@ -1080,8 +1080,10 @@ _CAM_STORY = [
      lambda c: {"operation": _RECOGNIZED_OP, "selection": "surface_group",
                 "handles": [_ctx_get(c, "step_top_face", "the stepped top"),
                             _ctx_get(c, "boss_top", "the boss top")],
-                "machine_over_holes": True, "machine_mode": "avoid", "generate": False},
-     lambda p: _surface_group_applied(2, True, groups=3, mode="avoid")(p), None),
+                "machine_over_holes": True, "machine_mode": "avoid", "axial_offset": 0.5,
+                "generate": False},
+     lambda p: _surface_group_applied(2, True, groups=3, mode="avoid", axial_offset=0.5)(p),
+     None),
     # THE SURFACE GROUP AS A DIFFERENCE: this drill now carries a direct group the other does not,
     # and a group's faces and flags live on the group objects - so the two read identical parameter
     # expressions for it. Taken here, while the group is still on the operation.
@@ -3516,21 +3518,24 @@ def _surfaces_applied(count, target, param):
     return check
 
 
-def _surface_group_applied(count, over_holes, groups=2, mode="machine"):
+def _surface_group_applied(count, over_holes, groups=2, mode="machine", axial_offset=None):
     """cam_select_geometry(surface_group): what the applied group reads BACK - its own face count,
-    the machine-over-holes flag, the machining mode, and the group count the operation now holds.
+    the machine-over-holes flag, the machining mode, the group count the operation now holds, and
+    the axial offset in 'units' when one was written (stored in mm whatever the document shows).
     `groups` is that count after ONE direct group lands: the operation's own groups come first, and
     they differ by strategy - a corner reads 2, a drill reads 3 (both measured)."""
     def check(p):
         group = p.get("surface_group") or {}
         return _measured(f"{count} face(s) on a surface group reading machine_over_holes "
-                         f"{over_holes} and machine_mode {mode!r}, {groups} groups on the operation",
+                         f"{over_holes} and machine_mode {mode!r}, {groups} groups on the operation"
+                         + (f", axial_offset {axial_offset}" if axial_offset is not None else ""),
                          {"selections": p.get("selections"), "surface_group": group,
                           "surface_group_count": p.get("surface_group_count")},
                          p.get("selections") == count and group.get("entities") == count
                          and group.get("machine_over_holes") is over_holes
                          and group.get("machine_mode") == mode
-                         and p.get("surface_group_count") == groups)
+                         and p.get("surface_group_count") == groups
+                         and (axial_offset is None or group.get("axial_offset") == axial_offset))
     return check
 
 

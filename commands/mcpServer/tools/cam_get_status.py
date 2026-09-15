@@ -86,6 +86,22 @@ _ORIENTATION_TRIAGE = (
     "orientation!'. Both clear with cam_edit_setup(wcs={'z_axis': <hole face>}), then "
     "wcs_orientation_flipZ='true'.")
 
+_EMPTY_TRIAGE = ("A toolpath that generates VALID but EMPTY (hasToolpath False) cut nothing - "
+                 + _cam_common.EMPTY_TOOLPATH_REMEDY)
+
+# MEASURED (a 2D contour round a vise-clamped part): valid and EMPTY with this exact platform
+# warning; clean (valid, no warning) once doLeadIn and doLeadOut were both false at the launch.
+_LEAD_COLLISION_WARNING = "lead parameters would cause a collision"
+
+_LEAD_COLLISION_TRIAGE = (
+    "set doLeadIn and doLeadOut false (cam_edit_operation parameters) and regenerate - the leads, "
+    "not the contour, collide.")
+
+
+def _is_lead_collision_warning(text) -> bool:
+    """Whether one warned operation's message is the measured turning lead-collision warning."""
+    return _LEAD_COLLISION_WARNING in (text or "").strip().lower()
+
 
 def _collect_op_health(ops, labels=None):
     """{"warnings": [{name, warning}], "errors": [{name, error}], "empty": [name],
@@ -104,7 +120,10 @@ def _collect_op_health(ops, labels=None):
                                     "warning": (safe(lambda o=o: o.warning) or "").strip()})
         if facts["nonfinite_toolpath"]:
             out["nonfinite"].append(name)
-        if _cam_common.is_empty_toolpath(facts):
+        # An additive build op carries no toolpath by construction - the same exclusion the
+        # operations reader applies, read off this op's OWN setup, not the caller's scope.
+        additive = _cam_common.is_additive_setup(safe(lambda o=o: o.parentSetup))
+        if _cam_common.is_empty_toolpath(facts, additive=additive):
             out["empty"].append(name)
             if _cam_common.is_rail_driven(o):
                 out["empty_rail"].append(name)
@@ -209,6 +228,11 @@ def _attach_op_health(payload: dict, nodes, scope_label: str) -> str:
     # A triage rides the disclosure of the thing it triages, and only over the operations whose
     # own reading names it. The note names the KEYS; the rows beside them carry the counts.
     triage = []
+    # A rail-driven empty op already earns the MORE SPECIFIC rail_triage below; this one is for
+    # whatever empty row that triage does not cover, so the two never double up on one operation.
+    if len(health["empty"]) > len(health["empty_rail"]):
+        payload["empty_triage"] = _EMPTY_TRIAGE
+        triage.append("empty_triage")
     if health["empty_rail"]:
         payload["empty_rail_toolpaths"] = health["empty_rail"]
         payload["rail_triage"] = _RAIL_TRIAGE
@@ -219,6 +243,12 @@ def _attach_op_health(payload: dict, nodes, scope_label: str) -> str:
         payload["operations_with_orientation_errors"] = oriented
         payload["orientation_triage"] = _ORIENTATION_TRIAGE
         triage.append("orientation_triage")
+    lead_collided = [row["name"] for row in health["warnings"]
+                     if _is_lead_collision_warning(row.get("warning"))]
+    if lead_collided:
+        payload["operations_with_lead_collisions"] = lead_collided
+        payload["lead_collision_triage"] = _LEAD_COLLISION_TRIAGE
+        triage.append("lead_collision_triage")
     return shared + (" Triage: " + ", ".join(triage) + "." if triage else "")
 
 

@@ -16,8 +16,8 @@ from ..mcp_primitives.registry import register
 from ._common import apply_rename, counted, named_with_remainder, ok, error, read_flag, safe
 from ._cam_common import (CREATE_DEDUPE, _MANUAL_NC_STRATEGY, _length_capped, capability_entitled,
                           choice_expressions, get_cam, find_setup, operation_nodes,
-                          operation_name_clash, register_future, setups, unquote_expression,
-                          walk_cam_tree)
+                          operation_name_clash, register_future, setups, setups_sharing_models,
+                          unquote_expression, walk_cam_tree)
 # _read_tool_number is the one tool_number read; _tp is the one tool-parameter value read.
 from .cam_edit_tools import _read_tool_number, _tp
 
@@ -175,6 +175,24 @@ _MACHINING_TYPE_PARAM = "multiAxisMachiningType"
 _TOOL_AXIS_MODE_PARAM = "toolAxisMode"
 
 _TOOL_AXIS_NOTE = " tool_axis reads off this operation, not off the strategy name."
+
+# MEASURED: generating an additive_arrange moved the CAM model pose - a milling setup sharing
+# that body flipped out_of_date on that generation alone, with the design unchanged. Every other
+# additive strategy (automatic_orientation, a second arrange, deleting one) left it valid.
+_ADDITIVE_ARRANGE = "additive_arrange"
+_MILLING_STALE_LEAD = (" An arrange that moves the part re-poses these models, and operations "
+                       "in ")
+_MILLING_STALE_TAIL = " read out_of_date once generated - relaunch with cam_generate(target=<setup>)."
+
+
+def _milling_stale_clause(existing_note, names):
+    """The stale-milling-setups clause for `names`, capped so `existing_note` plus this clause
+    together hold the wire budget - '' for an empty `names`."""
+    if not names:
+        return ""
+    lead = existing_note + _MILLING_STALE_LEAD
+    cap = _length_capped(names, lead, _MILLING_STALE_TAIL)
+    return _MILLING_STALE_LEAD + named_with_remainder(names, cap=cap) + _MILLING_STALE_TAIL
 
 
 def _axis_row(op, name):
@@ -615,6 +633,15 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
         # generate=true REPLACED the note above, and a corner without a reference is what that
         # launch fails on - so the rest input rides the generate arm too.
         result["note"] += " " + _CORNER_NEXT
+    if strategy == _ADDITIVE_ARRANGE:
+        # Never a false failure: a broken models read anywhere in the walk yields [], not a raise.
+        try:
+            shared = setups_sharing_models(cam, target)
+        except Exception:
+            shared = []
+        if shared:
+            result["milling_setups_on_models"] = shared
+            result["note"] += _milling_stale_clause(result["note"], shared)
     axis = _tool_axis_facts(op)
     if axis is not None:
         # absent = the operation carries neither tool-axis parameter, so it has no axis to disclose

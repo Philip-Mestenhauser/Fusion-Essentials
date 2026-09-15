@@ -70,23 +70,19 @@ def handler(project: str = "", project_id: str = "", folder: str = "", recursive
                                                       project_id=project_id, folder=folder))
         if e:
             return e
+        # Captured before this scope builds its OWN note below, which would otherwise overwrite
+        # rather than carry forward a fact only file_facts_handler read (e.g. state.is_complete).
+        handler_note = out.get("note")
         out["scope"] = "file"
         out["note"] = (
-            "One file's record: metadata, version state and LINK state. Dates are UNIX epoch seconds "
-            "with the UTC ISO string beside each. 'file_extension' is unreliable for a non-CAD "
-            "upload - the file NAME carries the true extension. Link state is read-only here, so an "
-            "unshared file reports public_link.available=false. Next: data_download_file (a design "
-            "leaves through design_export), data_move_file, doc_open."
+            "'file_extension' is unreliable for a non-CAD upload - the NAME carries the true "
+            "extension. Next: data_download_file."
         )
-        if out.get("name_scope_truncated"):
-            out["note"] += (" The name was matched inside a CAPPED listing - files beyond the cap "
-                            "were never compared, so another file there could share this name. Pass "
-                            "the lineage URN (or a 'folder') to be exact.")
-        if out.get("name_scope_folders_unreadable"):
-            out["note"] += (f" {out['name_scope_folders_unreadable']} folder(s) could not be READ "
-                            "while resolving that name, so they were never searched - a file of the "
-                            "same name could be sitting in one, which would make this match the "
-                            "wrong file. Pass the lineage URN to be exact.")
+        if out.get("name_scope_truncated") or out.get("name_scope_folders_unreadable"):
+            out["note"] += (" This NAME match may not be unique (a CAPPED listing or unread "
+                            "folders). Pass the lineage URN to be exact.")
+        if handler_note:
+            out["note"] += " " + handler_note
         return ok(out)
 
     if len(set(inc)) > 1:

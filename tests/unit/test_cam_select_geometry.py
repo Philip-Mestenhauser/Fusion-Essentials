@@ -3380,7 +3380,7 @@ class _AvoidGroup:
     The mode a FRESH group reads varies by strategy (corner and three_plus_two answered Machine,
     blend answered Gouge), so `mode` is what a test states rather than a constant."""
     def __init__(self, default=False, over_holes_setter_raises=False, deaf_mode=False,
-                 mode="Machine_MachiningMode"):
+                 mode="Machine_MachiningMode", offset_setter_raises=False):
         self.inputGeometry = None
         self.value = []
         self._over_holes = False
@@ -3388,6 +3388,10 @@ class _AvoidGroup:
         self._raises = over_holes_setter_raises or default
         self._mode = _machining_mode(mode)
         self._deaf_mode = deaf_mode
+        self._offsets_raise = offset_setter_raises
+        self._radial_offset = 0.0
+        self._axial_offset = 0.0
+        self._combined_offset = 0.0
 
     @property
     def machineOverHoles(self):
@@ -3408,6 +3412,36 @@ class _AvoidGroup:
     def machineMode(self, value):
         if not self._deaf_mode:            # deaf = the write is swallowed, seen only on read-back
             self._mode = value
+
+    @property
+    def radialOffset(self):
+        return self._radial_offset
+
+    @radialOffset.setter
+    def radialOffset(self, value):
+        if self._offsets_raise:
+            raise RuntimeError("3 : This offset is not offered on this group.")
+        self._radial_offset = value
+
+    @property
+    def axialOffset(self):
+        return self._axial_offset
+
+    @axialOffset.setter
+    def axialOffset(self, value):
+        if self._offsets_raise:
+            raise RuntimeError("3 : This offset is not offered on this group.")
+        self._axial_offset = value
+
+    @property
+    def combinedOffset(self):
+        return self._combined_offset
+
+    @combinedOffset.setter
+    def combinedOffset(self, value):
+        if self._offsets_raise:
+            raise RuntimeError("3 : This offset is not offered on this group.")
+        self._combined_offset = value
 
 
 class _AvoidGroups:
@@ -3580,6 +3614,50 @@ class TestSurfaceGroup:
         assert "machine_over_holes is not offered on this group" in res["message"]
         assert "Nothing was applied" in res["message"]
         assert value.getMachineAvoidGroups().count == 1
+
+    def test_offsets_are_written_in_mm_and_read_back_in_units(self, monkeypatch):
+        # MEASURED: radialOffset/axialOffset/combinedOffset are stored in mm regardless of display
+        # units - 'in' 0.1 writes 2.54 (mm) and reads back 0.1.
+        value = _AvoidGroupsParamValue()
+        op = _group_op(value=value)
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        out = _payload(cg.handler(operation="Adaptive1", selection="surface_group", handles=["a"],
+                                  radial_offset=0.1, axial_offset=0.2, combined_offset=0.3,
+                                  units="in", generate=False))
+        rec = out["surface_group"]
+        assert rec["radial_offset"] == 0.1
+        assert rec["axial_offset"] == 0.2
+        assert rec["combined_offset"] == 0.3
+        groups = value.getMachineAvoidGroups()
+        applied = groups.item(groups.count - 1)
+        assert applied.radialOffset == pytest.approx(2.54)
+        assert applied.axialOffset == pytest.approx(5.08)
+        assert applied.combinedOffset == pytest.approx(7.62)
+
+    def test_a_group_that_refuses_an_offset_is_an_error_and_applies_nothing(self, monkeypatch):
+        value = _AvoidGroupsParamValue(groups=[_AvoidGroup(default=True)])
+        op = _group_op(value=value)
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        monkeypatch.setattr(_AvoidGroups, "createNewMachineAvoidDirectSelectionGroup",
+                            lambda self: self._groups.append(_AvoidGroup(offset_setter_raises=True))
+                            or self._groups[-1])
+        res = cg.handler(operation="Adaptive1", selection="surface_group", handles=["a"],
+                         radial_offset=0.5, generate=False)
+        assert res["isError"] is True
+        assert "radial_offset is not offered on this group" in res["message"]
+        assert "Nothing was applied" in res["message"]
+        assert value.getMachineAvoidGroups().count == 1
+
+    def test_an_offset_on_another_selection_kind_is_refused(self, monkeypatch):
+        op = _drill_op()
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Drill1", selection="holes", handles=["a"],
+                         axial_offset=0.5, generate=False)
+        assert res["isError"] is True
+        assert "'axial_offset' does not apply to the 'holes' selection" in res["message"]
 
     def test_a_group_count_that_did_not_move_is_an_error_not_a_false_ok(self, monkeypatch):
         # the apply not raising is no evidence: a collection that commits nothing would otherwise

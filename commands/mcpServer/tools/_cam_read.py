@@ -10,13 +10,14 @@ import adsk.cam
 import adsk.fusion
 
 from ._common import (CM_TO_UNIT, counted, measured, ok, error, iter_collection, safe, told_apart)
-from ._cam_common import (_MANUAL_NC_STRATEGY, _SETUP_BLOCKER_REMEDY, _segment, _setup_node,
-                          _walk_children, blocked_setup_records, clamp_rows, counts_as_warning,
-                          first_line, get_cam, is_additive_setup, is_empty_toolpath, machine_label,
-                          machine_limits, machine_spindle_max, op_primary_state, op_state_facts,
-                          operations_under, ready_verdict, resolve_cam_node, setup_blockers, setups,
-                          spindle_check, stock_mode_name, time_reading, toolpath_present_tally,
-                          validity_basis, validity_sync_miss, with_validity_clause)
+from ._cam_common import (EMPTY_TOOLPATH_REMEDY, _MANUAL_NC_STRATEGY, _SETUP_BLOCKER_REMEDY,
+                          _segment, _setup_node, _walk_children, blocked_setup_records, clamp_rows,
+                          counts_as_warning, first_line, get_cam, is_additive_setup,
+                          is_empty_toolpath, machine_label, machine_limits, machine_spindle_max,
+                          op_primary_state, op_state_facts, operations_under, ready_verdict,
+                          resolve_cam_node, setup_blockers, setups, spindle_check, stock_mode_name,
+                          time_reading, toolpath_present_tally, validity_basis,
+                          validity_sync_miss, with_validity_clause)
 
 MAP_BLURB = (
     "the per-slice READ cores behind cam_get(include=[...]) - get_cam_setups_handler, "
@@ -986,11 +987,10 @@ def _hms(seconds) -> str:
     return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
 
 _NC_PROGRAM_NOTE = (
-    "operation_count is NCProgram.filteredOperations - unsuppressed operations in scope; "
-    "posted_operations: valid toolpaths in scope (hasToolpath and not errored). item_count is "
-    "NCProgram.operations, the SETUPS/folders it stores. empty_toolpath_count counts held "
-    "operations that generated and cut nothing, empty_toolpaths names them, capped; a name several "
-    "share carries its position in that list.")
+    "operation_count excludes suppressed ops; posted_operations counts valid toolpaths among "
+    "them. item_count is the program's SETUPS/folders. empty_toolpath_count/empty_toolpaths "
+    "names ops that generated and cut nothing (capped; a shared name carries its position in "
+    "that list).")
 
 _NC_EMPTY_NAME_CAP = 20
 
@@ -1108,8 +1108,10 @@ def get_nc_programs_handler() -> dict:
     except Exception as e:
         return error(f"Could not read NC programs: {e}")
 
-    return ok({"nc_program_count": len(programs), "nc_programs": programs,
-               "note": _NC_PROGRAM_NOTE})
+    note = _NC_PROGRAM_NOTE
+    if any(p.get("empty_toolpath_count") for p in programs):
+        note += " " + EMPTY_TOOLPATH_REMEDY
+    return ok({"nc_program_count": len(programs), "nc_programs": programs, "note": note})
 
 # ── inspection results - the recorded probing measurements cam_get(include=['inspection']) reads ──
 

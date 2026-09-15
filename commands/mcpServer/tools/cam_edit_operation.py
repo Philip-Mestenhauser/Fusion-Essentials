@@ -105,6 +105,7 @@ def _feeds_clause(feeds) -> str:
 def _set_tool(cam, op, name, scope, library_url, index):
     """(record, error) - point the operation at a library tool by the addressing
     cam_create_operation takes, then read Operation.tool back and compare its identity."""
+    # A tool swap under a running generation is unmeasured, unlike a rename or a parameter write.
     if read_flag(lambda: op.isGenerating) is True:
         return None, (f"Operation '{name}' is GENERATING, so no tool was assigned. Poll it with "
                       "cam_get_status and retry once the generation has finished.")
@@ -445,6 +446,11 @@ def _suppression_note(rec, name):
     return lead + f"; hasToolpath reads {_flag_word(has)}."
 
 
+_WAS_GENERATING_NOTE = (
+    "The write landed while a generation was in flight - re-read the state once it settles "
+    "(cam_get_status) and relaunch if the toolpath is missing.")
+
+
 def handler(operation: str = "", parameters=None, suppressed=None, preset: str = "",
             rename: str = "", tool_scope: str = "", tool_library_url: str = "",
             tool_index: int = -1) -> dict:
@@ -478,6 +484,10 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
     if oerr:
         return error(oerr)
     op = node.obj
+    # Read ONCE, before any write below - MEASURED: a write during generation is not refused (one
+    # run left the op empty until a relaunch; two isolated repro attempts generated it clean either
+    # way), so this is disclosed, never blocked.
+    was_generating = read_flag(lambda: op.isGenerating) is True
 
     # The name clash is checked with the other pre-flights, before ANY write: the rename itself runs
     # after the parameters, and a call refused here has changed nothing.
@@ -676,7 +686,11 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
     "changed": changed,
     }
     out.update(pre_records)
+    if was_generating:
+        out["was_generating"] = True    # absent = isGenerating did not read True before this write
     notes = list(pre_notes)
+    if was_generating:
+        notes.append(_WAS_GENERATING_NOTE)
     if changed:
         notes.append(_PARAM_NOTE + " " + _parameter_state_note(op, cam))
     if any(c.get("unchanged") for c in changed):

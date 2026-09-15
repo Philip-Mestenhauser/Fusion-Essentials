@@ -1394,12 +1394,28 @@ class TestToolChange:
         assert "reads back null" in res["message"] and "did not take" in res["message"]
 
     def test_a_generating_operation_is_refused_before_the_assignment(self, monkeypatch):
+        # A tool swap under a running generation is unmeasured, so the tool arm still refuses;
+        # a parameter write on the same operation lands and discloses was_generating instead.
         op = FakeOp("Adaptive1", {"tool_stepover": "2."}, is_generating=True)
         _install_op(monkeypatch, op, doc_tools=[FakeLibTool("12mm Flat Endmill", 7)])
         res = ce.handler(operation="Adaptive1", tool_scope="document", tool_index=0)
         assert res["isError"] is True and "GENERATING" in res["message"]
         assert "cam_get_status" in res["message"]
         assert op.tool is None                       # nothing was assigned
+
+    def test_a_parameter_write_on_a_generating_operation_discloses_it(self, monkeypatch):
+        op = FakeOp("Adaptive1", {"tool_stepover": "2."}, is_generating=True)
+        _install_op(monkeypatch, op)
+        out = _payload(ce.handler(operation="Adaptive1", parameters={"tool_stepover": "3."}))
+        assert out["was_generating"] is True
+        assert "generation was in flight" in out["note"]
+
+    def test_a_non_generating_operation_carries_no_was_generating_key(self, monkeypatch):
+        op = FakeOp("Adaptive1", {"tool_stepover": "2."}, is_generating=False)
+        _install_op(monkeypatch, op, doc_tools=[FakeLibTool("12mm Flat Endmill", 7)])
+        out = _payload(ce.handler(operation="Adaptive1", tool_scope="document", tool_index=0))
+        assert "was_generating" not in out
+        assert "generation was in flight" not in out["note"]
 
     def test_the_note_states_the_toolpath_flag_on_both_sides(self, monkeypatch):
         op = InvalidatingToolOp("Adaptive1", {"tool_stepover": "2."}, toolpath_valid=True)

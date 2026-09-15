@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 192  |  **description breadcrumbs:** 288  |  **note/error breadcrumbs:** 622
+**Tools:** 192  |  **description breadcrumbs:** 289  |  **note/error breadcrumbs:** 620
   |  **guidance smells flagged:** 8
 ## Blindspots to engineer
 
@@ -17,8 +17,8 @@ close orphans, factor duplicated guards into shared helpers.
 **Read/Acquire (8)** - higher concern, a check-your-work tool nothing points to:
   `cam_compare_operations`, `cam_find_holes`, `cam_find_pockets`, `cam_inspect_toolpaths`, `drawing_get_status`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`
 
-**Edit (48)** - usually leaf actions, scan for genuine gaps:
-  `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `design_remove_feature`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_delete_sketch`, `drawing_dimension`, `drawing_insert_image`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_plane_cut`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_sweep`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
+**Edit (49)** - usually leaf actions, scan for genuine gaps:
+  `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `data_move_file`, `design_remove_feature`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_delete_sketch`, `drawing_dimension`, `drawing_insert_image`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_plane_cut`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_sweep`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
 - **51x** across 50 module(s): "No active design. Create or open a document first (see doc_new)."
@@ -42,8 +42,8 @@ close orphans, factor duplicated guards into shared helpers.
 - `view_screenshot`  <- 34  (desc 5, note 29)
 - `cam_get`  <- 32  (desc 15, note 17)
 - `data_get`  <- 25  (desc 10, note 15)
-- `doc_open`  <- 24  (desc 5, note 19)
 - `model_inspect`  <- 24  (desc 3, note 21)
+- `doc_open`  <- 23  (desc 5, note 18)
 - `sketch_create`  <- 23  (desc 7, note 16)
 - `sketch_get`  <- 22  (desc 5, note 17)
 - `assembly_get`  <- 21  (desc 3, note 18)
@@ -615,6 +615,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - A cutting-TOOL dimension is edited on the document-library entry this operation runs - cam_edit_tools(action='edit', scope='document') - which it reads at once, leaving the toolpath out of date.
 - A row another parameter in the SAME call unlocks is written after it - deburr's numberOfStepovers reads editable once doMultiplePasses is true.
 - ; hasToolpath read True before the set and False after - the suppression DISCARDED the toolpath, and the operation carries none until it is regenerated. Restore it with suppressed=false, then regen...
+- The write landed while a generation was in flight - re-read the state once it settles (cam_get_status) and relaunch if the toolpath is missing.
 - Operation '' parameters cannot be read before assignment; no write was attempted. Re-read it with cam_get(include=['parameters']).
 - Operation '' has no parameter(s): .  lists the rows Fusion SHOWS and counts the rest as hidden_count: a row behind a switch reads isEnabled false and is absent from that list, yet still lands when ...
 
@@ -964,7 +965,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - 'surface_target' is needed here: operation '' has no '' parameter to default to. It carries  - pass whichever of those these faces are.
 - The group this call added REMAINS on the operation ({held}): putting the previous groups back did not read back. Take it off in the operation's Surface Groups in Fusion.
 - machine_mode='' is not available in this Fusion build - adsk.cam.MachiningMode carries no such member. Nothing was applied.
-- applyMachineAvoidGroups failed: . Nothing was applied - drop machine_mode, then machine_over_holes, and retry to find which of them this strategy refuses at the commit.
+- applyMachineAvoidGroups failed: . Nothing was applied - drop machine_mode, machine_over_holes and the offsets one at a time to find which this strategy refuses at the commit.
 - The surface groups could not be read back after applyMachineAvoidGroups, so the group is UNCONFIRMED - re-read the operation with .
 - The height setting(s)  were applied BEFORE this failure and REMAIN on the operation - this call did not undo them; set them back if the selection is not going to be applied.
 - Every non-construction curve of the sketch is taken; text alone is not selectable - put it in its own sketch, or sketch_delete_entity.
@@ -1113,7 +1114,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `data_get`
 - Active hub + its projects. Pass project=<name|id> to list its FILES (add 'folder' to scope, include=['summary'] for immediate counts, or include=['folders'] for the tree); 'file'=<name|URN> reads O...
-- One file's record: metadata, version state and LINK state. Dates are UNIX epoch seconds with the UTC ISO string beside each. 'file_extension' is unreliable for a non-CAD upload - the file NAME carr...
+- 'file_extension' is unreliable for a non-CAD upload - the NAME carries the true extension. Next: data_download_file.
 - Files in the project (each with its lineage URN + openable fusionWebURL). 'folder'=<path> scopes to one folder; include=['summary'] reads its identity and immediate counts; include=['folders'] show...
 - All hubs (is_active flags the current one). Switch with data_switch_hub - it CLOSES every open document. Then pass project=<name> to list files.
 - Include slices cannot be combined:
@@ -1123,8 +1124,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Folder tree under 'folder' (the whole project when none is given). Drop include=['folders'] to list a folder's FILES instead.
 - does not apply to the 'file' scope (it reads one file's record in full). Drop 'file' to use include, or drop include.
 - include= does not apply to the 'file' scope (it reads one file's record in full). Drop 'file' to use include, or drop include.
-- The name was matched inside a CAPPED listing - files beyond the cap were never compared, so another file there could share this name. Pass the lineage URN (or a 'folder') to be exact.
-- folder(s) could not be READ while resolving that name, so they were never searched - a file of the same name could be sitting in one, which would make this match the wrong file. Pass the lineage UR...
 - The walk hit its folder budget (each folder is a slow cloud fetch on Fusion's main thread): nodes flagged folders_truncated were not descended. Scope with 'folder'=<path>, lower max_depth, or raise...
 - (a network stall, not the fetch-count cap) - results are PARTIAL. Retry, scope with 'folder'=<path>, or raise time_budget_s.
 - folder(s) would not enumerate at all - the first of them named in folders_unreadable_at, and flagged children_unreadable wherever the tree holds their node: what is under them was never read, so th...

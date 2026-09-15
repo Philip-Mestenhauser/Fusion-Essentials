@@ -1337,18 +1337,24 @@ def _op_deleted_by_name(name):
     return check
 
 
-def _additive_op_created(setup, strategy):
+def _additive_op_created(setup, strategy, expect_stale=None):
     """cam_create_operation on an additive strategy: it landed, and it carries NO cutting tool -
-    the whole point of the additive arm. 'tool' null is asserted, not merely absent."""
+    the whole point of the additive arm. 'tool' null is asserted, not merely absent. `expect_stale`
+    names milling setups an arrange must list under milling_setups_on_models (a subset check)."""
     def check(p):
-        return _measured(f"a tool-less '{strategy}' operation created in '{setup}'",
+        stale = p.get("milling_setups_on_models") or []
+        return _measured(f"a tool-less '{strategy}' operation created in '{setup}'"
+                         + (f", naming {expect_stale} as the setups it stales" if expect_stale
+                            else ""),
                          {"operation": p.get("operation"), "setup": p.get("setup"),
                           "strategy": p.get("strategy"), "tool": p.get("tool"),
-                          "tool_number": p.get("tool_number")},
+                          "tool_number": p.get("tool_number"),
+                          "milling_setups_on_models": stale},
                          bool(p.get("operation")) and p.get("setup") == setup
                          and p.get("strategy") == strategy and p.get("tool") is None
                          and p.get("tool_number") is None
-                         and p.get("generation_started") is False)
+                         and p.get("generation_started") is False
+                         and (expect_stale is None or set(stale) >= set(expect_stale)))
     return check
 
 
@@ -1404,8 +1410,13 @@ _HUB_ADDITIVE = [
     # The three additive families, each created with no tool reference at all. Measured: the
     # platform names them itself and lands the last two in the setup's own containers, where
     # setup.operations never moves - the landing gate reads allOperations for that reason.
+    # The arrange names the setups sharing the hub body by native identity - the milling and
+    # turning jobs read there (measured), the multi-axis job does not (its models differ), so
+    # the two named are the check and the relaunch below stays what the sync measured.
     ("cam_create_operation", {"setup": _ADD_SETUP, "strategy": "additive_arrange"},
-     _additive_op_created(_ADD_SETUP, "additive_arrange"), None),
+     _additive_op_created(_ADD_SETUP, "additive_arrange",
+                          expect_stale=[HUB_MILL_SETUP, HUB_TURN_SETUP]),
+     ("add_arrange_op", _recall("add_arrange_op", lambda p: p["operation"]))),
     ("cam_create_operation", {"setup": _ADD_SETUP, "strategy": "automatic_orientation"},
      _additive_op_created(_ADD_SETUP, "automatic_orientation"),
      ("add_orient_op", _recall("add_orient_op", lambda p: p["operation"]))),
@@ -1423,6 +1434,14 @@ _HUB_ADDITIVE = [
     # construction, the manual-NC exclusion's additive sibling.
     ("cam_get", {"include": ["operations"], "setup": _ADD_SETUP},
      lambda p: _additive_no_tool_blockers(_ADD_SETUP, _RECALL["add_orient_op"])(p), None),
+    # The status health names no additive row as an empty toolpath: an additive build op carries
+    # no toolpath by construction, the same exclusion the operations reader applies.
+    ("cam_get_status", {"target": _ADD_SETUP},
+     lambda p: _measured("no additive operation named in empty_toolpaths",
+                         {"empty_toolpaths": p.get("empty_toolpaths"), "counts": p.get("counts")},
+                         not ({_RECALL["add_arrange_op"], _RECALL["add_orient_op"],
+                               _RECALL["add_support_op"]}
+                              & set(p.get("empty_toolpaths") or []))), None),
     # and the address that reaches one: the support operation deleted BY ITS OWN NAME.
     ("cam_delete",
      lambda c: {"entity": _ctx_get(c, "add_support_op", "the support operation")},

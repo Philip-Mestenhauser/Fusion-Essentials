@@ -608,6 +608,20 @@ class TestFileFacts:
         assert out["location"]["project"]["name"] == "Sample Project"
         assert out["location"]["parent_folder"]["path"] == "Docs"
         assert out["state"] == {"is_read_only": False, "is_in_use": False, "is_complete": True}
+        assert "note" not in out            # True says what it says - nothing to add
+
+    def test_an_incomplete_flag_names_both_completion_signals(self, resolves):
+        resolves(_full_file(is_complete=False))
+        out = _payload(dm.file_facts_handler(file="urn:lin:AAA"))
+        assert out["state"]["is_complete"] is False
+        assert "data_get_upload_status" in out["note"]
+        assert len(out["note"]) <= 400
+
+    def test_an_unread_flag_carries_the_same_processing_note(self, resolves):
+        resolves(_full_file(is_complete=None))
+        out = _payload(dm.file_facts_handler(file="urn:lin:AAA"))
+        assert out["state"]["is_complete"] is None
+        assert "data_get_upload_status" in out["note"]
 
     def test_latest_version_reads_as_latest(self, resolves):
         resolves(_full_file(version=3))
