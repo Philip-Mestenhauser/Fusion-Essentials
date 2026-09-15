@@ -6,6 +6,7 @@ before/after effect reads a write is verified with, and the nested-child disclos
 publishes."""
 
 import math
+import types
 
 import adsk.core
 import adsk.fusion
@@ -27,14 +28,64 @@ _BODY_BBOX_TYPES = (adsk.fusion.BoundingBoxEntityTypes.SolidBRepBodyBoundingBoxE
                     | adsk.fusion.BoundingBoxEntityTypes.MeshBodyBoundingBoxEntityType)
 
 
+# How deep an occurrence's own subtree walk goes. A sub-assembly carries its parts a level down and
+# an occurrence tree cannot contain itself, so this bounds a pathological depth, not a cycle.
+_SUBTREE_DEPTH = 32
+
+
+def union_box(boxes):
+    """One box spanning `boxes`, as a plain minPoint/maxPoint record - or None when no box's
+    corners read. Not an adsk BoundingBox3D: every reader here takes those two points alone."""
+    corners = [(_coords(safe(lambda b=b: b.minPoint)), _coords(safe(lambda b=b: b.maxPoint)))
+               for b in boxes]
+    corners = [(lo, hi) for lo, hi in corners if lo is not None and hi is not None]
+    if not corners:
+        return None
+    lo = [min(c[0][i] for c in corners) for i in range(3)]
+    hi = [max(c[1][i] for c in corners) for i in range(3)]
+    return types.SimpleNamespace(minPoint=types.SimpleNamespace(x=lo[0], y=lo[1], z=lo[2]),
+                                 maxPoint=types.SimpleNamespace(x=hi[0], y=hi[1], z=hi[2]))
+
+
+def placed_meshes(occ):
+    """The MESH bodies an occurrence places, as the assembly-context proxies it hands back."""
+    # MEASURED (meshbodyvector-shape): Occurrence.meshBodies is a MeshBodyVector - len() and
+    # ITERATION answer while .count and .item(i) BOTH raise - so the counted walk every other
+    # collection takes reads NOTHING off it, and a mixed occurrence would measure short.
+    vec = safe(lambda: occ.meshBodies)
+    return [] if vec is None else [b for b in (safe(lambda: list(vec), []) or []) if b is not None]
+
+
+def _subtree_body_boxes(occ, depth):
+    """Every readable body box under one occurrence: its own body proxies plus each child
+    occurrence's, `depth` levels down."""
+    boxes = []
+    bodies = list(_common.iter_collection(safe(lambda: occ.bRepBodies))) + placed_meshes(occ)
+    for body in bodies:
+        box = safe(lambda b=body: b.boundingBox)
+        if box is not None:
+            boxes.append(box)
+    if depth > 0:
+        for child in _common.iter_collection(safe(lambda: occ.childOccurrences)):
+            boxes.extend(_subtree_body_boxes(child, depth - 1))
+    return boxes
+
+
 def body_aabb(entity):
     """The world AABB of an entity counting only its BODIES (solid+surface+mesh), or None."""
     # An Occurrence/Component exposes boundingBox2(entityTypes); a BRepBody has none, and its own
     # .boundingBox is already body-only.
     bb2 = safe(lambda: entity.boundingBox2)   # a bound method on Occurrence/Component; absent on a body
-    if callable(bb2):
+    if not callable(bb2):
+        return safe(lambda: entity.boundingBox)
+    # childOccurrences is the member a COMPONENT does not carry, and its box stays the platform's.
+    if safe(lambda: entity.childOccurrences) is None:
         return safe(lambda: bb2(_BODY_BBOX_TYPES))
-    return safe(lambda: entity.boundingBox)
+    # MEASURED: an OCCURRENCE's boundingBox2 runs loose on curved parts (80.331 mm for an 80 mm
+    # shaft), while its body proxies read the nominal in ROOT space - the same space - at every
+    # nesting level; a container occurrence places no body of its own, so the union walks down.
+    union = union_box(_subtree_body_boxes(entity, _SUBTREE_DEPTH))
+    return union if union is not None else safe(lambda: bb2(_BODY_BBOX_TYPES))
 
 
 def _coords(p):

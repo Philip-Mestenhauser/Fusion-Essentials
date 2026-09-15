@@ -30,8 +30,8 @@ from conftest import (_AdditiveContainer, _BaseNode, _FakeObjectCollection, _Nam
                       _Strategy, _make_object_collection, load_tool, make_cam, make_occurrence,
                       operation_cast, strategy_factory, underlying, wcs_params)
 from conftest import (FakeApplication, FakeCAMParameter, FakeCAMParameters, FakeDataFile,
-                      FakeDocumentReference, FakeMachine, FakeMatrix3D, FakeSetup, FakeCAMFolder,
-                      FakeOperation, FakeTool)
+                      FakeDocumentReference, FakeFusionDocument, FakeMachine, FakeMatrix3D,
+                      FakeProducts, FakeSetup, FakeCAMFolder, FakeOperation, FakeTool)
 
 cc = load_tool("_cam_common")
 cr = load_tool("_cam_read")
@@ -53,8 +53,8 @@ def install(monkeypatch):
     imported from it, which its handlers call - so one fixture serves a test in either
     module; patches undo themselves."""
     def _install(cam):
-        monkeypatch.setattr(cc, "get_cam", lambda: (cam, None))
-        monkeypatch.setattr(cr, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(cc, "get_cam", lambda **_:(cam, None))
+        monkeypatch.setattr(cr, "get_cam", lambda **_:(cam, None))
         return cam
     return _install
 
@@ -2507,7 +2507,7 @@ class TestInspectionGuards:
         assert res["isError"] is True and "furlong" in res["message"]
 
     def test_no_cam_product_surfaces_the_shared_gate(self, monkeypatch):
-        monkeypatch.setattr(cr, "get_cam", lambda: (None, "This document has no CAM product yet."))
+        monkeypatch.setattr(cr, "get_cam", lambda **_:(None, "This document has no CAM product yet."))
         res = cr.get_inspection_results_handler()
         assert res["isError"] is True and "CAM" in res["message"]
 
@@ -2609,6 +2609,138 @@ class TestGetCamGuards:
         assert cam is None and "view_switch_workspace('manufacture')" in err
 
 
+class TestValiditySync:
+    """get_cam(sync=True) runs CAM.checkValidity before handing the product over - the callers that
+    publish a validity verdict, launch or post. MEASURED: a model edit alone leaves operationState
+    valid, isToolpathValid True and checkToolpath True while the operation's face selection has
+    decayed to bodies; the sync marks the affected ones out of date."""
+
+    def _wire(self, monkeypatch, cam):
+        """The REAL get_cam over `cam` - the sync runs on that path alone. The sync flag is a
+        module-level reading of THIS call, so it is pinned per test rather than inherited."""
+        monkeypatch.setattr(cc, "_VALIDITY_SYNCED", [True])
+        monkeypatch.setattr(cc, "app", FakeApplication(
+            active_document=FakeFusionDocument(products=FakeProducts(cam=cam))))
+        monkeypatch.setattr(adsk.cam.CAM, "cast", lambda x: x if x is cam else None)
+        return cam
+
+    def test_the_sync_is_asked_for_never_assumed(self, monkeypatch):
+        # A read that publishes no validity verdict (design_get's capability probe, the library
+        # slices) must not re-check the document's operations, so the default does nothing.
+        cam = self._wire(monkeypatch, make_cam(FakeSetup("S1")))
+        got, err = cc.get_cam()
+        assert err is None and got is cam and cam.check_validity_calls == []
+        got, err = cc.get_cam(sync=True)
+        assert err is None and got is cam and cam.check_validity_calls == [True]
+
+    def test_the_operations_read_sees_the_state_the_sync_flipped(self, monkeypatch,
+                                                                 operation_cast_passthrough):
+        # the whole point: the row is read AFTER the sync, so a model edit that left the operation
+        # reading valid reaches the agent as out_of_date rather than as postable.
+        op = FakeOperation("Drill1", operation_state=0)
+        cam = self._wire(monkeypatch, make_cam(FakeSetup("S1", ops=[op]),
+                                               check_validity=lambda: setattr(
+                                                   op, "_operation_state", 1)))
+        out = _payload(cr.get_cam_operations_handler())
+        assert cam.check_validity_calls == [True]
+        assert out["setups"][0]["operations"][0]["state"] == "out_of_date"
+
+    def test_a_sync_that_raised_is_disclosed_in_the_readiness(self, monkeypatch,
+                                                              operation_cast_passthrough):
+        def _boom():
+            raise RuntimeError("checkValidity is not available on this build")
+        self._wire(monkeypatch, make_cam(FakeSetup("S1", ops=[FakeOperation("Face1")]),
+                                         check_validity=_boom))
+        sig, err = cc.live_readiness()
+        assert err is None
+        assert "Validity not synced this call." in sig["readiness"]
+        # the reason and the remedy ride their own key, which is what keeps the verdict bounded
+        assert "checkValidity raised" in sig["validity_not_synced"]
+        assert "view_switch_workspace" in sig["validity_not_synced"]
+
+    def test_a_sync_that_ran_adds_no_clause(self, monkeypatch, operation_cast_passthrough):
+        self._wire(monkeypatch, make_cam(FakeSetup("S1", ops=[FakeOperation("Face1")])))
+        sig, err = cc.live_readiness()
+        assert err is None and "Validity not synced" not in sig["readiness"]
+        assert "validity_not_synced" not in sig       # absent = the sync ran
+
+    def test_the_operations_summary_carries_the_same_disclosure(self, monkeypatch):
+        monkeypatch.setattr(cc, "_VALIDITY_SYNCED", [False])
+        summary = cr._operations_summary([])
+        assert "Validity not synced this call." in summary["readiness"]
+        assert "checkValidity raised" in summary["validity_not_synced"]
+
+    def test_sync_validity_answers_whether_the_call_ran(self, monkeypatch):
+        monkeypatch.setattr(cc, "_VALIDITY_SYNCED", [True])
+        assert cc.sync_validity(make_cam(FakeSetup("S1"))) is True
+        assert cc.sync_validity(SimpleNamespace()) is False      # no such member on this product
+
+
+# The exception codes an ordinary broken job carries at once - each one contributing its own remedy
+# to the readiness parenthetical, which is what makes this the summary's LONGEST composition.
+_ALL_EXCEPTION_CODES = ("toolpath_out_of_date", "state_unread", "tool_unselected",
+                        "operation_error", "toolpath_nonfinite")
+
+
+class TestReadinessStaysInsideTheWireBudget:
+    """One worst-case composition per branch: the verdict AND the unsynced-validity clause cross the
+    wire together, and test_prose_budget measures literals, not what a handler composes."""
+
+    _BUDGET = 400                                    # test_prose_budget.NOTE_BUDGET_CHARS
+
+    def _rows(self):
+        return [{"name": f"Op{i}", "state": "out_of_date", "blocked_by": [code]}
+                for i, code in enumerate(_ALL_EXCEPTION_CODES)]
+
+    def _blocked(self):
+        return [{"name": "FlipSetup", "blocked_by": ["no_machine_selected"]}]
+
+    def _in_manufacture(self, monkeypatch):
+        monkeypatch.setattr(cc, "app", SimpleNamespace(userInterface=SimpleNamespace(
+            activeWorkspace=SimpleNamespace(id="CAMEnvironment"))))
+
+    def test_the_exceptions_branch_with_every_code_and_the_clause(self, monkeypatch):
+        self._in_manufacture(monkeypatch)
+        monkeypatch.setattr(cc, "_VALIDITY_SYNCED", [False])
+        summary = cr._operations_summary(self._rows(), self._blocked())
+        assert summary["validity_basis"] == "manufacture_verified"
+        assert "Validity not synced this call." in summary["readiness"]
+        assert "cam_edit_setup assigns a machine" in summary["readiness"]   # the last remedy is in
+        assert len(summary["readiness"]) <= self._BUDGET, len(summary["readiness"])
+
+    def test_the_postable_branch_with_a_warning_and_the_clause(self, monkeypatch):
+        self._in_manufacture(monkeypatch)
+        monkeypatch.setattr(cc, "_VALIDITY_SYNCED", [False])
+        warned = [{"name": "Contour2", "state": "valid", "toolpath_valid": True,
+                   "has_warning": True,
+                   "warning": "A contour was not machined because the given lead parameters would "
+                              "cause a collision!"}]
+        summary = cr._operations_summary(warned, self._blocked())
+        assert "Validity not synced this call." in summary["readiness"]
+        assert len(summary["readiness"]) <= self._BUDGET, len(summary["readiness"])
+
+    def test_the_unverified_branch_with_the_clause(self, monkeypatch):
+        monkeypatch.setattr(cc, "app", SimpleNamespace(userInterface=SimpleNamespace(
+            activeWorkspace=SimpleNamespace(id="FusionSolidEnvironment"))))
+        monkeypatch.setattr(cc, "_VALIDITY_SYNCED", [False])
+        summary = cr._operations_summary(self._rows(), self._blocked())
+        assert summary["validity_basis"] == "unverified_design_workspace"
+        assert "Validity not synced this call." in summary["readiness"]
+        assert len(summary["readiness"]) <= self._BUDGET, len(summary["readiness"])
+
+    def test_a_verdict_past_the_budget_gives_way_to_the_clause(self, monkeypatch):
+        # The bound is by CONSTRUCTION, not by arithmetic luck: a verdict that would cross the
+        # budget is cut with its ellipsis and the clause still crosses the wire whole.
+        monkeypatch.setattr(cc, "_VALIDITY_SYNCED", [False])
+        composed = cc.with_validity_clause("x" * 600)
+        assert len(composed) == self._BUDGET
+        assert composed.endswith("... Validity not synced this call.")
+
+    def test_a_synced_call_leaves_the_verdict_exactly_as_built(self, monkeypatch):
+        monkeypatch.setattr(cc, "_VALIDITY_SYNCED", [True])
+        assert cc.with_validity_clause("x" * 600) == "x" * 600
+
+
 class TestValidityBasis:
     def test_the_manufacture_workspace_is_the_only_verified_basis(self, monkeypatch):
         monkeypatch.setattr(cc, "app", SimpleNamespace(userInterface=SimpleNamespace(
@@ -2631,7 +2763,7 @@ class TestValidityBasis:
 
 class TestSharedCamGate:
     def test_every_read_returns_the_gate_reason_unwrapped(self, monkeypatch):
-        monkeypatch.setattr(cr, "get_cam", lambda: (None, "no CAM product here."))
+        monkeypatch.setattr(cr, "get_cam", lambda **_:(None, "no CAM product here."))
         for handler in (cr.get_cam_setups_handler, cr.get_cam_operations_handler,
                         cr.get_setup_references_handler, cr.get_tool_list_handler,
                         cr.get_machining_time_handler, cr.get_nc_programs_handler):
@@ -2862,7 +2994,7 @@ class TestLiveReadinessEdges:
 
     def test_a_document_with_no_active_ops_gives_no_verdict(self, monkeypatch,
                                                             operation_cast_passthrough):
-        monkeypatch.setattr(cc, "get_cam", lambda: (self._cam([]), None))
+        monkeypatch.setattr(cc, "get_cam", lambda **_:(self._cam([]), None))
         sig, err = cc.live_readiness()
         assert err is None and sig["total"] == 0
         assert sig["readiness"] == "no active operations to assess."
@@ -2872,7 +3004,7 @@ class TestLiveReadinessEdges:
         # suppressed ops are excluded from posting by design, so they are not "active" - a
         # "0 of 0 valid" verdict would read as a job that needs generating.
         op = SimpleNamespace(name="Off", operationState=2, hasError=False, isGenerating=False)
-        monkeypatch.setattr(cc, "get_cam", lambda: (self._cam([op]), None))
+        monkeypatch.setattr(cc, "get_cam", lambda **_:(self._cam([op]), None))
         sig, _err = cc.live_readiness()
         assert sig["suppressed"] == 1 and sig["total"] == 1
         assert sig["readiness"] == "no active operations to assess."
@@ -2880,7 +3012,7 @@ class TestLiveReadinessEdges:
     def test_a_raising_walk_is_reported_as_a_reason_never_an_all_clear(self, monkeypatch):
         def _boom(_cam):
             raise RuntimeError("CAM tree read failed")
-        monkeypatch.setattr(cc, "get_cam", lambda: (self._cam([]), None))
+        monkeypatch.setattr(cc, "get_cam", lambda **_:(self._cam([]), None))
         monkeypatch.setattr(cc, "walk_operations", _boom)
         sig, err = cc.live_readiness()
         assert sig is None and "CAM tree read failed" in err
@@ -2891,7 +3023,7 @@ class TestLiveReadinessEdges:
         op = _tally_op("Face1", state=1, generating=True)
         op.strategy = "face"
         monkeypatch.setattr(cc, "_create_strategy", strategy_factory({"face": True}))
-        monkeypatch.setattr(cc, "get_cam", lambda: (self._cam([op]), None))
+        monkeypatch.setattr(cc, "get_cam", lambda **_:(self._cam([op]), None))
         sig, err = cc.live_readiness()
         assert err is None and cc.unsettled_count(sig) == 1
         assert "poll cam_get_status" in sig["readiness"]
@@ -2901,7 +3033,7 @@ class TestLiveReadinessEdges:
             self, monkeypatch, operation_cast_passthrough):
         op = _unread_state_op()
         op.isGenerating = True
-        monkeypatch.setattr(cc, "get_cam", lambda: (self._cam([op]), None))
+        monkeypatch.setattr(cc, "get_cam", lambda **_:(self._cam([op]), None))
         sig, err = cc.live_readiness()
         assert err is None and sig["unread"] == 1 and cc.unsettled_count(sig) == 1
         assert "unread operationState" in sig["readiness"]
@@ -2910,7 +3042,7 @@ class TestLiveReadinessEdges:
 
     def test_idle_unread_state_requires_a_fresh_manufacture_read(
             self, monkeypatch, operation_cast_passthrough):
-        monkeypatch.setattr(cc, "get_cam", lambda: (self._cam([_unread_state_op()]), None))
+        monkeypatch.setattr(cc, "get_cam", lambda **_:(self._cam([_unread_state_op()]), None))
         sig, err = cc.live_readiness()
         assert err is None and sig["unread"] == 1 and cc.unsettled_count(sig) == 0
         assert "re-read with cam_get in the Manufacture workspace" in sig["readiness"]
@@ -2921,7 +3053,7 @@ class TestLiveReadinessEdges:
     def test_an_unrecognized_state_value_uses_the_same_unread_guidance(
             self, monkeypatch, operation_cast_passthrough, generating):
         op = _tally_op("OddState", state=99, generating=generating)
-        monkeypatch.setattr(cc, "get_cam", lambda: (self._cam([op]), None))
+        monkeypatch.setattr(cc, "get_cam", lambda **_:(self._cam([op]), None))
         sig, err = cc.live_readiness()
         assert err is None and sig["unread"] == 1
         assert "unread operationState" in sig["readiness"]
@@ -2937,7 +3069,7 @@ class TestLiveReadinessEdges:
     def test_mixed_idle_stale_and_unread_states_keep_both_next_steps(
             self, monkeypatch, operation_cast_passthrough):
         ops = [_tally_op("Stale", state=1), _unread_state_op()]
-        monkeypatch.setattr(cc, "get_cam", lambda: (self._cam(ops), None))
+        monkeypatch.setattr(cc, "get_cam", lambda **_:(self._cam(ops), None))
         sig, err = cc.live_readiness()
         assert err is None and sig["out_of_date"] == 1 and sig["unread"] == 1
         assert "1 operation(s) read out_of_date" in sig["readiness"]
@@ -2955,7 +3087,7 @@ class TestReadinessWarningVerdict:
     def _sig(self, monkeypatch, ops, machine=SimpleNamespace(description="Haas VF-2")):
         cam = SimpleNamespace(setups=_NamedCollection([_machined_setup(ops, machine=machine)]),
                               ncPrograms=_NamedCollection([]))
-        monkeypatch.setattr(cc, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(cc, "get_cam", lambda **_:(cam, None))
         sig, err = cc.live_readiness()
         assert err is None
         return sig
@@ -3216,7 +3348,7 @@ class TestLiveReadinessConsumesSetupBlockers:
         return SimpleNamespace(setups=_NamedCollection(setups), ncPrograms=_NamedCollection([]))
 
     def _sig(self, monkeypatch, setups):
-        monkeypatch.setattr(cc, "get_cam", lambda: (self._cam(setups), None))
+        monkeypatch.setattr(cc, "get_cam", lambda **_:(self._cam(setups), None))
         sig, err = cc.live_readiness()
         assert err is None
         return sig
@@ -3275,8 +3407,8 @@ class TestLiveReadinessConsumesSetupBlockers:
         # the one-input-set proof: the codes cam_get publishes per setup are the codes the verdict
         # was built from - the two surfaces cannot report different answers about one setup.
         setups = [_machined_setup([_tally_op("Face1")], machine=None)]
-        monkeypatch.setattr(cc, "get_cam", lambda: (self._cam(setups), None))
-        monkeypatch.setattr(cr, "get_cam", lambda: (self._cam(setups), None))
+        monkeypatch.setattr(cc, "get_cam", lambda **_:(self._cam(setups), None))
+        monkeypatch.setattr(cr, "get_cam", lambda **_:(self._cam(setups), None))
         sig, _err = cc.live_readiness()
         slice_rec = _payload(cr.get_cam_setups_handler())["setups"][0]
         assert slice_rec["blocked_by"] == ["no_machine_selected"]
@@ -6614,7 +6746,7 @@ class TestUnfinishedVerdictNamesTheBlockedOps:
         ops = [_tally_op("Cham", state=1), _tally_op("Face1")]
         ops[0].strategy, ops[1].strategy = "chamfer", "face"
         cam = SimpleNamespace(setups=_NamedCollection([_machined_setup(ops)]), ncPrograms=_NamedCollection([]))
-        monkeypatch.setattr(cc, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(cc, "get_cam", lambda **_:(cam, None))
         sig, err = cc.live_readiness()
         assert err is None and sig["out_of_date"] == 1
         assert "Cham" in sig["readiness"] and "EXCLUDES" in sig["readiness"]

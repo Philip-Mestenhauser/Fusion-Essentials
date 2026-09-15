@@ -1147,6 +1147,44 @@ class ThirdToolOp(FakeOp):
         self._tool = FakeLibTool("#9 - 20mm Face Mill", 9)
 
 
+class PresetReloadingToolOp(FakeOp):
+    """A tool assignment that RELOADS the tool's preset over the operation's feed parameters
+    (measured), and stores a tool whose description matches the one already carried - so the moved
+    feed is the only reading that separates the re-assignment from a dropped write."""
+
+    _PRESET = {"tool_feedCutting": "1000.", "tool_spindleSpeed": "5000."}
+
+    @FakeOp.tool.setter
+    def tool(self, value):
+        self._tool = value
+        for pname, expr in self._PRESET.items():
+            p = self.parameters.itemByName(pname)
+            if p is not None:
+                p.expression = expr
+
+
+class AddingFeedsToolOp(FakeOp):
+    """A tool-less operation whose parameter collection gains the tool's own feed rows with the
+    assignment - the before side of those rows never read at all."""
+
+    @FakeOp.tool.setter
+    def tool(self, value):
+        self._tool = value
+        self.parameters = FakeParams({"tool_stepover": "2.", "tool_feedCutting": "1000."})
+
+
+class UnreadableFeedParam(FakeParam):
+    """A feed parameter whose expression will not read, on either side of the assignment."""
+
+    @property
+    def expression(self):
+        raise RuntimeError("expression unreadable")
+
+    @expression.setter
+    def expression(self, value):
+        pass
+
+
 class InvalidatingToolOp(FakeOp):
     """A store that clears isToolpathValid when the tool changes. The note is worded from the two
     reads THIS call made, never from an assumption about what the platform does to a toolpath."""
@@ -1261,6 +1299,60 @@ class TestToolChange:
         assert "cannot tell a re-assignment from a dropped write" in out["note"]
         assert "Operation.tool reads tool number 2 and the library tool is number 1." in out["note"]
         assert "now reads" not in out["note"]              # no change is claimed
+
+    def test_a_reloaded_feed_drops_the_cannot_tell_clause(self, monkeypatch):
+        # MEASURED: assigning the SAME tool reloaded its preset over the operation's feeds - an
+        # authored '1234 mm/min' read '1000.' after - so the read-back is unmoved while a value the
+        # write moved is on the record. That moved value IS the evidence, and the clause goes.
+        op = PresetReloadingToolOp("Adaptive1", {"tool_feedCutting": "1234 mm/min",
+                                                 "tool_spindleSpeed": "9000.",
+                                                 "tool_stepover": "2."})
+        op._tool = FakeLibTool("#1 - 12mm Flat Endmill", 1)
+        _install_op(monkeypatch, op, doc_tools=[FakeLibTool("#1 - 12mm Flat Endmill", 1)])
+        out = _payload(ce.handler(operation="Adaptive1", tool_scope="document", tool_index=0))
+        assert out["tool_unchanged"] is True
+        assert out["feeds_reset"] == [
+            {"name": "tool_feedCutting", "before": "1234 mm/min", "after": "1000."},
+            {"name": "tool_spindleSpeed", "before": "9000.", "after": "5000."}]
+        assert "the assignment reloaded the tool's preset - 2 feed/speed value(s) changed" \
+            in out["note"]
+        assert "(tool_feedCutting 1234 mm/min -> 1000.)" in out["note"]
+        assert "cannot tell a re-assignment from a dropped write" not in out["note"]
+        # the worst this arm composes: the tool lead, the reload clause and the validity pair
+        assert len(out["note"]) <= 400, len(out["note"])   # test_prose_budget.NOTE_BUDGET_CHARS
+
+    def test_an_assignment_that_moved_no_feed_keeps_the_clause(self, monkeypatch):
+        # the boundary: nothing the call read separates the re-assignment from a dropped write when
+        # the description matched AND no feed moved, so the disclosure stays.
+        op = DroppedToolOp("Adaptive1", {"tool_feedCutting": "1234 mm/min", "tool_stepover": "2."})
+        op._tool = FakeLibTool("#1 - 12mm Flat Endmill", 1)
+        _install_op(monkeypatch, op, doc_tools=[FakeLibTool("#1 - 12mm Flat Endmill", 1)])
+        out = _payload(ce.handler(operation="Adaptive1", tool_scope="document", tool_index=0))
+        assert "feeds_reset" not in out
+        assert "cannot tell a re-assignment from a dropped write" in out["note"]
+        assert "reloaded the tool's preset" not in out["note"]
+
+    def test_a_feed_that_does_not_read_is_skipped_not_printed(self, monkeypatch):
+        # a parameter whose expression raises answers on NEITHER side, so it is no comparison - and
+        # a row naming it with a null would read as a value the reload wrote.
+        op = PresetReloadingToolOp("Adaptive1", {
+            "tool_feedCutting": "1234 mm/min",
+            "tool_spindleSpeed": UnreadableFeedParam("tool_spindleSpeed", "9000."),
+            "tool_stepover": "2."})
+        op._tool = FakeLibTool("#1 - 12mm Flat Endmill", 1)
+        _install_op(monkeypatch, op, doc_tools=[FakeLibTool("#1 - 12mm Flat Endmill", 1)])
+        out = _payload(ce.handler(operation="Adaptive1", tool_scope="document", tool_index=0))
+        assert [row["name"] for row in out["feeds_reset"]] == ["tool_feedCutting"]
+        assert "tool_spindleSpeed" not in out["note"]
+
+    def test_a_feed_that_only_arrives_with_the_tool_is_no_change(self, monkeypatch):
+        # a tool-less operation carries no feed rows until the assignment brings them in. Pairing
+        # that absence with the preset's value would report a change nothing made.
+        op = AddingFeedsToolOp("Adaptive1", {"tool_stepover": "2."})
+        _install_op(monkeypatch, op, doc_tools=[FakeLibTool("12mm Flat Endmill", 7)])
+        out = _payload(ce.handler(operation="Adaptive1", tool_scope="document", tool_index=0))
+        assert op.parameters.itemByName("tool_feedCutting").expression == "1000."
+        assert "feeds_reset" not in out and "reloaded the tool's preset" not in out["note"]
 
     def test_a_landed_tool_change_still_says_now_reads(self, monkeypatch):
         # the other side: a read-back that MOVED is a change this call did observe

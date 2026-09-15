@@ -316,13 +316,19 @@ POLL_AFTER = {
     # the rotary setup's own three, wrapped about the hub axis.
     "ACT 10c13 - CAM: THE ROTARY FAMILIES": {"narrative": HUB_ROT_SETUP, "fallback": [],
                                              "max_polls": 70},
+    # the additive build re-poses the hub it shares with the multi-axis job (measured: once
+    # validity is synced, that job reads out_of_date with 'Design changed: Floor surfaces'), so
+    # the act ends by relaunching it and this poll certifies the relaunch before ACT 10d reads it.
+    "ACT 10c15 - CAM: THE ADDITIVE BUILD": {"narrative": _MX_SETUP, "fallback": [],
+                                            "max_polls": 70},
     # the flip act's fallback is EMPTY, so it launches nothing and there is nothing to certify -
     # an empty target list polls nothing rather than reading a setup that was never created.
     "ACT 10d - CAM: THE SECOND SETUP": {"narrative": FLIP_SETUP, "fallback": []},
     # the last act relaunches every setup its own edits left stale, and how many of them exist
     # depends on the capability tier - so the DOCUMENT is the scope certified here, which covers
-    # whichever of them launched.
-    "ACT 10e - CAM: MULTI-SETUP POST": {"narrative": "document", "fallback": [], "max_polls": 70},
+    # whichever of them launched. Its PartLen nudge stales the part's two setups, so the budget is
+    # the long-family one (160) rather than a count of what usually skips.
+    "ACT 10e - CAM: MULTI-SETUP POST": {"narrative": "document", "fallback": [], "max_polls": 160},
 }
 
 # STEPS: the flat union of every act's narrative + fallback steps - the coverage ledger the

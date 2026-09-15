@@ -16,7 +16,7 @@ from ._cam_common import (_MANUAL_NC_STRATEGY, _SETUP_BLOCKER_REMEDY, _segment, 
                           machine_limits, machine_spindle_max, op_primary_state, op_state_facts,
                           operations_under, ready_verdict, resolve_cam_node, setup_blockers, setups,
                           spindle_check, stock_mode_name, time_reading, toolpath_present_tally,
-                          validity_basis)
+                          validity_basis, validity_sync_miss, with_validity_clause)
 
 MAP_BLURB = (
     "the per-slice READ cores behind cam_get(include=[...]) - get_cam_setups_handler, "
@@ -181,7 +181,7 @@ def setup_wcs(setup, unit="mm", unit_factor=1.0):
 
 
 def get_cam_setups_handler(setup: str = "", units: str = "mm") -> dict:
-    cam, err = get_cam()
+    cam, err = get_cam(sync=True)
     if err:
         return error(err)
     unit = (units or "mm").strip().lower()
@@ -336,7 +336,7 @@ _OPERATIONS_NOTE = (
 
 def get_cam_operations_handler(setup: str = "") -> dict:
     """Operations across all setups, or just the named setup (`setup`)."""
-    cam, err = get_cam()
+    cam, err = get_cam(sync=True)
     if err:
         return error(err)
 
@@ -469,6 +469,10 @@ def _operations_summary(op_records, setup_blocked=None) -> dict:
     else:
         summary["readiness"] = ("op validity is only trustworthy after entering the Manufacture "
                                 "workspace - enter it (and run cam_generate) to assess post-readiness.")
+    summary["readiness"] = with_validity_clause(summary["readiness"])
+    miss = validity_sync_miss()
+    if miss:
+        summary["validity_not_synced"] = miss     # absent = this call's sync ran
     return summary
 
 
@@ -860,7 +864,7 @@ def _per_operation_only(label, ops, suppressed, block, exc) -> dict:
 
 def get_machining_time_handler(setup: str = "", units: str = "mm") -> dict:
     """Estimated machining time for the whole doc, or one setup (`setup`), per setup and per op."""
-    cam, err = get_cam()
+    cam, err = get_cam(sync=True)
     if err:
         return error(err)
     unit = (units or "mm").strip().lower()
@@ -1062,7 +1066,7 @@ def _nc_program_unit_record(params):
 def get_nc_programs_handler() -> dict:
     """The document's NC programs: name, machine, post configuration, operation counts, and the
     post parameters the post exposes."""
-    cam, err = get_cam()
+    cam, err = get_cam(sync=True)
     if err:
         return error(err)
 
@@ -1281,7 +1285,7 @@ def get_inspection_results_handler(measure: str = "", max_results: int = 0,
                                    units: str = "mm") -> dict:
     """The recorded probing results: a per-measure state rollup by default, or one measure's (or one
     path's) out-of-tolerance points when 'measure' scopes it. Lengths are scaled out of CM."""
-    cam, err = get_cam()
+    cam, err = get_cam(sync=True)
     if err:
         return error(err)
     unit = (units or "mm").strip().lower()

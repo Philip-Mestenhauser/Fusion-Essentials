@@ -1838,6 +1838,19 @@ def _interference_measured(p):
                      and _num(m.get("occurrences_checked")) and m.get("occurrences_checked") >= 1)
 
 
+def _occurrence_box(name, size, tol=0.01):
+    """assembly_get(include=['poses']): ONE occurrence's bbox_size - the union of its own bodies'
+    boxes - against the size its single body was drawn at, in mm. A box read off the platform's
+    looser occurrence read would carry the same part a fraction bigger."""
+    def check(p):
+        row = next((o for o in (p.get("occurrences") or []) if o.get("name") == name), None)
+        got = (row or {}).get("bbox_size") or []
+        return _measured(f"{name} bbox_size (want {list(size)} mm)",
+                         {"bbox_size": got, "body_count": (row or {}).get("body_count")},
+                         len(got) == 3 and all(_near(g, w, tol) for g, w in zip(got, size)))
+    return check
+
+
 # A parameter's value read back through unitsManager.convert lands on the nominal to well within
 # this; the band is far too narrow to admit a different unit or a different expression's result.
 _PARAM_TOL = 1e-4
@@ -2236,6 +2249,10 @@ def _joint_bench():
                      tint=tint, shape="bar")
     rows.append(("design_activate_component", {"occurrence": "root"}, "ok", None))
     rows.append(_watch(["JointBase:1"] + ["Ind" + st[0] + ":1" for st in _JOINT_STATIONS]))
+    # THE ARM'S OWN BOX, before any joint carries it: an occurrence's bbox_size is the union of the
+    # bodies under it, so this bar reads the 34 x 10 x 8 mm it was drawn at.
+    rows.append(("assembly_get", {"include": ["poses"], "max_occurrences": 200},
+                 _occurrence_box("IndRig:1", (34.0, 10.0, 8.0)), None))
     for i, (tag, motion, axis, slide, _dk, _dv, _t) in enumerate(_JOINT_STATIONS):
         x = _STN_X0 + i * _STN_PITCH
         # FLIPPED, and the reason is measured: an arm's bottom face points -Z while the station's

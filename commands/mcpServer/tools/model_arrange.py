@@ -299,6 +299,24 @@ def _grounded_shapes(names, occs):
             if safe(lambda o=occ: o.isGroundToParent) is True]
 
 
+_ACTIVE_SHAPES = (
+    "The ACTIVE edit target's component is placed by {names}, and the platform fails an arrange "
+    "holding one with a bare code. Nothing was created. Run design_activate_component('root') "
+    "first, or drop it from 'shapes'.")
+
+_PLATFORM_ACTIVE = (
+    "Arrange failed, and the ACTIVE edit target's component is placed by {names}: run "
+    "design_activate_component('root'), then retry - or drop it from 'shapes'. Platform: {msg}")
+
+
+def _active_shapes(design, names, occs):
+    """The shapes whose component IS the design's active edit target - the component where new
+    geometry lands. A comparison that could not be made names nothing."""
+    active = _common.target_component(design)
+    return [name for name, occ in zip(names, occs)
+            if _common.same_component(safe(lambda o=occ: o.component), active) is True]
+
+
 def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_shape",
             spacing: float = 0.0, units: str = "mm", boundary_component: str = "",
             envelope_plane: str = "", envelope_length: float = 0.0, envelope_width: float = 0.0,
@@ -425,6 +443,12 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
             return error(_NO_PLANAR_FACE.format(
                 label=label, names=_common.named_with_remainder(faceless)))
 
+    # MEASURED on BOTH solvers: an arrange whose shapes include the ACTIVE component fails with a
+    # bare '3 :' and the identical call lands once root is active. Refused before the write.
+    active_shapes = _active_shapes(design, resolved, occs)
+    if active_shapes:
+        return error(_ACTIVE_SHAPES.format(names=_common.named_with_remainder(active_shapes)))
+
     # move_originals=true RELOCATES the named occurrences, and the platform refuses the whole
     # arrange when one is pinned to its parent (measured isGroundToParent True). The copy path
     # (move_originals=false) was not measured against a grounded shape, so this gate leaves it be.
@@ -545,6 +569,12 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
             # text ("3 : Pinned component cannot be arranged") never does.
             code_clause = f" with '{_GROUNDED_CODE}'" if _GROUNDED_CODE in msg else ""
             return error(_PLATFORM_PINNED_UNNAMED.format(code_clause=code_clause, msg=msg))
+        # The pre-flight above refuses on a comparison that ANSWERED; a component read that
+        # declined there can answer here, and the platform's own message carries no cause at all.
+        still_active = _active_shapes(design, resolved, occs)
+        if still_active:
+            return error(_PLATFORM_ACTIVE.format(
+                names=_common.named_with_remainder(still_active), msg=msg))
         return error(f"Arrange failed: {msg}")
     if not feature:
         return error(_common.no_feature_error(design, "Arrange"))

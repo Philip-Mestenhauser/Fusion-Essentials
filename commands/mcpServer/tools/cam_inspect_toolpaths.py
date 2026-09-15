@@ -217,7 +217,7 @@ def _note(passed, label, states, rows, truncated, basis, suppressed_excluded,
 def handler(scope: str = "", max_results: int = _ROWS_CAP,
             include_suppressed: bool = False) -> dict:
     """See TOOL_DESCRIPTION."""
-    cam, cerr = get_cam()
+    cam, cerr = get_cam(sync=True)
     if cerr:
         return error(cerr)
 

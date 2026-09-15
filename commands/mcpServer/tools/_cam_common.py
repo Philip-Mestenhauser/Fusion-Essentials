@@ -176,8 +176,55 @@ def parse_parameters(parameters):
     return None, "Provide 'parameters' as an object {name: value} or a 'name=value, ...' string."
 
 
-def get_cam():
-    """The active document's CAM product, or (None, reason) - readable in any workspace."""
+# The last synced get_cam() call's reading, taken by the readiness verdicts built in that call.
+_VALIDITY_SYNCED = [True]
+
+# checkValidity's own return is not what says it ran - only that the call did not raise.
+_SYNC_RAISED = object()
+
+_SYNC_MISS_CLAUSE = " Validity not synced this call."
+
+_SYNC_MISS = (
+    "checkValidity raised on this call, so operation validity was not synced against the current "
+    "model and an operation a model edit staled can still read valid. A view_switch_workspace "
+    "round trip out to 'design' and back performs the same sync.")
+
+
+def sync_validity(cam) -> bool:
+    """Whether CAM.checkValidity() ran, re-checking every operation against the CURRENT model."""
+    # MEASURED: a model edit alone leaves operationState valid while a drill's face selection has
+    # decayed to bodies; this call marks the affected operations out of date and re-resolves that
+    # selection, and on a SAVED document it leaves isModified False. Safe mid-generation.
+    ran = safe(lambda: cam.checkValidity(), _SYNC_RAISED) is not _SYNC_RAISED
+    _VALIDITY_SYNCED[0] = ran
+    return ran
+
+
+def validity_sync_clause() -> str:
+    """The clause a readiness verdict carries when this call's validity sync raised, else ''."""
+    return "" if _VALIDITY_SYNCED[0] else _SYNC_MISS_CLAUSE
+
+
+def validity_sync_miss() -> str:
+    """What a raised sync leaves the verdict beside it standing on, for its own payload key - '' when
+    the sync ran."""
+    return "" if _VALIDITY_SYNCED[0] else _SYNC_MISS
+
+
+def with_validity_clause(verdict: str) -> str:
+    """`verdict` plus this call's unsynced-validity clause, held inside the wire budget: the clause
+    is the half an agent must not miss, so a verdict past the budget is the half that gives way."""
+    clause = validity_sync_clause()
+    if not clause:
+        return verdict
+    room = _MISS_BUDGET - len(clause)
+    return (verdict if len(verdict) <= room else verdict[:room - 3].rstrip() + "...") + clause
+
+
+def get_cam(sync: bool = False):
+    """The active document's CAM product, or (None, reason) - readable in any workspace. sync=True
+    re-checks every operation's validity against the current model first, for a caller about to
+    publish a validity verdict, launch a generation or post."""
     doc = safe(lambda: app.activeDocument)
     if not doc:
         return None, "No active document."
@@ -189,6 +236,8 @@ def get_cam():
         return None, ("This document has no CAM (Manufacture) product yet - a fresh design gains "
                       "one on first entry: call view_switch_workspace('manufacture') once, then "
                       "retry this call.")
+    if sync:
+        sync_validity(cam)
     return cam, None
 
 
@@ -1098,7 +1147,7 @@ def live_readiness():
     """(signal, None) or (None, reason) - the CAM readiness signal for the active document: the op
     tally, the setup- and NC-program-level errors, setups_blocked, one sample per level, and the
     readiness verdict over them."""
-    cam, err = get_cam()
+    cam, err = get_cam(sync=True)
     if err:
         return None, err
     samples = {"op": None, "setup": None, "program": None, "warning": None}
@@ -1145,14 +1194,19 @@ def live_readiness():
         readiness = unfinished_verdict(measure, ops, unsettled)
     else:
         readiness = "no active operations to assess."
-    return {"valid": valid, "out_of_date": ood, "errored": errored, "generating": tally["generating"],
-            "generating_settled": tally["generating_settled"],
-            "suppressed": tally["suppressed"], "unread": unread, "nonfinite": nonfinite,
-            "warnings": warned, "total": tally["total"],
-            "active": tally["active"],
-            "setups_errored": setups_errored, "programs_errored": programs_errored,
-            "setups_blocked": blocked,
-            "readiness": readiness, "samples": samples}, None
+    signal = {"valid": valid, "out_of_date": ood, "errored": errored,
+              "generating": tally["generating"],
+              "generating_settled": tally["generating_settled"],
+              "suppressed": tally["suppressed"], "unread": unread, "nonfinite": nonfinite,
+              "warnings": warned, "total": tally["total"],
+              "active": tally["active"],
+              "setups_errored": setups_errored, "programs_errored": programs_errored,
+              "setups_blocked": blocked,
+              "readiness": with_validity_clause(readiness), "samples": samples}
+    miss = validity_sync_miss()
+    if miss:
+        signal["validity_not_synced"] = miss     # absent = this call's sync ran
+    return signal, None
 
 
 def op_primary_state(facts: dict) -> str:

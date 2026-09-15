@@ -319,7 +319,7 @@ _SWEEP_EXPORT_DIR = "C:/Users/machinist/AppData/Local/Temp/eval_sweep_exports"
 
 
 def _install(monkeypatch, cam, valid=1):
-    monkeypatch.setattr(cp, "get_cam", lambda: (cam, None))
+    monkeypatch.setattr(cp, "get_cam", lambda **_:(cam, None))
     monkeypatch.setattr(cp, "live_readiness",
                         lambda: ({"valid": valid, "readiness": "ready to post."}, None))
     monkeypatch.setattr(cp.adsk.cam.PostConfiguration, "createFromContent",
@@ -340,7 +340,7 @@ def _payload(result):
 
 class TestGuards:
     def test_no_cam(self, monkeypatch):
-        monkeypatch.setattr(cp, "get_cam", lambda: (None, "no CAM data"))
+        monkeypatch.setattr(cp, "get_cam", lambda **_:(None, "no CAM data"))
         res = cp.handler(output_folder="x", program_name="1", post="p")
         assert res["isError"] is True and "cam" in res["message"].lower()
 

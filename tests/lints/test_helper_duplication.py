@@ -424,6 +424,11 @@ _DENYLIST = {
     "dot": ("_geom", "def"),
     "cross": ("_geom", "def"),
     "body_aabb": ("_geom", "def"),
+    # The min/max collapse over several boxes, and the occurrence's own MESH read. One home each:
+    # a second union re-rolls which corner wins on an unreadable box, and a second mesh read walks
+    # a MeshBodyVector with the count/item protocol it does not answer to, reading nothing.
+    "union_box": ("_geom", "def"),
+    "placed_meshes": ("_geom", "def"),
     "owning_bodies": ("_geom", "def"),
     "volumes": ("_geom", "def"),
     "volume_delta": ("_geom", "def"),

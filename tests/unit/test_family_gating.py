@@ -152,7 +152,7 @@ def small_design_with_cam(monkeypatch):
     import adsk.cam
     monkeypatch.setattr(adsk.fusion.Design, "cast", lambda x: design if x is design else None)
     monkeypatch.setattr(adsk.cam.CAM, "cast", lambda x: x if x is cam else None)
-    monkeypatch.setattr(wo._cam_common, "get_cam", lambda: (cam, None))
+    monkeypatch.setattr(wo._cam_common, "get_cam", lambda **_:(cam, None))
     return wo
 
 

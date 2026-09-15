@@ -120,7 +120,7 @@ class TestCollectOpHealth:
         # the shape the flags read as a clean valid: hasToolpath TRUE, state IsValid, 0.0 s. The
         # cutting operation beside it carries a warning of its own and stays out of the list.
         cam = make_cam(machining_times={"Swarf1": 0.0, "Cut": 4.193083})
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(cam, None))
         out = st._collect_op_health([_op("Swarf1", warning="No passes to link."),
                                       _op("Cut", warning="Tool was lifted.")])
         assert out["empty"] == ["Swarf1"]
@@ -138,7 +138,7 @@ class TestCollectOpHealth:
         # a document-scope list names a shared operation name by its path; the empty row has to
         # take that same label, or two payload lists address one operation two ways
         cam = make_cam(machining_times={"Bore": 0.0})
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(cam, None))
         out = st._collect_op_health([_op("Bore")], ["Front / Bore"])
         assert out["empty"] == ["Front / Bore"]
 
@@ -179,7 +179,7 @@ class TestCollectOpHealth:
         # the triage names otherSide, the rail order and the flute length - inputs a 2D contour has
         # not got, so the rail row is keyed on the drive parameter, never on being empty.
         cam = make_cam(machining_times={"Swarf1": 0.0, "Contour1": 0.0})
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(cam, None))
         out = st._collect_op_health([_op("Swarf1", rail=True), _op("Contour1")])
         assert out["empty"] == ["Swarf1", "Contour1"]
         assert out["empty_rail"] == ["Swarf1"]
@@ -188,7 +188,7 @@ class TestCollectOpHealth:
         # the row is the intersection of the two: rail-driven AND empty. A rail op with a toolpath
         # has nothing to triage.
         cam = make_cam(machining_times={"Swarf1": 4.19})
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(cam, None))
         assert st._collect_op_health([_op("Swarf1", rail=True)])["empty_rail"] == []
 
 
@@ -616,7 +616,7 @@ class TestStatusHandler:
         import adsk.cam
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
         cam = _FakeCAM(list(setups))
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(cam, None))
         return cam
 
     def test_scoped_handle_completes_while_another_job_generates(self, monkeypatch):
@@ -742,7 +742,7 @@ class TestStatusHandler:
 
     def _live_document(self, monkeypatch, **states):
         """Wire the live ACTIVE-document path (the one a bare read must reach)."""
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(object(), None))
         monkeypatch.setattr(st._cam_common, "live_readiness", self._readiness(**states))
         monkeypatch.setattr(st, "_collect_op_health",
                             lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
@@ -1312,7 +1312,7 @@ class TestTargetPollInFlightGeneration:
         import adsk.cam
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
         cam = _FakeCAM(list(setups))
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(cam, None))
         return cam
 
     def test_an_in_flight_first_generation_reads_not_completed_with_no_empty_entry(
@@ -1353,7 +1353,7 @@ class TestScopedReadinessWarningVerdict:
         import adsk.cam
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
         cam = _FakeCAM([_setup("Roughing", ops)])
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(cam, None))
         monkeypatch.setattr(st, "_collect_op_health",
                             lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
                                                       "empty_rail": [], "nonfinite": []})
@@ -1412,7 +1412,7 @@ class TestScopedReadinessSetupBlockers:
         else:
             setup = _setup("Roughing", ops, machine=machine)
         cam = _FakeCAM([setup])
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(cam, None))
         monkeypatch.setattr(st, "_collect_op_health",
                             lambda ops, labels=None: {"warnings": [], "errors": [], "empty": [],
                                                       "empty_rail": [], "nonfinite": []})
@@ -1493,7 +1493,7 @@ class TestScopedHealthLists:
         for s in (roughing, finishing):
             s.machine = _MACHINE
         cam = _FakeCAM([roughing, finishing])
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(cam, None))
         return cam
 
     def _names(self, rows):
@@ -1595,7 +1595,7 @@ class TestScopedHealthLists:
         setup = SharedSetup("WindowFrame", ops=[_op("Contour21", warning="outside the folder")],
                             folders=[folder])
         setup.machine = _MACHINE
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (_FakeCAM([setup]), None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(_FakeCAM([setup]), None))
         out = _payload(st.handler(target="WindowFrame Roughing"))
         assert out["health_scope"] == "folder 'WindowFrame Roughing'"
         assert out["live_states"]["total"] == 3
@@ -1636,7 +1636,7 @@ class TestScopedHealthLists:
         setup = SharedSetup("Roughing", ops=[_op("Rough clean", has_toolpath=False, state=3)])
         setup.operations._items[0].isGenerating = True
         setup.machine = _MACHINE
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (_FakeCAM([setup]), None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(_FakeCAM([setup]), None))
         out = _payload(st.handler(target="Roughing"))
         assert out["completed"] is False
         assert "empty_toolpaths" not in out and "health_scope" not in out
@@ -1650,7 +1650,7 @@ class TestScopedHealthLists:
         for row in setup.operations._items:
             row.isGenerating = True
         setup.machine = _MACHINE
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (_FakeCAM([setup]), None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(_FakeCAM([setup]), None))
         out = _payload(st.handler(target="Roughing"))
         assert out["completed"] is True
         assert out["live_states"]["generating"] == 2
@@ -1726,7 +1726,7 @@ class TestOpLabelsRepeatedPath:
         setup = SharedSetup("Roughing", ops=[_op("Rough clean", has_toolpath=False),
                                              _op("Rough clean", has_toolpath=False)])
         setup.machine = _MACHINE
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (_FakeCAM([setup]), None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(_FakeCAM([setup]), None))
         out = _payload(st.handler(target="Roughing"))
         assert out["empty_toolpaths"] == ["Roughing / Rough clean (operation 1)",
                                           "Roughing / Rough clean (operation 2)"]
@@ -1749,7 +1749,7 @@ class TestStatusLivePoll:
     # no cam_generate handle. A status read with NO handle must report its live generation state, not
     # refuse for lack of a launched generation.
     def test_no_handle_reports_inline_generation(self, monkeypatch):
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(object(), None))
         monkeypatch.setattr(st._cam_common, "live_readiness",
                             self._readiness(generating=1, out_of_date=1, total=2,
                                             readiness="0 of 2 active ops valid - run cam_generate to finish the rest."))
@@ -1765,7 +1765,7 @@ class TestStatusLivePoll:
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
         op = _live_op("Face1", state=1, generating=True)
         cam = _FakeCAM([_setup("Roughing", [op])])
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(cam, None))
         if route == "handle":
             monkeypatch.setattr(st, "document_key", lambda: "urn:doc")
             st._GENERATIONS["gen1"] = {
@@ -1796,7 +1796,7 @@ class TestStatusLivePoll:
         op = _live_op("Face1", state=state, generating=generating,
                       state_readable=state_readable)
         cam = _FakeCAM([_setup("Roughing", [op])])
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(cam, None))
         out = _payload(st.handler(target="Face1"))
         readiness = out["readiness"]
         assert out["live_states"]["unread"] == 1
@@ -1816,7 +1816,7 @@ class TestStatusLivePoll:
         ops = [_live_op("Stale", state=1),
                _live_op("Unknown", state=99, state_readable=True)]
         cam = _FakeCAM([_setup("Roughing", ops)])
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(cam, None))
         out = _payload(st.handler(target="Roughing"))
         readiness = out["readiness"]
         assert out["live_states"]["out_of_date"] == 1
@@ -1831,14 +1831,14 @@ class TestStatusLivePoll:
         import adsk.cam
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
         cam = _FakeCAM([_setup("Roughing", [_live_op("Face1", state=1)])])
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(cam, None))
         out = _payload(st.handler(target="Face1"))
         assert out["completed"] is True
         assert "run cam_generate" in out["readiness"]
         assert "poll this handle" not in out["readiness"]
 
     def test_document_completed_only_when_nothing_generating(self, monkeypatch):
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(object(), None))
         monkeypatch.setattr(st._cam_common, "live_readiness",
                             self._readiness(valid=3, generating=0, total=3,
                                             readiness="3 of 3 active ops valid - ready to post."))
@@ -1851,7 +1851,7 @@ class TestStatusLivePoll:
     def test_the_live_path_words_what_completed_means(self, monkeypatch):
         # the same claim on the no-handle path: nothing generating, but 0 of 34 valid - so the note
         # says completed is not a success verdict and carries the readiness line that is.
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(object(), None))
         monkeypatch.setattr(st._cam_common, "live_readiness",
                             self._readiness(valid=0, out_of_date=34, generating=0, total=34,
                                             readiness="0 of 34 active ops valid - run cam_generate to finish the rest."))
@@ -1866,7 +1866,7 @@ class TestStatusLivePoll:
     def test_live_errored_op_flagged_not_generating_forever(self, monkeypatch):
         # an errored op will NEVER finish - a still-generating live poll must flag the BLOCKER now, not
         # report it as generating forever.
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(object(), None))
         monkeypatch.setattr(st._cam_common, "live_readiness",
                             self._readiness(errored=1, generating=1, total=2,
                                             readiness="BLOCKER: 1 operation(s) have errors - those operations will not post.",
@@ -1885,7 +1885,7 @@ class TestStatusLivePoll:
         setup = _setup("Roughing", [_live_op("Op1", state=0),
                                     _live_op("Op2", state=1, generating=True)])
         cam = _FakeCAM([setup])
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(cam, None))
         out = _payload(st.handler(target="Roughing"))
         assert "Roughing" in out["target"]
         assert out["live_states"]["valid"] == 1
@@ -1898,7 +1898,7 @@ class TestStatusLivePoll:
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
         setup = _setup("Finish", [_live_op("Bad", error=True), _live_op("Good", state=0)])
         cam = _FakeCAM([setup])
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(cam, None))
         out = _payload(st.handler(target="Finish"))
         assert out["live_states"]["errored"] == 1
         assert out["live_states"]["valid"] == 1
@@ -1907,7 +1907,7 @@ class TestStatusLivePoll:
 
     def test_target_not_found_errors(self, monkeypatch):
         cam = _FakeCAM([_setup("Roughing")])
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(cam, None))
         res = st.handler(target="Ghost")
         assert res["isError"] is True and "Ghost" in res["message"]
 
@@ -1915,7 +1915,7 @@ class TestStatusLivePoll:
         # The status read reports the CURRENT state once and returns - it never loops, sleeps, or
         # pumps the event loop (generation runs in the background on its own). One _scope_state
         # read per call, even when ops are still generating.
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(object(), None))
         reads = {"n": 0}
 
         def one_read(cam, target):
@@ -1939,7 +1939,7 @@ class TestStatusNamesAToolpathThatGeneratedEmpty:
         setup = SharedSetup("S1", ops=[_op("Swarf1", warning="No passes to link."),
                                        _op("Swarf4", warning="Tool was lifted.")])
         cam = _FakeCAM([setup], machining_times=times)
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(cam, None))
         return _payload(st.handler(target="S1"))
 
     def test_the_empty_operation_is_named_and_the_cutting_one_is_not(self, monkeypatch):
@@ -1964,7 +1964,7 @@ class TestStatusNamesAToolpathWhoseMotionIsNotANumber:
         import adsk.cam
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
         cam = _FakeCAM([_setup("S1", [_op("Groove1"), _op("Cut")])], machining_times=times)
-        monkeypatch.setattr(st._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(st._cam_common, "get_cam", lambda **_:(cam, None))
         return _payload(st.handler(target="S1"))
 
     def test_the_verdict_drops_it_from_valid_and_names_it(self, monkeypatch):

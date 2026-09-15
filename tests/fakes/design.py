@@ -698,7 +698,13 @@ class FakeOccurrence:
                  joints=None, grounded=None, bodies=None, bounding_box=None, entity_token=None,
                  ground_set_ok=True, ground_lies=False, referenced=None, delete_ok=True,
                  derived=False, document_reference=None, valid=_OCC_PLAIN_VALID,
-                 light_bulb_on=_OCC_PLAIN_LIT, bodies_bounding_box=_UNSET, isolated=False):
+                 light_bulb_on=_OCC_PLAIN_LIT, bodies_bounding_box=_UNSET, isolated=False,
+                 mesh_bodies=None):
+        # meshBodies is handed in WHOLE: an occurrence's is a MeshBodyVector (len + iteration, no
+        # count/item - meshbodyvector-shape), not the counted collection a component answers, so
+        # the caller supplies the shape it is testing against.
+        if mesh_bodies is not None:
+            self.meshBodies = mesh_bodies
         self.isValid = valid
         self.isLightBulbOn = light_bulb_on
         self._isolated = bool(isolated)
@@ -889,14 +895,14 @@ def make_occurrence(path="Comp:1", component=None, raises=None, transform2=None,
                     transform=None, joints=None, grounded=None, bodies=None, bounding_box=None,
                     entity_token=None, referenced=None, delete_ok=True, derived=False,
                     document_reference=None, valid=_OCC_PLAIN_VALID, light_bulb_on=_OCC_PLAIN_LIT,
-                    bodies_bounding_box=FakeOccurrence._UNSET, isolated=False):
+                    bodies_bounding_box=FakeOccurrence._UNSET, isolated=False, mesh_bodies=None):
     """An occurrence placing `component` at assembly path `path`, with the placement matrix
     ``transform2`` and the occurrence ``assembly_context`` that places it, the ground-to-parent lock
     ``ground_to_parent`` and the nested ``children`` a census descends into. Pass ``raises`` to model
     an unresolved external reference, where every read but ``name`` throws that message, or
     ``raises_on`` = {property: message} for the row where only that one read declines;
     ``delete_ok`` False is the deleteMe the platform refuses. ``valid``/``light_bulb_on``/
-    ``bodies_bounding_box``/``isolated`` pass through to FakeOccurrence."""
+    ``bodies_bounding_box``/``isolated``/``mesh_bodies`` pass through to FakeOccurrence."""
     return FakeOccurrence(path, component, raises, transform2, assembly_context,
                           ground_to_parent, children, raises_on, transform=transform,
                           joints=joints, grounded=grounded, bodies=bodies,
@@ -904,7 +910,7 @@ def make_occurrence(path="Comp:1", component=None, raises=None, transform2=None,
                           referenced=referenced, delete_ok=delete_ok, derived=derived,
                           document_reference=document_reference, valid=valid,
                           light_bulb_on=light_bulb_on, bodies_bounding_box=bodies_bounding_box,
-                          isolated=isolated)
+                          isolated=isolated, mesh_bodies=mesh_bodies)
 
 
 @fusion_fake(factory_for="FakeOccurrence")

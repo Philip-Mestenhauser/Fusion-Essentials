@@ -532,7 +532,7 @@ def handler(scope: str = "", post: str = "", post_scope: str = "local", output_f
             program_name: str = "", units: str = "document", program_comment: str = "",
             overwrite: bool = False, setups=None) -> dict:
     """See TOOL_DESCRIPTION."""
-    cam, cerr = get_cam()
+    cam, cerr = get_cam(sync=True)
     if cerr:
         return error(cerr)
 

@@ -1494,6 +1494,12 @@ class TestName:
         assert out["operation"] == "Bore1"
         assert "'Bore' did not take" in out["rename_warning"]
         assert "named 'Bore1'" in out["rename_warning"]
+        # the one route to the name that was asked for, and what that route costs. MEASURED: a
+        # post-add rename of an operation created with SkipGeneration starts a generation.
+        assert ("cam_edit_operation(operation='Bore1', rename='Bore')"
+                in out["rename_warning"])
+        assert "that edit starts a generation" in out["rename_warning"]
+        assert len(out["rename_warning"]) <= 400   # test_prose_budget.NOTE_BUDGET_CHARS
 
     def test_an_input_that_refuses_the_name_falls_back_to_the_post_add_rename(self, monkeypatch):
         # A setter that raises must not turn into a nameless create: the operation carries no name

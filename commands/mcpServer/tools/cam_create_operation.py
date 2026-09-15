@@ -361,6 +361,12 @@ _MANUAL_NO_TOOL = ("A manual NC operation takes no tool - drop 'tool_scope', 'to
 _MANUAL_NEXT = "It takes no cutting tool: manual NC carries no toolpath by construction."
 
 
+# The one way a declined name still lands. MEASURED: a post-add rename of an additive_arrange
+# created with SkipGeneration took the name and flipped isGenerating True in the same call.
+_RENAME_REMEDY = (" Rename it with cam_edit_operation(operation='{landed}', rename='{want}') - "
+                  "that edit starts a generation.")
+
+
 def _own_autoname_dedupe(cam, rename_warning, op_name, want_name, strategy):
     """The rename_warning naming Fusion's own auto-name as the cause when the landed name is
     exactly the requested spelling's dedupe AND no node of ANY kind in the CAM tree carries it -
@@ -525,7 +531,8 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
         op_name, rename_warning = safe(lambda: op.name), None
         if op_name != want_name:
             rename_warning = (f"created, but the requested name '{want_name}' did not take - it is "
-                              f"named '{op_name}'.")
+                              f"named '{op_name}'." + _RENAME_REMEDY.format(landed=op_name,
+                                                                            want=want_name))
     else:
         op_name, rename_warning = apply_rename(op, name)
     rename_warning = _own_autoname_dedupe(cam, rename_warning, op_name, want_name, strategy)

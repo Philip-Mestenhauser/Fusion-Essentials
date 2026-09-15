@@ -545,7 +545,7 @@ class TestCam:
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
         _install(active_product=des, doc=_doc(design=des, cam=cam))
-        monkeypatch.setattr(wo._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(wo._cam_common, "get_cam", lambda **_:(cam, None))
         return _payload(wo.handler())
 
     def test_cam_present_with_ungenerated_ops(self, monkeypatch):
@@ -954,7 +954,7 @@ class TestCam:
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
         _install(active_product=des, doc=_doc(design=des, cam=cam))
-        monkeypatch.setattr(wo._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(wo._cam_common, "get_cam", lambda **_:(cam, None))
         out = _payload(wo.handler())
         assert out["cam"]["total_operations"] == 1
         assert out["cam"]["operations_unread"] == 2
@@ -974,7 +974,7 @@ class TestCam:
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
         _install(active_product=des, doc=_doc(design=des, cam=cam))
-        monkeypatch.setattr(wo._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(wo._cam_common, "get_cam", lambda **_:(cam, None))
         out = _payload(wo.handler())
         assert out["cam"]["setups_with_unreadable_operation_count"] == 1
         assert "operations_unread" not in out["cam"]      # unknown is not a number
@@ -1002,7 +1002,7 @@ class TestCam:
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
         _install(active_product=des, doc=_doc(design=des, cam=cam))
-        monkeypatch.setattr(wo._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(wo._cam_common, "get_cam", lambda **_:(cam, None))
         out = _payload(wo.handler())
         assert out["cam"]["errored_operations"] == 1 and out["cam"]["operations_unread"] == 3
         pointer = out["pointers"]["cam"]
@@ -1030,7 +1030,7 @@ class TestCam:
         root = FakeRoot(top_occs=[FakeOcc("A:1")])
         des = FakeDesign(root, timeline=[FakeTL(0)])
         _install(active_product=des, doc=_doc(design=des, cam=cam))
-        monkeypatch.setattr(wo._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(wo._cam_common, "get_cam", lambda **_:(cam, None))
         pointer = _payload(wo.handler())["pointers"]["cam"]
         assert "1 operation(s) need generating." in pointer and "incomplete" in pointer
 

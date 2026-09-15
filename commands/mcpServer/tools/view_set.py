@@ -19,6 +19,7 @@ from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from . import _common
+from . import _geom
 from . import _inputs
 from . import _view_common
 from . import _write_guard
@@ -205,18 +206,6 @@ def _do_snapshot(design):
                 "rest. Camera and visual style are complete.")
     out["note"] = note
     return ok(out)
-
-
-def _union_box(boxes):
-    """One box enclosing them all - what a multi-name focus frames on. Kept as a plain record
-    rather than an adsk BoundingBox3D: framing reads only minPoint/maxPoint, and building a live
-    API box here would be a second way to say the same thing."""
-    lo = [min(b.minPoint.x for b in boxes), min(b.minPoint.y for b in boxes),
-          min(b.minPoint.z for b in boxes)]
-    hi = [max(b.maxPoint.x for b in boxes), max(b.maxPoint.y for b in boxes),
-          max(b.maxPoint.z for b in boxes)]
-    return types.SimpleNamespace(minPoint=types.SimpleNamespace(x=lo[0], y=lo[1], z=lo[2]),
-                                 maxPoint=types.SimpleNamespace(x=hi[0], y=hi[1], z=hi[2]))
 
 
 def _camera_axes(cam):
@@ -472,7 +461,7 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
         if not boxes:
             return error(f"'focus': none of {labels} has a readable bounding box, so there is "
                          "nothing to frame on. Re-run with fit=false to re-aim only.")
-        bb = _union_box(boxes)
+        bb = _geom.union_box(boxes)
         focus_bb = bb
         o = types.SimpleNamespace(name=", ".join(labels), boundingBox=bb)
         target = adsk.core.Point3D.create((bb.minPoint.x + bb.maxPoint.x) / 2,

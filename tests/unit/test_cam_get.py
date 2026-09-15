@@ -38,7 +38,7 @@ def _named_op(name):
 
 @pytest.fixture
 def stub_slices(monkeypatch):
-    monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))   # a CAM product
+    monkeypatch.setattr(cg, "get_cam", lambda **_:(object(), None))   # a CAM product
     monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup, units: (
         {"setup_count": 2, "setups": [{"name": "Setup1", "operation_count": 3}]}, None))
     monkeypatch.setattr(cg, "_slice_operations", lambda cam, setup: ({"operations": []}, None))
@@ -87,8 +87,8 @@ class TestDefaultSlice:
         setup = FakeSetup("S1")
         setup.stockMode = cc.stock_mode_member("previous_setup")
         cam = make_cam(setup)
-        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
-        monkeypatch.setattr(cg._cr, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(cg, "get_cam", lambda **_:(cam, None))
+        monkeypatch.setattr(cg._cr, "get_cam", lambda **_:(cam, None))
         out = _payload(cg.handler())
         assert out["setups"][0]["stock_mode"] == "previous_setup"
         assert "'include'" in out["note"] and "Manufacture" in out["note"]   # every piece armed
@@ -135,7 +135,7 @@ class TestIncludeSlices:
 class TestSetupSliceScope:
     def test_unknown_setup_refuses_instead_of_returning_all(self, monkeypatch):
         cam = make_cam(FakeSetup("Setup1"), FakeSetup("Setup2"))
-        monkeypatch.setattr(cg._cr, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(cg._cr, "get_cam", lambda **_:(cam, None))
         result = cg._cr.get_cam_setups_handler(setup="Missing")
         assert result["isError"] is True
         assert "Missing" in error_message(result)
@@ -143,7 +143,7 @@ class TestSetupSliceScope:
     def test_scoped_setup_beyond_row_cap_is_returned(self, monkeypatch):
         target = FakeSetup("Setup1000")
         cam = make_cam(*(FakeSetup(f"Setup{i}") for i in range(1000)), target)
-        monkeypatch.setattr(cg._cr, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(cg._cr, "get_cam", lambda **_:(cam, None))
         result = cg._cr.get_cam_setups_handler(setup="Setup1000")
         out = _payload(result)
         assert out["setup_count"] == 1
@@ -159,7 +159,7 @@ class TestSetupSliceScope:
                 raise RuntimeError("uncapped setup read")
             return first
         cam = SimpleNamespace(setups=SimpleNamespace(count=3, item=item))
-        monkeypatch.setattr(cg._cr, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(cg._cr, "get_cam", lambda **_:(cam, None))
         monkeypatch.setattr(cg._cr, "_MAX_ITEMS", 1)
         out = _payload(cg._cr.get_cam_setups_handler())
         assert out["setup_count"] == 1 and out["truncated"] is True
@@ -205,7 +205,7 @@ class TestDeepReadDropsTheDefaultSlice:
     def test_a_deep_read_publishes_no_orientation_pointers(self, monkeypatch):
         # the pointers are read OFF the orientation rows, so a deep read has nothing to point at -
         # and the pointer walk must take the unread slice without raising.
-        monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(cg, "get_cam", lambda **_:(object(), None))
         monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup, units: (
             {"setups": [{"name": "S", "op_states": {"out_of_date": 6}}]}, None))
         monkeypatch.setattr(cg, "_slice_time", lambda cam, setup, units: ({"total_minutes": 5}, None))
@@ -341,7 +341,7 @@ class TestReferencesCensus:
     def test_the_census_rides_through_the_router(self, monkeypatch):
         # the slice is reached through include=['references'], so the sentence actually crosses the
         # wire rather than living on a helper nobody calls.
-        monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(cg, "get_cam", lambda **_:(object(), None))
         monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup, units: ({"setups": []}, None))
         self._stub_source(monkeypatch, [
             {"setup": "Op1", "reference_count": 0, "references": [], "references_truncated": False}])
@@ -572,7 +572,7 @@ class TestStrategiesSlice:
 
     def test_the_slice_rides_through_the_router(self, monkeypatch):
         # end to end: the reader's payload reaches the wire under include=['strategies'].
-        monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(cg, "get_cam", lambda **_:(object(), None))
         monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup, units: ({"setups": []}, None))
         self._stub_source(monkeypatch, [
             {"setup": "Op1", "strategy_count": 1, "allowed_count": 0, "blocked_count": 1,
@@ -609,7 +609,7 @@ class TestCamPointers:
         assert "3" in p["toolpaths"]
 
     def test_router_emits_pointers_on_stale_default(self, monkeypatch):
-        monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(cg, "get_cam", lambda **_:(object(), None))
         monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup, units: (
             {"setup_count": 1, "setups": [{"name": "S", "op_states": {"out_of_date": 6},
                                            "machine_out_of_date": True}]}, None))
@@ -625,7 +625,7 @@ class TestOrientationDedup:
 
     @pytest.fixture
     def stub_with_reasons(self, monkeypatch):
-        monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))
+        monkeypatch.setattr(cg, "get_cam", lambda **_:(object(), None))
         monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup, units: ({"setup_count": 1, "setups": [
             {"name": "Op1", "machine": "Haas", "op_states": {"out_of_date": 2},
              "invalidation_reasons": ["Design changed: WCS origin"]}]}, None))
@@ -677,7 +677,7 @@ class TestGuards:
             assert name in out, name
 
     def test_no_cam_data_guard(self, monkeypatch):
-        monkeypatch.setattr(cg, "get_cam", lambda: (None, "This document has no CAM (Manufacture) data."))
+        monkeypatch.setattr(cg, "get_cam", lambda **_:(None, "This document has no CAM (Manufacture) data."))
         res = cg.handler()
         assert "cam" in error_message(res).lower()
 
@@ -1248,7 +1248,7 @@ class TestDuplicateOperationName:
         # a name NO operation carries is worded by the shared resolver over the real tree, so the
         # available list is the walk's own - not a second census this tool keeps.
         cam = make_cam(FakeSetup("Setup1", ops=[_named_op("Face1"), _named_op("Adaptive1")]))
-        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(cg, "get_cam", lambda **_:(cam, None))
         msg = error_message(cg.handler(include=["parameters"], operation="Drill1"))
         assert "ambiguous" not in msg.lower()
         assert "Face1" in msg and "Adaptive1" in msg
@@ -1289,7 +1289,7 @@ class TestDuplicateOperationName:
         cam = make_cam(FakeSetup("Setup1", folders=[
             FakeCAMFolder("Roughing", ops=[_named_op("Drill1")]),
             FakeCAMFolder("Finishing", ops=[_named_op("Drill1")])]))
-        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(cg, "get_cam", lambda **_:(cam, None))
         msg = error_message(cg.handler(include=["parameters"], operation="Drill1"))
         assert "ambiguous" in msg.lower()
         assert "setup=" not in msg
@@ -1303,7 +1303,7 @@ class TestDuplicateOperationName:
         cam = make_cam(FakeSetup("Setup1", folders=[
             FakeCAMFolder("Roughing", ops=[_named_op("Drill1")]),
             FakeCAMFolder("Finishing", ops=[_named_op("Drill1")])]))
-        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(cg, "get_cam", lambda **_:(cam, None))
         assert cg.handler(include=["parameters"], operation="Drill1")["isError"] is True
         out = _payload(cg.handler(include=["parameters"], operation="Setup1 / Roughing / Drill1"))
         assert out["parameters"]["operation"] == "Drill1"
@@ -1357,7 +1357,7 @@ class TestOnePoolForResolveAndRemedy:
     def _cam(self, monkeypatch):
         cam = make_cam(FakeSetup("Top", ops=[_named_op("Drill1"), _named_op("TopOnly")]),
                        FakeSetup("Bottom", ops=[_named_op("Drill1")]))
-        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(cg, "get_cam", lambda **_:(cam, None))
         return cam
 
     def test_the_refusal_and_its_setup_values_come_from_one_resolve(self, monkeypatch,
@@ -1402,7 +1402,7 @@ class TestOperationScopedBySetup:
         top = FakeSetup("Top", ops=[_op("Shared", "3000"), _op("TopOnly", "10")])
         bottom = FakeSetup("Bottom", ops=[_op("Shared", "800")])
         cam = make_cam(top, bottom)
-        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(cg, "get_cam", lambda **_:(cam, None))
         return cam
 
     def test_unscoped_a_shared_name_is_refused_never_first_matched(self, monkeypatch):
@@ -1482,7 +1482,7 @@ class TestOperationScopedBySetup:
                 "parameters": _SetupParams([FakeCAMParameter("tool_feedCutting", feed, title="Feed")])})()
 
         cam = make_cam(FakeSetup("Top", ops=[_op("3000"), _op("800")]))
-        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(cg, "get_cam", lambda **_:(cam, None))
         _out, err = cg._slice_parameters(cam, "Twin", "")
         msg = err["message"]
         assert "ambiguous" in msg.lower() and "setup=" not in msg

@@ -10,8 +10,8 @@ import math
 import types
 
 from conftest import (BRepBody, BRepFace, Cylinder, FakeBoundingBox3D, FakePoint, FakeVector3D,
-                      MakeComp, Plane, _NamedCollection, body_proxy, entity_proxy, load_tool,
-                      make_source_document)
+                      MakeComp, MeshBody, Plane, _NamedCollection, body_proxy, entity_proxy,
+                      load_tool, make_bbox, make_occurrence, make_source_document)
 
 geom = load_tool("_geom")
 
@@ -161,6 +161,87 @@ class TestBodyAabb:
             def boundingBox2(self, types):
                 return None                    # no measurable bodies
         assert geom.body_aabb(_Empty()) is None
+
+
+# ── an OCCURRENCE's box is the union of its bodies' own boxes ───────────────────────────────────
+#
+# MEASURED on the arrange fixture: Occurrence.boundingBox2 runs LOOSER than the bodies' own boxes on
+# curved parts (80.331 mm for an 80 mm shaft, 25.098 for a 25 mm saddle), while the body proxies read
+# the nominal in ROOT space - the same space boundingBox2 answers in - at every nesting level. A
+# container occurrence places no body of its own, so the union walks its children.
+
+def _corners(box):
+    return ((box.minPoint.x, box.minPoint.y, box.minPoint.z),
+            (box.maxPoint.x, box.maxPoint.y, box.maxPoint.z))
+
+
+class _MeshBodyVector:
+    """An OCCURRENCE's meshBodies: len() and iteration answer, .count and .item(i) do not exist
+    (meshbodyvector-shape). No SHAPES dump stands for this type, so it is a local double."""
+
+    def __init__(self, bodies):
+        self._bodies = list(bodies)
+
+    def __len__(self):
+        return len(self._bodies)
+
+    def __iter__(self):
+        return iter(self._bodies)
+
+
+class TestOccurrenceBoxIsTheUnionOfItsBodies:
+    _LOOSE = ((-2.0, -2.0, -2.0), (9.0, 9.0, 9.0))
+
+    def _occ(self, bodies=(), children=(), loose=_LOOSE, meshes=None):
+        return make_occurrence(bodies=list(bodies), children=list(children),
+                               mesh_bodies=(None if meshes is None
+                                            else _MeshBodyVector(meshes)),
+                               bodies_bounding_box=(None if loose is None
+                                                    else make_bbox(*loose)))
+
+    def _body(self, name, lo, hi, light_bulb=True):
+        return BRepBody(name, bbox=make_bbox(lo, hi), light_bulb=light_bulb)
+
+    def test_two_bodies_union_tighter_than_the_platform_box(self):
+        occ = self._occ(bodies=[self._body("A", (0, 0, 0), (1, 2, 3)),
+                                self._body("B", (-1, 0, 0), (0.5, 5, 1))])
+        assert _corners(geom.body_aabb(occ)) == ((-1.0, 0.0, 0.0), (1.0, 5.0, 3.0))
+
+    def test_a_mesh_body_is_in_the_union_beside_the_breps(self):
+        # boundingBox2's mask spans SOLID|SURFACE|MESH, so a union that could not read the meshes
+        # would hand back a box SHORTER than the platform's for a mixed occurrence - a measurement
+        # that shrank. The occurrence's meshBodies answers len/iteration alone (measured).
+        occ = self._occ(bodies=[self._body("Solid", (0, 0, 0), (1, 1, 1))],
+                        meshes=[MeshBody(name="Scan1", bbox=make_bbox((5, 0, 0), (6, 2, 3)))])
+        assert _corners(geom.body_aabb(occ)) == ((0.0, 0.0, 0.0), (6.0, 2.0, 3.0))
+
+    def test_a_mesh_only_occurrence_measures_its_mesh(self):
+        occ = self._occ(meshes=[MeshBody(name="Scan1", bbox=make_bbox((0, 0, 0), (7, 7, 2)))])
+        assert _corners(geom.body_aabb(occ)) == ((0.0, 0.0, 0.0), (7.0, 7.0, 2.0))
+
+    def test_a_child_occurrences_body_is_counted(self):
+        # a container occurrence carries no body of its own and its box spans the children, so a
+        # union that stopped at its own bRepBodies would answer nothing for a whole sub-assembly.
+        child = self._occ(bodies=[self._body("Cube", (0, 100, 0), (15, 115, 15))], loose=None)
+        tray = self._occ(children=[child])
+        assert _corners(geom.body_aabb(tray)) == ((0.0, 100.0, 0.0), (15.0, 115.0, 15.0))
+
+    def test_no_body_read_falls_back_to_the_platform_box(self):
+        assert _corners(geom.body_aabb(self._occ())) == self._LOOSE
+
+    def test_a_hidden_body_still_counts(self):
+        # boundingBox2 counts a hidden body (measured: a hidden plate read the same 80 x 60 box),
+        # so a union that filtered on the bulb would SHRINK the box a hide never changed.
+        occ = self._occ(bodies=[self._body("Shown", (0, 0, 0), (1, 1, 1)),
+                                self._body("Hidden", (0, 0, 0), (8, 6, 1), light_bulb=False)])
+        assert _corners(geom.body_aabb(occ)) == ((0.0, 0.0, 0.0), (8.0, 6.0, 1.0))
+
+    def test_a_component_keeps_the_platforms_own_box(self):
+        # a Component carries no childOccurrences, and its own bRepBodies do not include the bodies
+        # its sub-occurrences place - so a union there would UNDER-report the component.
+        comp = MakeComp(name="Part", bodies=[self._body("A", (0, 0, 0), (1, 1, 1))])
+        comp.boundingBox2 = lambda _types: make_bbox(*self._LOOSE)
+        assert _corners(geom.body_aabb(comp)) == self._LOOSE
 
 
 # ── owning_bodies: deduped by entityToken, NEVER by identity ────────────────

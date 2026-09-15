@@ -222,7 +222,7 @@ def _launch_around_blocked(cam, keep, blocked, skip_valid, scope, target_desc, r
 
 def handler(target: str = "", skip_valid: bool = True) -> dict:
     """Launch toolpath (re)generation over `target` and return a poll handle immediately."""
-    cam, err = _cam_common.get_cam()
+    cam, err = _cam_common.get_cam(sync=True)
     if err:
         return error(err)
 

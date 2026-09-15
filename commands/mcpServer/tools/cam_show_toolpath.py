@@ -110,7 +110,7 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
     action = (action or "").strip().lower()
     if action not in _ACTIONS:
         return error(f"Unknown action '{action}'. Valid: {', '.join(_ACTIONS)}.")
-    cam, err = get_cam()
+    cam, err = get_cam(sync=True)
     if err:
         return error(err)
 

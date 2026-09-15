@@ -11,7 +11,7 @@ import json
 from types import SimpleNamespace
 
 
-from conftest import load_tool, make_cam
+from conftest import FakeApplication, FakeFusionDocument, FakeProducts, load_tool, make_cam
 from conftest import FakeSetup as SharedSetup, FakeCAMFolder as SharedFolder, FakeOperation as SharedOp
 
 gen = load_tool("cam_generate")
@@ -30,10 +30,10 @@ def _payload(result):
 
 # ── target resolution (via the shared _cam_common.resolve_cam_node) ─────────────────────────────────
 
-def _FakeCAM(setups, machining_times=None):
+def _FakeCAM(setups, machining_times=None, check_validity=None):
     """A CAM product that RECORDS its launches: generate_calls holds ('target', obj) / ('all',
     skip_valid) in order. The machining-time answer is the shared one, borrowed not re-rolled."""
-    cam = make_cam(*setups, machining_times=machining_times)
+    cam = make_cam(*setups, machining_times=machining_times, check_validity=check_validity)
     cam.generate_calls = []
 
     def generate_toolpath(tgt):
@@ -62,7 +62,7 @@ class TestTargetResolution:
 
     def _install(self, monkeypatch, setups):
         cam = _FakeCAM(setups)
-        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda **_:(cam, None))
         return cam
 
     def test_setup_target_launches_scoped_generation_ci(self, monkeypatch):
@@ -119,7 +119,7 @@ class TestGenerateHandler:
         # the setup carries an out-of-date operation: a scope with nothing to build is the
         # skipped payload, not a launch, so a launch test needs something in scope.
         cam = _FakeCAM([_setup("S", [SharedOp("Face1", operation_state=1)])])
-        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda **_:(cam, None))
         out = _payload(gen.handler(target=""))
         assert out["launched"] is True
         assert cam.generate_calls[0][0] == "all"
@@ -129,7 +129,7 @@ class TestGenerateHandler:
         import adsk.cam
         monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
-        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda **_:(cam, None))
         res = gen.handler(target="Ghost")
         assert res["isError"] is True and "Ghost" in res["message"]
 
@@ -139,7 +139,7 @@ class TestGenerateHandler:
         import adsk.cam
         monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
-        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda **_:(cam, None))
         out = _payload(gen.handler(target="Face1", skip_valid=True))
         assert out["launched"] is False and out["skipped"] is True
         assert cam.generate_calls == []          # never launched a generation
@@ -150,7 +150,7 @@ class TestGenerateHandler:
         import adsk.cam
         monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
-        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda **_:(cam, None))
         out = _payload(gen.handler(target="Face1", skip_valid=False))
         assert out["launched"] is True
         assert cam.generate_calls[0][0] == "target"
@@ -164,7 +164,7 @@ class TestGenerateHandler:
         import adsk.cam
         monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
-        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda **_:(cam, None))
         out = _payload(gen.handler(target="Groove1", skip_valid=True))
         assert out["launched"] is True and cam.generate_calls[0][0] == "target"
         assert out["launch_reasons"] == {"nonfinite": 1}
@@ -181,7 +181,7 @@ class TestGenerateHandler:
                        machining_times={"Groove1": 9223372036854.775})
         import adsk.cam
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
-        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda **_:(cam, None))
         out = _payload(gen.handler(target="", skip_valid=True))
         assert out["launched"] is True and cam.generate_calls == [("all", True)]
         assert out["operations_to_generate"] == 1
@@ -198,7 +198,7 @@ class TestGenerateHandler:
                        machining_times={"Groove1": 9223372036854.775})
         import adsk.cam
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
-        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda **_:(cam, None))
         out = _payload(gen.handler(target="", skip_valid=True))
         assert out["launched"] is False and out["skipped"] is True
         assert cam.generate_calls == []
@@ -215,7 +215,7 @@ class TestGenerateHandler:
         import adsk.cam
         monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
-        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda **_:(cam, None))
         out = _payload(gen.handler(target="S", skip_valid=True))
         assert out["operations_to_generate"] == 1
         assert out["launched_operations"] == [{"operation": "Groove1", "reason": "nonfinite"}]
@@ -229,7 +229,7 @@ class TestGenerateHandler:
         import adsk.cam
         monkeypatch.setattr(adsk.cam.CAMFolder, "cast", staticmethod(lambda x: None))
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
-        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda **_:(cam, None))
         out = _payload(gen.handler(target="Groove1", skip_valid=True))
         assert out["skipped"] is True and cam.generate_calls == []
 
@@ -245,7 +245,7 @@ class TestLaunchHandsOffToTheStatusRead:
     def test_the_launch_claims_no_completion_and_names_the_poller(self, monkeypatch):
         _GENERATIONS.clear()
         cam = _FakeCAM([SharedSetup("S", ops=[SharedOp("Face1", operation_state=1)])])
-        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda **_:(cam, None))
         out = _payload(gen.handler(target=""))
         assert out["launched"] is True                       # the launch, and only the launch
         assert "completed" not in out and "generated" not in out
@@ -264,7 +264,7 @@ class TestLaunchCountIsTheScopeWalk:
         cam = _FakeCAM(setups)
         cam.generateAllToolpaths = lambda skip_valid: SimpleNamespace(
             numberOfOperations=future_count)
-        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda **_:(cam, None))
         return cam
 
     def _ops(self):
@@ -331,6 +331,26 @@ class TestLaunchCountIsTheScopeWalk:
         out = _payload(gen.handler(target="", skip_valid=True))
         assert "skip_valid_applied" not in out
         assert "skip_valid was requested but NOT applied" not in out["note"]
+        _GENERATIONS.clear()
+
+    def test_the_launch_set_is_walked_after_the_validity_sync(self, monkeypatch):
+        # THE BITE: this operation reads operationState valid until get_cam's CAM.checkValidity
+        # flips it (measured), so a launch set walked before the sync would skip the one operation
+        # a model edit left stale and report nothing to generate.
+        _GENERATIONS.clear()
+        import adsk.cam
+        monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
+        monkeypatch.setattr(gen._cam_common, "_VALIDITY_SYNCED", [True])
+        stale = SharedOp("Stale", operation_state=0)
+        cam = _FakeCAM([SharedSetup("S", ops=[stale])],
+                       check_validity=lambda: setattr(stale, "_operation_state", 1))
+        monkeypatch.setattr(gen._cam_common, "app", FakeApplication(
+            active_document=FakeFusionDocument(products=FakeProducts(cam=cam))))
+        monkeypatch.setattr(adsk.cam.CAM, "cast", lambda x: x if x is cam else None)
+        out = _payload(gen.handler(target="", skip_valid=True))
+        assert cam.check_validity_calls == [True]
+        assert out["launched"] is True and out["operations_to_generate"] == 1
+        assert out["launch_reasons"] == {"out_of_date": 1}
         _GENERATIONS.clear()
 
     def test_the_named_rows_are_capped_and_the_overflow_is_flagged(self, monkeypatch):
@@ -439,7 +459,7 @@ class TestEntitlementPreflight:
         import adsk.cam
         monkeypatch.setattr(adsk.cam.Operation, "cast", staticmethod(lambda x: x))
         cam = _FakeCAM(setups, machining_times=machining_times)
-        monkeypatch.setattr(gen._cam_common, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(gen._cam_common, "get_cam", lambda **_:(cam, None))
         monkeypatch.setattr(gen._cam_common, "strategy_generation_allowed", _entitlement(table))
         return cam
 

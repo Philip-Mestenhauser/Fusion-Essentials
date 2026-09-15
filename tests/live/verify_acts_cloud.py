@@ -231,16 +231,20 @@ def _upload_complete(p):
 
 def _file_record(folder_path, complete=True):
     """data_get(file=<urn>): the file's own record - where it sits, and whether the cloud has
-    finished with it. 'is_complete' is what the drawing generator needs true of its source."""
+    finished with it. 'is_complete' is what the drawing generator needs true of its source;
+    complete=None reads the flag without judging it - on an uploaded IMAGE it read False 25
+    minutes after data_get_upload_status read 'complete' with a lineage (measured), so for a
+    non-CAD upload that status, not this flag, is the completion signal."""
     def check(p):
         f, loc, state = p.get("file") or {}, p.get("location") or {}, p.get("state") or {}
-        return _measured(f"the file's record reads folder '{folder_path}', is_complete {complete}",
+        flag = "unjudged" if complete is None else complete
+        return _measured(f"the file's record reads folder '{folder_path}', is_complete {flag}",
                          {"name": f.get("name"), "id": f.get("id"),
                           "parent_folder": (loc.get("parent_folder") or {}).get("path"),
                           "state": state, "matched_by": p.get("matched_by")},
                          bool(f.get("name")) and str(f.get("id") or "").startswith("urn:")
                          and (loc.get("parent_folder") or {}).get("path") == folder_path
-                         and state.get("is_complete") is complete)
+                         and (complete is None or state.get("is_complete") is complete))
     return check
 
 
@@ -248,7 +252,7 @@ def _file_record(folder_path, complete=True):
 # tens of seconds after the save answers, and past a full minute on a slow day - an uploaded
 # marker measured so), and both the drawing generator and a delete need it finished. Bounded:
 # the budget running out is reported as the state it last read, never as complete.
-_SETTLE_POLLS = 36
+_SETTLE_POLLS = 96
 _SETTLE_GAP_S = 5.0
 
 
@@ -2030,8 +2034,11 @@ _CLOUD_DATA = [
      _upload_complete, ("cloud_file", _recall("cloud_file", lambda p: p["file_id"]))),
     ("data_get", {"project": PROJECT, "folder": RUN_PATH, "recursive": False},
      _known_file_listing(RUN_PATH, RUN_PATH, False), None),
+    # The marker is an IMAGE: its record's is_complete read False 25 minutes after the upload
+    # status above read 'complete' with a lineage (measured), so the record is judged by where it
+    # sits and the flag is read, not waited on - the status row is what says the file landed.
     ("data_get", lambda c: {"file": _ctx_get(c, "cloud_file", "the uploaded file")},
-     _file_settled(RUN_PATH), ("cloud_file_name", lambda p: p["file"]["name"])),
+     _file_record(RUN_PATH, complete=None), ("cloud_file_name", lambda p: p["file"]["name"])),
     ("data_get", {"project": PROJECT, "recursive": False}, _root_files,
      ("data_root_files", _recall("data_root_files", _root_file_ids))),
     ("data_get", {"project": PROJECT, "folder": "/", "recursive": False},

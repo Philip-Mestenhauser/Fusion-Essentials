@@ -365,7 +365,7 @@ class _SetupsCollection(_NamedCollection):
 
 
 @fusion_fake(factory_for="_NamedCollection")
-def make_cam(*setups, machining_times=None):
+def make_cam(*setups, machining_times=None, check_validity=None):
     """A minimal CAM product carrying `setups` (count/item protocol) - pair with
     `monkeypatch.setattr(mod, "get_cam", lambda: (cam, None))`.
 
@@ -374,9 +374,14 @@ def make_cam(*setups, machining_times=None):
     still reads hasToolpath True and answers 0.0 s). An operation the mapping does not carry RAISES
     '3 : Machining time could not be calculated.', which is what an operation holding no toolpath
     answers, so a test that wants a time has to name the operation it wants one for. The call
-    records into .machining_time_calls, for a test that cares how often it was made."""
+    records into .machining_time_calls, for a test that cares how often it was made.
+
+    checkValidity is the platform's re-check of every operation against the CURRENT model, which
+    get_cam runs on every call: `check_validity` is a callable standing in for what it does (flip a
+    stale operation's state, or raise). Each call records into .check_validity_calls."""
     times = dict(machining_times or {})
     calls = []
+    validity_calls = []
 
     def _machining_time(obj, *knobs):
         calls.append((obj, knobs))
@@ -385,9 +390,16 @@ def make_cam(*setups, machining_times=None):
             raise RuntimeError("3 : Machining time could not be calculated.")
         return types.SimpleNamespace(machiningTime=times[name])
 
+    def _check_validity():
+        validity_calls.append(True)
+        if check_validity is not None:
+            check_validity()
+
     return types.SimpleNamespace(setups=_SetupsCollection(list(setups)),
                                  getMachiningTime=_machining_time,
-                                 machining_time_calls=calls)
+                                 machining_time_calls=calls,
+                                 checkValidity=_check_validity,
+                                 check_validity_calls=validity_calls)
 
 
 # ── inspection results (CAM.inspectionResults) - the recorded probing measurements ────────────────

@@ -561,6 +561,13 @@ _NESTING = _box("ArrP1", ox=200, oy=350) + [
      _refused("ArrP1:1", "read isGroundToParent True", "ground_to_parent=false"), None),
     ("assembly_ground", {"occurrence": "ArrP1:1", "ground_to_parent": False},
      lambda p: p.get("isGroundToParent") is False and bool(p.get("occurrence")), None),
+    # THE ACTIVE EDIT TARGET: measured on both solvers, an arrange whose shapes include the active
+    # component fails with a bare '3 :' - so the shape is refused before the feature, and the same
+    # call lands once root is active again (the nest below it).
+    ("design_activate_component", {"occurrence": "ArrP1:1"}, "ok", None),
+    ("model_arrange", {"boundary_sketch": "ArrB", "shapes": ["ArrP1:1"]},
+     _refused("ArrP1:1", "ACTIVE edit target", "design_activate_component('root')"), None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
     # TRUE-SHAPE, because the boundary is a hexagon: the rectangular solver nests bounding boxes and
     # refuses a non-rectangular envelope outright (ARRANGE_ERROR_ENVELOPE_INVALIDRECTANGULAR), which
     # is exactly what a slanted wall is for. The solver places COPIES under an Envelope occurrence

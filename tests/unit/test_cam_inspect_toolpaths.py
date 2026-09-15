@@ -62,7 +62,7 @@ def _cam(*setups, verdict=True, scoped_verdict=None, raises=None, all_raises=Non
 def wire(monkeypatch):
     """Wire one CAM product into the tool's shared get_cam seam; the patch undoes itself."""
     def _wire(cam):
-        monkeypatch.setattr(mod, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(mod, "get_cam", lambda **_:(cam, None))
         return cam
     return _wire
 
@@ -788,7 +788,7 @@ class TestGuards:
         assert res["message"] == "No active document."
 
     def test_missing_cam_product_reason_is_passed_through(self, monkeypatch):
-        monkeypatch.setattr(mod, "get_cam", lambda: (None, "This document has no CAM data."))
+        monkeypatch.setattr(mod, "get_cam", lambda **_:(None, "This document has no CAM data."))
         res = mod.handler()
         assert res["isError"] is True
         assert res["message"] == "This document has no CAM data."

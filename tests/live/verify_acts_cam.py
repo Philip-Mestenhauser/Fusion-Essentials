@@ -22,8 +22,8 @@ import time
 from verify_core import (
     EXPORT_DIR, MACHINE_NAME, NOTE_MAX, Parked, TEMPLATE_NAME, _RECALL, _box, _ctx_get, _dwell,
     _extruded, _face_up_at, _fg, _fgn, _imported, _joint_origin_computed, _made_component,
-    _matched, _measured, _near, _needs, _num, _param_read, _pocket_selected, _recall, _refused,
-    _selected_saved, _watch, facade)
+    _matched, _measured, _near, _needs, _num, _param_read, _param_set_to, _pocket_selected,
+    _recall, _refused, _selected_saved, _watch, facade)
 
 # THE NAMES THE STORY BUILDS UNDER, in one place for the acts that have to agree on them: the
 # modelling acts create the part and the parameter that drives it, the vise act creates the billet
@@ -249,6 +249,33 @@ def _relaunched(setup):
                          p.get("target") == f"setup '{setup}'"
                          and ((p.get("launched") is True and _num(covered) and covered >= 1)
                               or (p.get("skipped") is True and "already valid" in reason)))
+    return check
+
+
+def _feeds_reloaded(name):
+    """cam_edit_operation pointed at the tool the operation ALREADY carries: 'feeds_reset' is that
+    operation's own feed/speed expressions read either side of the write. The read-back names the
+    same tool, so a value that MOVED is the only evidence the assignment landed."""
+    def check(p):
+        row = next((r for r in (p.get("feeds_reset") or []) if r.get("name") == name), {})
+        return _measured(f"{name} reloaded off the tool's preset",
+                         {"feeds_reset": p.get("feeds_reset"),
+                          "tool_unchanged": p.get("tool_unchanged")},
+                         bool(row) and row.get("before") != row.get("after")
+                         and "1234" in str(row.get("before")))
+    return check
+
+
+def _went_stale(setup):
+    """cam_get(include=['operations']) taken straight after a model edit: the setup's operations
+    read out_of_date. Every state channel reads VALID after such an edit until CAM.checkValidity
+    runs, so this row is what says the read was taken on a synced CAM product."""
+    def check(p):
+        recs = ((p.get("operations") or {}).get("setups") or [])
+        rec = next((r for r in recs if r.get("setup") == setup), None)
+        states = {r.get("name"): r.get("state") for r in ((rec or {}).get("operations") or [])}
+        return _measured(f"{setup} reads out_of_date after the model edit", {"states": states},
+                         any(s == "out_of_date" for s in states.values()))
     return check
 
 
@@ -4137,6 +4164,18 @@ _CAM_SECOND_SETUP = [
     ("cam_select_geometry", lambda c: {"operation": _FLIP_FACE_OP, "selection": "face",
                                        "handles": [_ctx_get(c, "part_bottom", "the part's underside")],
                                        "generate": False}, _selected(1), None),
+    # THE PRESET RELOAD, before either path is launched: an authored feed, then the SAME tool
+    # assigned again. Measured - the assignment reloads the tool's preset over the operation's
+    # feeds, so the moved value is what tells that write from one the platform dropped.
+    # MEASURED on a scratch face op: the parameter write on an operation carrying NO toolpath
+    # starts no generation ("operationState now reads no_toolpath"), so the assignment below meets
+    # no in-flight refusal and needs no settle between the two rows.
+    ("cam_edit_operation", {"operation": _FLIP_FACE_OP,
+                            "parameters": {"tool_feedCutting": "1234 mm/min"}},
+     lambda p: p.get("updated_count") == 1, None),
+    ("cam_edit_operation", {"operation": _FLIP_FACE_OP, "tool_scope": "document",
+                            "tool_index": _FACE_MILL},
+     _feeds_reloaded("tool_feedCutting"), None),
     # and the contour round what the flip exists to reach - the mounting pattern's backsides, taken
     # off the part's silhouette from this side. Zero handles, so it runs against the bodies set as
     # the SETUP'S models: the one reference the re-imported twin cannot reach, since the setup was
@@ -4249,6 +4288,14 @@ _CAM_MULTI_POST = [
     ("cam_delete", {"entity": _TEMPLATE_SKIP_SETUP},
      lambda p: p.get("deleted") is True and p.get("entity") == _TEMPLATE_SKIP_SETUP
      and p.get("entity_type") == "setup", None),
+    # THE MODEL EDIT UNDER A GENERATED JOB, with both programs already written: the part's driving
+    # length is nudged and put back, and the read between them is taken on a CAM product whose
+    # validity every CAM call syncs - so the flip setup reads out_of_date rather than postable.
+    ("param_set", {"name": PART_DRIVER, "expression": "121 mm"},
+     _param_set_to(PART_DRIVER, 121), None),
+    ("cam_get", {"include": ["operations"], "setup": FLIP_SETUP}, _went_stale(FLIP_SETUP), None),
+    ("param_set", {"name": PART_DRIVER, "expression": "120 mm"},
+     _param_set_to(PART_DRIVER, 120), None),
     # THE TREE THE RUN LEAVES BEHIND. Both programs are written, so the rail toolpath comes back off
     # its park and every setup the job's later edits left stale is relaunched. Only setups whose
     # every operation read a selection back are named: a blocked one parks the process on a modal.
@@ -4262,6 +4309,14 @@ _CAM_MULTI_POST = [
      _needs(MACHINING_EXTENSION, _relaunched(_SW_SETUP)), None),
     ("cam_generate", {"target": _MX_SETUP, "skip_valid": True},
      _needs(MACHINING_EXTENSION, _relaunched(_MX_SETUP)), None),
+    # the flip setup is the one the model edit above left stale, so this launch is what the sync
+    # earns: skip_valid passes over a valid operation, and these read out_of_date.
+    ("cam_generate", {"target": FLIP_SETUP, "skip_valid": True},
+     _launched_on(FLIP_SETUP, skip_valid=True), None),
+    # and the template act's lasting witness, which the same nudge staled: with validity synced
+    # its operation reads out_of_date too, and ACT 10f asserts every operation valid.
+    ("cam_generate", {"target": _TEMPLATE_GENERATE_SETUP, "skip_valid": True},
+     _relaunched(_TEMPLATE_GENERATE_SETUP), None),
 ]
 
 

@@ -14,9 +14,9 @@ import time
 
 import _dump_reader
 from verify_acts_cam import (
-    _TURNING_TYPE, _TURN_MACHINE, _all_cut, _landed_in_one_call, _launched_on, _offers, _op_named,
-    _param_landed, _posted_turning, _reveal, _setup_ready, _setup_row, _turning_stock,
-    _types_offered)
+    _MX_SETUP, _TURNING_TYPE, _TURN_MACHINE, _all_cut, _landed_in_one_call, _launched_on, _offers,
+    _op_named, _param_landed, _posted_turning, _relaunched, _reveal, _setup_ready, _setup_row,
+    _turning_stock, _types_offered)
 from verify_core import (
     EXPORT_DIR, _RECALL, _ctx_get, _datum, _drilled, _extruded, _face_up_at, _fg, _filleted,
     _joint_origin_computed, _made_component, _matched, _measured, _near, _num, _prof, _recall,
@@ -1436,4 +1436,9 @@ _HUB_ADDITIVE = [
     ("cam_delete", {"entity": _ADD_SETUP},
      lambda p: p.get("deleted") is True and p.get("entity") == _ADD_SETUP
      and p.get("entity_type") == "setup", None),
+    # THE JOB THE BUILD STALED. The additive setup re-poses the hub it shares with the multi-axis
+    # job, and with validity synced that job reads out_of_date ("Design changed: Floor surfaces"
+    # / "Drive surfaces") - a staleness an unsynced read does not show. Relaunched here, and this
+    # act's boundary poll certifies it before the next act reads its times.
+    ("cam_generate", {"target": _MX_SETUP, "skip_valid": True}, _relaunched(_MX_SETUP), None),
 ]

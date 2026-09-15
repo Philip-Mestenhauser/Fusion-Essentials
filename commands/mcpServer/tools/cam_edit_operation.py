@@ -67,6 +67,41 @@ def _set_suppressed(op, name, want):
             "has_toolpath": read_flag(lambda: op.hasToolpath)}, None
 
 
+# The operation's own feed/speed parameters. MEASURED: assigning a tool - the SAME tool included -
+# reloads its preset over them, so an authored tool_feedCutting of '1234 mm/min' read '1000.' after.
+_FEED_PARAMS = ("tool_feedCutting", "tool_spindleSpeed", "tool_feedPlunge", "tool_feedPerTooth",
+                "tool_surfaceSpeed", "tool_feedRetract", "tool_feedRamp")
+
+
+def _feed_expressions(op) -> dict:
+    """{parameter: expression} for the feed/speed parameters that READ - one that does not is
+    absent, so no pair is built from a side that never answered."""
+    params = safe(lambda: op.parameters)
+    out = {}
+    for pname in _FEED_PARAMS:
+        p = safe(lambda pname=pname: params.itemByName(pname)) if params is not None else None
+        expr = safe(lambda p=p: p.expression) if p is not None else None
+        if expr is not None:
+            out[pname] = str(expr)
+    return out
+
+
+def _feeds_moved(before: dict, after: dict) -> list:
+    """[{name, before, after}] for the feed/speed values that MOVED across the assignment, read in
+    parameter order. A value missing from either side was never compared."""
+    return [{"name": pname, "before": before[pname], "after": after[pname]}
+            for pname in _FEED_PARAMS
+            if pname in before and pname in after and before[pname] != after[pname]]
+
+
+def _feeds_clause(feeds) -> str:
+    """What the assignment RELOADED: how many feed/speed values moved, and the first pair."""
+    first = feeds[0]
+    return ("; the assignment reloaded the tool's preset - "
+            f"{len(feeds)} feed/speed value(s) changed "
+            f"({first['name']} {first['before']} -> {first['after']})")
+
+
 def _set_tool(cam, op, name, scope, library_url, index):
     """(record, error) - point the operation at a library tool by the addressing
     cam_create_operation takes, then read Operation.tool back and compare its identity."""
@@ -93,6 +128,7 @@ def _set_tool(cam, op, name, scope, library_url, index):
     # null, not '', when the operation carried no tool - the case this arm exists for.
     was = _tool_facts(prior)[0] if prior is not None else None
     was_valid = read_flag(lambda: op.isToolpathValid)
+    was_feeds = _feed_expressions(op)
     try:
         op.tool = t
     except Exception as e:
@@ -120,6 +156,9 @@ def _set_tool(cam, op, name, scope, library_url, index):
            # description names a tool, and only these say what size it is.
            "tool_dimensions": tool_dimensions(now, _MM, "mm"),
            "is_toolpath_valid": read_flag(lambda: op.isToolpathValid)}
+    feeds = _feeds_moved(was_feeds, _feed_expressions(op))
+    if feeds:
+        rec["feeds_reset"] = feeds      # absent = no feed/speed expression moved across the write
     if named is None:
         # absent = both descriptions read and the read-back names the library tool
         rec["tool_identity_checked"] = False
@@ -155,8 +194,12 @@ def _tool_note(rec, name):
     diameter = (rec.get("tool_dimensions") or {}).get("diameter")
     if diameter is not None:
         lead += f"; cutting diameter {diameter} mm"
-    if rec.get("tool_unchanged"):
+    feeds = rec.get("feeds_reset")
+    # A moved feed IS the evidence of a landed write, so the cannot-tell clause goes when one moved.
+    if rec.get("tool_unchanged") and not feeds:
         lead += _unchanged_clause(rec)
+    if feeds:
+        lead += _feeds_clause(feeds)
     was, now = rec["was_toolpath_valid"], rec["is_toolpath_valid"]
     if was is True and now is False:
         return (lead + "; isToolpathValid read True before the assignment and False after - "

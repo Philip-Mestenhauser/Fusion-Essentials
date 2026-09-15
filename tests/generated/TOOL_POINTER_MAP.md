@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 192  |  **description breadcrumbs:** 287  |  **note/error breadcrumbs:** 621
+**Tools:** 192  |  **description breadcrumbs:** 288  |  **note/error breadcrumbs:** 622
   |  **guidance smells flagged:** 8
 ## Blindspots to engineer
 
@@ -2670,6 +2670,8 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - {names} read isGroundToParent True - the platform refuses to arrange a pinned component with move_originals=true. Nothing was created. Release each with assembly_ground(ground_to_parent=false), or ...
 - Arrange failed on a pinned component: {names}. Release it with assembly_ground(ground_to_parent=false), or drop it from 'shapes'. Platform: {msg}
 - Arrange failed{code_clause}: a shape it holds is pinned to its parent and the platform names none of them. Release a pinned shape with assembly_ground(ground_to_parent=false), or drop it from 'shap...
+- The ACTIVE edit target's component is placed by {names}, and the platform fails an arrange holding one with a bare code. Nothing was created. Run design_activate_component('root') first, or drop it...
+- Arrange failed, and the ACTIVE edit target's component is placed by {names}: run design_activate_component('root'), then retry - or drop it from 'shapes'. Platform: {msg}
 - Pass exactly ONE envelope: 'boundary_sketch' (a sketch profile), or 'envelope_plane' with 'envelope_length' and 'envelope_width'. Given boundary_sketch='', envelope_plane=''.
 - solver='3d' packs into a 3D envelope: pass 'envelope_plane' with 'envelope_length', 'envelope_width' and 'envelope_height' instead of 'boundary_sketch' ('').
 - 'envelope_origin' offsets a SIZED envelope from its plane's origin, and the profile envelope this call takes from sketch '' carries no origin offsets. Drop it, or pass 'envelope_plane' with its sizes.

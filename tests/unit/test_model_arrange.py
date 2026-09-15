@@ -948,6 +948,62 @@ class TestGroundedPreflight:
         assert "assembly_ground(ground_to_parent=false)" in res["message"]
 
 
+class TestActiveComponentPreflight:
+    """MEASURED on BOTH solvers: an arrange whose shapes include the ACTIVE component failed with a
+    bare '3 :' (an empty platform message), and the identical call landed once root was active. The
+    refusal rests on a comparison that ANSWERED - the component where new geometry lands."""
+
+    def _install_active(self, active_shape):
+        """A root holding one shape and a boundary, with the shape's component (or root) ACTIVE."""
+        af = FakeArrangeFeatures()
+        occ = _occ("A:1")
+        root = _component("Root", [_sketch("Boundary")], [occ], af)
+        design = make_design(comp=root)
+        design.activeComponent = occ.component if active_shape else root
+        _wire(design, af)
+        return af, design, occ
+
+    def test_a_shape_whose_component_is_active_is_refused_before_the_add(self):
+        af, _design, _occ_a = self._install_active(True)
+        res = ar.handler(boundary_sketch="Boundary", shapes="A:1")
+        assert res["isError"] is True
+        assert "A:1" in res["message"] and "ACTIVE edit target" in res["message"]
+        assert "design_activate_component('root')" in res["message"]
+        assert af.added is False and af.last_input is None      # nothing created
+
+    def test_the_same_call_with_root_active_arranges(self):
+        af, _design, _occ_a = self._install_active(False)
+        out = _payload(ar.handler(boundary_sketch="Boundary", shapes="A:1"))
+        assert out["arranged"] is True and af.added is True
+
+    def test_a_bare_platform_failure_names_the_active_shape(self):
+        # The pre-flight is TRI-STATE: it refuses on a proven True alone, so a comparison that could
+        # not be made lets the call through. When the platform then fails with a message carrying no
+        # cause at all, the same read - answering by then - is what names one.
+        af, design, occ = self._install_active(False)
+
+        def _boom(inp):
+            design.activeComponent = occ.component
+            raise RuntimeError("3 :")
+
+        af.add = _boom
+        res = ar.handler(boundary_sketch="Boundary", shapes="A:1")
+        assert res["isError"] is True
+        assert "A:1" in res["message"] and "ACTIVE edit target" in res["message"]
+        assert "Platform: 3 :" in res["message"]
+
+    def test_a_bare_platform_failure_with_no_active_shape_stays_the_plain_report(self):
+        af, _design, _occ_a = self._install_active(False)
+
+        def _boom(inp):
+            raise RuntimeError("3 :")
+
+        af.add = _boom
+        res = ar.handler(boundary_sketch="Boundary", shapes="A:1")
+        assert res["isError"] is True
+        assert res["message"] == "Arrange failed: 3 :"
+
+
 class TestHonesty:
     def test_add_returning_none_is_error(self):
         _, af = _install([_sketch("B")], ["A:1"])

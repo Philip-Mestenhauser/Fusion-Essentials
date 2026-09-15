@@ -275,7 +275,7 @@ def _handle_scope_state(entry: dict):
     name = (entry.get("target_name") or "").strip()
     scoped = bool(name) and (entry.get("scope") or "document") in ("setup", "folder", "operation")
     if scoped:
-        cam, cerr = _cam_common.get_cam()
+        cam, cerr = _cam_common.get_cam(sync=True)
         if not cerr:
             live, label, health_ops, serr = _scope_state(cam, name)
             if not serr and live is not None:
@@ -501,7 +501,7 @@ def _status_live(target: str, include_operations: bool) -> dict:
     or the whole document - reading op state DIRECTLY off the ACTIVE document, so an op generated
     inline (cam_create_operation(generate=true) / the UI) is readable with no cam_generate handle.
     completed=true only when nothing in scope is still generating."""
-    cam, err = _cam_common.get_cam()
+    cam, err = _cam_common.get_cam(sync=True)
     if err:
         return error(err)
 

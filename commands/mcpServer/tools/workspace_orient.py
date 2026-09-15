@@ -374,7 +374,7 @@ def _cam_summary(doc):
     # MEASURED: a missing hasToolpath is NOT "needs generating" - a suppressed op has none by
     # design, and a generated op can finish with an EMPTY toolpath (state IsValid, isToolpathValid
     # true, hasToolpath false), which is why is_empty_toolpath is also handed the CAM product.
-    cam, _ = _cam_common.get_cam()
+    cam, _ = _cam_common.get_cam(sync=True)
     if not cam:
         return False, None
     setups = safe(lambda: cam.setups)

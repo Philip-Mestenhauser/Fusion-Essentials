@@ -170,7 +170,7 @@ class TestLiveReadiness:
         ccom = load_tool("_cam_common")
         # states: 0=valid, 1/3=out_of_date, 2=suppressed
         ops = [_op(0), _op(0), _op(1), _op(3), _op(2)]
-        monkeypatch.setattr(ccom, "get_cam", lambda: (_cam_with(ops), None))
+        monkeypatch.setattr(ccom, "get_cam", lambda **_:(_cam_with(ops), None))
         sig, err = ccom.live_readiness()
         assert err is None
         assert sig["valid"] == 2
@@ -182,7 +182,7 @@ class TestLiveReadiness:
         ccom = load_tool("_cam_common")
         ops = [_op(1, generating=True, progress="Pending", name="queued"),
                _op(1, generating=True, progress="42.0%", name="running")]
-        monkeypatch.setattr(ccom, "get_cam", lambda: (_cam_with(ops), None))
+        monkeypatch.setattr(ccom, "get_cam", lambda **_:(_cam_with(ops), None))
         sig, _ = ccom.live_readiness()
         assert sig["generating"] == 2
         # The op with real progress wins over the "Pending" one.
@@ -195,7 +195,7 @@ class TestLiveReadiness:
         # never finish); samples.op carries name + first error line, and readiness is a BLOCKER.
         ops = [_op(0), _op(1, error="Top height must not be below the bottom height\nOn the Heights tab...",
                        name="Rough to Model Top"), _op(1)]
-        monkeypatch.setattr(ccom, "get_cam", lambda: (_cam_with(ops), None))
+        monkeypatch.setattr(ccom, "get_cam", lambda **_:(_cam_with(ops), None))
         sig, _ = ccom.live_readiness()
         assert sig["errored"] == 1
         assert sig["out_of_date"] == 1          # only the non-errored state-1 op
@@ -210,7 +210,8 @@ class TestLiveReadiness:
         # a faulted SETUP blocks the job even with clean ops - surfaced as setups_errored + a sample.
         ops = [_op(0)]
         monkeypatch.setattr(ccom, "get_cam",
-                            lambda: (_cam_with(ops, setup_error="WCS orientation is invalid"), None))
+                            lambda **_: (_cam_with(ops, setup_error="WCS orientation is invalid"),
+                                         None))
         sig, _ = ccom.live_readiness()
         assert sig["setups_errored"] == 1
         assert sig["programs_errored"] == 0
@@ -222,7 +223,7 @@ class TestLiveReadiness:
         # a faulted NC PROGRAM (no post config / no ops) blocks posting - surfaced as programs_errored.
         ops = [_op(0)]
         progs = [_ncp("Main", error="No post configuration selected")]
-        monkeypatch.setattr(ccom, "get_cam", lambda: (_cam_with(ops, programs=progs), None))
+        monkeypatch.setattr(ccom, "get_cam", lambda **_:(_cam_with(ops, programs=progs), None))
         sig, _ = ccom.live_readiness()
         assert sig["programs_errored"] == 1
         assert sig["samples"]["program"]["name"] == "Main"
@@ -231,7 +232,8 @@ class TestLiveReadiness:
     def test_clean_job_is_ready(self, monkeypatch):
         ccom = load_tool("_cam_common")
         monkeypatch.setattr(ccom, "get_cam",
-                            lambda: (_cam_with([_op(0), _op(0)], programs=[_ncp("Main")]), None))
+                            lambda **_: (_cam_with([_op(0), _op(0)], programs=[_ncp("Main")]),
+                                         None))
         sig, _ = ccom.live_readiness()
         assert sig["setups_errored"] == 0 and sig["programs_errored"] == 0
         assert sig["samples"]["op"] is None
@@ -242,6 +244,6 @@ class TestLiveReadiness:
 
     def test_cam_unavailable_returns_error(self, monkeypatch):
         ccom = load_tool("_cam_common")
-        monkeypatch.setattr(ccom, "get_cam", lambda: (None, "no CAM"))
+        monkeypatch.setattr(ccom, "get_cam", lambda **_:(None, "no CAM"))
         sig, err = ccom.live_readiness()
         assert sig is None and err == "no CAM"
