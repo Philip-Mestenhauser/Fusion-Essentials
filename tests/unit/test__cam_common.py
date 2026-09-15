@@ -199,6 +199,34 @@ class TestStockModeAndFrame:
         rec = _payload(cr.get_cam_setups_handler())["setups"][0]
         assert "z_world" not in (rec["wcs"] or {})
 
+    def test_the_origin_converts_from_the_matrixs_own_millimetres(self, install):
+        # MEASURED: workCoordinateSystem's translation reads in MM regardless of display units - a
+        # 40 mm origin reads 4.0 under 'cm', never 400 (treating it as cm) or left in mm.
+        install(FakeCAM([_StockSetup(matrix=FakeMatrix3D(t=(40.0, 30.0, 21.0)))]))
+        rec = _payload(cr.get_cam_setups_handler(units="cm"))["setups"][0]
+        assert rec["wcs"]["origin"] == [4.0, 3.0, 2.1]
+        assert rec["wcs"]["units"] == "cm"
+
+    def test_the_axes_publish_as_unit_vectors_beside_the_origin_and_z_world(self, install):
+        install(FakeCAM([_StockSetup(matrix=FakeMatrix3D(t=(40.0, 30.0, 21.0)))]))
+        rec = _payload(cr.get_cam_setups_handler())["setups"][0]
+        assert rec["wcs"]["x_axis"] == [1.0, 0.0, 0.0]
+        assert rec["wcs"]["y_axis"] == [0.0, 1.0, 0.0]
+        # z_world IS the frame's own z_axis - published once, under the one name, never twice.
+        assert rec["wcs"]["z_world"] == [0.0, 0.0, 1.0]
+        assert "z_axis" not in rec["wcs"]
+
+    def test_a_setup_with_no_matrix_carries_no_frame_keys(self, install):
+        install(FakeCAM([_StockSetup()]))
+        rec = _payload(cr.get_cam_setups_handler())["setups"][0]
+        wcs = rec["wcs"] or {}
+        assert "origin" not in wcs and "x_axis" not in wcs and "units" not in wcs
+
+    def test_unknown_units_is_an_error(self, install):
+        install(FakeCAM([_StockSetup()]))
+        res = cr.get_cam_setups_handler(units="parsecs")
+        assert res["isError"] is True and "parsecs" in res["message"]
+
 
 class TestUnreadableModelLists:
     """A model collection whose PROPERTY raises is published as null, never as []. The two answers
@@ -1855,6 +1883,84 @@ class TestResolveCamNode:
         assert err is None and node.kind == "setup" and node.name == "Setup2"
 
 
+class TestResolveCamNodeByPath:
+    """A ' / ' request is tried against node.path BEFORE the bare-name match - the escape for a
+    name two nodes answer to, published on every operation row as 'path' already."""
+
+    def _split_dup(self):
+        """'Drill1' folder-held in Setup1 and bare in Setup2 - the bare name is ambiguous, and only
+        the path tells the two apart."""
+        folder = FakeCAMFolder("Holes", ops=[FakeOperation("Drill1")])
+        s1 = FakeSetup("Setup1", folders=[folder])
+        s2 = FakeSetup("Setup2", ops=[FakeOperation("Drill1")])
+        return make_cam(s1, s2)
+
+    def test_a_path_resolves_what_the_bare_name_calls_ambiguous(self):
+        cam = self._split_dup()
+        node, err = cc.resolve_cam_node(cam, "Drill1")
+        assert node is None and "ambiguous" in err        # the bare name alone cannot pick one
+        node, err = cc.resolve_cam_node(cam, "Setup1 / Holes / Drill1")
+        assert err is None and node.path == "Setup1 / Holes / Drill1"
+
+    def test_a_path_naming_the_wrong_setup_does_not_silently_resolve_the_other(self):
+        # 'Setup2' holds no 'Holes' folder, so the path matches NOTHING - refused as not found,
+        # never silently resolved against the differently-pathed 'Drill1' that IS there.
+        cam = self._split_dup()
+        node, err = cc.resolve_cam_node(cam, "Setup2 / Holes / Drill1")
+        assert node is None
+        assert "No operation named 'Setup2 / Holes / Drill1'" in err
+
+    def test_two_nodes_sharing_one_path_are_refused_not_picked(self):
+        # a container repeating its own name at one level: 'Holes' listed twice under Setup1, each
+        # holding a 'Drill1' - two DIFFERENT nodes read the identical path.
+        s1 = FakeSetup("Setup1", folders=[FakeCAMFolder("Holes", ops=[FakeOperation("Drill1")]),
+                                          FakeCAMFolder("Holes", ops=[FakeOperation("Drill1")])])
+        cam = make_cam(s1)
+        node, err = cc.resolve_cam_node(cam, "Setup1 / Holes / Drill1")
+        assert node is None and "2" in err and "sharing that path" in err
+
+    def test_two_same_named_siblings_under_one_setup_also_share_a_path(self):
+        # the common duplicate shape - no repeated container needed: two operations of one name
+        # sitting directly under one setup both read the path 'Setup1 / Dup'.
+        cam = make_cam(FakeSetup("Setup1", ops=[FakeOperation("Dup"), FakeOperation("Dup")]))
+        node, err = cc.resolve_cam_node(cam, "Setup1 / Dup")
+        assert node is None and "2" in err and "sharing that path" in err
+
+    def test_a_literal_name_matching_another_nodes_path_is_refused_not_shadowed(self):
+        # NodeA is literally NAMED 'Setup1 / Face' (an operation name that happens to carry the
+        # path separator); NodeB's own COMPUTED path also reads 'Setup1 / Face'. One spelling, two
+        # readings - refused rather than letting the path silently win.
+        literal = FakeOperation("Setup1 / Face")
+        cam = make_cam(FakeSetup("Setup1", ops=[literal, FakeOperation("Face")]))
+        node, err = cc.resolve_cam_node(cam, "Setup1 / Face")
+        assert node is None
+        assert "reads two ways" in err and "AT that path" in err and "NAMED" in err
+
+    def test_the_path_match_is_case_insensitive(self):
+        cam = self._split_dup()
+        node, err = cc.resolve_cam_node(cam, "setup1 / holes / drill1")
+        assert err is None and node.path == "Setup1 / Holes / Drill1"
+
+    def test_the_ordinal_address_still_works_beside_a_path(self):
+        cam = make_cam(FakeSetup("Setup1", ops=[FakeOperation("Dup"), FakeOperation("Dup")]))
+        node, err = cc.resolve_cam_node(cam, "Dup#2")
+        assert err is None and node.name == "Dup"
+
+    def test_the_miss_names_are_bare_not_paths_and_the_hint_names_the_form(self):
+        cam, *_ = _tree_cam()
+        node, err = cc.resolve_cam_node(cam, "Ghost", kinds=("operation",), label="operation")
+        assert node is None
+        assert "Setup1 / Holes / Drill1" not in err        # the list stays names, not paths
+        assert "Drill1" in err
+        assert "'Setup / operation' path" in err
+
+    def test_the_path_hint_is_omitted_for_a_setup_scoped_miss(self):
+        # a setup's own path is its bare name - naming the path form here would teach nothing.
+        cam, *_ = _tree_cam()
+        node, err = cc.resolve_cam_node(cam, "Ghost", kinds=("setup",), label="setup")
+        assert node is None and "'Setup / operation' path" not in err
+
+
 # The four kinds cam_delete passes. A resolve whose kinds include `setup` alongside another kind is
 # how a SETUP lands in a candidate list beside a namesake; two setups cannot share a name (Fusion
 # dedupes), so that collision is always setup-vs-other.
@@ -2124,7 +2230,8 @@ class TestAvailableListIsCappedByName:
     def test_every_listed_name_is_whole_and_the_rest_are_counted(self):
         node, err = cc.resolve_cam_node(self._cam(20), "Ghost", label="operation")
         assert node is None
-        listed = err.split("Available: ")[1].rstrip(".").split(", ")
+        available = err.split("Available: ")[1].split(". A 'Setup / operation'")[0]
+        listed = available.split(", ")
         assert listed[:8] == [f"Operation-{i:02d}-LongEnoughToTruncate" for i in range(8)]
         assert listed[8:] == ["... (+12 more not listed)"]
 
@@ -5387,6 +5494,11 @@ class TestMachineLabel:
     def test_no_machine_is_none_not_a_placeholder(self):
         assert cc.machine_label(None) is None
 
+    def test_a_trailing_newline_on_the_description_is_stripped(self):
+        # MEASURED: the shipped 'Tormach 1500MX' description carries one.
+        assert cc.machine_label(_machine_stub("Tormach", "1500MX", "Tormach 1500MX\n")) == \
+            "Tormach 1500MX"
+
     def test_ident_is_label_vendor_model(self):
         assert cc.machine_ident(_machine_stub("Haas", "VF-2", "Haas VF-2 with TRT100")) == \
             ("Haas VF-2 with TRT100", "Haas", "VF-2")
@@ -5596,7 +5708,7 @@ class TestResolveMachineByDescription:
         m, label, err = cc.resolve_machine("This machine has BC axis on the Table")
         assert m is None and label is None
         assert "No machine matches" in err
-        assert "Use the machine name (its description)" in err
+        assert "cam_get(include=['machines']" in err
 
     def test_a_failing_location_does_not_sink_the_description_walk(self, install_library):
         install_library(_machine_lib(self._pools(), raises=(_LOC_LOCAL,)))

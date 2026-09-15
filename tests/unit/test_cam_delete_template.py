@@ -278,22 +278,29 @@ class TestDeleteTemplateGuards:
         assert lib.deleted == []
 
     def test_an_incomplete_asset_walk_refuses_the_delete(self, tlib):
-        # the walk that would have shown a same-named duplicate is the read that did not finish, so
-        # the one-asset conclusion has no support and the delete fails CLOSED.
+        # the by-name search itself now catches this: a TRUNCATED walk cannot show its one hit is
+        # the only one, so it declares nothing rather than a false unique - the delete never starts,
+        # and the message says the template WAS found, never "not found" (it was).
         t, a = _one()
         lib = tlib(tree={"": [t]}, assets=[a], folder_depth=8)
         res = ct.handler(name="GyroTmpl", confirm_name="GyroTmpl")
         assert res["isError"] is True
-        assert "hit its own bound" in res["message"] and "only ONE asset" in res["message"]
+        assert "One template named 'GyroTmpl' was found under 'local'" in res["message"]
+        assert "the library walk stopped at" in res["message"] and "template_url" in res["message"]
+        assert "No template named" not in res["message"]         # never wrapped as "not found"
         assert lib.deleted == []
 
-    def test_a_zero_hit_search_discloses_an_incomplete_walk(self, tlib):
+    def test_a_truncated_walk_refuses_upstream_even_with_no_matching_asset(self, tlib):
+        # the SAME upstream refusal, reached through a fixture where the found template carries no
+        # paired asset entry at all - proving the guard fires before, and independent of, the local
+        # asset census (unreachable from here, see cam_delete_template.py).
         lib = tlib(tree={"": [_Tmpl("GyroTmpl")]},
                    assets=[("Other.f3dhsm-template", _Tmpl("Other"))], folder_depth=8)
         res = ct.handler(name="GyroTmpl", confirm_name="GyroTmpl")
         assert res["isError"] is True
-        assert "No asset in the Local template library is named" in res["message"]
-        assert "incomplete" in res["message"]
+        assert "One template named 'GyroTmpl' was found under 'local'" in res["message"]
+        assert "the library walk stopped at" in res["message"] and "template_url" in res["message"]
+        assert "No template named" not in res["message"]         # never wrapped as "not found"
         assert lib.deleted == []
 
     def test_an_asset_that_loads_nothing_is_refused(self, tlib):

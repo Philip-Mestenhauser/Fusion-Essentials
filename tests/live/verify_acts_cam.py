@@ -702,6 +702,22 @@ def _tool_param_landed(name, fragment):
     return check
 
 
+def _wcs_origin_at(recall_key):
+    """cam_get: the setup's published wcs.origin lands on the point a bound Joint Origin computed -
+    not a stand-in coordinate. Compared within the joint tool's own 0.01 mm band."""
+    def check(p):
+        want = _RECALL.get(recall_key) or {}
+        rows = p.get("setups") or []
+        origin = ((rows[0] or {}).get("wcs") or {}).get("origin") if rows else None
+        pairs = [(want.get(k), (origin or [None, None, None])[i])
+                 for i, k in enumerate(("x", "y", "z"))]
+        return _measured("the setup's published WCS origin lands on the bound joint origin",
+                         {"origin": origin, "want": want},
+                         bool(origin) and want.get("units") == "mm"
+                         and all(_num(a) and _near(b, a, 0.01) for a, b in pairs))
+    return check
+
+
 # ACT 10a: CAM on the REAL part in the REAL fixture - job built and generated. The scratch-stock
 # rows remain as this act's fallback, so the CAM family stays covered when the story world
 # could not build.
@@ -877,9 +893,13 @@ _CAM_STORY = [
     # setup WCS; the bound_entities read-back lands in ctx as the receipt's evidence.
     ("joint_create_origin", {"anchor": "bbox_center", "bbox_target": STOCK_COMP + ":1",
                              "orient_axis": "z", "name": "StockWCS"},
-     _joint_origin_computed("StockWCS"), None),
+     _joint_origin_computed("StockWCS"),
+     ("stock_wcs_point", _recall("stock_wcs_point", lambda p: p.get("origin_readback")))),
     ("cam_edit_setup", {"setup": CAM_SETUP, "wcs": {"origin": "StockWCS"}}, "ok",
      ("wcs_bound_entities", lambda p: p["wcs_set"]["origin"]["bound_entities"])),
+    # the setup's published WCS frame reads the point the joint origin above computed and landed
+    # on, not a stand-in coordinate.
+    ("cam_get", {"setup": CAM_SETUP, "units": "mm"}, _wcs_origin_at("stock_wcs_point"), None),
     # THE STRATEGY VOCABULARY THIS SETUP OFFERS, read before a single operation is created: the
     # tallies partition it, and every strategy the creates below name is in it reading allowed. A
     # spelling this build does not carry, or one this licence will not generate, reds here with the
@@ -1349,6 +1369,10 @@ _CAM_STORY = [
      _refused("already answer to", "dedupes rather than refusing"), None),
     ("cam_get", {"include": ["operations"], "setup": CAM_SETUP},
      _paths_address_every_operation(CAM_SETUP), None),
+    # the breadcrumb the row above just confirmed for SpotDrill (moved into Drilling above)
+    # resolves it directly - the address a duplicate name would need, on a name that is unique.
+    ("cam_get", {"include": ["tool"], "operation": f"{CAM_SETUP} / Drilling / {_SPOT_OP}"},
+     lambda p: (p.get("tool") or {}).get("operation") == _SPOT_OP, None),
     # A MACHINE OF OUR OWN before the library one: built from a template into the Local library and
     # then proven usable three ways - the create's own re-resolve, the catalog it must list in, and a
     # real assignment. The name carries the run stamp because the library keeps it (see MACHINE_NAME).
@@ -1377,6 +1401,10 @@ _CAM_STORY = [
     ("cam_edit_setup", {"setup": CAM_SETUP, "machine": "Haas VF-2",
                         "machine_strip_simulation": True},
      lambda p: p.get("machine_set") == "Haas VF-2", None),
+    # An agent has no UI: a bare VENDOR miss names the machines that vendor carries, off the same
+    # catalog cam_get(include=['machines']) reads - refused, so the machine above stays assigned.
+    ("cam_edit_setup", {"setup": CAM_SETUP, "machine": "Tormach"},
+     _refused("vendor", "Tormach|"), None),
     ("cam_get", {"include": ["machines"], "vendor": "Haas", "machine_type": "milling"},
      lambda p: p.get("machines", {}).get("count", 0) > 0, None),
     # THE CAP the catalog runs under: the read's own default is 100 rows and the shipped library
@@ -1424,6 +1452,20 @@ def _tmpl_rows(node, folder=None):
 def _tmpl_names(node):
     """Every template NAME in that tree - the witness a template teardown is read against."""
     return [t.get("name") for _folder, t in _tmpl_rows(node)]
+
+
+def _asset_template_resolves(name):
+    """cam_get(include=['templates'], template_url=<an asset url>): ONE template row, never an
+    empty folder-shaped tree for that same asset url."""
+    def check(p):
+        block = p.get("templates") or {}
+        rows = (block.get("tree") or {}).get("templates") or []
+        return _measured(f"template_url resolves '{name}' as one asset",
+                         {"node_count": block.get("node_count"),
+                          "names": [r.get("name") for r in rows]},
+                         block.get("node_count") == 1 and len(rows) == 1
+                         and rows[0].get("name") == name)
+    return check
 
 
 def _applicable_listing(payload, name):
@@ -2085,6 +2127,12 @@ _CAM_TEMPLATE_CLEANUP = [
     # not two.
     ("cam_get", {"include": ["templates"], "template_location": "local"},
      lambda p: _no_repeated_template_url(p), None),
+    # the saved template's OWN asset url resolves as that one template - never the empty,
+    # folder-shaped tree a url misread as a folder root answers.
+    ("cam_get", lambda c: {"include": ["templates"],
+                           "template_url": _ctx_get(c, "saved_template_url",
+                                                    "the saved template's url")},
+     _asset_template_resolves(TEMPLATE_NAME), None),
     # the by-NAME resolve still reaches the template - it is the CONFIRMATION that refuses here,
     # which is why the refusal is pinned to that wording: an ambiguity refusal would pass a bare
     # 'refused' while proving the opposite of what this row is for.

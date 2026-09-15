@@ -978,7 +978,7 @@ class TestHonesty:
         assert out["moved"] == []
         assert out["new_occurrence_count"] == 1
         assert "Arrange1:1+Envelope1(Qty: 1):1+A:1" in out["new_occurrences"]
-        assert "COPIES" in out["note"] and "did NOT move" in out["note"]
+        assert "new_occurrences holds the copies" in out["note"] and "moved reads empty" in out["note"]
 
     def test_nothing_happened_is_an_error_and_rolls_back(self):
         # No input moved AND no occurrence appeared = the arrange did nothing; success would be a lie.
@@ -1042,7 +1042,7 @@ class TestHonesty:
         assert out["components_arranged"] == 6
         assert out["components_unarranged"] is None
         assert out["statistics"]["Envelope1"]["Envelope Area"] == 60000    # mm: 600 cm2 * 100
-        assert "null rather than zero" in out["note"]
+        assert "components_unarranged reads null, not zero" in out["note"]
 
     def test_an_area_statistic_converts_to_units_squared_while_a_count_does_not(self):
         # mm: cm2 -> mm2 is factor 10 SQUARED (x100), the boundary a linear-length mistake would
@@ -1081,7 +1081,7 @@ class TestHonesty:
                                   envelope_length=200, envelope_width=200, envelope_height=100,
                                   partial=True))
         assert out["components_unarranged"] == 1
-        assert "1 component(s) did NOT fit" in out["note"]
+        assert "1 component(s) did not fit" in out["note"]
 
     def test_an_unreported_unarranged_count_is_not_an_error(self):
         # The error fires on a READ value only: a statistics object carrying no unarranged key says
@@ -1111,7 +1111,7 @@ class TestHonesty:
         row = out["result_envelopes"][0]
         assert row["name"] == "Envelope1" and row["occurrence_count"] == 3
         assert "extent" not in row
-        assert "no bounding box" in out["note"] and "no 'extent'" in out["note"]
+        assert "boxless" in out["note"] and "no 'extent'" in out["note"]
 
     def test_a_plane_envelope_publishes_a_two_axis_extent(self):
         # Its box is a BoundingBox2D of Point2Ds - reading .z raises - so the row carries x and y
@@ -1149,11 +1149,10 @@ class TestHonesty:
         out = _payload(ar.handler(boundary_sketch="B", shapes="A:1"))
         assert out["moved"] == ["A:1"]
 
-    def test_the_shortfall_and_units_clauses_compose_within_the_wire_budget(self):
-        # This composes the partial-shortfall clause with the new units sentence (266 chars) -
-        # test_prose_budget cannot see a runtime composition, so it is measured here. NOT the
-        # reachable worst case (shortfall + no-extent + the COPIES clause + units + envelope-cap
-        # composes to 628, a pre-existing overflow this item did not cause - ledgered separately).
+    def test_a_narrower_shortfall_and_units_composition_fits_the_wire_budget(self):
+        # This composes the partial-shortfall clause with the units sentence and the restructure
+        # clause (a narrower case than the reachable worst case below) - test_prose_budget cannot
+        # see a runtime composition, so it is measured here.
         design, af = _install([], ["A:1", "B:1", "C:1"])
         af.unarranged = 1
         real_add = af.add
@@ -1165,6 +1164,41 @@ class TestHonesty:
                                   envelope_plane="xy", envelope_length=300, envelope_width=200,
                                   partial=True))
         note = out["note"]
-        assert "did NOT fit" in note and "volumes in mm^3" in note
+        assert "did not fit" in note and "volumes in mm^3" in note
         assert "restructured" in note      # the short clause: this scenario MOVED an input too
+        assert len(note) <= 400, len(note)      # test_prose_budget.NOTE_BUDGET_CHARS
+
+    def test_a_shortfall_and_the_null_unarranged_clause_never_compose_together(self):
+        # stat_unarranged truthy (the shortfall fires) and stat_unarranged is None (the null clause
+        # fires) are mutually exclusive branches - one JSON cannot carry both, so the reachable
+        # worst case is whichever of the two is longer beside the rest, never both at once.
+        _, af = _install([_sketch("B")], ["A:1", "B:1", "C:1"])
+        af.statistics = json.dumps({
+            "name": "Arrange1",
+            "statistics": {"Components Arranged": {"value": 2}},
+        })
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1, B:1, C:1"))
+        note = out["note"]
+        assert "did not fit" not in note
+        assert "components_unarranged reads null, not zero" in note
+
+    def test_the_full_worst_case_composition_fits_the_wire_budget(self):
+        # The reachable worst case (measured): the SHORTFALL clause is skipped in favor of the
+        # longer 'stat_unarranged is None' clause, beside a boxless (profile) envelope row, unmoved
+        # COPIES, both measurement units, and the envelope-list cap - test_prose_budget cannot see
+        # this (it is composed at RUN TIME).
+        _, af = _install([_sketch("B")], ["A:1", "B:1", "C:1"])
+        af.statistics = json.dumps({
+            "name": "Arrange1",
+            "statistics": {"Components Arranged": {"value": 3}, "Components Volume": {"value": 16}},
+            "envelopes": [{"name": f"Envelope{i}", "statistics": {"Envelope Area": {"value": 600}}}
+                         for i in range(1, 14)],
+        })
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1, B:1, C:1"))
+        note = out["note"]
+        assert "did not fit" not in note        # the shortfall clause did NOT also fire
+        assert "extent" in note and "new_occurrences" in note
+        assert "areas are in mm^2" in note and "volumes in mm^3" in note
+        assert "components_unarranged reads null, not zero" in note
+        assert "first 12 of 14" in note
         assert len(note) <= 400, len(note)      # test_prose_budget.NOTE_BUDGET_CHARS

@@ -286,6 +286,9 @@ _FIRST_MATCH_ALLOWLIST = {
         "a name a sibling already carries raises '3 : CB_NAE - Another object with the same name "
         "already exists in this container', so a folder cannot hold two of one name and the first "
         "match is the only match",
+    "_cam_common.resolve_cam_node":
+        "matches[0] is compared against a path hit to detect a name-vs-path COLLISION, never "
+        "returned as an answer - the function refuses the collision rather than picking either side",
 }
 
 

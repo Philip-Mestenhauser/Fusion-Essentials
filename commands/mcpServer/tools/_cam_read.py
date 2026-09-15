@@ -115,26 +115,55 @@ def _wcs_bound_entities(param) -> list:
     return rows
 
 
-def _wcs_z_world(setup):
-    """The setup's own +Z as a world unit vector, off Setup.workCoordinateSystem - which way the
-    tool comes at the part. A turning setup and a top milling job on one part read opposite Zs."""
+def _matrix_axes(setup):
+    """The (origin, xAxis, yAxis, zAxis) Point3D/Vector3D tuple off
+    Setup.workCoordinateSystem.getAsCoordinateSystem, or None where the matrix or that read did
+    not answer - the one read _wcs_z_world and _wcs_frame both stand on."""
     matrix = safe(lambda: setup.workCoordinateSystem)
     if matrix is None:
         return None
     axes = safe(lambda: matrix.getAsCoordinateSystem())
-    if not axes or len(axes) != 4:
-        return None
-    z = axes[3]
-    return safe(lambda: [round(z.x, 6), round(z.y, 6), round(z.z, 6)])
+    return axes if axes and len(axes) == 4 else None
 
 
-def setup_wcs(setup):
-    """ONE setup's bound WCS {origin_mode, orientation_mode, z_world, origin_entities,
-    orientation_z_entities}, terse; None where the setup exposes no readable parameters."""
-    wcs = {}
-    z_world = _wcs_z_world(setup)
-    if z_world is not None:
-        wcs["z_world"] = z_world
+# MEASURED (2705.1.15, an 80x60x20 mm box, relative-box stock): Setup.workCoordinateSystem's own
+# translation reads in MILLIMETRES regardless of display unit - the stock top centre on that box
+# read (40, 30, 21) under both mm and inch display units, not cm and not the document's unit.
+_WCS_ORIGIN_MM_TO_CM = 0.1
+
+
+def _wcs_frame(axes, unit_factor) -> dict:
+    """{z_world, origin, x_axis, y_axis} off ONE already-read (origin, xAxis, yAxis, zAxis) tuple -
+    origin scaled from its own MILLIMETRES into 'units', the rest as unit vectors (z_world IS the
+    frame's own z_axis, under the name the setup tree already uses); {} where `axes` is None, each
+    key independently absent where its own read did not answer."""
+    if axes is None:
+        return {}
+    origin, x_axis, y_axis, z_axis = axes
+    out = {}
+    z = safe(lambda: [round(z_axis.x, 6), round(z_axis.y, 6), round(z_axis.z, 6)])
+    if z is not None:
+        out["z_world"] = z
+    f = unit_factor * _WCS_ORIGIN_MM_TO_CM
+    o = safe(lambda: [round(origin.x * f, 6), round(origin.y * f, 6), round(origin.z * f, 6)])
+    if o is not None:
+        out["origin"] = o
+    x = safe(lambda: [round(x_axis.x, 6), round(x_axis.y, 6), round(x_axis.z, 6)])
+    if x is not None:
+        out["x_axis"] = x
+    y = safe(lambda: [round(y_axis.x, 6), round(y_axis.y, 6), round(y_axis.z, 6)])
+    if y is not None:
+        out["y_axis"] = y
+    return out
+
+
+def setup_wcs(setup, unit="mm", unit_factor=1.0):
+    """ONE setup's bound WCS {origin_mode, orientation_mode, z_world, origin, x_axis, y_axis,
+    units, origin_entities, orientation_z_entities}, terse; None where the setup exposes no
+    readable parameters."""
+    wcs = _wcs_frame(_matrix_axes(setup), unit_factor)
+    if wcs:            # the one unit-scaled fact - the label rides only beside it
+        wcs["units"] = unit
     params = safe(lambda: setup.parameters)
     if params is None:
         return wcs or None
@@ -150,10 +179,14 @@ def setup_wcs(setup):
     return wcs or None
 
 
-def get_cam_setups_handler(setup: str = "") -> dict:
+def get_cam_setups_handler(setup: str = "", units: str = "mm") -> dict:
     cam, err = get_cam()
     if err:
         return error(err)
+    unit = (units or "mm").strip().lower()
+    factor = CM_TO_UNIT.get(unit)
+    if factor is None:
+        return error(f"Unknown units '{units}'. Valid: mm, cm, in.")
 
     setups = []
     setups_truncated = False
@@ -181,7 +214,7 @@ def get_cam_setups_handler(setup: str = "") -> dict:
         "is_active": safe(lambda: s.isActive),
         "machine": machine_label(safe(lambda: s.machine)),
             "stock_mode": stock_mode_name(safe(lambda: s.stockMode)),
-            "wcs": setup_wcs(s),
+            "wcs": setup_wcs(s, unit, factor),
             # null (not []) for a list whose collection property RAISED - see _model_names.
             "selected_models": models,
             "fixtures": fixtures,

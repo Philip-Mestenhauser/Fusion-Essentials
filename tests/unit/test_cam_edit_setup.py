@@ -853,6 +853,57 @@ class TestMachineResolver:
         assert m is None and "No machine matches" in err
 
 
+_TORMACH_FAMILY = [_machine("Tormach", "1100M"), _machine("Tormach", "1100MX"),
+                   _machine("Tormach", "1500MX")]
+
+
+class TestMachineVendorOnlyMiss:
+    """An agent has no UI to browse the machine library, so a request naming a VENDOR alone (no
+    model) is re-checked against the same catalog cam_get(include=['machines']) reads."""
+
+    def test_a_bare_vendor_name_lists_its_machines_as_vendor_model(self, monkeypatch):
+        _install_machine_lib(monkeypatch, _TORMACH_FAMILY)
+        m, label, err = ces.resolve_machine("Tormach")
+        assert m is None
+        assert "vendor" in err and "Tormach|1100M" in err
+        assert "cam_get(include=['machines']" in err
+
+    def test_a_request_matching_no_vendor_keeps_the_bare_miss(self, monkeypatch):
+        _install_machine_lib(monkeypatch, _VF2_FAMILY)
+        m, label, err = ces.resolve_machine("Okuma")
+        assert m is None
+        assert "No machine matches 'Okuma'" in err
+        assert "names a vendor carrying" not in err
+
+    def test_the_vendor_listing_composes_within_the_wire_budget(self, monkeypatch):
+        # A FIXED cap of 8 does not bound the wire: 8 pairs this wide compose 515 unbudgeted
+        # (measured). The listing is capped by LENGTH, so fewer than 8 show and the rest are
+        # counted rather than flooding past 400.
+        family = [_machine("Tormach", "X" * 31 + f"-{i:02d}") for i in range(9)]
+        _install_machine_lib(monkeypatch, family)
+        m, label, err = ces.resolve_machine("Tormach")
+        assert m is None
+        assert "more not listed" in err
+        assert len(err) <= 400, len(err)   # test_prose_budget.NOTE_BUDGET_CHARS
+
+    def test_a_prefix_match_is_not_claimed_as_the_vendors_own_name(self, monkeypatch):
+        # PROBE-unconfirmed whether the library query prefix-matches the vendor field. If it ever
+        # does, a request naming only PART of a vendor ('Torm') must not claim it named that
+        # vendor outright - the returned rows' own vendor field is what backs the wording.
+        def create_query(loc, vendor, model):
+            hit = bool(vendor) and "tormach".startswith(vendor.lower())
+            return SimpleNamespace(execute=lambda: list(_TORMACH_FAMILY) if hit else [])
+        lib = SimpleNamespace(createQuery=create_query)
+        holder = SimpleNamespace(libraryManager=SimpleNamespace(machineLibrary=lib))
+        monkeypatch.setattr(ces.adsk.cam.CAMManager, "get", staticmethod(lambda: holder),
+                            raising=False)
+        m, label, err = ces.resolve_machine("Torm")
+        assert m is None
+        # both locations answer the same fake query, so the 3-machine family lists twice.
+        assert "matches 6 machine(s)" in err
+        assert "names a vendor" not in err
+
+
 # ── the machine CATALOG read (cam_get include=['machines'] delegates here) ──────────────────────────
 
 class TestReadMachines:

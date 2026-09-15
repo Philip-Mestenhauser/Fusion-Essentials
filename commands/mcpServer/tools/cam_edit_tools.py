@@ -14,7 +14,7 @@ from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import (CM_TO_UNIT, iter_collection, named_with_remainder, ok, error, read_flag,
                       safe)
-from ._cam_common import (get_cam, expression_error, library_assets, quote_expression,
+from ._cam_common import (assets_named, get_cam, expression_error, library_assets, quote_expression,
                           tool_dimension_value)
 from ._cam_presets import (_apply_preset_values, _persist_preset_change, _persisted_preset_names,
                            _preset_names, _preset_spec_error, _preset_tool, _presets_named)
@@ -195,8 +195,16 @@ def _resolve_target(scope, library):
     if not target:
         return None, f"Provide 'library' (name or url) for {scope} scope. Available: " \
                      f"{', '.join(safe(lambda a=a: a.leafName) for a in found)}.{capped}"
-    lib_url = next((a for a in found if safe(lambda a=a: a.toString()) == target), None) \
-        or next((a for a in found if safe(lambda a=a: a.leafName) == target), None)
+    lib_url = next((a for a in found if safe(lambda a=a: a.toString()) == target), None)
+    if lib_url is None:
+        # The leafName-or-stem matcher every library resolve shares - refuses two assets answering
+        # one name rather than picking the first the folder walk reached.
+        named = assets_named(found, {target.lower()})
+        if len(named) > 1:
+            urls = [str(safe(lambda a=a: a.toString())) for a in named]
+            return None, (f"'{target}' names {len(named)} {scope} libraries: "
+                          f"{', '.join(urls)}. Pass one of these urls as 'library'.")
+        lib_url = named[0] if named else None
     if lib_url is None:
         avail = [safe(lambda a=a: a.leafName) for a in found]
         return None, (f"No {scope} library '{target}'. Available: "

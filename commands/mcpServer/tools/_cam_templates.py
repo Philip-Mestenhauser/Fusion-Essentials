@@ -53,6 +53,33 @@ _LOCATION = _inputs.Choice("location", options=list(_LOCATION_MEMBERS), default=
 
 _MAX_NODES = 1500
 
+# The shipped asset suffix every template row's own 'url' carries (cam_get(include=['templates'])
+# publishes it) - what tells a template_url APART from a folder url the same input also takes.
+_ASSET_SUFFIX = ".f3dhsm-template"
+
+
+def _folder_url_of(asset_url_text):
+    """The folder url text one asset url sits directly under - cut at the LAST '/', '' when the
+    text carries none."""
+    return asset_url_text.rsplit("/", 1)[0] if "/" in asset_url_text else ""
+
+
+def _asset_template_tree(lib, url_text, asset_url):
+    """(a one-template tree, None) for a template_url addressing ONE asset - resolved through
+    templateAtURL, the same read cam_apply_template's own template_url takes. (None, reason) names
+    the containing folder to list instead when nothing loads there."""
+    t = safe(lambda: lib.templateAtURL(asset_url))
+    folder = _folder_url_of(url_text)
+    if t is None:
+        return None, (f"No template loads at '{url_text}'. Its folder url is '{folder}' - list "
+                      "that as 'template_url' instead.")
+    row = {"name": safe(lambda: t.name), "description": safe(lambda: t.description),
+           "is_valid": safe(lambda: t.isValidTemplate),
+           "is_hole_template": safe(lambda: t.isHoleTemplate),
+           "url": url_text, "folder_url": folder}
+    return {"folder": None, "url": folder, "templates": [row], "folders": []}, None
+
+
 _TREE_NOTE = (
     "A row's 'url' is what cam_apply_template(template_url=...) takes. url_basis "
     "'folder_position' means the asset at that template's INDEX in its folder - how the shipped "
@@ -84,7 +111,8 @@ def _template_library():
 # ---------------------------------------------------------------------------
 
 def list_cam_templates_handler(location: str = "cloud", url: str = "", max_depth: int = 4) -> dict:
-    """Navigate the template library. Start at a location root (or a folder 'url')."""
+    """Navigate the template library. Start at a location root (or a folder 'url'); a template
+    ASSET url ('.f3dhsm-template') resolves as that one template instead of walking it as a folder."""
     lib, err = _template_library()
     if err:
         return error(err)
@@ -92,9 +120,16 @@ def list_cam_templates_handler(location: str = "cloud", url: str = "", max_depth
     # Resolve the starting URL: explicit url wins, else the named location's root.
     start_url = None
     if url.strip():
-        start_url = safe(lambda: adsk.core.URL.create(url.strip()))
+        text = url.strip()
+        start_url = safe(lambda: adsk.core.URL.create(text))
         if not start_url:
             return error(f"Invalid library URL: '{url}'.")
+        if text.lower().endswith(_ASSET_SUFFIX):
+            tree, aerr = _asset_template_tree(lib, text, start_url)
+            if aerr:
+                return error(aerr)
+            return ok({"location": None, "root_url": text, "node_count": 1, "truncated": False,
+                       "tree": tree, "note": _TREE_NOTE})
     else:
         loc_key, lerr = _LOCATION.resolve(location)
         if lerr:
@@ -227,14 +262,27 @@ def _walk_library(lib, folder_url, depth, max_depth, counter):
     return node
 
 
+# Markers a self-contained _find_template_by_name hint carries - the template WAS found, once or
+# more than once, so a caller returns it verbatim rather than wrapping it as "not found". The ONE
+# home both cam_apply_template.py and cam_delete_template.py check through.
+_AMBIGUOUS_MARKER = "is ambiguous"
+_TRUNCATED_MARKER = "the library walk stopped at"
+
+
+def hint_is_self_contained(hint):
+    """Whether a _find_template_by_name hint already reads as a complete refusal on its own."""
+    return bool(hint) and (_AMBIGUOUS_MARKER in hint or _TRUNCATED_MARKER in hint)
+
+
 def _find_template_by_name(lib, location, name):
     """Search a library location (recursively) for a template by name. Returns (template, hint). A
     name that matches in MORE THAN ONE folder is REFUSED (None + an 'ambiguous' hint naming the
     folders) rather than first-DFS-matched - template_url is the precise escape (the resolver idiom
     _cam_common uses for CAM tree names)."""
-    if (location or "cloud").lower() not in _LOCATION_MEMBERS:
+    loc_key = (location or "cloud").lower()
+    if loc_key not in _LOCATION_MEMBERS:
         return None, f"Unknown location '{location}'."
-    loc = _location_enum(location or "cloud")
+    loc = _location_enum(loc_key)
     if loc is None:
         return None, f"Location '{location}' is not available in this Fusion build."
     root = safe(lambda: lib.urlByLocation(loc))
@@ -261,8 +309,15 @@ def _find_template_by_name(lib, location, name):
                                         lib.displayName(folder_url)) or "?"))
         return False      # every folder is searched: a duplicate name must be REFUSED, not raced
 
-    walk_library_folders(lib, root, visit, max_folders=_MAX_NODES)
+    truncated = walk_library_folders(lib, root, visit, max_folders=_MAX_NODES)
     if len(matches) == 1:
+        if truncated:
+            # A truncated walk cannot show the single hit is the ONLY one: a duplicate past the
+            # bound would not have been seen, so this declares nothing rather than a false unique -
+            # a COMPLETE sentence (the template WAS found), never wrapped in "not found".
+            return None, (f"One template named '{name}' was found under '{loc_key}', but the "
+                          f"library walk stopped at {_MAX_NODES} nodes, so it may not be the "
+                          "only one - pass template_url.")
         return matches[0][0], None
     if len(matches) > 1:
         folders = ", ".join(f for _, f in matches)

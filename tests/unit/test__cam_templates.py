@@ -6,6 +6,7 @@ asset-URL pairing, depth limit and node cap. A fake library models the ``childTe
 ``childFolderURLs`` / ``urlByLocation`` surface the walker uses - no live CAM needed.
 """
 
+import json
 from types import SimpleNamespace
 
 from conftest import load_tool
@@ -19,10 +20,12 @@ class FakeLib:
     ``urlByLocation`` returns the configured root url regardless of enum value.
     childAssetURLs answers ONE asset per DISTINCT template name in the folder - the shape measured
     across the shipped libraries (no folder holds two templates of one name), and the asset side
-    the by-name resolve reads a repeated arrival's identity from."""
-    def __init__(self, root_url, tree):
+    the by-name resolve reads a repeated arrival's identity from. ``templates_by_url`` keys the
+    ONE-asset resolve (templateAtURL) by the exact url string handed to it."""
+    def __init__(self, root_url, tree, templates_by_url=None):
         self._root = root_url
         self._tree = tree
+        self._templates_by_url = templates_by_url or {}
 
     def urlByLocation(self, loc):
         return self._root
@@ -39,6 +42,9 @@ class FakeLib:
     def childFolderURLs(self, folder_url):
         _, subs = self._tree.get(folder_url, ([], []))
         return subs
+
+    def templateAtURL(self, url):
+        return self._templates_by_url.get(url)
 
 
 class TestFindTemplateByName:
@@ -75,6 +81,37 @@ class TestFindTemplateByName:
         template, hint = ct._find_template_by_name(lib, "cloud", "Missing")
         assert template is None
 
+    def test_a_truncated_walk_with_one_hit_refuses_not_declares_unique(self, monkeypatch):
+        # the walk hits its own node cap before "sub" - where a duplicate 'Face' sits - is ever
+        # visited, so the one hit the root gave up is not shown to be the only one.
+        monkeypatch.setattr(ct, "_MAX_NODES", 1)
+        lib = FakeLib("root", {"root": (["Face"], ["sub"]), "sub": (["Face"], [])})
+        template, hint = ct._find_template_by_name(lib, "cloud", "Face")
+        assert template is None
+        assert "One template named 'Face' was found under 'cloud'" in hint
+        assert "the library walk stopped" in hint and "template_url" in hint
+        assert ct.hint_is_self_contained(hint) is True
+
+
+class TestHintIsSelfContained:
+    """The ONE marker both cam_apply_template.py and cam_delete_template.py check through, so
+    neither wraps a found-but-refused hint in a 'not found' sentence."""
+
+    def test_the_ambiguous_hint_is_self_contained(self):
+        assert ct.hint_is_self_contained("'X' is ambiguous - 2 templates share that name.") is True
+
+    def test_the_truncated_hint_is_self_contained(self):
+        assert ct.hint_is_self_contained(
+            "One template named 'X' was found under 'local', but the library walk stopped "
+            "at 1500 nodes, so it may not be the only one - pass template_url.") is True
+
+    def test_a_plain_not_found_hint_is_not_self_contained(self):
+        assert ct.hint_is_self_contained("Templates seen: A, B, C.") is False
+
+    def test_no_hint_at_all_is_not_self_contained(self):
+        assert ct.hint_is_self_contained(None) is False
+        assert ct.hint_is_self_contained("") is False
+
     def test_a_name_arriving_twice_in_one_folder_still_resolves(self):
         # the folder's own listing hands one template back twice; refusing that as an ambiguity
         # leaves the template unreachable by name and by url alike.
@@ -107,6 +144,55 @@ class TestFindTemplateByName:
         template, hint = ct._find_template_by_name(lib, "cloud", "Gyro")
         assert template is not None and template.name == "Gyro"
         assert hint is None
+
+
+# ── list_cam_templates_handler: a template_url that addresses ONE ASSET, not a folder ──────────────
+
+class _FakeTemplate:
+    def __init__(self, name="Block Facing Pocket Template", description="", valid=True, hole=False):
+        self.name = name
+        self.description = description
+        self.isValidTemplate = valid
+        self.isHoleTemplate = hole
+
+
+class TestListTemplatesAssetUrl:
+    """cam_get(include=['templates'], template_url=...): a url ending '.f3dhsm-template' - the
+    suffix every row's own 'url' already carries - resolves as the ONE template at it, the same
+    templateAtURL read cam_apply_template's own template_url takes."""
+
+    def _wire(self, monkeypatch, templates_by_url, tree=None):
+        lib = FakeLib("root", tree or {}, templates_by_url)
+        monkeypatch.setattr(ct, "_template_library", lambda: (lib, None))
+        monkeypatch.setattr(ct.adsk.core.URL, "create", lambda s: s, raising=False)
+        return lib
+
+    def test_an_asset_url_publishes_the_one_row(self, monkeypatch):
+        url = "user://MCP Demo Templates/Block_Facing_Pocket_Template.f3dhsm-template"
+        self._wire(monkeypatch, {url: _FakeTemplate("Block Facing Pocket Template")})
+        out = ct.list_cam_templates_handler(url=url)
+        payload = json.loads(out["content"][0]["text"])
+        assert payload["node_count"] == 1 and payload["truncated"] is False
+        row = payload["tree"]["templates"][0]
+        assert row["name"] == "Block Facing Pocket Template"
+        assert row["url"] == url
+        assert row["folder_url"] == "user://MCP Demo Templates"
+
+    def test_an_unknown_asset_url_refuses_naming_the_folder(self, monkeypatch):
+        url = "user://MCP Demo Templates/Ghost.f3dhsm-template"
+        self._wire(monkeypatch, {})
+        out = ct.list_cam_templates_handler(url=url)
+        assert out["isError"] is True
+        # asserts the FOLDER CLAUSE itself, not just the echoed input url the message already
+        # carries elsewhere - a rsplit -> split mutant (folder url 'user:') must go red here.
+        assert "Its folder url is 'user://MCP Demo Templates'" in out["message"]
+
+    def test_a_folder_url_still_walks(self, monkeypatch):
+        self._wire(monkeypatch, {}, tree={"root": (["Face"], [])})
+        out = ct.list_cam_templates_handler(url="root")
+        payload = json.loads(out["content"][0]["text"])
+        assert payload["node_count"] == 1
+        assert payload["tree"]["templates"][0]["name"] == "Face"
 
 
 # ── _walk_library: asset-URL matching + depth limit + node cap ──────────────────────────────────────

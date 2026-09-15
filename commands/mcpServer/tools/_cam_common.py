@@ -438,10 +438,14 @@ def _free_sibling_addresses(pool, same):
             if addr.lower() not in carried]
 
 
+_PATH_ADDRESS_HINT = " A 'Setup / operation' path (or 'Setup / Folder / operation') is also accepted."
+
+
 def resolve_cam_node(cam, name, kinds=("operation",), setup=None, label=None, nodes=None):
     """(CamNode, None) for the one node of a kind in `kinds` matching `name` case-insensitively and
-    exactly; no hit lists the available names, and 2+ hits are REFUSED with each duplicate's
-    '<name>#<n>' address. `setup` scopes the walk, `nodes` reuses a walk the caller already made."""
+    exactly - or matching its own PATH first when `name` carries ' / ' (two nodes can share a bare
+    name a path tells apart); no hit lists the available names, and 2+ hits are REFUSED with each
+    duplicate's '<name>#<n>' address. `setup` scopes the walk, `nodes` reuses a caller's own walk."""
     if setup is not None:
         nodes = tree_nodes(setup)
     elif nodes is not None:
@@ -454,7 +458,30 @@ def resolve_cam_node(cam, name, kinds=("operation",), setup=None, label=None, no
     asked = (name or "").strip()
     want = asked.lower()
     pool = [n for n in nodes if n.kind in kinds]
+    # Path hint text only teaches an OPERATION resolve (a folder/setup path never resolves one).
+    path_capable = "operation" in kinds
     matches = [n for n in pool if (n.name or "").lower() == want]
+    if " / " in asked:
+        path_hits = [n for n in pool if (n.path or "").lower() == want]
+        if len(path_hits) > 1:
+            # Two nodes share one PATH when same-named siblings sit under one parent - refused
+            # rather than picked, same as two nodes sharing a bare name.
+            rows = [_candidate_label(n, i) for i, n in enumerate(path_hits, 1)]
+            return None, (f"'{asked}' addresses {len(path_hits)} {label} sharing that path: "
+                          f"{named_with_remainder(rows)}. Retry with one of those '<name>#<n>' "
+                          "addresses.")
+        if len(path_hits) == 1:
+            if matches and matches[0] is not path_hits[0]:
+                # One spelling, two readings: the PATH of one node and the literal NAME of a
+                # different one both equal this string - the same collision the ordinal address
+                # is refused for below, so this is refused rather than guessed too.
+                return None, (f"'{asked}' reads two ways here: the {label} AT that path "
+                              f"({_candidate_label(path_hits[0], 1)}), and the {label} literally "
+                              f"NAMED '{asked}'. Both exist, so the address does not identify "
+                              "one. cam_get(include=['operations']) lists every one with its own "
+                              "name and path.")
+            return path_hits[0], None
+            # No path hit at all: the literal name wins, unchanged below.
     addressed, base, ordinal, same = _ordinal_reading(pool, asked)
     if not matches:
         # A literal name wins over the ordinal address: the plain match above runs first, so a node
@@ -470,8 +497,9 @@ def resolve_cam_node(cam, name, kinds=("operation",), setup=None, label=None, no
         available = [n.name for n in pool if n.name]
         # Capped by NAME COUNT, with the remainder COUNTED - never by character, which can end the
         # list mid-name and print a spelling no caller can pass back.
+        hint = _PATH_ADDRESS_HINT if path_capable else ""
         return None, (f"No {label} named '{name}'. Available: "
-                      f"{named_with_remainder(available) or '(none)'}.")
+                      f"{named_with_remainder(available) or '(none)'}." + hint)
     if len(matches) == 1 and addressed is not None and addressed is not matches[0]:
         # Both readings resolve to DIFFERENT nodes and no spelling on this input separates them, so
         # nothing is picked. The ordinal reading dies once fewer than `ordinal` nodes carry `base`,
@@ -496,10 +524,13 @@ def resolve_cam_node(cam, name, kinds=("operation",), setup=None, label=None, no
                       "not identify one." + remedy)
     if len(matches) > 1:
         rows = [_candidate_label(n, i) for i, n in enumerate(matches, 1)]
+        # The path each row's '(at ...)' already carries resolves directly too - named here so the
+        # fragile '<name>#<n>' address is not the only remedy on offer.
+        also = " The path in parentheses is also accepted." if path_capable else ""
         return None, (f"'{name}' is ambiguous - {len(matches)} CAM items share that name: "
                       f"{named_with_remainder(rows)}. Retry with one of those '<name>#<n>' "
                       "addresses; the number counts the items of that name in the order listed "
-                      "here.")
+                      "here." + also)
     return matches[0], None
 
 
@@ -1243,11 +1274,14 @@ def machine_kinds(m):
             if bool(safe(lambda caps=caps, attr=attr: getattr(caps, attr), False))]
 
 
+# MEASURED: the shipped 'Tormach 1500MX' description carries a trailing newline, which would reach
+# the wire raw in the machine catalog's 'name' and in cam_edit_setup's machine_set.
 def machine_label(m):
-    """Readable machine label: .description, else 'vendor model'. adsk.cam.Machine has no .name."""
+    """Readable machine label: .description stripped, else 'vendor model'. adsk.cam.Machine has no .name."""
     if not m:
         return None
     desc = safe(lambda: m.description)
+    desc = desc.strip() if desc else desc
     if desc:
         return desc
     label = ((safe(lambda: m.vendor) or "") + " " + (safe(lambda: m.model) or "")).strip()
@@ -1621,6 +1655,28 @@ def _exact_machine(cands, machine, vendor, model):
                        and (not ven or (v or "").lower() == ven)))
 
 
+# Headroom reserved for named_with_remainder's own "... (+N more not listed)" suffix, whose exact
+# length depends on the remainder count and is not known before the cap below is chosen.
+_REMAINDER_MARGIN = 30
+_MISS_BUDGET = 400          # test_prose_budget.NOTE_BUDGET_CHARS
+
+
+def _length_capped(pairs, lead, tail):
+    """How many leading `pairs` named_with_remainder can list before `lead` + the list + `tail`
+    crosses the wire budget - a listing whose item WIDTH varies too much for a fixed count (a
+    shipped vendor's model names are not all short)."""
+    available = _MISS_BUDGET - len(lead) - len(tail) - _REMAINDER_MARGIN
+    used = 0
+    n = 0
+    for p in pairs:
+        add = len(p) + (2 if n else 0)
+        if used + add > available:
+            break
+        used += add
+        n += 1
+    return max(n, 1)
+
+
 def resolve_machine(machine):
     """(machine, label, None) for a 'machine' string - vendor|model, vendor/model, a bare model, a
     full description, or a listing line handed back - else (None, None, error): nothing matched, or
@@ -1689,9 +1745,24 @@ def resolve_machine(machine):
             return None, None, (f"No machine matches description '{ident[0]}' with vendor|model "
                                 f"'{ident[1]}|{ident[2]}' in the Local or Fusion360 machine "
                                 "libraries. Pass a line as the refusal that listed it prints it.")
-        return None, None, (f"No machine matches '{machine}' (vendor='{vendor}', model='{model}') in the "
-                            "Local or Fusion360 machine libraries. Use the machine name (its description) "
-                            "you see in the Manufacture machine library.")
+        read = "cam_get(include=['machines'], vendor=...) lists a vendor's machines."
+        # An agent has no UI to browse: re-check the same catalog cam_get reads, so a request the
+        # catalog answers offers what it holds instead of a bare miss.
+        vendor_rows, _truncated, _cerr = machine_catalog(machine, "", 100)
+        if not _cerr and vendor_rows:
+            pairs = [f"{r['vendor']}|{r['model']}" for r in vendor_rows]
+            # "names a VENDOR" is claimed only where every returned row's own vendor field backs
+            # it case-insensitively - the query's match semantics on that field are not otherwise
+            # established here, and a prefix match would make this claim false on the caller's string.
+            is_vendor = all((r.get("vendor") or "").strip().lower() == machine.lower()
+                            for r in vendor_rows)
+            lead = (f"'{machine}' names a vendor carrying {len(pairs)} machine(s): " if is_vendor
+                    else f"'{machine}' matches {len(pairs)} machine(s): ")
+            tail = f" - pass one. {read}"
+            cap = _length_capped(pairs, lead, tail)
+            return None, None, lead + named_with_remainder(pairs, cap=cap) + tail
+        return None, None, (f"No machine matches '{machine}' (vendor='{vendor}', model='{model}') "
+                            f"in the Local or Fusion360 machine libraries. {read}")
     # EXACT match wins BEFORE refusing ambiguity (the house rule).
     exact = _exact_machine(cands, machine, vendor, model)
     if exact is not None:

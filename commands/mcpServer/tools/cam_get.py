@@ -57,10 +57,11 @@ def _unwrap(result):
         return None, result
 
 
-def _slice_setups(cam, setup):
+def _slice_setups(cam, setup, units):
     """The setups orientation default: machine + model/fixture/stock + per-setup operation_count (the
-    REAL total, incl. ops nested in folders) + folder_count (the depth breadcrumb)."""
-    return _unwrap(_cr.get_cam_setups_handler(setup=setup))
+    REAL total, incl. ops nested in folders) + folder_count (the depth breadcrumb), the WCS frame in
+    'units'."""
+    return _unwrap(_cr.get_cam_setups_handler(setup=setup, units=units))
 
 
 def _dedupe_orientation(out, inc):
@@ -287,8 +288,8 @@ def _slice_inspection(cam, measure, max_results, units):
 
 def _slice_templates(cam, template_location, template_url, template_depth):
     """The CAM toolpath TEMPLATE library tree (folders + templates by URL) for a location
-    (cloud/local/fusion/...) or a specific folder 'template_url'. Apply/save stay on cam_apply_template
-    / cam_save_template."""
+    (cloud/local/fusion/...) or a 'template_url' - a folder to walk, or one template's own asset url.
+    Apply/save stay on cam_apply_template / cam_save_template."""
     from . import _cam_templates
     return _unwrap(_cam_templates.list_cam_templates_handler(
         location=template_location or "cloud", url=template_url, max_depth=template_depth or 4))
@@ -313,7 +314,8 @@ def _op_miss_error(operation, names, refusal):
         if scopes:
             return error(f"'{operation}' is ambiguous - {len(paths)} operations share that name: "
                          f"{named_with_remainder(paths)}. Retry with the setup that holds the one "
-                         "you mean: " + ", ".join(f"setup='{s}'" for s in scopes) + ".")
+                         "you mean: " + ", ".join(f"setup='{s}'" for s in scopes)
+                         + ", or pass one of those paths as 'operation' directly.")
     return error(refusal)
 
 
@@ -639,6 +641,11 @@ _TOOL_COPY_NOTE = (
     "'dimensions' is what Operation.tool reads now in 'units': cutter, shoulder, shaft and both "
     "gauge lengths, null where the tool has no such parameter.")
 
+_PRESET_SCOPE_NOTE = (
+    " 'preset' holds the tool LIBRARY preset's own numbers, not this operation's feeds - "
+    "cam_get(include=['parameters'], operation=..., parameter_names=['tool_spindleSpeed', "
+    "'tool_feedCutting']) reads those.")
+
 
 _SHARED_PRESET_NAME_NOTE = (
     "'{name}' names {n} presets on this tool, so every match is returned under "
@@ -704,7 +711,9 @@ def _slice_tool(cam, operation, preset, setup="", units="mm"):
         if len(matches) == 1:
             chosen = matches[0][1]
             out["preset"] = {"name": safe(lambda: chosen.name),
+                             "source": "tool library preset",
                              "expressions": _preset_expressions(chosen)}
+            out["note"] += _PRESET_SCOPE_NOTE
         else:
             out["presets_sharing_name"] = [
                 {"index": i, "name": safe(lambda p=p: p.name), "expressions": _preset_expressions(p)}
@@ -748,7 +757,7 @@ def handler(include=None, setup: str = "", operation: str = "", preset: str = ""
 
     out = {}
     if want_default:
-        out, serr = _slice_setups(cam, setup)
+        out, serr = _slice_setups(cam, setup, units)
         if serr:
             return serr
 
@@ -856,22 +865,22 @@ tool = (
             "items": {"type": "string", "enum": list(_SLICES + _DEFAULT_NAMES)},
             "description": "'default'/'setups' keeps the setups slice beside them."})
     .add_input_property("setup", {"type": "string",
-            "description": "Scopes the default setup orientation and the operations/strategies/references/time/machine slices."})
+            "description": "Scopes the default orientation and several deeper slices."})
     .add_input_property("operation", {"type": "string"})
     .add_input_property("parameter_names", {"type": "array", "minItems": 1,
             "maxItems": _PARAMETER_NAME_CAP, "items": {"type": "string"},
             "description": "With 'parameters': exact internal names."})
     .add_input_property("include_unavailable", {"type": "boolean",
-            "description": "With 'parameters': include rows not both visible and enabled."})
+            "description": "With 'parameters': rows not both visible and enabled."})
     .add_input_property("unavailable_offset", {"type": "integer", "minimum": 0,
-            "description": "Continue the unavailable listing at this offset."})
+            "description": "Continues the unavailable listing."})
     .add_input_property("preset", {"type": "string",
             "description": "With include=['tool']: this preset's feeds/speeds."})
     .add_input_property("scope", {"type": "string",
             "enum": ["document", "local", "cloud", "hub", "fusion"],
-            "description": "'library': which location. Default document."})
+            "description": "Location for 'library'; default document."})
     .add_input_property("library", {"type": "string",
-            "description": "'library': a name/url; omit to list the libraries there."})
+            "description": "A name or url; omit to list the libraries there."})
     .add_input_property("tool_type", {"type": "string"})
     .add_input_property("vendor", {"type": "string"})
     .add_input_property("machine_type", {"type": "string",
@@ -880,7 +889,8 @@ tool = (
             "description": "'print_settings' filter."})
     .add_input_property("template_location", {"type": "string",
             "description": "Default cloud."})
-    .add_input_property("template_url", {"type": "string"})
+    .add_input_property("template_url", {"type": "string",
+            "description": "A folder url to walk, or one template's own url for its row."})
     .add_input_property("template_depth", {"type": "integer",
             "description": "Default 4."})
     .add_input_property("measure", {"type": "string",

@@ -1705,6 +1705,16 @@ class _AssetURL:
         return "systemlibraryroot://Samples/" + self.leafName
 
 
+class _DupLeafURL:
+    """Two of these can share ONE leafName while staying distinct assets (different toString) -
+    the shape a same-named library sitting in two folders reads as."""
+    def __init__(self, leaf, path):
+        self.leafName = leaf
+        self._path = path
+    def toString(self):
+        return self._path
+
+
 class _SampleAssets:
     """ToolLibraries over the bundled Fusion360 sample assets: leaf name -> the tool types it holds.
     Each toolLibraryAtURL is a CLOUD FETCH live (~1.4-6.7s each, measured), so `fetched` records
@@ -2709,6 +2719,17 @@ class TestResolveTargetShared:
                             lambda: self._libs([_AssetURL("Team Mill")], loads=False))
         target, err = ct._resolve_target("cloud", "Team Mill")
         assert target is None and "Could not load cloud library 'Team Mill'" in err
+
+    def test_two_libraries_sharing_a_leaf_name_are_refused_not_the_first(self, monkeypatch):
+        # two DISTINCT assets both leafed 'Team Mill' (different folders) - the by-name resolve
+        # must not pick whichever one the folder walk reached first.
+        a = _DupLeafURL("Team Mill", "systemlibraryroot://Samples/A/Team Mill")
+        b = _DupLeafURL("Team Mill", "systemlibraryroot://Samples/B/Team Mill")
+        monkeypatch.setattr(ct, "_tool_libraries", lambda: self._libs([a, b]))
+        target, err = ct._resolve_target("cloud", "Team Mill")
+        assert target is None
+        assert "2 cloud libraries" in err
+        assert a.toString() in err and b.toString() in err
 
 
 # ── the library cache guards + _source_tool ─────────────────────────────────────────────────────

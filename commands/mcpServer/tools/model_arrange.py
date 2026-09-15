@@ -582,15 +582,12 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
     rows = _envelope_rows(feature, out_factor)
     note = "Shapes arranged within the envelope. Pair with view_screenshot (top) to view the nest."
     if stat_unarranged:
-        note += (f" {stat_unarranged} component(s) did NOT fit and were left out, which partial=true"
-                 " allows.")
+        note += f" {stat_unarranged} component(s) did not fit (partial=true)."
     if any("extent" not in row for row in rows):
-        note += " A result envelope reported no bounding box, so its row carries no 'extent'."
+        note += " A boxless envelope's row has no 'extent'."
     if new_paths and not moved:
-        note += (" NOTE: the solver placed COPIES under new Envelope occurrences - the named "
-                 "input occurrences did NOT move (positions read back unchanged). Re-running an "
-                 "identical arrange STACKS another coincident copy set; delete the originals or "
-                 "the envelope (design_delete_feature on this feature) if copies were not intended.")
+        note += (" new_occurrences holds the copies; moved reads empty - re-arranging stacks "
+                 "another set, design_delete_feature removes it.")
     elif new_paths:
         note += " The solver restructured the arranged parts under new Envelope occurrences."
     if not stats:
@@ -599,8 +596,7 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
     else:
         note += _measurement_units_clause(stats, units)
         if stat_unarranged is None:
-            note += (" It reported no 'Components Unarranged', so 'components_unarranged' is null "
-                     "rather than zero.")
+            note += " components_unarranged reads null, not zero."
         if len(stats) > _ENVELOPE_CAP:
             note += f" 'statistics' lists the first {_ENVELOPE_CAP} of {len(stats)} envelopes."
     payload = {

@@ -11,7 +11,7 @@ from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import named_with_remainder, ok, error, safe, set_verified
 from ._cam_common import get_cam, find_setup, tree_nodes
-from ._cam_templates import _LOCATION, _find_template_by_name, _template_library
+from ._cam_templates import _LOCATION, _find_template_by_name, _template_library, hint_is_self_contained
 from . import _inputs
 
 app = adsk.core.Application.get()
@@ -163,9 +163,9 @@ def handler(setup: str = "", template_url: str = "",
     else:
         template, where = _find_template_by_name(lib, loc_key, template_name.strip())
         if not template:
-            # An ambiguity hint is already a complete, self-contained message - don't wrap it as
-            # 'not found' (it WAS found, in more than one place).
-            if where and "ambiguous" in where:
+            # A self-contained hint is already a complete message - don't wrap it as 'not found'
+            # (the template WAS found: in more than one place, or once past a truncated walk).
+            if hint_is_self_contained(where):
                 return error(where)
             return error(f"Template named '{template_name}' not found under '{loc_key}'. "
                           + (where or ""))

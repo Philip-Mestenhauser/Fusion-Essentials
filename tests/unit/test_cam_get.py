@@ -38,7 +38,7 @@ def _named_op(name):
 @pytest.fixture
 def stub_slices(monkeypatch):
     monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))   # a CAM product
-    monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup: (
+    monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup, units: (
         {"setup_count": 2, "setups": [{"name": "Setup1", "operation_count": 3}]}, None))
     monkeypatch.setattr(cg, "_slice_operations", lambda cam, setup: ({"operations": []}, None))
     monkeypatch.setattr(cg, "_slice_strategies",
@@ -116,11 +116,19 @@ class TestIncludeSlices:
     def test_setup_filter_scopes_default_orientation(self, monkeypatch, stub_slices):
         seen = {}
         monkeypatch.setattr(cg, "_slice_setups",
-                            lambda cam, setup: (seen.update(setup=setup) or {
+                            lambda cam, setup, units: (seen.update(setup=setup) or {
                                 "setup_count": 1, "setups": [{"name": setup}]}, None))
         out = _payload(cg.handler(setup="Setup2"))
         assert seen["setup"] == "Setup2"
         assert out["setup_count"] == 1 and out["setups"][0]["name"] == "Setup2"
+
+    def test_units_passes_through_to_the_default_orientation(self, monkeypatch, stub_slices):
+        seen = {}
+        monkeypatch.setattr(cg, "_slice_setups",
+                            lambda cam, setup, units: (seen.update(units=units) or {
+                                "setup_count": 0, "setups": []}, None))
+        cg.handler(units="in")
+        assert seen["units"] == "in"
 
 
 class TestSetupSliceScope:
@@ -197,7 +205,7 @@ class TestDeepReadDropsTheDefaultSlice:
         # the pointers are read OFF the orientation rows, so a deep read has nothing to point at -
         # and the pointer walk must take the unread slice without raising.
         monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))
-        monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup: (
+        monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup, units: (
             {"setups": [{"name": "S", "op_states": {"out_of_date": 6}}]}, None))
         monkeypatch.setattr(cg, "_slice_time", lambda cam, setup, units: ({"total_minutes": 5}, None))
         out = _payload(cg.handler(include=["time"]))
@@ -333,7 +341,7 @@ class TestReferencesCensus:
         # the slice is reached through include=['references'], so the sentence actually crosses the
         # wire rather than living on a helper nobody calls.
         monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))
-        monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup: ({"setups": []}, None))
+        monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup, units: ({"setups": []}, None))
         self._stub_source(monkeypatch, [
             {"setup": "Op1", "reference_count": 0, "references": [], "references_truncated": False}])
         out = _payload(cg.handler(include=["references"]))
@@ -564,7 +572,7 @@ class TestStrategiesSlice:
     def test_the_slice_rides_through_the_router(self, monkeypatch):
         # end to end: the reader's payload reaches the wire under include=['strategies'].
         monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))
-        monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup: ({"setups": []}, None))
+        monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup, units: ({"setups": []}, None))
         self._stub_source(monkeypatch, [
             {"setup": "Op1", "strategy_count": 1, "allowed_count": 0, "blocked_count": 1,
              "strategies": [self._row("steep_and_shallow", False, is_3d=True)]}])
@@ -601,7 +609,7 @@ class TestCamPointers:
 
     def test_router_emits_pointers_on_stale_default(self, monkeypatch):
         monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))
-        monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup: (
+        monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup, units: (
             {"setup_count": 1, "setups": [{"name": "S", "op_states": {"out_of_date": 6},
                                            "machine_out_of_date": True}]}, None))
         out = _payload(cg.handler())
@@ -617,7 +625,7 @@ class TestOrientationDedup:
     @pytest.fixture
     def stub_with_reasons(self, monkeypatch):
         monkeypatch.setattr(cg, "get_cam", lambda: (object(), None))
-        monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup: ({"setup_count": 1, "setups": [
+        monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup, units: ({"setup_count": 1, "setups": [
             {"name": "Op1", "machine": "Haas", "op_states": {"out_of_date": 2},
              "invalidation_reasons": ["Design changed: WCS origin"]}]}, None))
         monkeypatch.setattr(cg, "_slice_operations", lambda cam, setup: ({"operations": []}, None))
@@ -1091,6 +1099,14 @@ class TestDuplicateOperationName:
         assert "ambiguous" not in msg.lower()
         assert "Face1" in msg and "Adaptive1" in msg
 
+    def test_the_refusal_also_offers_the_listed_paths_directly(self, monkeypatch, stub_slices):
+        # the paths named in the listing now resolve directly as 'operation' too (item E) - the
+        # refusal says so rather than only offering the fragile setup= scoping.
+        monkeypatch.setattr(cg, "resolve_operation",
+                            _refuses_with(["Setup1 / Drill1", "Setup2 / Drill1"]))
+        msg = error_message(cg.handler(include=["parameters"], operation="Drill1"))
+        assert "pass one of those paths as 'operation' directly" in msg
+
     def test_the_refusal_offers_the_setup_values_this_tool_actually_accepts(self, monkeypatch,
                                                                             stub_slices):
         # the refusal must name a remedy in THIS tool's own input vocabulary - "rename the target"
@@ -1125,6 +1141,18 @@ class TestDuplicateOperationName:
         assert "setup=" not in msg
         assert "Rename" not in msg
         assert "Drill1#1" in msg and "Drill1#2" in msg
+
+    def test_a_path_resolves_what_the_bare_name_calls_ambiguous(self, monkeypatch):
+        # the same reachable shape as the ordinal test above: one operation per FOLDER of one name -
+        # the breadcrumb cam_get already publishes as 'path' is what picks the one the bare name and
+        # the ordinal both have to work around.
+        cam = make_cam(FakeSetup("Setup1", folders=[
+            FakeCAMFolder("Roughing", ops=[_named_op("Drill1")]),
+            FakeCAMFolder("Finishing", ops=[_named_op("Drill1")])]))
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        assert cg.handler(include=["parameters"], operation="Drill1")["isError"] is True
+        out = _payload(cg.handler(include=["parameters"], operation="Setup1 / Roughing / Drill1"))
+        assert out["parameters"]["operation"] == "Drill1"
 
     def test_a_duplicated_name_is_listed_capped_not_in_full(self, monkeypatch, stub_slices):
         # every candidate rides in an error string, so the list is capped and the remainder COUNTED;
@@ -1364,7 +1392,7 @@ class TestToolSlicePresets:
                                                                    "tool_spindleSpeed": "4500"})])
         out, err = cg._slice_tool(cam, "Adaptive1", "Steel finishing")
         assert err is None
-        assert out["preset"] == {"name": "Steel finishing",
+        assert out["preset"] == {"name": "Steel finishing", "source": "tool library preset",
                                  "expressions": {"tool_feedCutting": "800 mm/min",
                                                  "tool_spindleSpeed": "4500"}}
 
@@ -1387,8 +1415,31 @@ class TestToolSlicePresets:
                                        _Preset("Steel", {})])
         out, err = cg._slice_tool(cam, "Adaptive1", "alu rough")
         assert err is None
-        assert out["preset"] == {"name": "Alu Rough",
+        assert out["preset"] == {"name": "Alu Rough", "source": "tool library preset",
                                  "expressions": {"tool_feedCutting": "3000 mm/min"}}
+
+    def test_the_preset_scope_clause_names_the_operations_own_feed_read(self, monkeypatch):
+        # 'preset' is the tool LIBRARY's recipe, not what this operation actually cuts at - the
+        # clause names the read that answers the operation's own feeds.
+        cam = self._wire(monkeypatch, [_Preset("Aluminum - Roughing", {"tool_feedCutting": "3200"})])
+        out, err = cg._slice_tool(cam, "Adaptive1", "Aluminum - Roughing")
+        assert err is None
+        assert out["preset"]["source"] == "tool library preset"
+        assert "tool LIBRARY preset's own numbers" in out["note"]
+        assert "parameter_names=['tool_spindleSpeed', 'tool_feedCutting']" in out["note"]
+
+    def test_no_preset_asked_carries_neither_the_key_nor_the_clause(self, monkeypatch):
+        cam = self._wire(monkeypatch, [_Preset("Aluminum - Roughing", {})])
+        out, err = cg._slice_tool(cam, "Adaptive1", "")
+        assert err is None
+        assert "preset" not in out
+        assert "tool LIBRARY preset's own numbers" not in out["note"]
+
+    def test_the_preset_scope_note_composes_within_the_wire_budget(self, monkeypatch):
+        cam = self._wire(monkeypatch, [_Preset("Aluminum - Roughing", {"tool_feedCutting": "3200"})])
+        out, err = cg._slice_tool(cam, "Adaptive1", "Aluminum - Roughing")
+        assert err is None
+        assert len(out["note"]) <= 400, len(out["note"])   # test_prose_budget.NOTE_BUDGET_CHARS
 
     def test_two_presets_sharing_a_name_are_both_returned_keyed_by_index(self, monkeypatch):
         # two recipes answer to one name; publishing the first as 'preset' would present one

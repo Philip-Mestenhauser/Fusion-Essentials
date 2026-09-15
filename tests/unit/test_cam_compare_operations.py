@@ -80,7 +80,8 @@ class TestGuards:
                  for i in range(20)])
         res = cc.handler(operation_a="Ghost", operation_b="Operation-00")
         assert res["isError"] is True
-        listed = res["message"].split("Available: ")[1].rstrip(".").split(", ")
+        available = res["message"].split("Available: ")[1].split(". A 'Setup / operation'")[0]
+        listed = available.split(", ")
         assert listed[:8] == [f"Operation-{i:02d}-LongEnoughToTruncate" for i in range(8)]
         assert listed[8:] == ["... (+12 more not listed)"]
 

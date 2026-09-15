@@ -549,12 +549,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - '. Pass confirm_name='
 - ' if you really mean this template.
 - Could not resolve the Local template library location, so the template's asset cannot be addressed. Nothing was deleted.
-- The walk hit its own bound, so this list is incomplete.
 - No asset in the Local template library is named '
 - assets in the Local template library (
 - ) - refusing to guess which one to delete. Pass template_url=<one of those urls> to delete exactly that asset.
-- The Local template library walk hit its own bound before it finished, so '
-- ' cannot be shown to name only ONE asset - a duplicate past the bound would not have been seen. Nothing was deleted.
 - The Local library asset '
 - ' holds the template '
 - ' - refusing to delete an asset that is not the template that was confirmed.
@@ -568,7 +565,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No template named '' in the LOCAL template library - this tool deletes from the Local library only.  Nothing was deleted.
 - Name mismatch - refusing to delete. '' resolves to the template '', but confirm_name was ''. Pass confirm_name='' if you really mean this template.
 - '' names  assets in the Local template library () - refusing to guess which one to delete. Pass template_url=<one of those urls> to delete exactly that asset.
-- The Local template library walk hit its own bound before it finished, so '' cannot be shown to name only ONE asset - a duplicate past the bound would not have been seen. Nothing was deleted.
 - The Local library asset '' holds the template '', not '' - refusing to delete an asset that is not the template that was confirmed.
 - deleteAsset returned true for '', but the Local template library , so the delete could not be read back and is UNCONFIRMED. Re-read with cam_get(include=['templates'], template_location='local').
 - deleteAsset returned true but the Local template library still lists '' - the delete did not take. Re-read with cam_get(include=['templates'], template_location='local').
@@ -798,11 +794,13 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - the model/fixture/stock entries each setup selects directly, and of those only the ones that are themselves referenced components
 - Pass a row's exact 'name' to cam_create_setup(operation_type='additive', print_setting=...); 'technology' narrows this listing. A name_shared row has a twin the resolver refuses - only its 'descrip...
 - The listing was CAPPED, so name_shared is read over the listed rows only - narrow with 'technology', or raise max_results.
+- '' is ambiguous -  operations share that name: . Retry with the setup that holds the one you mean: , or pass one of those paths as 'operation' directly.
 - 'stock_extents' adds the computed low/high extents: 'value' is scaled into 'units', 'expression' is the authored text in the document's own unit - subtract within ONE.
 - Exact queries use internal parameter names. Unavailable pages match readable rows whose visible and enabled flags did not both read true; each flag is independent and null means unread. Controlling...
 - Parameter lookup for '' on  failed: . Retry the scoped exact query; if it repeats, use include_unavailable=true to inspect readable rows.
 - No parameter with exact internal name '' on . Check its spelling and case, or use include_unavailable=true and follow next_offset to discover names.
 - 'dimensions' is what Operation.tool reads now in 'units': cutter, shoulder, shaft and both gauge lengths, null where the tool has no such parameter.
+- 'preset' holds the tool LIBRARY preset's own numbers, not this operation's feeds - cam_get(include=['parameters'], operation=..., parameter_names=['tool_spindleSpeed', 'tool_feedCutting']) reads th...
 - '{name}' names {n} presets on this tool, so every match is returned under presets_sharing_name keyed by its index on the tool - the name alone does not pick one. Omit 'preset' for the preset_names ...
 - This tool carries no presets at all, so '' names none. cam_edit_tools(action='add_preset') authors one on a library tool.
 
@@ -2675,7 +2673,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - 'envelope_origin' offsets a SIZED envelope from its plane's origin, and the profile envelope this call takes from sketch '' carries no origin offsets. Drop it, or pass 'envelope_plane' with its sizes.
 - Arrange reported success but NOTHING happened - no input occurrence moved and no occurrence was added.  Check the  holds the shapes at this spacing.
 - Arrange left  component(s) UNPLACED - its statistics read arranged , unarranged . The feature '' IS in the model with the rest placed: enlarge the envelope, lower 'spacing', or pass partial=true, t...
-- NOTE: the solver placed COPIES under new Envelope occurrences - the named input occurrences did NOT move (positions read back unchanged). Re-running an identical arrange STACKS another coincident c...
+- new_occurrences holds the copies; moved reads empty - re-arranging stacks another set, design_delete_feature removes it.
 
 ### `model_base_feature`
 - No scope was open in this session to close.

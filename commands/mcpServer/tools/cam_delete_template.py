@@ -10,7 +10,7 @@ from ._common import named_with_remainder, ok, error, safe
 # The shared CAM substrate: the ONE leafName-or-stem asset matcher every library DELETE addresses
 # its target with - the same reads cam_delete_machine resolves on.
 from ._cam_common import asset_key, asset_leaf, assets_named, library_assets, unique_by_url
-from ._cam_templates import _find_template_by_name, _location_enum, _template_library
+from ._cam_templates import _find_template_by_name, _location_enum, _template_library, hint_is_self_contained
 
 # How many local asset names a refusal spells out before named_with_remainder counts the rest.
 _ASSET_NAMES_CAP = 12
@@ -104,8 +104,9 @@ def _delete_by_name(lib, name, confirm_name):
     # several templates answer to is REFUSED rather than resolved to the first folder walked.
     template, where = _find_template_by_name(lib, "local", name)
     if template is None:
-        # An ambiguity hint is already a complete message - it WAS found, in more than one place.
-        if where and "ambiguous" in where:
+        # A self-contained hint is already a complete message - the template WAS found, in more
+        # than one place, or once past a truncated walk it cannot show is the only one.
+        if hint_is_self_contained(where):
             return error(where + " Nothing was deleted.")
         return error(f"No template named '{name}' in the LOCAL template library - this tool deletes "
                      f"from the Local library only. {where or ''} Nothing was deleted.")
@@ -118,7 +119,10 @@ def _delete_by_name(lib, name, confirm_name):
                      f"'{label}', but confirm_name was '{confirm_name}'. Pass "
                      f"confirm_name='{label}' if you really mean this template.")
 
-    assets, truncated = _local_template_assets(lib)
+    # _find_template_by_name above already refuses a TRUNCATED walk before reaching here (its own
+    # walk shares this one's 6/1500 bounds), so the asset census below runs only over a walk proven
+    # complete - the census itself carries no truncation guard of its own.
+    assets, _truncated = _local_template_assets(lib)
     if assets is None:
         return error("Could not resolve the Local template library location, so the template's "
                      "asset cannot be addressed. Nothing was deleted.")
@@ -130,21 +134,12 @@ def _delete_by_name(lib, name, confirm_name):
         listing = named_with_remainder(sorted(asset_leaf(a) for a in assets), cap=_ASSET_NAMES_CAP)
         return error(f"No asset in the Local template library is named '{label}'"
                      + f". Local assets: {listing or '(none)'}."
-                     + (" The walk hit its own bound, so this list is incomplete."
-                        if truncated else "")
                      + " Nothing was deleted.")
     if len(hits) > 1:
         return error(f"'{label}' names {len(hits)} assets in the Local template library "
                      f"({named_with_remainder([str(asset_key(a)) for a in hits], cap=_ASSET_NAMES_CAP)})"
                      " - refusing to guess which one to delete. Pass template_url=<one of those "
                      "urls> to delete exactly that asset.")
-    # An INCOMPLETE walk cannot support the one-asset conclusion above: a second asset of the same
-    # name beyond the walk's bound would have been refused, and this delete is irreversible - so it
-    # fails CLOSED rather than firing on one of an unknown number.
-    if truncated:
-        return error(f"The Local template library walk hit its own bound before it finished, so "
-                     f"'{label}' cannot be shown to name only ONE asset - a duplicate past the "
-                     "bound would not have been seen. Nothing was deleted.")
 
     url = hits[0]
     # The asset is only deletable as the template the caller confirmed: load it back and compare the
