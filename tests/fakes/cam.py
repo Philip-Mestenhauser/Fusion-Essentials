@@ -31,7 +31,8 @@ class FakeOperation:
     coerced default would publish one of them off a read that never happened."""
     def __init__(self, name, has_toolpath=True, valid=True, suppressed=False, shown=False,
                  operation_state=0, has_error=False, error="", has_warning=False, warning="",
-                 state_readable=True, strategy="contour2d", parameters=None, tool=None):
+                 state_readable=True, strategy="contour2d", parameters=None, tool=None,
+                 parent_shown=True):
         self.name = name
         # An operation with no `parameters` given still answers a collection - the read every CAM
         # tool makes; `tool` unset answers None, the empty read a tool row has to survive.
@@ -52,12 +53,38 @@ class FakeOperation:
         self.generatingProgress = None
         self._operation_state = operation_state
         self._state_readable = state_readable
+        # isVisible is the ACTUAL on-screen state (measured): this op's own bulb AND its parent's -
+        # parent_shown stands in for an ancestor folder/setup being lit, default True (no parent
+        # hiding it).
+        self._parent_shown = parent_shown
 
     @property
     def operationState(self):
         if not self._state_readable:
             raise RuntimeError("operationState cannot be read on this operation")
         return self._operation_state
+
+    @property
+    def isVisible(self):
+        return bool(self.isLightBulbOn) and bool(self._parent_shown)
+
+
+class _FolderCollection(_NamedCollection):
+    """A CAMFolder's or Setup's .folders: count/item/itemByName plus addFolder, which stamps the
+    new child's .parent to the collection's OWNER (measured) - CAMFolders itself has no live SHAPES
+    dump to sweep against (test_fake_shapes_exist)."""
+
+    def __init__(self, items, owner):
+        super().__init__(list(items))
+        self._owner = owner
+        for f in self._items:
+            f.parent = owner
+
+    def addFolder(self, name):
+        f = FakeCAMFolder(name)
+        f.parent = self._owner
+        self._items.append(f)
+        return f
 
 
 @fusion_fake(live_type="CAMFolder", facts=("shape-dump-cam-world", "cam-alloperations-shape"))
@@ -73,7 +100,7 @@ class FakeCAMFolder:
     def __init__(self, name, ops=(), folders=(), patterns=(), others=()):
         self.name = name
         self.operations = _NamedCollection(list(ops))
-        self.folders = _NamedCollection(list(folders))
+        self.folders = _FolderCollection(folders, self)
         self.patterns = _NamedCollection(list(patterns))
         self._others = list(others)
         # one fake serves the folder and the pattern alike, so the collection a child was handed in

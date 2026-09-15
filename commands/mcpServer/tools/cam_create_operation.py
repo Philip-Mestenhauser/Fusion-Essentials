@@ -4,6 +4,7 @@
 """Create a CAM milling operation in a setup: pick a strategy, a tool by (library_url, index)
 reference, and add it. Generating is opt-in (generate=true) - the geometry selection comes first."""
 
+import difflib
 import re
 
 import adsk.core
@@ -13,8 +14,9 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import apply_rename, counted, named_with_remainder, ok, error, read_flag, safe
-from ._cam_common import (CREATE_DEDUPE, choice_expressions, get_cam, find_setup, operation_nodes,
-                          operation_name_clash, register_future, setups, unquote_expression)
+from ._cam_common import (CREATE_DEDUPE, _MANUAL_NC_STRATEGY, choice_expressions, get_cam,
+                          find_setup, operation_nodes, operation_name_clash, register_future,
+                          setups, unquote_expression)
 # _read_tool_number is the one tool_number read; _tp is the one tool-parameter value read.
 from .cam_edit_tools import _read_tool_number, _tp
 
@@ -330,6 +332,12 @@ _DRILLING_AXIS_NOTE = (
     "tool orientation!'. Aim it with cam_edit_setup(wcs={'z_axis': <face>}) and "
     "wcs_orientation_flipZ.")
 
+# A manual NC operation carries no toolpath and takes no cutting tool - it lands with tool None
+# by construction (measured), so a request that also names one is refused before the add.
+_MANUAL_NO_TOOL = ("A manual NC operation takes no tool - drop 'tool_scope', 'tool_library_url' "
+                   "and 'tool_index' and retry.")
+_MANUAL_NEXT = "It takes no cutting tool: manual NC carries no toolpath by construction."
+
 
 def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
             tool_index: int = -1, tool_scope: str = "", generate: bool = False,
@@ -349,9 +357,12 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
     rows = _strategy_rows(target)
     chosen = next((r for r in (rows or []) if r["name"] == strategy), None)
     if chosen is None and rows is not None:
+        names = [r["name"] for r in rows]
+        nearest = difflib.get_close_matches(strategy, names, n=3, cutoff=0.6)
         return error(f"Strategy '{strategy}' isn't compatible with setup '{setup}'. "
-                     + (f"Compatible: {named_with_remainder([r['name'] for r in rows])}."
-                        if rows else "The setup offers no compatible strategies at all."))
+                     + (f"Compatible: {named_with_remainder(names)}."
+                        if rows else "The setup offers no compatible strategies at all.")
+                     + (f" Nearest: {', '.join(nearest)}." if nearest else ""))
 
     # Before the tool arm and the add: these names are refused on the NAME, since what one of them
     # creates is not what the landing gate below can see.
@@ -363,12 +374,15 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
     # row reading isAdditiveStrategy true. A strategy whose vocabulary did not read still asks for
     # a tool: nothing said it was additive.
     tool_scope = (tool_scope or "").strip().lower()
-    toolless = chosen is not None and chosen.get("is_additive") is True
+    manual = strategy == _MANUAL_NC_STRATEGY
+    toolless = manual or (chosen is not None and chosen.get("is_additive") is True)
     tool = None
     if toolless:
         # index_given, not a parse: a 'tool_index' this arm cannot read is still one the caller
         # PASSED, and dropping it silently would accept a reference nothing here honours.
         if tool_scope or tool_library_url or index_given(tool_index):
+            if manual:
+                return error(_MANUAL_NO_TOOL)
             return error(f"Strategy '{strategy}' reads isAdditiveStrategy true, and this tool "
                          "assigns no cutting tool to one, so nothing was created. Drop "
                          "'tool_scope', 'tool_library_url' and 'tool_index' and retry.")
@@ -507,6 +521,7 @@ def handler(setup: str = "", strategy: str = "", tool_library_url: str = "",
         "tool_number": tool_number,
         "generation_started": False,
         "note": "Operation created. " + ("" if generate else
+                _MANUAL_NEXT if manual else
                 _ADDITIVE_NEXT if toolless else
                 _CORNER_NEXT if strategy == _CORNER else
                 "No toolpath yet: cam_select_geometry for its geometry, then cam_generate."),

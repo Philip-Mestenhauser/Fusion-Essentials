@@ -10,12 +10,12 @@ import adsk.cam
 import adsk.fusion
 
 from ._common import (CM_TO_UNIT, counted, measured, ok, error, iter_collection, safe, told_apart)
-from ._cam_common import (_SETUP_BLOCKER_REMEDY, _segment, _setup_node, _walk_children,
-                          blocked_setup_records, clamp_rows, counts_as_warning, first_line, get_cam,
-                          is_empty_toolpath, machine_label, machine_limits, machine_spindle_max,
-                          op_primary_state, op_state_facts, operations_under, ready_verdict,
-                          resolve_cam_node, setup_blockers, setups, spindle_check, stock_mode_name,
-                          time_reading, toolpath_present_tally, validity_basis)
+from ._cam_common import (_MANUAL_NC_STRATEGY, _SETUP_BLOCKER_REMEDY, _segment, _setup_node,
+                          _walk_children, blocked_setup_records, clamp_rows, counts_as_warning,
+                          first_line, get_cam, is_empty_toolpath, machine_label, machine_limits,
+                          machine_spindle_max, op_primary_state, op_state_facts, operations_under,
+                          ready_verdict, resolve_cam_node, setup_blockers, setups, spindle_check,
+                          stock_mode_name, time_reading, toolpath_present_tally, validity_basis)
 
 MAP_BLURB = (
     "the per-slice READ cores behind cam_get(include=[...]) - get_cam_setups_handler, "
@@ -219,10 +219,9 @@ _PREVIOUS_SETUP_MODE = "previous_setup"
 _REST_STOCK_UNREADABLE = "the relative box, NOT the rest stock this mode cuts from"
 
 _REST_STOCK_NOTE = (
-    "A setup at stock_mode 'previous_setup' cuts what the SETUP BEFORE it left, and nothing readable "
-    "describes that: its stockSolids read empty and its stock extents keep the relative-box numbers "
-    "(stock_extents_describe says so on the row). Size a clearing strategy from the preceding "
-    "setup's own operations, not from those extents.")
+    "A setup at stock_mode 'previous_setup' cuts what the setup before it left - stockSolids and "
+    "stock extents do NOT describe that (see stock_extents_describe); size a clearing strategy from "
+    "the preceding setup's own operations.")
 
 _GENERATE_REQUIRES = {"tool": "cam_generate", "workspace": "Manufacture"}
 # A state that never answered is not stale work: the remedy is another READ, in the workspace op
@@ -244,7 +243,7 @@ def _op_blocked_by(summary):
     if summary.get("state") == "nonfinite":
         # It reads IsValid with a toolpath, so every other flag on this row says it is postable.
         blocked.append("toolpath_nonfinite")
-    if summary.get("tool") is None:
+    if summary.get("tool") is None and summary.get("strategy") != _MANUAL_NC_STRATEGY:
         blocked.append("tool_unselected")  # real refusal: "Toolpath requires tool to be selected"
     if summary.get("is_out_of_date"):
         blocked.append("toolpath_out_of_date")
@@ -293,11 +292,10 @@ def _attach_setup_invalidation(rec, setup, cam=None):
 _SUPPRESSED_NOT_COMPARED = "suppressed_not_compared"
 
 _OPERATIONS_NOTE = (
-    "'unread': no operationState read - re-read in Manufacture, not cam_generate. "
-    "'folder'/'container': what holds a row; 'other_nodes': base nodes - no operation, no "
-    "toolpath. 'spindle_over_machine_max': tool_spindleSpeed vs machine_spindle_max_rpm, null if "
-    "a side did not read; summary.spindle_over_machine_max_count counts them, and a suppressed "
-    "row reads spindle_check 'suppressed_not_compared'.")
+    "'unread' state: re-read in Manufacture, not cam_generate. 'other_nodes': base nodes with no "
+    "operation, no toolpath. 'spindle_over_machine_max': tool_spindleSpeed vs "
+    "machine_spindle_max_rpm (null if unread); a suppressed row reads spindle_check "
+    "'suppressed_not_compared'.")
 
 
 def get_cam_operations_handler(setup: str = "") -> dict:
@@ -938,10 +936,10 @@ def _hms(seconds) -> str:
 
 _NC_PROGRAM_NOTE = (
     "operation_count is NCProgram.filteredOperations - unsuppressed operations in scope; "
-    "posted_operations counts those reading hasToolpath True. item_count is NCProgram.operations, "
-    "the SETUPS/folders it stores. empty_toolpath_count counts held operations that generated and "
-    "cut nothing, empty_toolpaths names them, capped; a name several share carries its position in "
-    "that list.")
+    "posted_operations: valid toolpaths in scope (hasToolpath and not errored). item_count is "
+    "NCProgram.operations, the SETUPS/folders it stores. empty_toolpath_count counts held "
+    "operations that generated and cut nothing, empty_toolpaths names them, capped; a name several "
+    "share carries its position in that list.")
 
 _NC_EMPTY_NAME_CAP = 20
 

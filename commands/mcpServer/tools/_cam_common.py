@@ -101,10 +101,8 @@ def enumeration_remedy(message, written, read_call, param=None):
 _STRATEGY_PARAM = "strategy"
 
 STRATEGY_PAIR_NOTE = (
-    "'strategy' is the operation's own strategy PARAMETER - the platform's internal id - and "
-    "'strategy_name' is Operation.strategy. cam_create_operation and "
-    "cam_get(include=['strategies']) take strategy_name; the id is not a name either of them "
-    "accepts.")
+    "'strategy' is the internal strategy id; 'strategy_name' is Operation.strategy - "
+    "cam_create_operation and cam_get(include=['strategies']) take strategy_name, not the id.")
 
 
 def strategy_pair(op) -> dict:
@@ -764,15 +762,14 @@ def is_empty_toolpath(facts: dict) -> bool:
 
 
 def toolpath_present_tally(ops):
-    """(rows reading hasToolpath True, rows whose flag did not read) over a list of operations."""
-    # An NC program's filteredOperations holds unsuppressed operations in its scope; hasToolpath
-    # separates the ones carrying a path from the ones that read back with none.
+    """(rows reading hasToolpath True and not errored, rows whose flag did not read) - an errored
+    row reads hasToolpath True but a post will not write it."""
     present = unread = 0
     for row in (ops or []):
         flag = read_flag(lambda row=row: row.hasToolpath)
         if flag is None:
             unread += 1
-        elif flag:
+        elif flag and not safe(lambda row=row: row.hasError, False):
             present += 1
     return present, unread
 
@@ -1008,12 +1005,12 @@ def unfinished_verdict(measure: str, ops, unsettled: int = 0) -> str:
             "cam_generate for the rest.")
 
 
-# What an errored item of each kind blocks, in the order errored_verdict counts them. MEASURED: an
-# NC program reading hasError blocked only its own re-post - a post to another program name landed
-# in the same session - while an errored setup or operation blocks what it holds.
-_ERROR_BLOCKS = (("setup", "those setups will not post"),
+# What an errored item of each kind blocks, in the order errored_verdict counts them. MEASURED: a
+# setup carrying an errored OPERATION reads hasError itself ("One or more items have errors") and
+# still POSTS its other valid toolpaths - only an errored NC program blocks its own whole re-post.
+_ERROR_BLOCKS = (("setup", "each still posts its valid toolpaths and skips the errored item"),
                  ("NC program", "those programs will not re-post; other posts land"),
-                 ("operation", "those operations will not post"))
+                 ("operation", "will not post; the rest of their setup does"))
 
 
 def errored_verdict(setups: int, programs: int, operations: int) -> str:

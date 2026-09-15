@@ -198,6 +198,14 @@ class _ToolpathlessOp(_Op):
         pass
 
 
+class _ErroredOp(_Op):
+    """An operation reading hasToolpath True AND hasError True - a post will not write it, though
+    it is still held in the program's scope."""
+    def __init__(self, name, **kw):
+        super().__init__(name, **kw)
+        self.hasError = True
+
+
 class _IdlessOp(_Op):
     """An operation whose operationId cannot be read - reading it raises, as a stale/invalid proxy
     does."""
@@ -1330,8 +1338,9 @@ class TestSetupsScope:
 class TestProgramOperationCount:
     """MEASURED: NCProgram.operations holds the SETUPS/folders assigned, filteredOperations every
     Operation in that scope - posted or not. So 'program_operation_count' is the filtered read,
-    'posted_operations' the rows of it reading hasToolpath True, and 'program_item_count' the
-    stored containers beside them."""
+    'posted_operations' the rows of it reading hasToolpath True and not errored (an errored row
+    reads hasToolpath True but will not post), and 'program_item_count' the stored containers
+    beside them."""
 
     def test_the_operations_figure_is_the_filtered_read_not_the_stored_items(self, monkeypatch,
                                                                              tmp_path):
@@ -1370,6 +1379,15 @@ class TestProgramOperationCount:
         assert data["program_operation_count"] == 2
         assert data["posted_operations"] == 1 and data["toolpath_unread"] == 1
 
+    def test_an_errored_row_reading_hasToolpath_true_is_not_counted_as_posted(self, monkeypatch,
+                                                                               tmp_path):
+        s1 = _Setup("Setup1", [_Op("Face1"), _ErroredOp("Bad1")])
+        _install(monkeypatch, _CAM([s1]))
+        data = _payload(cp.handler(setups=["Setup1"], post=str(_write_cps(tmp_path)),
+                                   output_folder=str(tmp_path), program_name="9"))
+        assert data["program_operation_count"] == 2
+        assert data["posted_operations"] == 1
+
     def test_the_note_words_the_operations_figure_as_what_the_program_holds(self, monkeypatch,
                                                                             tmp_path):
         # the reading this note exists to correct: 'the operations posted' off a count that also
@@ -1379,7 +1397,8 @@ class TestProgramOperationCount:
         data = _payload(cp.handler(setups=["Setup1"], post=str(_write_cps(tmp_path)),
                                    output_folder=str(tmp_path), program_name="9"))
         assert "program_operation_count: unsuppressed operations in scope" in data["note"]
-        assert "posted_operations: hasToolpath True" in data["note"]
+        assert "posted_operations: valid toolpaths in scope (hasToolpath and not errored)" \
+            in data["note"]
         assert "Suppressed operations are excluded from both counts and NC output" in data["note"]
 
     def test_the_note_says_a_suppressed_operation_is_neither_held_nor_posted(self, monkeypatch,

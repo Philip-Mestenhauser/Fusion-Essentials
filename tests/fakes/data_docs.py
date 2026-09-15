@@ -18,13 +18,15 @@ class FakeSelection:
 
 @fusion_fake(live_type="Selections", facts=("shape-dump-document-world",))
 class FakeSelections:
-    """ui.activeSelections: the counted/item walk a selection read makes, plus the clear() a
-    selection tool drives - which answers the bool its caller gates on ("Returns true if
-    successful") and empties the walk only then. The calls are counted privately in _cleared."""
+    """ui.activeSelections: the counted/item walk a selection read makes, add() the display-settle
+    cycle drives, plus the clear() a selection tool drives - which answers the bool its caller
+    gates on ("Returns true if successful") and empties the walk only then. Calls are counted
+    privately in _added/_cleared."""
     def __init__(self, selections=(), clear_ok=True):
         self._items = list(selections)
         self._clear_ok = clear_ok
         self._cleared = 0
+        self._added = []
 
     @property
     def count(self):
@@ -32,6 +34,11 @@ class FakeSelections:
 
     def item(self, i):
         return _NamedCollection(self._items).item(i)
+
+    def add(self, entity):
+        self._added.append(entity)
+        self._items.append(entity)
+        return True
 
     def clear(self):
         self._cleared += 1

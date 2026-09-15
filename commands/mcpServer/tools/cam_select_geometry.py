@@ -1276,6 +1276,23 @@ def _sketch_scope_tail(result) -> str:
     return _SKETCH_SCOPE_NOTE if result.get("selection") == _SKETCH else ""
 
 
+def _seed_loop_tail(result) -> str:
+    """The clause for a per-reference 'curves' chain (trace/project/morph/multi_axis_contour) whose
+    resolved paths equal its seed count - the structural norm for this family (each seed expands
+    to its own whole loop), not itself evidence two seeds landed on one shared loop."""
+    if (result.get("selection") != _CHAIN
+            or result.get("selection_param") != _DRIVE_CURVES_PARAM):
+        return ""
+    seeds = result.get("selections")
+    resolved = result.get("resolved") or {}
+    paths, segments = resolved.get("curve_paths"), resolved.get("curve_segments")
+    if not seeds or seeds <= 1 or paths != seeds:
+        return ""
+    return (f" {seeds} seed edge(s) resolved {paths} chain(s) of {segments} segments - each seed "
+            "expands to its OWN whole loop, so two seeds on one loop cut that loop twice; pass "
+            "one edge per loop.")
+
+
 def _unread_entitlement(result, allowed):
     """`result`, with the disclosure a launch made under an UNREAD isGenerationAllowed flag carries -
     no pre-flight was made, so nothing here excluded anything."""
@@ -1464,7 +1481,7 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
         result["diameter_filter"] = diam_note
 
     # ── generate: LAUNCH async and return - generation runs in the background on its own ──
-    tails = _contour_tail(result) + _sketch_scope_tail(result)
+    tails = _contour_tail(result) + _sketch_scope_tail(result) + _seed_loop_tail(result)
     if not generate:
         result["note"] = ("Selection applied; pass generate=true (or cam_generate) to compute the "
                           "toolpath.") + tails

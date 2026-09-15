@@ -420,12 +420,13 @@ def _tp(tool, name, default=None):
     return safe(lambda: p.value.value, default) if p else default
 
 
-def _json_scalar(v):
-    """A parameter's evaluated value coerced to a JSON-safe scalar; a non-scalar value type is
-    str()'d so it is still reported, never dropped."""
+def _wire_value(v):
+    """(value, kind) for a parameter's evaluated value: int/float/bool/str/None pass through with
+    kind None; a non-scalar (a SWIG entity, e.g. BaseVector) reads value null with its OWN type
+    name as kind, so the null is not read as an unreadable value."""
     if v is None or isinstance(v, (bool, int, float, str)):
-        return v
-    return safe(lambda: str(v))
+        return v, None
+    return None, type(v).__name__
 
 
 def _tool_summary(tool, index):
@@ -1100,17 +1101,21 @@ def _do_parameters(target, tool_index):
     for p in iter_collection(params):
         name = safe(lambda p=p: p.name)
         expr = safe(lambda p=p: p.expression)
-        row = {"name": name, "expression": expr,
-               "value": _json_scalar(safe(lambda p=p: p.value.value))}
+        value, kind = _wire_value(safe(lambda p=p: p.value.value))
+        row = {"name": name, "expression": expr, "value": value}
+        if kind:
+            row["value_kind"] = kind
         src = _formula_source(params, name, expr)
         if src:
             row["formula_source"] = src
         rows.append(row)
     return ok({"tool": tool_index, "description": _tp(tool, "tool_description"),
                "parameter_count": len(rows), "parameters": rows,
-               "note": "Every parameter's name/expression/value (value is null where unreadable). "
-                       "'formula_source' marks a parameter tracking another (editing it overwrites "
-                       "that relationship). Set one with action='edit'."})
+               "note": "Every parameter's name/expression/value (null where unreadable, or "
+                       "non-scalar - see value_kind). Lengths in 'value' are internal centimetres; "
+                       "'expression' carries the tool's own unit. 'formula_source' marks a "
+                       "parameter tracking another (editing it overwrites that relationship). Set "
+                       "one with action='edit'."})
 
 
 def _empty_library():

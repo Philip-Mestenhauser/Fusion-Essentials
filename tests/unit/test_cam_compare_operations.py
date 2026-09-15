@@ -747,14 +747,13 @@ class TestComposedWireLength:
         assert out["truncated"] is False and "reads OPENED matching" in out["note"]
 
     def test_the_worst_full_note_stays_within_the_budget_plus_the_shared_head(self, install):
-        # the worst a caller can see: the cap clause AND the zero-geometry disclosure. The ceiling
-        # is the budget plus STRATEGY_PAIR_NOTE, which cam_get sends too and this tool does not own.
+        # the worst a caller can see: the cap clause AND the zero-geometry disclosure, plus
+        # STRATEGY_PAIR_NOTE (the shared head cam_get sends too, trimmed to the same one budget).
         install([_op("A", {f"p{i}": "a" for i in range(3)}),
                  _op("B", {f"p{i}": "b" for i in range(3)})])
         out = _payload(cc.handler(operation_a="A", operation_b="B", max_results=1))
         assert out["truncated"] is True and "NO selection set answered" in out["note"]
-        ceiling = self._BUDGET + len(cc.STRATEGY_PAIR_NOTE)
-        assert len(out["note"]) <= ceiling, len(out["note"])
+        assert len(out["note"]) <= self._BUDGET, len(out["note"])
 
 
 class TestSurfaceGroupDiff:

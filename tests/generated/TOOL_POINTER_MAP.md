@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 192  |  **description breadcrumbs:** 285  |  **note/error breadcrumbs:** 624
+**Tools:** 192  |  **description breadcrumbs:** 285  |  **note/error breadcrumbs:** 622
   |  **guidance smells flagged:** 8
 ## Blindspots to engineer
 
@@ -391,7 +391,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide both 'operation_a' and 'operation_b' (operation names).
 - 0 differences, and entity_bases_truncated names the set(s) whose entity readings stopped at the first {cap} - what those sets hold past that bound was not compared, so they are NOT shown to match. ...
 - 0 differences is what these reads OPENED matching: the parameter expressions, each selection set's counts and entity readings, and the surface groups' flags and modes. A property no selection answe...
-- NO selection set answered on either operation - neither carries one this read reaches, or the reads did not answer. The geometry counts are absent evidence about what the two CUT, not agreement.
+- NO selection set answered on either operation - the geometry counts are absent evidence about what the two CUT, not agreement.
 - {n} of the 2 named operations still {verb} generating to do ({names}), so nothing was compared. This read walks the selection objects on both operations, and one such call on a document still regen...
 
 ### `cam_create_machine`
@@ -576,11 +576,11 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Template deleted from the Local template library: its asset '' is gone from a re-walk of the library's own assets, and nothing loads from its url any more. cam_save_template writes a new one; cam_g...
 
 ### `cam_edit_folders`
-- Folders organise the operation tree. Create with action='create', move ops in with action='move'. (Patterns are created in the UI - the API won't add them.)
+- Folders organise the operation tree; nested folders list their path. Create with action='create' ('folder' nests under a parent), move ops in with action='move'. (Patterns are created in the UI - t...
+- Folder created and found in the
+- re-listed folders. Move operations into it with action='move'.
 - Provide 'name' for the new folder.
-- ' already exists in setup '
 - ' did not take - addFolder returned a folder whose name reads back as
-- Folder created and found in the setup's re-listed folders. Move operations into it with action='move'.
 - Provide 'folder' (the existing folder) and 'new_name'.
 - Could not rename folder '
 - Each move was read back off the destination folder's own membership; 'operations' are the names it carries them under.
@@ -588,7 +588,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' (move not allowed). (Moved so far:
 - ' did not take - moveInto returned true, but the folder re-lists
 - before this move, and the moved item reads its name back as
-- Creating folder '' did not take - addFolder returned a folder whose name reads back as , and setup '' re-lists  folder(s) () against  before the call.
+- Creating folder '' did not take - addFolder returned a folder whose name reads back as , and  re-lists  folder(s) () against  before the call.
 - Move of '' into '' did not take - moveInto returned true, but the folder re-lists  item(s) () against  before this move, and the moved item reads its name back as . (Moved so far: .)
 - requested item(s) are in 'unattributed' rather than 'moved': '' listed  - so nothing joined it under those names, and whether each item was already one of the items listed under its name or its mov...
 
@@ -715,7 +715,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - , so which operations run it is UNKNOWN - that is not 'used by none'. Re-read the library with action='list' and retry.
 - Operations that use this tool.
 - This tool is not used by any operation.
-- Every parameter's name/expression/value (value is null where unreadable). 'formula_source' marks a parameter tracking another (editing it overwrites that relationship). Set one with action='edit'.
+- Every parameter's name/expression/value (null where unreadable, or non-scalar - see value_kind). Lengths in 'value' are internal centimetres; 'expression' carries the tool's own unit. 'formula_sour...
 - scope='{scope}' is the libraries this Fusion installation ships, which this tool only READS - '{action}' was refused. Copy the tool out instead: action='list' at this scope for its libraries and th...
 - Summary rows only (diameter/flutes/type/description/number/product identity). For a tool's FULL parameter list - every dimension by name/expression/value - call action='parameters' with that tool's...
 - '{diameter}' was not applied and nothing was added: this tool reads {flag} true, and a 'diameter' override writes only the cutting diameter (tool_isMill/tool_isDrill) or the nozzle (tool_isJet). Th...
@@ -760,10 +760,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - No generation launched in
 - : every operation outside the
 - that read isGenerationAllowed false failed to launch (
-- Generation is launched and runs in the background at its own pace - the compute is often minutes. Check cam_get_status(handle) at whatever cadence you need the progress, until completed=true. opera...
+- Generation runs in the background - poll cam_get_status(handle) until completed=true (progress populates after the first check).
 - Check the Manufacturing Extension entitlement, or replace one: cam_delete + cam_create_operation with an allowed strategy (cam_get(include=['strategies']) lists them).
-- launch_reasons tallies the state each operation read BEFORE this launch, and launched_operations names them: out_of_date, no_toolpath (never generated), errored, nonfinite (its motion read NaN), va...
-- skip_valid was requested but NOT applied: this launch names one {scope}, and generateToolpath regenerates its whole target whatever the flag says - the valid_forced rows are that, not a stale read....
+- skip_valid was requested but NOT applied: a scoped launch always regenerates its whole target - valid_forced rows are that, not stale. Omit 'target' - only the document sweep narrows.
 - This sweep passed over them: skip_valid skips a path whose operationState reads valid, and these read valid with a motion that is not a number.  Change what one cuts, then regenerate that operation...
 
 ### `cam_generate_setup_sheet`
@@ -783,7 +782,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 ### `cam_get`
 - 'parameter_names', 'include_unavailable' and 'unavailable_offset' apply only with include=['parameters'].
 - Operation rows capped at
-- . Pass 'setup' to scope to one setup, or add 'default' to include for the per-setup operation_count.
+- - 'setup' scopes to one, or include 'default' for the per-setup operation_count.
 - rows; 'setup' scopes it, strategy_count is the true total.
 - include=['parameters'] needs 'operation' - the operation whose settings to read (scope first with cam_get(setup=..., include=['operations'])); or 'setup' alone for that SETUP's own parameters (stoc...
 - include=['tool'] needs 'operation' - the operation whose tool to read.
@@ -794,18 +793,12 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - preset(s) but none of their names read, so '
 - ' cannot be matched against them.
 - cam_generate to regenerate the  out-of-date / ungenerated operation(s); cam_get(include=['operations']) for the per-op detail.
-- Operation rows capped at . Pass 'setup' to scope to one setup, or add 'default' to include for the per-setup operation_count.
 - 'allowed' is isGenerationAllowed; cam_create_operation REFUSES a false one. null means it did not read, and no refusal follows. A classification flag at its usual value is dropped (false; is_suppre...
-- Counted {found} referenced component(s) among the entries the {setups} setup(s) SELECT DIRECTLY - named in the top-level setups[] slice as selected_models / fixtures / stock_solids - only an entry ...
+- Counted {found} referenced component(s) among what the {setups} setup(s) select DIRECTLY (the top-level setups[] slice's selected_models/fixtures/stock_solids) - a reference NESTED inside one is no...
 - the model/fixture/stock entries each setup selects directly, and of those only the ones that are themselves referenced components
-- references_truncated is set on at least one setup, so even that selected-entry census is incomplete - a selection list would not read, or its cap was hit.
 - Pass a row's exact 'name' to cam_create_setup(operation_type='additive', print_setting=...); 'technology' narrows this listing. A name_shared row has a twin the resolver refuses - only its 'descrip...
 - The listing was CAPPED, so name_shared is read over the listed rows only - narrow with 'technology', or raise max_results.
-- Only a row carrying editable false refuses a write - cam_edit_operation and cam_edit_setup reject one by name before applying anything; a row with no editable key read isEditable True, and null mea...
-- A row's 'choices' are the values that parameter's own getChoices() answers - the only expressions it takes; pass one of them verbatim.
-- {n} more parameter(s) did not read visible+enabled and are NOT listed (hidden_count). A row behind a switch reads isEnabled FALSE until that switch is on, and cam_edit_operation writes such a row a...
-- {n} more parameter(s) did not read visible+enabled and are NOT listed (hidden_count); the computed extents among them are what stock_extents publishes. cam_edit_setup REFUSES a row reading editable...
-- The setup's own parameters, filtered to the visible+enabled rows and grouped like the Fusion panel (job_stockMode is the stock mode). 'stock_extents' adds the computed low/high extents the rows ref...
+- 'stock_extents' adds the computed low/high extents: 'value' is scaled into 'units', 'expression' is the authored text in the document's own unit - subtract within ONE.
 - Exact queries use internal parameter names. Unavailable pages match readable rows whose visible and enabled flags did not both read true; each flag is independent and null means unread. Controlling...
 - Parameter lookup for '' on  failed: . Retry the scoped exact query; if it repeats, use include_unavailable=true to inspect readable rows.
 - No parameter with exact internal name '' on . Check its spelling and case, or use include_unavailable=true and follow next_offset to discover names.
@@ -870,7 +863,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Post config not found for ''. Tried: . Provide a full .cps path, or a post name in the personal () or installed () post folder. post_scope=fusion resolves the same name against the posts this insta...
 - Provide 'post' - the post processor: for post_scope=local a full .cps path or a name in the personal/installed post folder; for cloud/hub/fusion the NAME of a post in that library.
 - The post's message names the PROGRAM NUMBER, and program_name '' is not a number - retry with a numeric program_name such as '1001'.
-- program_operation_count: unsuppressed operations in scope; posted_operations: hasToolpath True. Suppressed operations are excluded from both counts and NC output.
+- program_operation_count: unsuppressed operations in scope; posted_operations: valid toolpaths in scope (hasToolpath and not errored). Suppressed operations are excluded from both counts and NC output.
 - NC Program '' re-read ZERO operations after the requested scope was assigned, while that scope resolves to  - the assignment did not take, so nothing was posted.
 - stored and  requested operation(s) have no readable operationId, so the program's membership was not compared with the scope.
 - The just-created NC Program '' was NOT removed - deleteMe raised (), so it remains in the document; remove it with cam_delete.
@@ -975,6 +968,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - The surface groups could not be read back after applyMachineAvoidGroups, so the group is UNCONFIRMED - re-read the operation with .
 - The height setting(s)  were applied BEFORE this failure and REMAIN on the operation - this call did not undo them; set them back if the selection is not going to be applied.
 - Every non-construction curve of the sketch is taken; text alone is not selectable - put it in its own sketch, or sketch_delete_entity.
+- seed edge(s) resolved  chain(s) of  segments - each seed expands to its OWN whole loop, so two seeds on one loop cut that loop twice; pass one edge per loop.
 - stock_faces names the STOCK's own analytic faces, so it takes no model geometry -  was passed beside it. Pass stock_faces alone, or drop it and select model faces with 'handles'.
 - 'handles' holds  chains that share no vertex () - a flat list is taken as ONE connected chain. Pass chain_groups, one list per contour, to group them yourself. No heights or selections were changed.
 - Selection applied but generation failed to launch: . The selection is saved - fix the cause, then run cam_generate(target='').
@@ -1002,6 +996,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `cam_show_toolpath`
 - Toolpath shown. Toolpaths render in the Manufacture workspace; pair with view_screenshot.
+- shown is the lightbulb; visible is the actual on-screen state (parents included).
+- The viewport selection was cycled (add, then clear) to drop the toolpath's drawn path - display_settled says whether it completed.
 - operation(s) did not read back isLightBulbOn=false after the hide.
 - Only this folder's generated toolpaths are shown.
 - operation(s) did not read back isLightBulbOn=true after the show - see toggle_failures.
@@ -1012,6 +1008,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - This operation has no generated toolpath yet - nothing to display. Generate it first (cam_generate).
 - Provide 'folder' - the folder or setup name to show.
 - Use cam_show_toolpath(list) or cam_get(include=['operations']).
+- ' still reads isVisible=true after hide - the write did not take.
 - activate() ran but setup '' still reads isActive=false - the viewport still shows another setup's models, not this operation's part.
 - activate() ran but isActive cannot be read on setup '', so the activation is UNCONFIRMED - the viewport may still show another setup's models rather than this operation's part.
 - Activated setup '' (the operation's own): the viewport renders only the ACTIVE setup's models, so the toolpath would otherwise sit beside another setup's part.

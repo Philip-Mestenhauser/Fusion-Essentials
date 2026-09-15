@@ -18,25 +18,38 @@ app = adsk.core.Application.get()
 _ACTIONS = ("list", "create", "rename", "move")
 
 
-def _do_list(setup):
-    folders = safe(lambda: setup.folders)
+def _folder_rows(coll, path_prefix, parent_name):
+    """Every folder row in `coll`, RECURSED into its own subfolders - each carrying its breadcrumb
+    'path' and its direct parent's name (null at the setup's own top level)."""
     out = []
-    for f in iter_collection(folders):
+    for f in iter_collection(safe(lambda: coll)):
+        name = safe(lambda f=f: f.name)
+        path = f"{path_prefix} / {name}" if path_prefix else name
         out.append({
-            "name": safe(lambda f=f: f.name),
+            "name": name,
+            "path": path,
+            "parent": parent_name,
             "operations": safe(lambda f=f: f.operations.count, 0),
             "patterns": safe(lambda f=f: f.patterns.count, 0),
             "subfolders": safe(lambda f=f: f.folders.count, 0),
         })
-    return ok({"setup": safe(lambda: setup.name), "folder_count": len(out), "folders": out,
-               "note": "Folders organise the operation tree. Create with action='create', move ops in "
-                       "with action='move'. (Patterns are created in the UI - the API won't add them.)"})
+        out.extend(_folder_rows(safe(lambda f=f: f.folders), path, name))
+    return out
 
 
-def _folder_names(setup):
-    """Every name in the setup's OWN folders collection, in its order - the membership list a
-    create is read back against."""
-    return [safe(lambda f=f: f.name) for f in iter_collection(safe(lambda: setup.folders))]
+def _do_list(setup):
+    rows = _folder_rows(safe(lambda: setup.folders), "", None)
+    return ok({"setup": safe(lambda: setup.name), "folder_count": len(rows), "folders": rows,
+               "note": "Folders organise the operation tree; nested folders list their path. "
+                       "Create with action='create' ('folder' nests under a parent), move ops in "
+                       "with action='move'. (Patterns are created in the UI - the API won't add "
+                       "them.)"})
+
+
+def _folder_names(parent):
+    """Every name in `parent`'s OWN folders collection, in its order - the membership list a
+    create is read back against (parent is a setup or a nested folder)."""
+    return [safe(lambda f=f: f.name) for f in iter_collection(safe(lambda: parent.folders))]
 
 
 def _member_names(folder):
@@ -49,30 +62,44 @@ def _member_names(folder):
     return names
 
 
-def _do_create(setup, name):
+def _do_create(setup, name, folder):
     name = (name or "").strip()
     if not name:
         return error("Provide 'name' for the new folder.")
     setup_name = safe(lambda: setup.name)
-    if safe(lambda: setup.folders.itemByName(name)):
-        return error(f"A folder named '{name}' already exists in setup '{setup_name}'.")
-    before = _folder_names(setup)
-    f = safe(lambda: setup.folders.addFolder(name))
+    folder = (folder or "").strip()
+    parent, parent_name = setup, None
+    if folder:
+        node, ferr = resolve_cam_node(None, folder, kinds=("folder",), setup=setup, label="folder")
+        if ferr:
+            return error(ferr)
+        parent, parent_name = node.obj, node.name
+    scope = f"folder '{parent_name}'" if parent_name else f"setup '{setup_name}'"
+    if safe(lambda: parent.folders.itemByName(name)):
+        return error(f"A folder named '{name}' already exists in {scope}.")
+    before = _folder_names(parent)
+    f = safe(lambda: parent.folders.addFolder(name))
     if not f:
         return error(f"Creating folder '{name}' failed.")
-    # addFolder handing back a folder is not proof the SETUP carries one: the returned folder's own
-    # name is re-read and looked for in the setup's re-listed folders, which must also have GROWN -
+    # addFolder handing back a folder is not proof the PARENT carries one: the returned folder's own
+    # name is re-read and looked for in the parent's re-listed folders, which must also have GROWN -
     # the name alone would be satisfied by a folder that was already there.
     landed = safe(lambda: f.name)
-    after = _folder_names(setup)
+    after = _folder_names(parent)
     if landed is None or landed not in after or len(after) <= len(before):
         return error(
             f"Creating folder '{name}' did not take - addFolder returned a folder whose name reads "
-            f"back as {landed!r}, and setup '{setup_name}' re-lists {len(after)} folder(s) "
+            f"back as {landed!r}, and {scope} re-lists {len(after)} folder(s) "
             f"({', '.join(n for n in after if n) or 'none'}) against {len(before)} before the call.")
-    return ok({"created": True, "folder": landed, "setup": setup_name, "folder_count": len(after),
-               "note": "Folder created and found in the setup's re-listed folders. Move operations "
-                       "into it with action='move'."})
+    where_note = "parent folder's" if parent_name else "setup's"
+    out = {"created": True, "folder": landed, "setup": setup_name, "folder_count": len(after),
+           "note": f"Folder created and found in the {where_note} re-listed folders. Move operations "
+                   "into it with action='move'."}
+    if parent_name:
+        # The new folder's OWN .parent, not the pre-resolved node: the stronger, independent read
+        # that it really landed under the folder asked for (measured: CAMFolder.parent).
+        out["parent"] = safe(lambda: f.parent.name)
+    return ok(out)
 
 
 def _do_rename(setup, folder, new_name):
@@ -175,7 +202,7 @@ def handler(action: str = "list", setup: str = "", name: str = "", folder: str =
     if action == "list":
         return _do_list(target)
     if action == "create":
-        return _do_create(target, name)
+        return _do_create(target, name, folder)
     if action == "rename":
         return _do_rename(target, folder, new_name)
     if action == "move":
@@ -192,7 +219,9 @@ tool = (
     .add_input_property("action", {"type": "string", "enum": list(_ACTIONS)})
     .add_input_property("setup", {"type": "string", "description": "Setup name (from cam_get)."})
     .add_input_property("name", {"type": "string", "description": "New folder name (create)."})
-    .add_input_property("folder", {"type": "string", "description": "Exact folder name; duplicates get name#n selectors."})
+    .add_input_property("folder", {"type": "string",
+            "description": "Exact folder name; duplicates get name#n selectors. Create: the "
+                            "parent to nest under (omit for top level). Rename/move: the target."})
     .add_input_property("new_name", {"type": "string", "description": "New name (rename)."})
     .add_input_property("operations", {"type": "array", "items": {"type": "string"},
             "description": "Operation names to move in (move)."})

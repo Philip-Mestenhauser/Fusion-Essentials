@@ -392,12 +392,10 @@ _CENSUS_MILL = [
     # THE MANUAL NC PASS. This beat proves the CREATE and nothing more: measured, a generated manual
     # operation's time row answers "3 : Machining time could not be calculated." and it never
     # appears in empty_toolpaths, so neither oracle this act uses can judge it. It is taken back out
-    # rather than left standing under a claim no read here supports.
+    # rather than left standing under a claim no read here supports. It takes NO tool (measured: the
+    # add lands with tool None), so none is passed - a tool reference here is refused.
     ("cam_create_operation",
-     lambda c: {"setup": HUB_MILL_SETUP, "strategy": "manual", "name": "ManualNC",
-                "tool_scope": "document",
-                "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _FLAT_AT,
-                "generate": False},
+     {"setup": HUB_MILL_SETUP, "strategy": "manual", "name": "ManualNC", "generate": False},
      _op_named(HUB_MILL_SETUP, "manual", "ManualNC"), None),
     ("cam_delete", {"entity": "ManualNC"}, _op_deleted("ManualNC"), None),
     ("cam_generate", {"target": HUB_MILL_SETUP, "skip_valid": False},
@@ -666,7 +664,7 @@ CENSUS = _LONG + (
     ("project", PROVEN, "chain", "ball end mill", "ACT 10c7 ProjectRim"),
     ("adaptive2d", PROVEN, "pocket", "flat end mill that fits the pocket", "ACT 10c7 Adaptive2D"),
     ("profile2d", PROVEN, "silhouette", "waterjet (a cutting tool)", "ACT 10c7 WaterjetProfile"),
-    ("manual", CREATED, "none", "any",
+    ("manual", CREATED, "none", "none - it takes no tool",
      "ACT 10c7 ManualNC creates it and reads the name back, then deletes it - a generated Manual NC "
      "answers '3 : Machining time could not be calculated.' on its time row and never appears in "
      "empty_toolpaths, so neither non-empty oracle can judge it"),

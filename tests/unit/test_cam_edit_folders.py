@@ -82,6 +82,22 @@ class _Setup(FakeSetup):
         _adopt(self.operations, self.folders)
 
 
+class _MisparentingFolders(_NamedCollection):
+    """A folder's OWN .folders whose addFolder stamps the new child's .parent to a THIRD folder
+    instead of this collection's owner - the shape an addFolder landing the child elsewhere would
+    produce, which a read-back must catch rather than echo the request it was given."""
+
+    def __init__(self, elsewhere):
+        super().__init__([])
+        self._elsewhere = elsewhere
+
+    def addFolder(self, name):
+        f = _Folder(name)
+        f.parent = self._elsewhere
+        self._items.append(f)
+        return f
+
+
 def _install(monkeypatch, setups=None):
     # default: one setup with 2 loose ops and 1 folder containing 1 op
     if setups is None:
@@ -126,6 +142,17 @@ class TestList:
         f = out["folders"][0]
         assert f["name"] == "Holes" and f["operations"] == 1
 
+    def test_nested_folders_carry_their_path_and_parent(self, monkeypatch):
+        inner = _Folder("Inner")
+        outer = _Folder("Outer", folders=[inner])
+        setup = _Setup("Setup1", folders=[outer])
+        _install(monkeypatch, [setup])
+        out = _payload(cf.handler(action="list", setup="Setup1"))
+        by_path = {r["path"]: r for r in out["folders"]}
+        assert by_path["Outer"]["parent"] is None
+        assert by_path["Outer / Inner"]["parent"] == "Outer"
+        assert out["folder_count"] == 2
+
 
 # ── create ───────────────────────────────────────────────────────────────────
 
@@ -140,6 +167,45 @@ class TestCreate:
         _install(monkeypatch)
         res = cf.handler(action="create", setup="Setup1")
         assert res["isError"] is True and "name" in res["message"].lower()
+
+    def test_a_top_level_create_carries_no_parent_key(self, monkeypatch):
+        _install(monkeypatch)
+        out = _payload(cf.handler(action="create", setup="Setup1", name="Finishing"))
+        assert "parent" not in out
+
+
+class TestNestedCreate:
+    def test_nested_create_reads_back_parent_and_the_parents_own_count(self, monkeypatch):
+        # addFolder stamps the new child's .parent to a DIFFERENT folder than the one resolved -
+        # the read-back has to report THAT (the folder's own parent), not echo the 'folder' input,
+        # or an addFolder that lands the child elsewhere would go uncaught.
+        elsewhere = _Folder("Elsewhere")
+        outer = _Folder("Outer")
+        outer.folders = _MisparentingFolders(elsewhere)
+        setup = _Setup("Setup1", folders=[outer])
+        _install(monkeypatch, [setup])
+        out = _payload(cf.handler(action="create", setup="Setup1", name="Nested", folder="Outer"))
+        assert out["folder"] == "Nested" and out["parent"] == "Elsewhere"
+        assert out["folder_count"] == 1          # Outer's OWN subfolder count, not the setup's
+        assert outer.folders.itemByName("Nested") is not None
+
+    def test_create_without_folder_stays_at_the_top_level(self, monkeypatch):
+        outer = _Folder("Outer")
+        setup = _Setup("Setup1", folders=[outer])
+        _install(monkeypatch, [setup])
+        out = _payload(cf.handler(action="create", setup="Setup1", name="TopLevel"))
+        assert "parent" not in out
+        assert setup.folders.itemByName("TopLevel") is not None
+        assert outer.folders.count == 0          # never nested under Outer
+
+    def test_an_ambiguous_parent_refuses_before_any_add(self, monkeypatch):
+        left, right = _Folder("Dup"), _Folder("Dup")
+        setup = _Setup("Setup1", folders=[_Folder("A", folders=[left]),
+                                          _Folder("B", folders=[right])])
+        _install(monkeypatch, [setup])
+        res = cf.handler(action="create", setup="Setup1", name="X", folder="Dup")
+        assert res["isError"] is True and "ambiguous" in res["message"].lower()
+        assert left.folders.count == 0 and right.folders.count == 0
 
 
 # ── rename ───────────────────────────────────────────────────────────────────

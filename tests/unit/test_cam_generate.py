@@ -169,7 +169,7 @@ class TestGenerateHandler:
         assert out["launched"] is True and cam.generate_calls[0][0] == "target"
         assert out["launch_reasons"] == {"nonfinite": 1}
         assert out["launched_operations"] == [{"operation": "Groove1", "reason": "nonfinite"}]
-        assert "nonfinite (its motion read NaN)" in out["note"]
+        assert "launch_reasons tallies why" in out["note"]
 
     def test_the_document_sweep_names_the_nonfinite_op_it_does_not_cover(self, monkeypatch):
         # MEASURED: generateAllToolpaths(true) regenerated the out-of-date operation and left the
@@ -295,7 +295,7 @@ class TestLaunchCountIsTheScopeWalk:
         assert out["launch_reasons"] == {"out_of_date": 1, "no_toolpath": 1}
         assert out["launched_operations"] == [{"operation": "Stale", "reason": "out_of_date"},
                                               {"operation": "New", "reason": "no_toolpath"}]
-        assert "launch_reasons tallies the state each operation read BEFORE" in out["note"]
+        assert "launch_reasons tallies why" in out["note"]
         _GENERATIONS.clear()
 
     def test_a_forced_launch_says_the_valid_ones_were_forced(self, monkeypatch):
@@ -319,7 +319,9 @@ class TestLaunchCountIsTheScopeWalk:
         assert out["skip_valid_applied"] is False
         assert out["launch_reasons"] == {"valid_forced": 1, "out_of_date": 1}
         assert "skip_valid was requested but NOT applied" in out["note"]
-        assert "regenerates its whole target whatever the flag says" in out["note"]
+        assert "always regenerates its whole target" in out["note"]
+        # the worst composition this tool ships: LAUNCH + REASONS + SKIP_VALID_UNUSED all armed
+        assert len(out["note"]) <= 400, len(out["note"])   # test_prose_budget.NOTE_BUDGET_CHARS
         _GENERATIONS.clear()
 
     def test_the_document_sweep_publishes_no_such_disclosure(self, monkeypatch):

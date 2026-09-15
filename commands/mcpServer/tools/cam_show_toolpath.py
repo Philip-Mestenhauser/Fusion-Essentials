@@ -27,6 +27,29 @@ def _set_bulb(o, on):
     return (now is not None and now == bool(on)), now
 
 
+def _settle_display(ops):
+    """ONE selection cycle over `ops` (add each, clear, refresh) - True when the selection read
+    empty after, never raising on a UI refusal. isLightBulbOn alone leaves a hidden toolpath drawn
+    (measured live); one cycle per ACTION, since one per operation ran a job of sixty past 30 s."""
+    if not ops:
+        return True
+    try:
+        sel = app.userInterface.activeSelections
+        for op in ops:
+            sel.add(op)
+        sel.clear()
+        app.activeViewport.refresh()
+        return safe(lambda: sel.count) == 0
+    except Exception:
+        return False
+
+
+def _was_drawn(o):
+    """Whether an operation's toolpath is on screen BEFORE its bulb goes off - the only ones whose
+    graphics linger and need the settle cycle."""
+    return safe(lambda: o.isVisible) is True
+
+
 def _op_identity(o):
     """An operation's operationId - two walks of the CAM tree hand back DIFFERENT Python objects
     for one operation, so id() matches nothing across them."""
@@ -91,22 +114,31 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
         "has_toolpath": safe(lambda o=o: o.hasToolpath),
         "valid": safe(lambda o=o: o.isToolpathValid),
         "suppressed": safe(lambda o=o: o.isSuppressed),
-        "shown": safe(lambda o=o: o.isLightBulbOn)})
-        return ok({"action": "list", "operation_count": len(rows), "operations": rows})
+        "shown": safe(lambda o=o: o.isLightBulbOn),
+        "visible": safe(lambda o=o: o.isVisible)})
+        note = "shown is the lightbulb; visible is the actual on-screen state (parents included)."
+        return ok({"action": "list", "operation_count": len(rows), "operations": rows,
+                  "note": note})
 
     if action == "hide_all":
         n = 0
         failed = 0
+        drawn = []
         for node in operation_nodes(cam):
             o = node.obj
             if safe(lambda o=o: o.hasToolpath):
+                was_drawn = _was_drawn(o)
                 took, _now = _set_bulb(o, False)
                 if took:
                     n += 1
+                    if was_drawn:
+                        drawn.append(o)
                 else:
                     failed += 1
-        app.activeViewport.refresh()
-        out = {"action": "hide_all", "hidden_count": n}
+        settled = _settle_display(drawn)
+        if not drawn:
+            app.activeViewport.refresh()
+        out = {"action": "hide_all", "hidden_count": n, "display_settled": settled}
         if failed:
             out["toggle_failures"] = failed
             # Worded on the read, not on a state: a bulb that reads back true and one that does not
@@ -185,8 +217,15 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
         if not took:
             return error(f"isLightBulbOn did not take for '{name}' - it reads back "
                          f"{_bulb_word(now)}.")
-        app.activeViewport.refresh()
-        return ok({"action": "hide", "operation": name})
+        settled = _settle_display([o])
+        visible = safe(lambda: o.isVisible)
+        if visible is True:
+            return error(f"'{name}' still reads isVisible=true after hide - the write did not "
+                         "take.")
+        note = ("The viewport selection was cycled (add, then clear) to drop the toolpath's "
+                "drawn path - display_settled says whether it completed.")
+        return ok({"action": "hide", "operation": name, "visible": visible,
+                  "display_settled": settled, "note": note})
 
     still_lit = []
     if action == "isolate":
@@ -194,10 +233,16 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
         # 'isolate' is the one action that promised nothing else would be.
         target_id = _op_identity(o)
         hide_failed = []
+        drawn = []
         for node in operation_nodes(cam):
+            was_drawn = _was_drawn(node.obj)
             hid, _now = _set_bulb(node.obj, False)
-            if not hid:
+            if hid:
+                if was_drawn:
+                    drawn.append(node.obj)
+            else:
                 hide_failed.append((_op_identity(node.obj), node.name))
+        _settle_display(drawn)
         # The target is shown immediately below, so its own refused hide ends lit as asked and is
         # dropped - matched by operationId, since this walk and the resolver that produced `o` hold
         # different objects for one operation. An id that did not read matches nothing.

@@ -65,6 +65,7 @@ _RECOGNIZED_OP = "DrillRecognized"   # the drill selected off cam_find_holes' ha
 _POCKET_RECOG_OP = "PocketRecognized"   # the 2D pocket selected off cam_find_pockets' floor handle
 _BLEND_OP = "BlendRims"        # the blend whose drive curves are a PAIR, then deleted
 _SAME_FACE_OP = "SpotAgain"    # the second op aimed at the spot drill's own bores, then deleted
+_MANUAL_OP = "ManualNC1"       # the toolless manual NC operation, then deleted
 
 _FOLDER_INNER = "FolderInner"
 _FOLDER_DEEP = "FolderDeep"
@@ -140,14 +141,19 @@ def _toolpath_shown(action, key, fit=False):
 
 def _bulb(action, name, fit=None):
     """cam_show_toolpath(show|hide): the operation NAME the tool resolved. 'fit' is asserted FALSE on
-    a show - the subject is framed once and the camera holds, so a fit here would be a camera move."""
+    a show - the subject is framed once and the camera holds, so a fit here would be a camera move.
+    A hide also asserts visible false and display_settled true - the actual on-screen state and
+    whether the clearing cycle ran clean, beside the bulb."""
     def check(p):
+        settled = action != "hide" or (p.get("visible") is False
+                                       and p.get("display_settled") is True)
         return _measured(f"'{name}' {'shown' if action == 'show' else 'hidden'}, "
                          "the standing frame kept",
                          {"action": p.get("action"), "operation": p.get("operation"),
-                          "fit": p.get("fit"), "setup": p.get("setup")},
+                          "fit": p.get("fit"), "setup": p.get("setup"),
+                          "visible": p.get("visible"), "display_settled": p.get("display_settled")},
                          p.get("action") == action and p.get("operation") == name
-                         and p.get("fit") is fit)
+                         and p.get("fit") is fit and settled)
     return check
 
 
@@ -275,6 +281,18 @@ def _op_valid(setup, name):
                          {"row": row},
                          bool(row) and row.get("state") == "valid"
                          and row.get("blocked_by") == [] and "empty_toolpath" not in row)
+    return check
+
+
+def _manual_op_untooled(setup, name):
+    """cam_get(include=['operations']) after a manual NC create: the row's tool reads null and
+    blocked_by carries no tool_unselected - a manual op takes no tool by construction."""
+    def check(p):
+        row = _operation_row(p, setup, name)
+        return _measured(f"'{name}' carries no tool and no tool_unselected blocker",
+                         {"row": row},
+                         bool(row) and row.get("tool") is None
+                         and "tool_unselected" not in (row.get("blocked_by") or []))
     return check
 
 
@@ -663,11 +681,12 @@ def _shoulder_follows_diameter(name):
     def check(p):
         rows = {r.get("name"): r.get("value") for r in (p.get("parameters") or [])}
         dia, shoulder = rows.get("tool_diameter"), rows.get("tool_shoulderDiameter")
+        no_repr = not any(str(v or "").startswith("<") for v in rows.values())
         return _measured(f"the {name}'s shoulder reads the same size as its cutter",
                          {"tool": p.get("tool"), "description": p.get("description"),
                           "tool_diameter": dia, "tool_shoulderDiameter": shoulder},
                          bool(_num(dia)) and bool(_num(shoulder)) and dia > 0
-                         and abs(dia - shoulder) < 1e-6)
+                         and abs(dia - shoulder) < 1e-6 and no_repr)
     return check
 
 
@@ -788,7 +807,8 @@ _CAM_STORY = [
      and all("drill" in str(t.get("type") or "").lower() for t in p["tools"]), None),
     ("cam_edit_tools", {"action": "parameters", "scope": "document", "tool": 0},
      lambda p: p.get("tool") == 0 and p.get("parameter_count", 0) > 0
-     and all(r.get("name") for r in p["parameters"]), None),
+     and all(r.get("name") for r in p["parameters"])
+     and not any(str(r.get("value") or "").startswith("<") for r in p["parameters"]), None),
     # the LOCAL scope with no 'library' named lists the libraries THERE, not tools - the same action
     # answering a different question because the scope changed.
     ("cam_edit_tools", {"action": "list", "scope": "local"},
@@ -880,6 +900,14 @@ _CAM_STORY = [
                               "generate": False},
      _op_created(CAM_SETUP, "face"),
      ("face_op", _recall("face_op", lambda p: p["operation"]))),
+    # A manual NC operation: no tool by construction, so its operations-slice row must not name a
+    # tool_unselected blocker for the tool it was never meant to carry. Deleted straight after, so
+    # the job the folders, the counts and the post below read is the one the rows above built.
+    ("cam_create_operation", {"setup": CAM_SETUP, "strategy": "manual", "name": _MANUAL_OP},
+     _op_named(CAM_SETUP, "manual", _MANUAL_OP), None),
+    ("cam_get", {"include": ["operations"], "setup": CAM_SETUP},
+     _manual_op_untooled(CAM_SETUP, _MANUAL_OP), None),
+    ("cam_delete", {"entity": _MANUAL_OP}, lambda p: _op_deleted(_MANUAL_OP)(p), None),
     # the stock's own top face, MEASURED before the facing pass is aimed at it: the billet spans
     # z[-8,48], so its top centroid is [0,0,48] and its normal faces +z - which is what separates it
     # from the underside 'nearest_to' would answer with just as readily.
@@ -1104,6 +1132,15 @@ _CAM_STORY = [
                                                    _ctx_get(c, "bk_rim_far", "the +y rim edge")],
                                        "generate": False},
      _refused("share no vertex", "chain_groups"), None),
+    # chain_groups says where each contour is - a group PER edge lands as its own selection, and
+    # 'contours' is not the per-reference 'curves' param, so no seed-loop duplication clause rides.
+    ("cam_select_geometry",
+     lambda c: {"operation": _ctx_get(c, "contour_op", "the contour op"), "selection": "chain",
+                "chain_groups": [[_ctx_get(c, "bk_rim_near", "the -y rim edge")],
+                                 [_ctx_get(c, "bk_rim_side", "the +x rim edge")]],
+                "generate": False},
+     lambda p: p.get("selections") == 2 and "seed edge(s) resolved" not in (p.get("note") or ""),
+     None),
     # THE DRIVE-CURVE PAIR: blend carries 'blend_curves' AND machiningBoundarySel (measured), so a
     # chain routed to the boundary leaves the drive input empty and the op reports 'Incorrect number
     # of drive curves'. The two opposite rim edges are one CurveSelection each. Deleted right after,
@@ -1264,6 +1301,19 @@ _CAM_STORY = [
     ("cam_edit_folders", {"action": "list", "setup": CAM_SETUP},
      lambda p: p["folder_count"] == 2
      and sorted(f["name"] for f in p["folders"]) == ["Drilling", "Milling"], None),
+    # A NESTED create: 'folder' resolves the parent and the landed folder reads its OWN parent name
+    # back. Deleted straight after, so the two folders the moves below address are unchanged.
+    ("cam_edit_folders", {"action": "create", "setup": CAM_SETUP, "name": "Rough",
+                          "folder": "Milling"},
+     lambda p: p["created"] is True and p["folder"] == "Rough" and p["parent"] == "Milling",
+     None),
+    ("cam_edit_folders", {"action": "list", "setup": CAM_SETUP},
+     lambda p: p["folder_count"] == 3
+     and any(f["path"] == "Milling / Rough" and f["parent"] == "Milling" for f in p["folders"]),
+     None),
+    ("cam_delete", {"entity": "Rough"},
+     lambda p: p.get("deleted") is True and p.get("entity") == "Rough"
+     and p.get("entity_type") == "folder", None),
     # 'moved' counts the moves whose destination-membership re-read GREW the folder under that
     # name; an item the folder already listed lands in 'unattributed', and the first failed move
     # errors naming what had landed - so the count IS the operations measured into the folder.
@@ -1337,7 +1387,8 @@ _CAM_STORY = [
     ("cam_show_toolpath", {"action": "list"},
      lambda p: p["action"] == "list" and p["operation_count"] >= 9
      and len(p["operations"]) == p["operation_count"]
-     and all(r["op"] for r in p["operations"]), None),
+     and all(r["op"] for r in p["operations"])
+     and all("shown" in r and "visible" in r for r in p["operations"]), None),
     # the validity verdict BEFORE generation: false, with the not-yet-generated ops named; a scoped
     # check resolves through the shared resolver and a bogus scope is refused listing what exists.
     ("cam_inspect_toolpaths", {},
@@ -2747,7 +2798,8 @@ _CAM = (
         ("cam_show_toolpath", {"action": "list"},
          lambda p: p["action"] == "list" and p["operation_count"] >= 2
          and len(p["operations"]) == p["operation_count"]
-         and all(r["op"] for r in p["operations"]), None),
+         and all(r["op"] for r in p["operations"])
+         and all("shown" in r and "visible" in r for r in p["operations"]), None),
         ("cam_generate", {"target": "Setup1", "skip_valid": False},
          lambda p: p["launched"] is True and p["target"] == "setup 'Setup1'"
          and p["skip_valid"] is False and bool(p["handle"]), None),

@@ -24,10 +24,8 @@ RETURNS = [
 register_future = _cam_common.register_future
 
 
-_LAUNCH_NOTE = ("Generation is launched and runs in the background at its own pace - the compute "
-                "is often minutes. Check cam_get_status(handle) at whatever cadence you need the "
-                "progress, until completed=true. operations_to_generate is the scope this launch "
-                "covers; the progress counters populate on the first check.")
+_LAUNCH_NOTE = ("Generation runs in the background - poll cam_get_status(handle) until "
+                "completed=true (progress populates after the first check).")
 
 # The remedy for THIS call site: cam_generate takes no strategy, so the operation itself is what
 # changes - picking a different strategy is a create-time choice.
@@ -45,19 +43,18 @@ _UNREAD_ENTITLEMENT = " {n} more: isGenerationAllowed did not read, so not exclu
 _SPLIT_LAUNCH_NOTE = "Launched - check cam_get_status(handle) until completed=true."
 
 # What launched_operations / launch_reasons describe: this call's OWN pre-launch walk over the
-# scope, the same walk operations_to_generate counts.
-_REASONS_NOTE = (
-    " launch_reasons tallies the state each operation read BEFORE this launch, and "
-    "launched_operations names them: out_of_date, no_toolpath (never generated), errored, "
-    "nonfinite (its motion read NaN), valid_forced (valid, and covered anyway) or state_unread.")
+# scope, the same walk operations_to_generate counts. The reason vocabulary itself rides those
+# keys' own values (see _LAUNCH_REASON), not restated here.
+_REASONS_NOTE = (" launch_reasons tallies why; launched_operations names each operation's own "
+                 "reason.")
 
 # MEASURED: cam.generateToolpath over a SETUP regenerated all four of its operations - two of them
 # already valid - under skip_valid=true. The flag narrows the DOCUMENT sweep only, so a scoped
 # launch says so rather than leaving the caller to read valid_forced rows as a fault.
 _SKIP_VALID_UNUSED = (
-    " skip_valid was requested but NOT applied: this launch names one {scope}, and generateToolpath "
-    "regenerates its whole target whatever the flag says - the valid_forced rows are that, not a "
-    "stale read. Omit 'target' for the document sweep, which the flag does narrow.")
+    " skip_valid was requested but NOT applied: a scoped launch always regenerates its whole "
+    "target - valid_forced rows are that, not stale. Omit 'target' - only the document sweep "
+    "narrows.")
 
 
 def _scope_nodes(cam, node):
@@ -304,7 +301,7 @@ def handler(target: str = "", skip_valid: bool = True) -> dict:
     _stranded_keys(payload, stranded)
     if skip_valid and node is not None:
         payload["skip_valid_applied"] = False    # absent = the flag narrowed this launch
-        payload["note"] += _SKIP_VALID_UNUSED.format(scope=scope)
+        payload["note"] += _SKIP_VALID_UNUSED
     if unread:
         payload["entitlement_unread"] = unread
         payload["note"] += _UNREAD_ENTITLEMENT.format(n=unread)

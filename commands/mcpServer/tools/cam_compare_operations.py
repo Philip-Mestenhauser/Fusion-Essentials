@@ -96,9 +96,8 @@ _NOTHING_DIFFERED_NOTE = (
 # The other 0/0: no selection parameter on either operation answered, so the geometry counts are 0
 # because nothing was read, not because the two match.
 _NO_GEOMETRY_NOTE = (
-    " NO selection set answered on either operation - neither carries one this read reaches, or the "
-    "reads did not answer. The geometry counts are absent evidence about what the two CUT, not "
-    "agreement.")
+    " NO selection set answered on either operation - the geometry counts are absent evidence "
+    "about what the two CUT, not agreement.")
 
 
 # The refusal while either named operation is still generating. The geometry half below reads the

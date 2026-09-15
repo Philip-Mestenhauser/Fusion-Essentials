@@ -112,9 +112,9 @@ def _slice_operations(cam, setup):
                 emitted += 1
             su["operations"] = rows
         if payload.get("truncated"):
-            payload["note"] = (f"Operation rows capped at {_OPERATIONS_CAP}. Pass 'setup' to scope to "
-                               "one setup, or add 'default' to include for the per-setup "
-                               "operation_count. " + (payload.get("note") or ""))
+            payload["note"] = (f"Operation rows capped at {_OPERATIONS_CAP} - 'setup' scopes to one, "
+                               "or include 'default' for the per-setup operation_count. "
+                               + (payload.get("note") or ""))
     return payload, err
 
 
@@ -168,11 +168,10 @@ def _slice_strategies(cam, setup):
 # and does not descend, so the census covers the SELECTED entries alone. The number is stated every
 # time: a 0 that does not say what it counted reads as a verdict on the document.
 _REFERENCE_CENSUS = (
-    "Counted {found} referenced component(s) among the entries the {setups} setup(s) SELECT "
-    "DIRECTLY - named in the top-level setups[] slice as selected_models / fixtures / "
-    "stock_solids - only an entry that is ITSELF a referenced component counts. A reference "
-    "nested INSIDE one is not examined, so a 0 is not 'this document has no external "
-    "references'. doc_get(include=['xref_tree']) walks every depth.")
+    "Counted {found} referenced component(s) among what the {setups} setup(s) select DIRECTLY "
+    "(the top-level setups[] slice's selected_models/fixtures/stock_solids) - a reference NESTED "
+    "inside one is not examined, so 0 is not 'no external references'. "
+    "doc_get(include=['xref_tree']) walks every depth.")
 
 
 def _slice_references(cam, setup):
@@ -186,8 +185,8 @@ def _slice_references(cam, setup):
         note = _REFERENCE_CENSUS.format(
             found=sum(r.get("reference_count") or 0 for r in rows), setups=len(rows))
         if any(r.get("references_truncated") for r in rows):
-            note += (" references_truncated is set on at least one setup, so even that selected-entry "
-                     "census is incomplete - a selection list would not read, or its cap was hit.")
+            note += (" references_truncated flags an incomplete selected-entry census - a list "
+                     "would not read, or its cap was hit.")
         payload["note"] = note
     return payload, err
 
@@ -338,34 +337,16 @@ def _resolve_op_in_scope(cam, operation, setup):
     return node.obj, None
 
 
-_EDITABLE_NOTE = (
-    "Only a row carrying editable false refuses a write - cam_edit_operation and cam_edit_setup "
-    "reject one by name before applying anything; a row with no editable key read isEditable True, "
-    "and null means the flag did not read.")
+_EDITABLE_NOTE = "An absent 'editable' key = editable; false = write refused; null = unread."
 
 # Said only where a row actually carries the key: a parameters read with no choice row in it would
 # otherwise advertise a key nothing in the payload has.
-_CHOICES_NOTE = (
-    " A row's 'choices' are the values that parameter's own getChoices() answers - the only "
-    "expressions it takes; pass one of them verbatim.")
+_CHOICES_NOTE = " 'choices' are the expressions that parameter accepts verbatim."
 
-
-# Said only where rows were dropped; parameter_count is the LISTED rows. MEASURED on a contour2d:
-# of 384 hidden, 205 read isVisible true with isEnabled FALSE and 179 read isVisible false. A gated
-# row flips to enabled+editable when its switch lands, and the listing grows by it.
+# Said only where rows were dropped; parameter_count is the LISTED rows. Shared by the setup and
+# operation slices - a switch-gated row's own refusal names the pair, not this note.
 _HIDDEN_NOTE = (
-    " {n} more parameter(s) did not read visible+enabled and are NOT listed (hidden_count). A row "
-    "behind a switch reads isEnabled FALSE until that switch is on, and cam_edit_operation writes "
-    "such a row after the switch in the SAME call - its refusal names the pair. Others read "
-    "isVisible false, licence and mode flags among them. parameter_count counts the LISTED rows.")
-
-# The same disclosure for a SETUP. MEASURED on a fresh milling setup: 304 parameters, 42 listed,
-# 262 hidden - of which the 12 computed extents stock_extents publishes are a small part.
-_SETUP_HIDDEN_NOTE = (
-    " {n} more parameter(s) did not read visible+enabled and are NOT listed (hidden_count); the "
-    "computed extents among them are what stock_extents publishes. cam_edit_setup REFUSES a row "
-    "reading editable false outright, so a hidden row here is NOT reachable the way "
-    "cam_edit_operation reaches one behind its switch. parameter_count counts the LISTED rows.")
+    " {n} more parameter(s) did not read visible+enabled and are not listed (hidden_count).")
 
 
 def _any_choices(groups) -> bool:
@@ -417,11 +398,8 @@ _STOCK_EXTENTS = ("stockXLow", "stockXHigh", "stockYLow", "stockYHigh", "stockZL
                   "surfaceZLow", "surfaceZHigh")
 
 _SETUP_PARAM_NOTE = (
-    "The setup's own parameters, filtered to the visible+enabled rows and grouped like the Fusion "
-    "panel (job_stockMode is the stock mode). 'stock_extents' adds the computed low/high extents "
-    "the rows refer to. Each extent carries the same length twice in DIFFERENT units: 'value' is "
-    "scaled into 'units', 'expression' is the authored text in the document's display unit. "
-    "Subtract within ONE of them.")
+    "'stock_extents' adds the computed low/high extents: 'value' is scaled into 'units', "
+    "'expression' is the authored text in the document's own unit - subtract within ONE.")
 
 _PARAMETER_NAME_CAP = 20
 _UNAVAILABLE_PARAMETER_CAP = 50
@@ -613,7 +591,7 @@ def _slice_setup_parameters(cam, setup, units, parameter_names=None, include_una
            "parameter_count": sum(len(v) for v in groups.values()),
            "note": _SETUP_PARAM_NOTE + " " + _EDITABLE_NOTE
                    + (_CHOICES_NOTE if _any_choices(groups) else "")
-                   + (_SETUP_HIDDEN_NOTE.format(n=hidden) if hidden else "")}
+                   + (_HIDDEN_NOTE.format(n=hidden) if hidden else "")}
     if hidden:
         out["hidden_count"] = hidden   # absent = every parameter the setup carries is listed
     extents = _stock_extents(params, factor, (units or "mm").strip().lower())
@@ -848,8 +826,8 @@ def handler(include=None, setup: str = "", operation: str = "", preset: str = ""
     remaining = [s for s in _SLICES if s not in inc]
     lines = []
     if want_default and remaining:
-        lines.append("Setups orientation. Deeper: include=" + str(remaining) +
-                     "; 'setup' scopes, 'operation' drills ['parameters'] / ['tool'].")
+        lines.append("Setups orientation; other slices are the 'include' enum - 'setup' scopes, "
+                     "'operation' drills.")
     if want_default or "operations" in inc:
         lines.append(_VALIDITY_NOTE)
     if lines:

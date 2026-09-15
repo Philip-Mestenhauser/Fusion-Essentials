@@ -1265,8 +1265,9 @@ def _container_rows(setup, ops):
     non-empty 'container', and the two sit in DIFFERENT containers - which is what says the walk
     reached each one where it actually lives rather than crediting both to one node. The listing is
     not truncated and carries exactly as many rows as the setup's own operation_count, which COUNTS
-    a container's children; those two disagreeing is what the slice reports as a cap. The container
-    NAMES are disclosed in the measurement, not asserted - nothing has measured their spelling."""
+    a container's children; those two disagreeing is what the slice reports as a cap. The two names
+    are pinned in `ops` order - 'Orientations', then 'Supports'; a container named for the print
+    setting moves with the setting, so no name beyond those two is pinned."""
     def check(p):
         rec = next((r for r in ((p.get("operations") or {}).get("setups") or [])
                     if r.get("setup") == setup), None)
@@ -1275,7 +1276,8 @@ def _container_rows(setup, ops):
         by_name = {r.get("name"): r for r in rows}
         held = [(by_name.get(n) or {}).get("container") for n in ops]
         declared = (row or {}).get("operation_count")
-        return _measured(f"'{setup}' lists each container-held operation under its own container",
+        return _measured(f"'{setup}' lists its whole tree, the orientation under 'Orientations'"
+                         " and the support under 'Supports'",
                          {"listed": len(rows), "operation_count": declared,
                           "containers_observed": dict(zip(ops, held)),
                           "truncated": (rec or {}).get("operations_truncated"),
@@ -1285,7 +1287,8 @@ def _container_rows(setup, ops):
                          and declared == len(rows)
                          and all(n in by_name for n in ops)
                          and all(isinstance(c, str) and c.strip() for c in held)
-                         and len(set(held)) == len(held))
+                         and len(set(held)) == len(held)
+                         and held == ["Orientations", "Supports"])
     return check
 
 

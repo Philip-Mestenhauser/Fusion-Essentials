@@ -2735,6 +2735,42 @@ class TestDriveParamRouting:
         assert _selection_on(op, "curves").count == 2
         assert out["selections"] == 2
 
+    def test_two_seeds_each_resolving_their_own_chain_gets_the_mechanism_clause(self, monkeypatch):
+        # the fake models two seeds EACH independently resolving a 4-segment chain - the
+        # structural norm _rail_groups builds for this per-reference param, not loop SHARING;
+        # nothing here (or in the payload) tells that apart from two seeds on two different loops.
+        op = _Op("Trace1", {"curves": _Param(_CurveParamValue(resolve=lambda sel: [_segments(4)])),
+                            "topHeight_mode": _Param(None), "topHeight_offset": _Param(None)})
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        out = _payload(cg.handler(operation="Trace1", selection="chain", handles=["a", "b"],
+                                  generate=False))
+        assert out["resolved"] == {"curve_paths": 2, "curve_segments": 8, "entities": 2}
+        assert "2 seed edge(s) resolved 2 chain(s) of 8 segments" in out["note"]
+        assert "each seed expands to its OWN whole loop" in out["note"]
+        assert "pass one edge per loop" in out["note"]
+
+    def test_the_mechanism_clause_fits_the_wire_budget_at_a_large_seed_count(self, monkeypatch):
+        # a worse-case seed count than any real loop carries - the composed note is still bounded.
+        n = 40
+        op = _Op("Trace1", {"curves": _Param(_CurveParamValue(resolve=lambda sel: [_segments(4)])),
+                            "topHeight_mode": _Param(None), "topHeight_offset": _Param(None)})
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge() for _ in range(n)])
+        out = _payload(cg.handler(operation="Trace1", selection="chain",
+                                  handles=[str(i) for i in range(n)], generate=False))
+        assert f"{n} seed edge(s) resolved {n} chain(s)" in out["note"]
+        assert len(out["note"]) <= 400, len(out["note"])
+
+    def test_one_seed_carries_no_mechanism_clause(self, monkeypatch):
+        op = _Op("Trace1", {"curves": _Param(_CurveParamValue(resolve=lambda sel: [_segments(4)])),
+                            "topHeight_mode": _Param(None), "topHeight_offset": _Param(None)})
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        out = _payload(cg.handler(operation="Trace1", selection="chain", handles=["a"],
+                                  generate=False))
+        assert "seed edge(s) resolved" not in out["note"]
+
     def test_curves_is_probed_before_the_machining_boundary(self, monkeypatch):
         # morph and project carry BOTH (measured over every allowed strategy): 'curves' is their
         # drive and machiningBoundarySel is containment, so a chain landing on the boundary would
@@ -3773,6 +3809,18 @@ class TestExplicitChainGroups:
     def test_invalid_groups_refuse(self, groups):
         res = cg.handler(operation="X", selection="chain", chain_groups=groups)
         assert res["isError"] is True and "chain_groups" in res["message"]
+
+    def test_chain_groups_given_carries_no_seed_loop_clause(self, monkeypatch):
+        # chain_groups is refused for a per-reference 'curves' strategy, so a call that reaches
+        # this note used a DIFFERENT drive param - the gate excludes it even where paths happens to
+        # equal the group count.
+        op = _curve_op(resolve=lambda sel: [_segments(4)])
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge(), _Edge()])
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain",
+                                  chain_groups=[["a"], ["b"]], generate=False))
+        assert out["resolved"]["curve_paths"] == 2
+        assert "seed edge(s) resolved" not in out["note"]
 
 
 # The top rim of a 60 x 40 x 10 mm block in Fusion's cm, the loop it resolves to, and the run on

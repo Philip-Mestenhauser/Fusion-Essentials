@@ -431,8 +431,8 @@ def _expand_ops(items):
 # The count semantics BOTH post arms publish - one sentence, since both arms publish the same keys
 # off _program_counts.
 _COUNTS_NOTE = ("program_operation_count: unsuppressed operations in scope; "
-                "posted_operations: hasToolpath True. Suppressed operations are excluded "
-                "from both counts and NC output.")
+                "posted_operations: valid toolpaths in scope (hasToolpath and not errored). "
+                "Suppressed operations are excluded from both counts and NC output.")
 
 
 # MEASURED: a program scoped over a list holding a suppressed operation omits it - filteredOperations

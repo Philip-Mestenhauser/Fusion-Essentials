@@ -890,16 +890,23 @@ class TestNonfiniteToolpath:
 class TestErroredVerdictNamesWhatIsBlocked:
     """MEASURED in one session: an NC program reading hasError ('Invalid NC Program') was present
     and a cam_post to ANOTHER program name landed - so an errored program blocks its own re-post,
-    not the job. An errored setup or operation blocks what it holds."""
+    not the job. A setup carrying an errored operation still posts its other valid toolpaths
+    (measured: it reads hasError itself, yet the post writes what is valid); only the errored
+    operation itself does not post."""
 
     def test_an_errored_program_does_not_claim_the_job_cannot_post(self):
         line = cc.errored_verdict(0, 1, 0)
         assert line == ("BLOCKER: 1 NC program(s) have errors - those programs will not re-post; "
                         "other posts land.")
 
-    def test_an_errored_operation_names_the_operations(self):
-        assert cc.errored_verdict(0, 0, 2) == ("BLOCKER: 2 operation(s) have errors - those "
-                                               "operations will not post.")
+    def test_an_errored_operation_names_what_still_posts(self):
+        assert cc.errored_verdict(0, 0, 2) == ("BLOCKER: 2 operation(s) have errors - will not "
+                                               "post; the rest of their setup does.")
+
+    def test_an_errored_setup_still_posts_its_valid_toolpaths(self):
+        assert cc.errored_verdict(1, 0, 0) == ("BLOCKER: 1 setup(s) have errors - each still "
+                                               "posts its valid toolpaths and skips the errored "
+                                               "item.")
 
     def test_only_the_kinds_present_are_named_and_all_three_fit_the_budget(self):
         line = cc.errored_verdict(1, 1, 3)
@@ -2631,7 +2638,7 @@ class TestPreviousSetupStockIsNotReadable:
         row = out["setups"][0]
         assert row["stock_mode"] == "previous_setup"
         assert row["stock_extents_describe"] == "the relative box, NOT the rest stock this mode cuts from"
-        assert "nothing readable describes that" in out["note"]
+        assert "do NOT describe that" in out["note"]
 
     def test_a_plain_box_setup_carries_no_such_key_or_sentence(self, install):
         # the quiet default: the caveat belongs to the one mode it is true of.
@@ -3118,8 +3125,8 @@ class TestLiveReadinessConsumesSetupBlockers:
         assert sig["setups_errored"] == 1
         assert sig["samples"]["setup"] == {"name": "Setup1",
                                            "error": "Stock is smaller than the model."}
-        assert sig["readiness"] == ("BLOCKER: 1 setup(s) have errors - those setups will not "
-                                    "post.")
+        assert sig["readiness"] == ("BLOCKER: 1 setup(s) have errors - each still posts its "
+                                    "valid toolpaths and skips the errored item.")
 
     def test_only_the_blocked_setup_of_several_is_named(self, monkeypatch,
                                                         operation_cast_passthrough):
@@ -3409,6 +3416,29 @@ class TestOpBlockedBy:
             {"state": "out_of_date", "tool": "flat 10mm", "is_out_of_date": True})
         assert blocked == ["toolpath_out_of_date"]
         assert requires == {"tool": "cam_generate", "workspace": "Manufacture"}
+
+    def test_a_manual_row_with_no_tool_is_not_blocked_on_that(self):
+        # manual NC lands with tool None by construction - never a missing selection.
+        blocked, requires = cr._op_blocked_by(
+            {"state": "valid", "tool": None, "strategy": "manual", "is_out_of_date": False})
+        assert blocked == [] and requires is None
+
+    def test_a_non_manual_row_with_no_tool_still_blocks(self):
+        blocked, requires = cr._op_blocked_by(
+            {"state": "valid", "tool": None, "strategy": "face", "is_out_of_date": False})
+        assert blocked == ["tool_unselected"] and requires is None
+
+
+class TestManualOperationRow:
+    """MEASURED: a manual NC operation lands with tool None by construction, through the whole
+    operations slice - not just the helper _op_blocked_by reads."""
+
+    def test_a_manual_operation_row_carries_no_tool_unselected_blocker(
+            self, install, operation_cast_passthrough):
+        op = FakeOperation("Manual1", has_toolpath=False, valid=True, strategy="manual", tool=None)
+        install(FakeCAM([_OpSetup("S1", [op])]))
+        row = _payload(cr.get_cam_operations_handler())["setups"][0]["operations"][0]
+        assert row["tool"] is None and row["blocked_by"] == []
 
 
 class TestOperationsSummarySuppressed:
@@ -3764,7 +3794,7 @@ class TestSpindleScopedToActiveOps:
         setup = FakeSetup("Op1", ops=[_row_op("Parked", rpm=24999.0, suppressed=True)])
         install(FakeCAM([setup]))
         note = _payload(cr.get_cam_operations_handler())["note"]
-        assert "suppressed_not_compared" in note and "spindle_over_machine_max_count" in note
+        assert "suppressed_not_compared" in note
 
     def test_a_setup_name_containing_a_separator_does_not_invent_a_folder(
             self, install, operation_cast_passthrough):
@@ -4142,6 +4172,15 @@ class TestNcProgramPostedOperations:
         entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
         assert entry["operation_count"] == 4 and entry["posted_operations"] == 1
         assert "toolpath_unread" not in entry
+
+    def test_an_errored_row_reading_hasToolpath_true_is_not_counted_as_posted(
+            self, install, operation_cast_passthrough):
+        errored = _row_op("Bad1")
+        errored.hasError = True
+        held = [_row_op("Cut"), errored]
+        install(SimpleNamespace(ncPrograms=_NamedCollection([self._program(held)])))
+        entry = _payload(cr.get_nc_programs_handler())["nc_programs"][0]
+        assert entry["operation_count"] == 2 and entry["posted_operations"] == 1
 
     def test_a_row_whose_toolpath_flag_does_not_read_is_disclosed_not_counted(
             self, install, operation_cast_passthrough):

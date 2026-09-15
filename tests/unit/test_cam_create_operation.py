@@ -1254,6 +1254,18 @@ class TestCompatibilityListing:
                                    tool_library_url="u", tool_index=0))
         assert "strategy_checked" not in out and "entitlement_checked" not in out
 
+    def test_a_near_miss_names_the_closest_compatible_strategy(self, monkeypatch):
+        _install(monkeypatch, strategies=("manual", "face", "drill", "bore"))
+        msg = cco.handler(setup="Setup1", strategy="manual_nc",
+                          tool_library_url="u", tool_index=0)["message"]
+        assert "Nearest: manual." in msg
+
+    def test_no_close_match_carries_no_nearest_clause(self, monkeypatch):
+        _install(monkeypatch, strategies=("face", "drill", "bore"))
+        msg = cco.handler(setup="Setup1", strategy="zzzzzzzzzz",
+                          tool_library_url="u", tool_index=0)["message"]
+        assert "Nearest" not in msg
+
 
 class TestComposedWireLength:
     """A note or error assembled at RUN TIME is not a literal, so test_prose_budget cannot measure
@@ -1634,3 +1646,28 @@ class TestAdditiveStrategies:
         _additive_ops(cam, _DeafOperations)
         res = cco.handler(setup="Setup1", strategy="additive_arrange")
         assert res["isError"] is True and "did not land" in res["message"]
+
+
+class TestManualStrategy:
+    """MEASURED live: setup.operations.createInput('manual') with tool None, then add, LANDS an
+    Operation with tool None - a manual NC operation takes no cutting tool, like an additive one."""
+
+    def test_a_manual_strategy_creates_with_no_tool_reference(self, monkeypatch):
+        cam = _install(monkeypatch, strategies=("face", "manual"))
+        out = _payload(cco.handler(setup="Setup1", strategy="manual"))
+        assert out["tool"] is None and out["tool_number"] is None
+        assert "tool_identity_checked" not in out
+        assert cam.setups.item(0).operations.added[-1].tool is None
+
+    def test_a_tool_handed_to_manual_is_refused_before_the_add(self, monkeypatch):
+        cam = _install(monkeypatch, strategies=("face", "manual"))
+        res = cco.handler(setup="Setup1", strategy="manual",
+                          tool_library_url="u", tool_index=0)
+        assert res["isError"] is True and "takes no tool" in res["message"]
+        assert cam.setups.item(0).operations.count == 0
+
+    def test_the_manual_note_makes_no_additive_claim(self, monkeypatch):
+        _install(monkeypatch, strategies=("face", "manual"))
+        out = _payload(cco.handler(setup="Setup1", strategy="manual"))
+        assert "isAdditiveStrategy" not in out["note"]
+        assert "cam_select_geometry" not in out["note"]

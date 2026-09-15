@@ -76,14 +76,21 @@ class TestDefaultSlice:
 
     def test_default_note_advertises_remaining(self, stub_slices):
         out = _payload(cg.handler())
-        assert "include=" in out["note"]
+        assert "other slices are the 'include' enum" in out["note"]
 
-    def test_the_worst_composed_router_note_fits_the_wire_budget(self, stub_slices):
-        # the router's note is assembled at run time from the advertising line (carrying the whole
-        # remaining slice list) and the validity caveat, so test_prose_budget measures neither. A
-        # _cam_read slice note rides AHEAD of this one and is that module's own budget.
+    def test_the_worst_composed_router_note_fits_the_wire_budget(self, monkeypatch):
+        # the true worst case: _cam_read's rest-stock note (a setup at stock_mode 'previous_setup')
+        # leads the router's own advertising + validity lines - all three compose at RUN TIME, so
+        # test_prose_budget measures none of them.
+        cc = load_tool("_cam_common")
+        setup = FakeSetup("S1")
+        setup.stockMode = cc.stock_mode_member("previous_setup")
+        cam = make_cam(setup)
+        monkeypatch.setattr(cg, "get_cam", lambda: (cam, None))
+        monkeypatch.setattr(cg._cr, "get_cam", lambda: (cam, None))
         out = _payload(cg.handler())
-        assert "operations" in out["note"] and "Manufacture" in out["note"]   # both pieces armed
+        assert out["setups"][0]["stock_mode"] == "previous_setup"
+        assert "'include'" in out["note"] and "Manufacture" in out["note"]   # every piece armed
         assert len(out["note"]) <= 400, len(out["note"])   # test_prose_budget.NOTE_BUDGET_CHARS
 
 
@@ -175,11 +182,11 @@ class TestDeepReadDropsTheDefaultSlice:
     def test_default_alone_is_the_orientation_read(self, stub_slices):
         out = _payload(cg.handler(include=["default"]))
         assert "setups" in out and "operations" not in out
-        assert "include=" in out["note"]          # still advertises the slices not pulled
+        assert "'include'" in out["note"]          # still advertises the slices not pulled
 
     def test_the_advertising_note_rides_only_on_the_default_read(self, stub_slices):
-        assert "include=" not in _payload(cg.handler(include=["operations"])).get("note", "")
-        assert "include=" in _payload(cg.handler(include=["default", "operations"]))["note"]
+        assert "'include'" not in _payload(cg.handler(include=["operations"])).get("note", "")
+        assert "'include'" in _payload(cg.handler(include=["default", "operations"]))["note"]
 
     def test_the_validity_caveat_rides_on_every_read_that_carries_op_state(self, stub_slices):
         for inc in (None, ["operations"], ["default", "operations"]):
@@ -235,7 +242,7 @@ class TestReferencesCensus:
         assert "2 setup(s)" in note
         assert "selects directly" in payload["counted"]
         # the reader must be told 0 is not a verdict on the document, and where the deeper read is
-        assert "not 'this document has no external references'" in note
+        assert "0 is not 'no external references'" in note
         assert "doc_get(include=['xref_tree'])" in note
 
     def test_the_census_names_the_slice_that_carries_the_selection_keys(self, monkeypatch):
@@ -304,6 +311,16 @@ class TestReferencesCensus:
              "references_truncated": False}])
         payload, _ = cg._slice_references(object(), "")
         assert "incomplete" not in payload["note"]
+
+    def test_the_worst_composed_note_fits_the_wire_budget(self, monkeypatch):
+        # the census plus the truncated-selection clause - the note's two pieces, both armed at
+        # once - is assembled at run time, so test_prose_budget measures neither.
+        self._stub_source(monkeypatch, [
+            {"setup": "Op1", "reference_count": 1, "references": [{}],
+             "references_truncated": True}])
+        payload, _ = cg._slice_references(object(), "")
+        assert "references_truncated" in payload["note"] and "incomplete" in payload["note"]
+        assert len(payload["note"]) <= 400, len(payload["note"])   # NOTE_BUDGET_CHARS
 
     def test_a_source_error_passes_through_with_no_census(self, monkeypatch):
         cc, common = self._siblings()
@@ -554,9 +571,11 @@ class TestStrategiesSlice:
         out = _payload(cg.handler(include=["strategies"]))
         assert out["strategies"]["setups"][0]["strategies"][0]["allowed"] is False
 
-    def test_the_default_note_advertises_the_slice(self, stub_slices):
-        # a flag nothing names is invisible - the orientation note is where an agent finds it.
-        assert "'strategies'" in _payload(cg.handler())["note"]
+    def test_the_slice_name_rides_the_schema_not_the_note(self, stub_slices):
+        # the vocabulary rides the schema's include enum, not a per-call note - an agent already
+        # has it from the tool's own inputSchema.
+        assert "strategies" in cg.tool.input_schema["properties"]["include"]["items"]["enum"]
+        assert "'include'" in _payload(cg.handler())["note"]
 
 
 class TestCamPointers:
@@ -692,6 +711,20 @@ class TestBounding:
         out, err = cg._slice_operations(object(), "")
         assert err is None
         assert len(out["setups"][0]["operations"]) == cg._OPERATIONS_CAP and out["truncated"] is True
+
+    def test_the_worst_composed_note_fits_the_wire_budget(self, monkeypatch):
+        # the truncated-cap prefix plus _cam_read's own operations note - both pieces armed at
+        # once, assembled at run time, so test_prose_budget measures neither.
+        crd = load_tool("_cam_read")
+        big = {"setups": [{"setup": "S", "operations": [
+            {"name": f"Op{i}", "state": "valid"} for i in range(cg._OPERATIONS_CAP + 50)]}],
+            "note": crd._OPERATIONS_NOTE}
+        self._fake_cam_read(monkeypatch,
+                            get_cam_operations_handler=lambda setup="": self._ok(big))
+        out, err = cg._slice_operations(object(), "")
+        assert err is None and out["truncated"] is True
+        assert "Operation rows capped" in out["note"] and "spindle_over_machine_max" in out["note"]
+        assert len(out["note"]) <= 400, len(out["note"])   # NOTE_BUDGET_CHARS
 
     def test_terse_rows_keep_the_spindle_and_preset_signals_that_matter(self, monkeypatch):
         # _OP_NOISE decides which of the new per-op keys survive into the wire rows. The whole
@@ -1650,7 +1683,7 @@ class TestSetupParameterSlice:
     def test_the_note_tells_the_two_units_apart(self, monkeypatch):
         self._wire(monkeypatch, self._params())
         out, _err = cg._slice_parameters(object(), "", "Op1")
-        assert "DIFFERENT units" in out["note"] and "display unit" in out["note"]
+        assert "scaled into 'units'" in out["note"] and "own unit" in out["note"]
 
     def test_an_operation_still_takes_the_operation_path(self, monkeypatch):
         # with an operation named, the OPERATION is the target - 'setup' scopes WHICH operation of
@@ -1745,7 +1778,7 @@ class TestParameterEditableFlag:
                             lambda cam, name, label="operation": (SimpleNamespace(obj=op), None, []))
         out, err = cg._slice_parameters(object(), "Adaptive1", "")
         assert err is None and out["sections"]["General"][0]["editable"] is False
-        assert "editable false refuses a write" in out["note"]
+        assert "false = write refused" in out["note"]
 
     def test_the_setup_slice_note_carries_it_beside_the_units_sentence(self, monkeypatch):
         setup = type("S", (), {"name": "Op1", "parameters": _SetupParams(
@@ -1753,7 +1786,7 @@ class TestParameterEditableFlag:
         monkeypatch.setattr(cg, "find_setup", lambda cam, name: (setup, ["Op1"], None))
         out, _err = cg._slice_parameters(object(), "", "Op1")
         assert out["sections"]["General"][0]["editable"] is False
-        assert "editable false refuses a write" in out["note"] and "DIFFERENT units" in out["note"]
+        assert "false = write refused" in out["note"] and "own unit" in out["note"]
 
 
 class TestGatedRowsAreCounted:
@@ -1761,7 +1794,9 @@ class TestGatedRowsAreCounted:
     the visible+enabled filter drops it; the switch landing flips it to enabled+editable and the
     listing grows by it. The listed count is therefore not the operation's whole set."""
 
-    def test_a_hidden_row_is_counted_and_the_note_says_a_switch_lands_it(self, monkeypatch):
+    def test_a_hidden_row_is_counted_and_named_by_its_key(self, monkeypatch):
+        # the switch-pairing teaching lives at cam_edit_operation's own refusal now, not here - one
+        # home, read at the point it matters.
         op = type("O", (), {"name": "Contour1", "strategy": "contour2d",
                             "parameters": _SetupParams([
                                 FakeCAMParameter("useStockToLeave", "false", title="Stock to leave"),
@@ -1771,23 +1806,16 @@ class TestGatedRowsAreCounted:
                             lambda cam, name, label="operation": (SimpleNamespace(obj=op), None, []))
         out, err = cg._slice_parameters(object(), "Contour1", "")
         assert err is None and out["parameter_count"] == 1 and out["hidden_count"] == 1
-        assert "hidden_count" in out["note"] and "SAME call" in out["note"]
-        assert "isEnabled FALSE" in out["note"]
+        assert "1 more parameter(s)" in out["note"] and "hidden_count" in out["note"]
 
     def test_a_setup_counts_its_hidden_rows_too(self, monkeypatch):
-        # MEASURED on a fresh milling setup: 304 parameters, 42 listed, 262 hidden - the 12 computed
-        # extents are a small part of that, so the extents alone do not account for the silence.
         setup = type("S", (), {"name": "Setup1", "parameters": _SetupParams([
             FakeCAMParameter("job_stockMode", "'default'", title="Stock Mode"),
             FakeCAMParameter("wcs_orientation_axisZ", "0", title="Z axis", visible=False)])})()
         monkeypatch.setattr(cg, "find_setup", lambda cam, name: (setup, ["Setup1"], None))
         out, _err = cg._slice_parameters(object(), "", "Setup1")
         assert out["parameter_count"] == 1 and out["hidden_count"] == 1
-        assert "stock_extents publishes" in out["note"]
-        # cam_edit_setup REFUSES a locked row outright (no switch-first ordering), so the setup note
-        # must not borrow cam_edit_operation's same-call promise
-        assert "REFUSES a row reading editable false" in out["note"]
-        assert "lands it in the SAME call" not in out["note"]
+        assert "1 more parameter(s)" in out["note"] and "hidden_count" in out["note"]
 
     def test_an_operation_hiding_nothing_carries_no_hidden_key_or_sentence(self, monkeypatch):
         op = type("O", (), {"name": "Face1", "strategy": "face", "parameters": _SetupParams(
@@ -2051,7 +2079,7 @@ class TestParameterChoices:
         out, err = cg._slice_parameters(object(), "MA1", "")
         assert err is None
         assert out["sections"]["General"][0]["choices"] == ["three_axis", "five_axis"]
-        assert "getChoices()" in out["note"]
+        assert "accepts verbatim" in out["note"]
 
     def test_a_row_with_no_choice_set_carries_no_key_and_no_note(self, monkeypatch):
         # the quiet default: nearly every parameter is a number or a string, and a 'choices' key on
@@ -2059,7 +2087,7 @@ class TestParameterChoices:
         self._op(monkeypatch, [FakeCAMParameter("tolerance", "0.01", title="Tolerance")])
         out, _err = cg._slice_parameters(object(), "MA1", "")
         assert "choices" not in out["sections"]["General"][0]
-        assert "getChoices()" not in out["note"]
+        assert "accepts verbatim" not in out["note"]
 
     def test_the_setup_slice_publishes_them_too(self, monkeypatch):
         setup = type("S", (), {"name": "Turn1", "parameters": _SetupParams(
@@ -2068,7 +2096,33 @@ class TestParameterChoices:
         monkeypatch.setattr(cg, "find_setup", lambda cam, name: (setup, ["Turn1"], None))
         out, _err = cg._slice_parameters(object(), "", "Turn1")
         assert out["sections"]["General"][0]["choices"] == ["model front", "model back"]
-        assert "getChoices()" in out["note"]
+        assert "accepts verbatim" in out["note"]
+
+
+class TestParametersNoteBudget:
+    """The parameters slice's worst composition - editable + choices + hidden, plus the strategy
+    pair on the operation side - built at run time, so test_prose_budget cannot measure it."""
+
+    def test_the_setup_slice_note_fits_the_wire_budget(self, monkeypatch):
+        setup = type("S", (), {"name": "Setup1", "parameters": _SetupParams(visible=[
+            FakeCAMParameter("wcs_origin_turning", "'model front'", title="Origin",
+                             editable=False, choices=["model front", "model back"]),
+            FakeCAMParameter("wcs_orientation_axisZ", "0", title="Z axis", visible=False)])})()
+        monkeypatch.setattr(cg, "find_setup", lambda cam, name: (setup, ["Setup1"], None))
+        out, _err = cg._slice_parameters(object(), "", "Setup1")
+        assert out["hidden_count"] == 1
+        assert len(out["note"]) <= 400, len(out["note"])
+
+    def test_the_operation_slice_note_fits_the_wire_budget(self, monkeypatch):
+        op = type("O", (), {"name": "Adaptive1", "strategy": "adaptive", "parameters": _SetupParams(
+            visible=[FakeCAMParameter("multiAxisMachiningType", "three_axis", title="Type",
+                                      editable=False, choices=["three_axis", "five_axis"]),
+                     FakeCAMParameter("tool_diameter", "10.", visible=False)])})()
+        monkeypatch.setattr(cg, "resolve_operation",
+                            lambda cam, name, label="operation": (SimpleNamespace(obj=op), None, []))
+        out, err = cg._slice_parameters(object(), "Adaptive1", "")
+        assert err is None and out["hidden_count"] == 1
+        assert len(out["note"]) <= 400, len(out["note"])
 
 
 class TestStrategyIdAndName:

@@ -1360,6 +1360,31 @@ class TestParameters:
         out = _payload(ct.handler(action="parameters", scope="document", tool=0))
         assert out["tool"] == 0 and out["parameter_count"] >= 1
 
+    def test_a_non_scalar_value_reads_null_with_its_type_as_value_kind(self, monkeypatch):
+        # MEASURED: a vector-valued CAM parameter carries a SWIG entity, not a JSON scalar - the
+        # wire never ships its memory-address repr, and the null it ships instead is not silence.
+        class _Vector:
+            pass
+        tool = _Tool("EM")
+        tool.parameters = FakeCAMParameters(
+            [FakeCAMParameter("connectionMoveClearanceArea_orientation_axisZ",
+                              expression="orientation", value=_Vector())])
+        _install(monkeypatch, _Target(tools=[tool]))
+        out = _payload(ct.handler(action="parameters", scope="cloud", library="L", tool=0))
+        row = out["parameters"][0]
+        assert row["value"] is None and row["value_kind"] == "_Vector"
+
+    def test_a_scalar_value_carries_no_value_kind_key(self, monkeypatch):
+        _install(monkeypatch, _Target(tools=[_Tool("EM", tool_numberOfFlutes="4")]))
+        out = _payload(ct.handler(action="parameters", scope="cloud", library="L", tool=0))
+        row = next(r for r in out["parameters"] if r["name"] == "tool_numberOfFlutes")
+        assert "value_kind" not in row
+
+    def test_the_note_states_the_internal_length_unit(self, monkeypatch):
+        _install(monkeypatch, _Target(tools=[_Tool("EM")]))
+        out = _payload(ct.handler(action="parameters", scope="cloud", library="L", tool=0))
+        assert "internal centimetres" in out["note"] and "value_kind" in out["note"]
+
 
 # ── the REAL _Target's tool list: an index IS the address ───────────────────
 
@@ -2890,7 +2915,9 @@ class TestToolNumberAssignment:
 # ── list/parameters read shapes: a non-scalar value, and a tool carrying no holder ──────────────
 
 class TestReadShapes:
-    def test_a_non_scalar_parameter_value_is_reported_as_text_never_dropped(self, monkeypatch):
+    def test_a_non_scalar_parameter_value_reads_null_with_its_kind_never_a_repr(self, monkeypatch):
+        # MEASURED: a non-scalar value published as str() shipped a SWIG memory-address repr on the
+        # wire - the fix reads null with the type name instead, never that repr.
         tool = _Tool("EM")
         _replace(tool.parameters, SimpleNamespace(
             name="tool_coolant", expression="flood",
@@ -2898,7 +2925,7 @@ class TestReadShapes:
         _install(monkeypatch, _Target(tools=[tool], is_document=True))
         out = _payload(ct.handler(action="parameters", scope="document", tool=0))
         row = next(r for r in out["parameters"] if r["name"] == "tool_coolant")
-        assert row["value"] == "('flood', 'mist')"
+        assert row["value"] is None and row["value_kind"] == "tuple"
 
     def test_a_tool_carrying_no_holder_publishes_no_holder_field(self, monkeypatch):
         # holder is present-only: a null 'holder' would read as a holder the tool does not have

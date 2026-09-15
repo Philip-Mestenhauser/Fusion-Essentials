@@ -12,8 +12,8 @@ conftest), so the fake ops flow through unchanged.
 
 import json
 
-from conftest import (Camera, FakeApplication, FakeFusionDocument, FakeProducts, Viewport,
-                      _NamedCollection, load_tool, make_cam)
+from conftest import (Camera, FakeApplication, FakeFusionDocument, FakeProducts, FakeSelections,
+                      Viewport, _NamedCollection, load_tool, make_cam)
 from conftest import FakeOperation as FakeOp, FakeSetup, FakeCAMFolder as CAMFolder
 
 st = load_tool("cam_show_toolpath")
@@ -193,6 +193,62 @@ class TestBulbReadBack:
         assert "setup_activated" not in out
         assert "isActive=false" in out["setup_activation_warning"]
         assert "isActive=false" in out["note"]
+
+
+class TestDisplaySettle:
+    """isLightBulbOn alone leaves a hidden toolpath's graphics drawn (measured live); only a
+    selection add/clear cycle clears them, and a hide is judged by isVisible - not just the bulb."""
+
+    def test_hide_publishes_visible_false_and_settles_the_display(self):
+        op = FakeOp("Finish", shown=True)
+        _install([FakeSetup("S1", [op], is_active=True)])
+        out = _payload(st.handler(action="hide", operation="Finish"))
+        assert out["visible"] is False and out["display_settled"] is True
+        sel = st.app.userInterface.activeSelections
+        assert sel._added == [op] and sel._cleared == 1
+
+    def test_display_settled_reads_false_when_the_selection_clear_does_not_take(self):
+        op = FakeOp("Finish", shown=True)
+        fake_app = _install([FakeSetup("S1", [op], is_active=True)])
+        fake_app.userInterface.activeSelections = FakeSelections(clear_ok=False)
+        out = _payload(st.handler(action="hide", operation="Finish"))
+        assert out["visible"] is False and out["display_settled"] is False
+        assert "display_settled" in out["note"]
+
+    def test_hide_errors_when_isVisible_stays_true_after_the_write(self):
+        class _StuckVisibleOp(FakeOp):
+            @property
+            def isVisible(self):
+                return True
+        stuck = _StuckVisibleOp("Stuck", shown=True)
+        _install([FakeSetup("S1", [stuck], is_active=True)])
+        res = st.handler(action="hide", operation="Stuck")
+        assert res["isError"] is True and "isVisible=true" in res["message"]
+        assert stuck.isLightBulbOn is False   # the bulb write itself DID take
+
+    def test_hide_all_settles_once_over_the_ops_that_were_drawn(self):
+        # op3 is the only op drawn before the hide; op1's bulb was already off, so its graphics
+        # never lingered and it stays out of the ONE cycle.
+        _op1, _op2, op3 = _simple_world()
+        out = _payload(st.handler(action="hide_all"))
+        sel = st.app.userInterface.activeSelections
+        assert out["hidden_count"] == 2 and out["display_settled"] is True
+        assert sel._added == [op3] and sel._cleared == 1
+
+    def test_isolate_settles_once_over_the_ops_its_mass_hide_darkened(self):
+        _op1, _op2, op3 = _simple_world()
+        out = _payload(st.handler(action="isolate", operation="Rough Top"))
+        assert out["operation"] == "Rough Top"
+        sel = st.app.userInterface.activeSelections
+        assert sel._added == [op3] and sel._cleared == 1
+
+    def test_a_hide_all_with_nothing_drawn_runs_no_cycle(self):
+        op1, _op2, op3 = _simple_world()
+        op3.isLightBulbOn = False
+        out = _payload(st.handler(action="hide_all"))
+        sel = st.app.userInterface.activeSelections
+        assert out["hidden_count"] == 2 and out["display_settled"] is True
+        assert sel._added == [] and sel._cleared == 0 and op1.isLightBulbOn is False
 
 
 class TestUnreadableBulb:
@@ -472,6 +528,13 @@ class TestList:
         by_name = {r["op"]: r for r in out["operations"]}
         assert by_name["Drill"]["has_toolpath"] is False
         assert by_name["Finish"]["shown"] is True
+
+    def test_carries_shown_and_visible_with_a_note_telling_them_apart(self):
+        _simple_world()
+        out = _payload(st.handler(action="list"))
+        by_name = {r["op"]: r for r in out["operations"]}
+        assert by_name["Finish"]["shown"] is True and by_name["Finish"]["visible"] is True
+        assert "shown" in out["note"] and "visible" in out["note"]
 
 
 # ── isolate ─────────────────────────────────────────────────────────────────
