@@ -145,18 +145,21 @@ def _axis_entity(raw, comp, design, context=None):
         return None, aerr
     if tagged[0] == "edge":
         ent = tagged[1]
+        if safe(lambda: ent.assemblyContext) is not None:
+            return ent, None
         occ, cerr = _inputs.single_placement("'axis': that entity", ent, comp, design)
         if cerr:
             return None, cerr
+        # single_placement answers "nothing to lift" when the axis's owner equals the host
+        # component - but a host itself placed under an occurrence needs its OWN axis proxied
+        # into that occurrence too, or defineAsRotate raises "3 : Invalid entity" on the native.
+        if occ is None:
+            occ = context
         if occ is None:
             return ent, None
-        proxy = safe(lambda: ent.createForAssemblyContext(occ))
-        if proxy is None:
-            path = safe(lambda: occ.fullPathName) or "its one occurrence"
-            return None, (f"'axis': that entity could not be brought into the move's assembly "
-                          f"context ({path}). Pass a handle at geometry in the moved body's own "
-                          "component, or a world axis (x/y/z).")
-        return proxy, None
+        return _inputs._proxy_or_refuse(
+            "'axis': that entity", ent, occ,
+            "Pass a handle at geometry in the moved body's own component, or a world axis (x/y/z).")
     ent = _inputs.world_construction_axis(comp, raw)
     if ent is None:
         return None, (f"'axis': the active component has no {raw} origin construction axis to move "

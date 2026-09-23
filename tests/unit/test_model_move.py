@@ -205,14 +205,14 @@ class _Proxyable:
         return ("PROXY", occurrence.fullPathName)
 
 
-def _wire_sub(monkeypatch, sub, *placements):
+def _wire_sub(monkeypatch, sub, *placements, tokens=None):
     """A root design in which `sub` is placed under the given occurrence fullPathNames."""
     root = MakeComp(name="Root")
     root.entityToken = "TOKEN:Root"
     root.features = types.SimpleNamespace(moveFeatures=FakeMoveFeatures())
     occs = [make_occurrence(path=p) for p in placements]
     root.allOccurrencesByComponent = lambda comp: _NamedCollection(occs)
-    design = make_design(comp=root)
+    design = make_design(comp=root, tokens=tokens)
     install(mm, design)
     monkeypatch.setattr(adsk.fusion, "BRepBody", BRepBody)
     monkeypatch.setattr(adsk.fusion, "BRepFace", BRepFace)
@@ -297,6 +297,23 @@ class TestSubComponentHosting:
         monkeypatch.setattr(mm._BODIES, "resolve", lambda raw: ([body], None))
         out = payload(mm.handler(mode="along_entity", bodies=["Slug"], axis="x", distance=30))
         assert axis.proxied_into == ["Assy:1+Rail:2"]
+        assert out["moved"] is True
+
+    def test_an_axis_owned_by_the_same_placed_subcomponent_still_proxies(self, monkeypatch):
+        # MEASURED: a handle/name axis whose OWNER equals the move's host component resolves
+        # NATIVE (assemblyContext None) - single_placement's "same component, nothing to lift"
+        # is wrong here because that HOST is itself placed under an occurrence, so its own axis
+        # needs the SAME lift a foreign one gets, not a bare pass-through.
+        body = _body("Slug")
+        sub_feats = FakeMoveFeatures([body])
+        sub = _sub_component(bodies=[body], feats=sub_feats)
+        body.parentComponent = sub
+        proxy = object()
+        edge = _foreign_edge(sub, proxy=proxy)   # axis OWNER is sub itself, not a foreign component
+        _wire_sub(monkeypatch, sub, "Assy:1+Rail:1", tokens={"e9": edge})
+        monkeypatch.setattr(mm._BODIES, "resolve", lambda raw: ([body], None))
+        out = payload(mm.handler(mode="along_entity", bodies=["Slug"], axis="e9", distance=30))
+        assert sub_feats.last_input.definition[1] is proxy
         assert out["moved"] is True
 
 

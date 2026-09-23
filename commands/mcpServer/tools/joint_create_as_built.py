@@ -53,6 +53,14 @@ def _configured_clause(design):
     return _CONFIGURED_NOTE if safe(lambda: design.configurationTopTable) is not None else ""
 
 
+# MEASURED: a rigid as-built joint from Base to Carrier (offset a user parameter) to Child left
+# Carrier's box moved by the param change while Child's stayed bit-identical - this joint's pose
+# is a snapshot, not a live parametric follow, however it was reached from an upstream move.
+_CAPTURED_POSE_NOTE = (" This joint's pose is CAPTURED, not driven - a later parametric move "
+                       "upstream of either occurrence will not carry through it; re-check with "
+                       "assembly_get after such a change.")
+
+
 def handler(occurrence_one: str = "", occurrence_two: str = "", geometry: str = "",
             joint_type: str = "rigid", axis: str = "z",
             slide_axis: str = "", name: str = "") -> dict:
@@ -184,7 +192,8 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", geometry: str = 
            "geometry": geom_label}
     configured = _configured_clause(design)
     if jtype == "rigid":
-        out["note"] = "Occurrences rigidly joined where they already are." + configured
+        out["note"] = ("Occurrences rigidly joined where they already are."
+                       + _CAPTURED_POSE_NOTE + configured)
         return ok(out)
 
     if _JOINT_TYPES[jtype][1]:
@@ -195,7 +204,7 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", geometry: str = 
         moved = _BALL_AXIS_NOTE if jtype == "ball" else f"{jtype} motion"
     pose_hint = "Pose it with joint_drive." if jtype in _DRIVES_ANY else _POSE_HINT_OTHER
     out["note"] = (f"Occurrences joined where they already are with {moved} - an as-built joint "
-                   f"moves neither part. {pose_hint}" + configured)
+                   f"moves neither part. {pose_hint}" + _CAPTURED_POSE_NOTE + configured)
     # AsBuiltJoint.geometry reads null when (and only when) the motion is rigid (live-verified across
     # rigid plus the five motion types), so a non-rigid joint with no geometry to read is a signal worth reporting
     # rather than swallowing.

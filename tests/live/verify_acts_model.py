@@ -351,6 +351,29 @@ def _radius_filtered_handle(ctx, filtered_key, index):
     return {"target": filtered[index], "units": "mm"}
 
 
+def _interference_pin(ctx, args):
+    """Add the exact owned-document pin to one interference-fixture write."""
+    return {**args, "expect_document": _ctx_get(
+        ctx, "interference_scratch", "the interference scratch document")}
+
+
+def _interference_pair_named(p):
+    """assembly_inspect_interference on the Peg/BlockA/BlockB rig: each of Peg's two instances
+    interferes with its OWN block, named exactly - no '(or N more instance(s))' guess."""
+    rows = (p.get("measured") or {}).get("interferences") or []
+    by_pair = {tuple(sorted([r.get("occurrence_one"), r.get("occurrence_two")])): r for r in rows}
+    a = by_pair.get(tuple(sorted(["Peg:1", "BlockA:1"])))
+    b = by_pair.get(tuple(sorted(["Peg:2", "BlockB:1"])))
+    no_candidates = not any("candidates" in k for r in rows for k in r)
+    return _measured(
+        "Peg:1 x BlockA:1 and Peg:2 x BlockB:1 named exactly, each with its own volume",
+        {"pairs": sorted(by_pair), "vol_a": a and a.get("overlap_volume_cm3"),
+         "vol_b": b and b.get("overlap_volume_cm3")},
+        a is not None and b is not None and no_candidates
+        and isinstance(a.get("overlap_volume_cm3"), (int, float)) and a["overlap_volume_cm3"] > 0
+        and isinstance(b.get("overlap_volume_cm3"), (int, float)) and b["overlap_volume_cm3"] > 0)
+
+
 def _combine_story_address(p):
     """Return the story handle while recording the open-document baseline."""
     _RECALL["combine_open_before"] = p.get("open_count")
@@ -1788,6 +1811,18 @@ _SOLIDS = [
                          p.get("frame") == "world" and p.get("aligned_to_face_axis") is True
                          and _near(abs(((p.get("geometry") or {}).get("direction") or [0, 0, 0])[1]),
                                    1.0, 1e-3)), None),
+    # a rotate move BY NAME about that same construction axis, still inside a rotated, captured
+    # occurrence: the axis's owning component equals the move's host, which a proxy lift must not
+    # skip just because "nothing foreign" - the body it turns is what proves the axis landed.
+    ("model_move", {"mode": "rotate", "bodies": ["AxisFrameRig"], "axis": "AxisFrameSpin",
+                    "angle_deg": 30},
+     lambda p: _measured("rotate by NAME about a construction axis owned by the rotated occurrence "
+                         "itself",
+                         {"mode": p.get("mode"), "moved": p.get("moved"),
+                          "displacement": p.get("displacement")},
+                         p.get("moved") is True and p.get("mode") == "rotate"
+                         and isinstance(p.get("displacement"), (int, float))
+                         and p.get("displacement") > 0), None),
     # a datum NAME reaches only the ACTIVE component, so the same name from the root is refused
     # rather than resolved to something else. (A second same-named axis is never ambiguous - Fusion
     # dedupes the name itself.) The activation is put back so the cameo tree is unchanged.
@@ -2647,9 +2682,34 @@ _DETAILS = [
     ("sketch_add_geometry", {"geometry": [{"kind": "line", "x1": 1050, "y1": 0,
                                            "x2": 1050, "y2": 40}],
                              "sketch_name": "PipeJoinMissPath"}, "ok", None),
+    # the miss as a CUT first, scoped to the box (the component's ONE body before the join lands
+    # its orphan; an unscoped miss raises NO_TARGET_SWEEP_BODY and leaves nothing - measured): the
+    # feature lands with no effect, retained at WARNING severity ("No target body!") - the boundary
+    # FSAE-0922-FAILED-FEATURE-SEVERITY-1 keeps apart from an ERROR, which alone breaks is_healthy.
+    ("model_pipe", {"path": "sketch:PipeJoinMissPath", "section_size": 6, "operation": "cut",
+                    "target_bodies": ["PipeJoinMiss"]},
+     _refused("no body's volume changed", "remains in the timeline"), None),
+    # then the same path as a JOIN lands an orphan tube, which the error names
     ("model_pipe", {"path": "sketch:PipeJoinMissPath", "section_size": 6, "operation": "join"},
      _refused("no body's volume changed", "operation='join' landed a NEW body (",
               "model_combine(join) merges them"), None),
+    # is_healthy must stay TRUE over a retained WARNING feature - only an ERROR breaks it.
+    ("assembly_get", {},
+     lambda p: _measured("a retained WARNING-severity pipe feature reads healthy on assembly_get",
+                         {"is_healthy": p.get("is_healthy"),
+                          "timeline_problems": p.get("timeline_problems"),
+                          "timeline_warnings": p.get("timeline_warnings")},
+                         p.get("is_healthy") is True and p.get("timeline_problems") == []
+                         and any("Pipe" in (w.get("name") or "")
+                                for w in (p.get("timeline_warnings") or []))), None),
+    # the SAME state through workspace_orient's health counts (uncapped, unlike the timeline
+    # slice's row list) - a warning, no error, is_healthy true: the severity must agree.
+    ("workspace_orient", {},
+     lambda p: _measured("workspace_orient counts the retained pipe as a warning, not an error",
+                         {"health": p.get("health")},
+                         (p.get("health") or {}).get("timeline_errors") == 0
+                         and ((p.get("health") or {}).get("timeline_warnings") or 0) >= 1
+                         and (p.get("health") or {}).get("is_healthy") is True), None),
     # a d70 CUT across a 100 x 30 x 8 plate: the tube is wider than the plate, so it DISCONNECTS
     # the plate into two bodies - the split is named, not left for 'result_bodies' alone to imply.
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
@@ -3021,6 +3081,80 @@ _RESIZE = [
     ("param_delete", {"name": "ScratchDim"}, _param_deleted("ScratchDim"), None),
     # the design at rest after the rebuild: the census the check ran, with the rows it found.
     ("assembly_inspect_interference", {}, _interference_measured, None),
+    # FSAE-0922-INTERFERENCE-INSTANCE-1: a component instanced twice must be named EXACTLY, never
+    # guessed from candidates - and two occurrences with no body must refuse, never pass. Isolated
+    # in its own scratch document so the census is exactly what this rig places.
+    ("doc_get", {}, _home_document,
+     ("interference_story", _recall("interference_story", _home_address))),
+    ("doc_new",
+     lambda c: {"expect_document": _ctx_get(c, "interference_story", "the story document")},
+     _new_document,
+     ("interference_scratch", _recall("interference_scratch", lambda p: p["document_handle"]))),
+    ("model_create_component",
+     lambda c: _interference_pin(c, {"name": "EmptyA", "activate": True}), _made_component, None),
+    ("design_activate_component",
+     lambda c: _interference_pin(c, {"occurrence": "root"}), "ok", None),
+    ("model_create_component",
+     lambda c: _interference_pin(c, {"name": "EmptyB", "activate": True}), _made_component, None),
+    ("design_activate_component",
+     lambda c: _interference_pin(c, {"occurrence": "root"}), "ok", None),
+    # two occurrences with ZERO solid bodies between them - the false pass this row exists to catch.
+    ("assembly_inspect_interference", {}, _refused("EmptyA:1", "EmptyB:1", "NOT a pass"), None),
+    ("model_create_component",
+     lambda c: _interference_pin(c, {"name": "BlockA", "activate": True}), _made_component, None),
+    ("sketch_create",
+     lambda c: _interference_pin(c, {"plane": "xy", "name": "BlockAS"}), "ok", None),
+    ("sketch_add_geometry",
+     lambda c: _interference_pin(c, {"geometry": [{"kind": "rectangle", "x1": 0, "y1": 0,
+                                                    "x2": 10, "y2": 10}], "sketch_name": "BlockAS"}),
+     "ok", None),
+    ("model_extrude",
+     lambda c: _interference_pin(c, {"sketch_name": "BlockAS", "profile_index": 0, "distance": 10}),
+     _extruded, None),
+    ("design_activate_component",
+     lambda c: _interference_pin(c, {"occurrence": "root"}), "ok", None),
+    ("model_create_component",
+     lambda c: _interference_pin(c, {"name": "BlockB", "activate": True, "x": 50}),
+     _made_component, None),
+    ("sketch_create",
+     lambda c: _interference_pin(c, {"plane": "xy", "name": "BlockBS"}), "ok", None),
+    ("sketch_add_geometry",
+     lambda c: _interference_pin(c, {"geometry": [{"kind": "rectangle", "x1": 0, "y1": 0,
+                                                    "x2": 10, "y2": 10}], "sketch_name": "BlockBS"}),
+     "ok", None),
+    ("model_extrude",
+     lambda c: _interference_pin(c, {"sketch_name": "BlockBS", "profile_index": 0, "distance": 10}),
+     _extruded, None),
+    ("design_activate_component",
+     lambda c: _interference_pin(c, {"occurrence": "root"}), "ok", None),
+    ("model_create_component",
+     lambda c: _interference_pin(c, {"name": "Peg", "activate": True}), _made_component, None),
+    ("sketch_create",
+     lambda c: _interference_pin(c, {"plane": "xy", "name": "PegS"}), "ok", None),
+    ("sketch_add_geometry",
+     lambda c: _interference_pin(c, {"geometry": [{"kind": "circle", "cx": 5, "cy": 5, "radius": 2}],
+                                     "sketch_name": "PegS"}), "ok", None),
+    ("model_extrude",
+     lambda c: _interference_pin(c, {"sketch_name": "PegS", "profile_index": 0, "distance": 10}),
+     _extruded, None),
+    ("design_activate_component",
+     lambda c: _interference_pin(c, {"occurrence": "root"}), "ok", None),
+    # a second instance of the SAME component, overlapping the OTHER block - the multi-instance case
+    # analyzeInterference alone cannot name (native bodies carry no assemblyContext).
+    ("design_add_instance",
+     lambda c: _interference_pin(c, {"component": "Peg", "x": 50}),
+     lambda p: p.get("created") is True, None),
+    ("assembly_inspect_interference", {}, _interference_pair_named, None),
+    ("doc_activate",
+     lambda c: {"name": _ctx_get(c, "interference_story", "the story document"),
+                "expect_document": _ctx_get(c, "interference_scratch",
+                                            "the interference scratch document")},
+     "ok", None),
+    ("doc_close",
+     lambda c: {"name": _ctx_get(c, "interference_scratch", "the interference scratch document"),
+                "save_changes": False,
+                "expect_document": _ctx_get(c, "interference_story", "the story document")},
+     _document_closed, None),
     # TIMELINE: roll back over the assembly, group a range, suppress and restore, then return the
     # marker to the end. Every beat reads the marker back, and the blast-radius refusal is exercised
     # WITHOUT the confirmation so nothing is discarded from the story.

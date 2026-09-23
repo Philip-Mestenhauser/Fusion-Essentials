@@ -60,6 +60,11 @@ def _joint_record(design, j, inv_k):
     mt = safe(lambda: j.jointMotion.jointType)
     friendly, dof = _MOTION.get(mt, ("?", None))
     rec = {"name": safe(lambda: j.name), "type": friendly, "dof": dof}
+    if _joints.is_as_built_joint(j):
+        # MEASURED: an as-built joint's relative pose is CAPTURED at creation, not driven - a
+        # later parametric move upstream of either occurrence leaves it unchanged (a param-offset
+        # move of one member left the other's world box bit-identical).
+        rec["as_built"] = True
     rec.update(_health_fields(j))
     rec["occurrence_one"] = (safe(lambda: j.occurrenceOne.name)
                              if safe(lambda: j.occurrenceOne) else None)
@@ -180,6 +185,7 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     broken_joints = [j["name"] for j in joints if j.get("healthy") is False]
     health_unknown_joints = [j["name"] for j in joints if j.get("health_unknown")]
     suppressed_joints = [j["name"] for j in joints if j.get("is_suppressed")]
+    as_built_names = [j["name"] for j in joints if j.get("as_built")]
     # Relation health is folded into the HEADLINE flag, not just the opt-in relations slice: a
     # failed assembly constraint reaches none of broken_joints/timeline_problems.
     broken_relations = []
@@ -189,11 +195,12 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
             if r_ok is False:
                 broken_relations.append({"kind": kind, "name": safe(lambda rel=rel: rel.name),
                                          "error": r_msg})
-    timeline_problems = []
-    for o in _common.iter_collection(safe(lambda: design.timeline)):
-        healthy, msg = _health(o)
-        if healthy is False:
-            timeline_problems.append({"name": safe(lambda o=o: o.name), "error": msg})
+    # SEVERITY: the same error/warning split design_get and workspace_orient key off
+    # (_common.timeline_health - healthState 2=error breaks is_healthy, 1=warning does not) - one
+    # shared read, so a feature's severity cannot disagree across the three tools.
+    tl_error_names, tl_warning_names, _tl_total = _common.timeline_health(design)
+    timeline_problems = [{"name": n} for n in tl_error_names]
+    timeline_warnings = [{"name": n} for n in tl_warning_names]
 
     # A ROLLED-BACK marker means features after it (downstream joints included) are NOT in the current
     # model - they revert to home while still reading healthy, so the joint state below is INCOMPLETE.
@@ -211,9 +218,10 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
                   and not broken_relations and not unresolved_references)
 
     # STALENESS RECONCILIATION: the per-joint healthState can LAG the timeline after an in-place
-    # edit that has not been recomputed. When they disagree the timeline is authoritative.
-    tl_problem_names = {p["name"] for p in timeline_problems}
-    joints_broke_but_timeline_clean = bool(broken_joints) and not timeline_problems
+    # edit that has not been recomputed. A WARNING row counts as "the timeline shows it" too, even
+    # though it stays out of is_healthy/timeline_problems (errors only).
+    tl_flagged_names = {p["name"] for p in timeline_problems} | {w["name"] for w in timeline_warnings}
+    joints_broke_but_timeline_clean = bool(broken_joints) and not tl_flagged_names
     out = {
     "units": units,
     "is_healthy": is_healthy,
@@ -222,6 +230,7 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
     "unresolved_references": unresolved_references,
     "suppressed_joints": suppressed_joints,
     "timeline_problems": timeline_problems,
+    "timeline_warnings": timeline_warnings,
     "timeline_rolled_back": rolled_back,
     "occurrence_count": occ_total,
     "grounded_occurrences": grounded_names,
@@ -361,6 +370,16 @@ def handler(units: str = "mm", include=None, include_joints: bool = True,
                         "AFTER it (downstream joints included) are ROLLED BACK and reverted to home, so "
                         "the joint state here is INCOMPLETE. Run design_recompute (or roll the marker to "
                         "the end) to restore the full model, then re-read.")
+    if timeline_warnings:
+        out["note"] += (
+            f" {len(timeline_warnings)} timeline feature(s) carry a WARNING "
+            f"({', '.join(w['name'] for w in timeline_warnings[:8])}): non-blocking, not counted "
+            "in is_healthy or timeline_problems.")
+    if as_built_names:
+        out["note"] += (
+            f" {len(as_built_names)} as-built joint(s) ({', '.join(as_built_names[:8])}) hold a "
+            "pose CAPTURED at creation, not driven - a parametric move upstream of either "
+            "occurrence will not carry through it; re-check after such a change.")
     if health_unknown_joints:
         # is_healthy is a verdict over the rows that HAVE one; a row that withheld its flag is not
         # counted broken, so the count it is silent about is said out loud here.

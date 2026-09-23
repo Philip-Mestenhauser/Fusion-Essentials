@@ -182,13 +182,17 @@ _MOTION = (
      and p.get("joint") == "AsbNamed"
      # the configured-design sentence is gated on THIS design carrying a configuration table, which
      # a sweep document does not - so it costs an ordinary design nothing.
-     and "CONFIGURED" not in (p.get("note") or ""),
+     and "CONFIGURED" not in (p.get("note") or "")
+     # the as-built joint's pose is a CAPTURED snapshot, not driven - the receipt says so.
+     and "CAPTURED, not driven" in (p.get("note") or ""),
      ("asb_joint", lambda p: p["joint"])),
-    # an INDEPENDENT read of the same joint: the tool's own read-back is not the only witness.
+    # an INDEPENDENT read of the same joint: the tool's own read-back is not the only witness, and
+    # the row + the design-level note both disclose the captured pose (FSAE-0922-ASBUILT-PARAM-FOLLOW-1).
     ("assembly_get", {},
-     lambda p: any(j.get("type") == "revolute"
+     lambda p: any(j.get("type") == "revolute" and j.get("as_built") is True
                    and {j.get("occurrence_one"), j.get("occurrence_two")} == {"AsbPin:1", "AsbPlate:1"}
-                   for j in (p.get("joints") or [])), None),
+                   for j in (p.get("joints") or []))
+     and "AsbNamed" in (p.get("note") or "") and "CAPTURED" in (p.get("note") or ""), None),
     # the beat the read-backs cannot fake: a motion that reads back but cannot be DRIVEN is no DOF.
     ("joint_drive", lambda c: {"joint_name": _ctx_get(c, "asb_joint", "the as-built revolute"),
                                "angle_deg": 30},

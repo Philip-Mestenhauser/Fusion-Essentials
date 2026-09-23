@@ -270,6 +270,26 @@ def _auto_dimension_input():
     return types.SimpleNamespace(view=None, dimensionStrategy=None, datumLocation=None)
 
 
+class _CustomTable:
+    """One Sheet custom table: name (may be unset), rowCount/columnCount, and getCellData(r, c) -
+    the cell text a 'tables' read walks. No live SHAPES dump to sweep against
+    (test_fake_shapes_exist); `cells` is a {(r, c): text} map, absent pairs answering ''."""
+    def __init__(self, name=None, row_count=2, column_count=2, cells=None):
+        self.name = name
+        self.rowCount = row_count
+        self.columnCount = column_count
+        self._cells = dict(cells or {})
+
+    def getCellData(self, r, c):
+        return self._cells.get((r, c), "")
+
+
+def _bend_tables():
+    """Sheet.bendTables as measured: present, but carrying NO .count - a different shape from
+    customTables, which every 'tables' read must not assume."""
+    return types.SimpleNamespace()
+
+
 @fusion_fake(live_type="Sheet", facts=("shape-dump-drawing-world",))
 class FakeSheet:
     """One sheet. width/height are READ-ONLY millimetres on every drawing, derived from size plus
@@ -309,7 +329,11 @@ class FakeSheet:
         self._auto_input = None
         self.views = make_drawing_views(views)
         self.sketches = FakeDrawingSketches() if sketches is None else sketches
-        self.customTables = types.SimpleNamespace(count=custom_tables)
+        # custom_tables takes a plain count OR a [_CustomTable, ...] list.
+        tables = (custom_tables if isinstance(custom_tables, (list, tuple))
+                 else [_CustomTable() for _ in range(custom_tables)])
+        self.customTables = _NamedCollection(list(tables))
+        self.bendTables = _bend_tables()
         self.images = FakeImages(self) if images is None else images
 
     @property

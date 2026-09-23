@@ -15,6 +15,7 @@ import adsk.cam
 from ._common import (counted, measured, named_with_remainder, native_identity, iter_collection,
                       read_flag, safe, scale, told_apart)
 from ._write_guard import _active_identity, document_key, on_key_renamed
+from . import _geom
 from . import _inputs
 from . import _view_common
 
@@ -862,6 +863,33 @@ def _model_identities(setup):
     except Exception:
         return None
     return ids
+
+
+def _body_collection_box(collection):
+    """The world AABB union of a setup's model/stock collection - _geom.body_aabb per item, the
+    same reader every other body box in this codebase uses."""
+    if collection is None:
+        return None
+    boxes = []
+    try:
+        for m in collection:
+            box = _geom.body_aabb(m)
+            if box is not None:
+                boxes.append(box)
+    except Exception:
+        return None
+    return _geom.union_box(boxes) if boxes else None
+
+
+def setup_model_box(setup):
+    """The world AABB union of a Setup's model bodies (setup.models), or None."""
+    return _body_collection_box(safe(lambda: setup.models))
+
+
+def setup_stock_box(setup):
+    """The world AABB union of a Setup's stock bodies (setup.stockSolids), or None - absent for a
+    computed stock extent with no real body to read."""
+    return _body_collection_box(safe(lambda: setup.stockSolids))
 
 
 def setups_sharing_models(cam, setup):

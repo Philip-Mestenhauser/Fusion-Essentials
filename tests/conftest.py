@@ -155,6 +155,7 @@ from tests.fakes.joints import PlanarJointMotion, RevoluteJointMotion  # noqa: E
 from tests.fakes.joints import RigidJointMotion, SliderJointMotion, _MotionLimits  # noqa: E402
 from tests.fakes.joints import make_joint  # noqa: E402
 from tests.fakes.drawing import FakeCreateDrawingInput, FakeCustomSheetSize  # noqa: E402
+from tests.fakes.drawing import _CustomTable  # noqa: E402
 from tests.fakes.drawing import FakeDocumentSettings, FakeDrawing  # noqa: E402
 from tests.fakes.drawing import FakeDrawingDocument, FakeDrawingExportManager  # noqa: E402
 from tests.fakes.drawing import FakeDrawingManager, FakeDrawingSketch  # noqa: E402

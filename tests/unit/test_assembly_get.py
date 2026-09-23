@@ -449,6 +449,23 @@ class TestProbe:
         occ = {o["name"]: o for o in out["occurrences"]}
         assert "AsBuiltSpin" in occ["Rotor:1"]["joints"]     # cross-indexed like any joint
 
+    def test_as_built_joint_row_and_note_disclose_the_captured_pose(self, kin_design, monkeypatch):
+        # an as-built joint's relative pose is CAPTURED, not driven - a caller must be told so it
+        # does not treat it as tracking a later parametric move of either occurrence.
+        import adsk.fusion
+        monkeypatch.setattr(adsk.fusion, "AsBuiltJoint", FakeAsBuiltJoint)
+        kin_design(asbuilt=[FakeAsBuiltJoint("Riveted", _RIGID, "A:1", "B:1",
+                                             timeline=FakeTimelineObject("Riveted"))])
+        out = _payload(ap.handler())
+        row = out["joints"][0]
+        assert row["as_built"] is True
+        assert "CAPTURED" in out["note"] and "Riveted" in out["note"]
+
+    def test_a_regular_joint_is_not_flagged_as_built(self, kin_design):
+        kin_design(joints=[_joint("Pin", _REVOLUTE, "A:1", "B:1")])
+        row = _payload(ap.handler())["joints"][0]
+        assert "as_built" not in row
+
     def test_broken_as_built_joint_breaks_health(self, kin_design):
         # an as-built joint that failed to compute must drop is_healthy, same as a regular joint.
         kin_design(asbuilt=[_joint("AB", _REVOLUTE, "A:1", "B:1", health_state=_WARNING,
@@ -558,14 +575,27 @@ class TestHealth:
         out = _payload(ap.handler())
         assert out.get("health_may_be_stale") is None
 
-    def test_timeline_problem_surfaced(self, kin_design):
+    def test_timeline_warning_is_disclosed_but_does_not_break_health(self, kin_design):
+        # A WARNING-severity feature reads health="warning" on design_get and is_healthy TRUE on
+        # workspace_orient - assembly_get must agree, keying the SAME error/warning split.
         kin_design(timeline=[FakeTimelineObject("Extrude5"),
                              FakeTimelineObject("Fillet1", health=_WARNING,
                                                 message="The fillet failed.")])
         out = _payload(ap.handler())
+        assert out["is_healthy"] is True
+        assert out["timeline_problems"] == []
+        warns = {w["name"] for w in out["timeline_warnings"]}
+        assert warns == {"Fillet1"}
+
+    def test_timeline_error_breaks_health(self, kin_design):
+        # the boundary: only an ERROR-severity feature flips is_healthy and lands in
+        # timeline_problems - the WARNING test above pins the other side of it.
+        kin_design(timeline=[FakeTimelineObject("Fillet2", health=_ERROR,
+                                                message="Compute failed.")])
+        out = _payload(ap.handler())
         assert out["is_healthy"] is False
-        probs = {p["name"]: p for p in out["timeline_problems"]}
-        assert "Fillet1" in probs and "Extrude5" not in probs
+        assert [p["name"] for p in out["timeline_problems"]] == ["Fillet2"]
+        assert out["timeline_warnings"] == []
 
     def test_health_message_deduped(self, kin_design):
         # Fusion repeats the message + appends "Compute Failed<name>"; we keep the first chunk.

@@ -1,57 +1,49 @@
-"""Unit tests for assembly_inspect_interference — the physical-fit 'check my work' tool.
+"""Unit tests for assembly_inspect_interference - the physical-fit 'check my work' tool.
 
-The live analyzeInterference call needs Fusion, but the logic worth pinning is pure: mapping an
-interfering body back to its OWNING occurrence (so the report is by part, not 'Body1'), aggregating
-overlap volume per occurrence-pair, the clear=true path, and the <2-occurrence short-circuit.
+The live analyzeInterference call needs Fusion, but the logic worth pinning is pure: planning which
+occurrence pairs to run (box-pruned, capped), aggregating overlap volume per pair, the clear=true
+path, and the body-less-occurrence census refusal.
 """
 
 import pytest
 
-from conftest import (_NamedCollection, BRepBody, install, load_tool, make_occurrence,
-                      make_source_document, MakeComp, MakeDesign, payload)
+from conftest import (BRepBody, FakeBoundingBox3D, FakePoint, _NamedCollection, install, load_tool,
+                      make_occurrence, MakeComp, MakeDesign, payload)
 
 ai = load_tool("assembly_inspect_interference")
 
-# The x-ref identity shape, MEASURED: an entityToken is DOCUMENT-LOCAL, so two DISTINCT bodies living
-# in two different source documents read byte-identical tokens (measured on a CAM job assembled from 7
-# source documents - all 7 root components answered one token, and their 7 lineage urns all differed).
-# The token below is deliberately opaque and shared verbatim by both bodies: a mnemonic token derived
-# from a body's own name would make a bare-token key and an identity key agree, and a fixture where the
-# two schemes agree cannot tell them apart.
-_COLLIDING_TOKEN = "/vB+AAEAAwAAAAAAAAAAAAAA"
-_URN_HOST = "urn:adsk.wipprod:dm.lineage:K3I2nkywRlaWPHJexysOdA"
-_URN_XREF = "urn:adsk.wipprod:dm.lineage:N_QoPrrrSJmF__f9BZV86A"
+
+def _boxed(minp, maxp):
+    return FakeBoundingBox3D(FakePoint(*minp), FakePoint(*maxp))
 
 
-def _occ(name, full_path=None, bodies=(), children=(), broken_children=()):
-    """An occurrence in the analysis set: fullPathName names the INSTANCE, its component holds the
-    native bodies analyzeInterference hands back."""
-    # component.occurrences is the COMPONENT-LOCAL superset the fallback walk reads; the
-    # assembly-context childOccurrences drops an occurrence with an unresolved reference.
-    comp = MakeComp(name=name.split(":")[0], bodies=list(bodies),
-                    occurrences=list(broken_children) + list(children))
-    return make_occurrence(path=full_path or name, component=comp, children=children)
+def _solid(name, minp, maxp, is_solid=True):
+    return BRepBody(name=name, bbox=_boxed(minp, maxp), is_solid=is_solid)
 
 
-def _body(name, comp_name=None, occ_name=None, token=None, urn=None):
-    """A NATIVE body: the entityToken an owner map keys on, plus the parentComponent/assemblyContext
-    an unmapped body falls back through."""
-    # LIVE shape: analyzeInterference returns NATIVE bodies - assemblyContext reads None on both
-    # result entities - so the interfering INSTANCE is recovered by mapping the body's
-    # _common.native_identity back to the occurrences that were put into the analysis set.
-    #
-    # `urn` puts the body in a named SOURCE DOCUMENT, through the chain native_identity reads its
-    # second half over (parentComponent -> parentDesign -> parentDocument -> dataFile.id, built by the
-    # shared conftest.make_source_document). Omitted, the chain stops short and the urn half reads
-    # None - which is what an unsaved single-document design looks like, and what every fixture here
-    # that is not about the x-ref collision wants.
-    comp = MakeComp(name=comp_name) if comp_name else None
-    if urn is not None:
-        comp = MakeComp(name=comp_name or "", parent_design=make_source_document(urn))
-    body = BRepBody(name=name, entity_token=token or f"TOK::{name}", parent_component=comp)
-    if occ_name:
-        body.assemblyContext = _occ(occ_name)
-    return body
+def _occ(path, bodies=(), children=(), broken_children=()):
+    """An occurrence in the analysis set: bRepBodies are the bodies THIS occurrence places (what
+    occ.bRepBodies reads live, and what the per-pair analysis feeds createInterferenceInput); its
+    component's own `occurrences` is what the recursed walk falls back to for nested/broken
+    children."""
+    comp = MakeComp(name=path.split(":")[0], occurrences=list(broken_children) + list(children))
+    return make_occurrence(path=path, component=comp, bodies=list(bodies), children=children)
+
+
+UNAVAILABLE = ("3 : The occurrence's referenced component is unavailable (broken or missing "
+               "external reference).")
+
+# The walk that will not enumerate at all: reading root.allOccurrences on a design holding an
+# unresolved reference RAISES, and an empty analysis set yields zero interferences.
+RAISING_WALK = "2 : InternalValidationError : occ"
+
+
+def _broken_occ(name="45740"):
+    """An occurrence whose referenced component will not load - it carries NO geometry this analysis
+    could compare, and its path will not read either."""
+    return make_occurrence(path=name, raises_on={
+        "component": UNAVAILABLE,
+        "fullPathName": "2 : InternalValidationError : path.valid()"})
 
 
 class FakeInterfBody:
@@ -89,201 +81,273 @@ class FakeInputRejectsCoincident:
         object.__setattr__(self, name, value)
 
 
-UNAVAILABLE = ("3 : The occurrence's referenced component is unavailable (broken or missing "
-               "external reference).")
+class _PairInterferenceDesign(MakeDesign):
+    """A design whose analyzeInterference answers every REGISTERED body pair present in the SAME
+    call's own createInterferenceInput collection - a call whose collection holds several bodies can
+    answer several results at once, the shape a self-overlap riding along a cross pair needs.
+    `pair_volumes` maps frozenset({id(body), id(body)}) -> a volume, or a list of volumes for
+    several interference bodies between one pair; an unregistered pair answers zero results,
+    matching a real non-interfering pair. `calls` records each call's own body list, so a
+    pruned/capped pair can be proven to have never reached the API."""
 
-# The walk that will not enumerate at all: reading root.allOccurrences on a design holding an
-# unresolved reference RAISES, and an empty analysis set yields zero interferences.
-RAISING_WALK = "2 : InternalValidationError : occ"
-
-
-def _broken_occ(name="45740"):
-    """An occurrence whose referenced component will not load - it carries NO geometry this analysis
-    could compare, and its path will not read either."""
-    return make_occurrence(path=name, raises_on={
-        "component": UNAVAILABLE,
-        "fullPathName": "2 : InternalValidationError : path.valid()"})
-
-
-class _InterferenceDesign(MakeDesign):
-    """A design whose interference analysis answers canned results."""
-
-    def __init__(self, occurrences, results, reject_coincident=False):
-        # allOccurrences is the analysis set (every depth); root-level solids join it too.
-        MakeDesign.__init__(self, comp=MakeComp(name="Root", occurrences=list(occurrences)))
-        self._results = results
+    def __init__(self, comp, pair_volumes=None, reject_coincident=False):
+        MakeDesign.__init__(self, comp=comp)
+        self._pair_volumes = pair_volumes or {}
         self._reject_coincident = reject_coincident
+        self.calls = []
 
     def createInterferenceInput(self, occs):
+        self.calls.append(list(occs))
         return FakeInputRejectsCoincident() if self._reject_coincident else FakeInput()
 
     def analyzeInterference(self, inp):
-        return FakeResults(self._results)
+        # Live returns a result for EVERY overlapping body pair inside the collection, not just the
+        # one pair a caller had in mind - a call whose collection holds 3+ bodies (a self-pair body
+        # riding along a cross pair) can answer several results at once. So a registered pair fires
+        # whenever BOTH its bodies are present in THIS call, not only when the call is exactly that
+        # pair - the shape _run_pair's attribution logic is written to sort back out.
+        bodies = self.calls[-1]
+        body_ids = {id(b) for b in bodies}
+        by_id = {id(b): b for b in bodies}
+        out = []
+        for pair_key, entry in self._pair_volumes.items():
+            if not pair_key <= body_ids:
+                continue
+            b1, b2 = (by_id[i] for i in pair_key)
+            vols = entry if isinstance(entry, (list, tuple)) else [entry]
+            out.extend(FakeResult(b1, b2, v) for v in vols)
+        return FakeResults(out)
 
 
 @pytest.fixture
 def world():
     """A design whose analysis set is `occurrences`, wired into the tool through install() - which
-    patches both design seams and the ObjectCollection the analysis set is built in."""
-    def _build(occurrences, results, reject_coincident=False):
-        return install(ai, _InterferenceDesign(occurrences, results,
-                                               reject_coincident=reject_coincident))
+    patches both design seams and the ObjectCollection the per-pair bodies are collected into.
+    Returns the design itself, so a test can read back `.calls` (pruning/cap proof)."""
+    def _build(occurrences, pair_volumes=None, reject_coincident=False, root_bodies=()):
+        comp = MakeComp(name="Root", occurrences=list(occurrences), bodies=list(root_bodies))
+        des = _PairInterferenceDesign(comp, pair_volumes=pair_volumes,
+                                      reject_coincident=reject_coincident)
+        return install(ai, des)
     return _build
 
 
-class TestOwningOccurrence:
-    def test_names_the_INSTANCE_via_the_analysis_set(self):
-        # The point of the report: which INSTANCE interferes. analyzeInterference returns a native
-        # body, so the path comes from the occurrence map, not off the body. An exact instance
-        # carries no candidate list. The map is keyed the way _native_body_owners keys it - on
-        # _common.native_identity, the same reader both sides use.
-        b = _body("Body1", comp_name="Wheel")
-        owners = {ai._common.native_identity(b): ["Rig:1+Wheel:2"]}
-        assert ai._owning_occurrence_name(b, owners) == ("Rig:1+Wheel:2", None)
+class TestTouchBoundary:
+    """_touch is the prune gate: keep a pair unless its boxes PROVABLY cannot meet."""
 
-    def test_names_every_candidate_when_one_native_body_serves_several_instances(self):
-        # A component instanced twice maps its native body to both - a genuine ambiguity: the label
-        # says so AND the full candidate path list rides along, so the caller can discriminate
-        # instead of guessing from "or N more".
-        b = _body("Body1", comp_name="Wheel")
-        owners = {ai._common.native_identity(b): ["Rig:1+Wheel:1", "Rig:1+Wheel:2"]}
-        label, cands = ai._owning_occurrence_name(b, owners)
-        assert "Rig:1+Wheel:1" in label and "1 more instance" in label
-        assert cands == ["Rig:1+Wheel:1", "Rig:1+Wheel:2"]
+    def test_boxes_sharing_exactly_one_boundary_plane_are_kept_not_pruned(self):
+        a = ai._entity_box([_solid("A", (0, 0, 0), (5, 5, 5))])
+        b = ai._entity_box([_solid("B", (5, 0, 0), (10, 5, 5))])
+        assert ai._touch(a, b) is True
 
-    def test_helper_returns_the_full_list_and_a_true_count_label(self):
-        # the helper never drops a suspect - the ROW caps what it publishes; the label's "or N
-        # more" is the true total either way.
-        b = _body("Body1", comp_name="Wheel")
-        paths = [f"Wheel:{i}" for i in range(1, 5)]
-        label, cands = ai._owning_occurrence_name(b, {ai._common.native_identity(b): paths})
-        assert cands == paths                          # full, uncapped
-        assert "3 more instance" in label              # the true total
+    def test_a_hairline_gap_beyond_the_boundary_is_pruned(self):
+        a = ai._entity_box([_solid("A", (0, 0, 0), (5, 5, 5))])
+        b = ai._entity_box([_solid("B", (5.0001, 0, 0), (10, 5, 5))])
+        assert ai._touch(a, b) is False
 
-    def test_the_multi_owner_label_claims_only_what_the_map_was_built_from(self):
-        # The map is built by walking each occurrence's component bodies, so what a multi-path entry
-        # records is: these occurrences' components own this one native body. Nothing in this module
-        # reads a component IDENTITY, so the label must not assert the paths are instances of one
-        # component.
-        b = _body("Body1", comp_name="Wheel")
-        label, _ = ai._owning_occurrence_name(
-            b, {ai._common.native_identity(b): ["Rig:1+Wheel:1", "Rig:1+Wheel:2"]})
-        assert "whose component owns this same native body" in label
-
-    def test_falls_back_to_component_then_body_name_when_unmapped(self):
-        # A root-level body belongs to no occurrence: the component name is all there is.
-        assert ai._owning_occurrence_name(_body("B", comp_name="Crank"), {}) == ("Crank", None)
-        assert ai._owning_occurrence_name(_body("LooseBody"), {}) == ("LooseBody", None)
-
-    def test_a_body_with_no_readable_token_has_no_identity_and_falls_back(self):
-        # native_identity answers None with no token, and None must not become a lookup key - every
-        # unidentifiable body would then share one owner list. The component-name fallback covers it.
-        b = _body("B", comp_name="Crank")
-        b.entityToken = ""
-        assert ai._common.native_identity(b) is None
-        assert ai._owning_occurrence_name(b, {None: ["Wrong:1"]}) == ("Crank", None)
-
-    def test_the_owner_map_SKIPS_a_body_with_no_identity(self):
-        # The WRITE side of the same guard: storing an identity-less body under None would give
-        # every unidentifiable body in the design ONE shared owner list - a merge, not an unknown -
-        # and _owning_occurrence_name's None lookup would then read it back.
-        good = _body("Good", comp_name="Wheel")
-        blank = _body("Bad", comp_name="Wheel")
-        blank.entityToken = ""
-        owners = ai._native_body_owners([_occ("Wheel:1", bodies=[good, blank])])
-        assert list(owners) == [ai._common.native_identity(good)]
-        assert None not in owners
+    def test_an_unreadable_box_on_either_side_is_never_pruned(self):
+        readable = ai._entity_box([_solid("A", (0, 0, 0), (5, 5, 5))])
+        assert ai._touch(None, readable) is True
+        assert ai._touch(readable, None) is True
 
 
-class TestTheTwoDocumentTokenCollision:
-    """An entityToken is DOCUMENT-LOCAL: two DISTINCT native bodies in two x-ref'd documents read
-    byte-identical tokens (measured). Keyed on the bare token their owner lists MERGE, and every path
-    in the merged list is then published as an owner of the other document's body. These fixtures put
-    two such bodies in front of the tool; a fixture whose tokens differ cannot tell a bare-token key
-    from an identity key and would prove nothing."""
+class TestMultiInstanceNaming:
+    def test_two_instances_of_one_component_name_their_own_block_and_volume(self, world):
+        # ONE component (Peg) placed twice, each instance overlapping a DIFFERENT block - the exact
+        # instance now comes straight off the per-pair analysis, never guessed from candidates.
+        peg1_body = _solid("PegBody", (0, 0, 0), (2, 2, 2))
+        peg2_body = _solid("PegBody", (48, 0, 0), (50, 2, 2))
+        block_a = _solid("BlockABody", (0, 0, 0), (10, 10, 10))
+        block_b = _solid("BlockBBody", (48, 0, 0), (58, 10, 10))
+        peg1, peg2 = _occ("Peg:1", bodies=[peg1_body]), _occ("Peg:2", bodies=[peg2_body])
+        blk_a, blk_b = _occ("BlockA:1", bodies=[block_a]), _occ("BlockB:1", bodies=[block_b])
+        world([peg1, blk_a, peg2, blk_b], pair_volumes={
+            frozenset({id(peg1_body), id(block_a)}): 1.0,
+            frozenset({id(peg2_body), id(block_b)}): 0.36,
+        })
+        out = payload(ai.handler())
+        rows = {tuple(sorted([r["occurrence_one"], r["occurrence_two"]])): r
+                for r in out["measured"]["interferences"]}
+        a = rows[tuple(sorted(["Peg:1", "BlockA:1"]))]
+        b = rows[tuple(sorted(["Peg:2", "BlockB:1"]))]
+        assert a["overlap_volume_cm3"] == 1.0 and b["overlap_volume_cm3"] == 0.36
+        assert "occurrence_one_candidates" not in a and "occurrence_two_candidates" not in a
+        assert "occurrence_one_candidates" not in b and "occurrence_two_candidates" not in b
+        assert out["measured"]["interference_count"] == 2
+        assert ai.RETURNS[0].assert_present(out) == ""
 
-    def _two_documents(self):
-        """(host body, x-ref body): different documents, ONE shared token, two different lineage urns."""
-        return (_body("Frame", comp_name="Frame", token=_COLLIDING_TOKEN, urn=_URN_HOST),
-                _body("Frame", comp_name="Lid", token=_COLLIDING_TOKEN, urn=_URN_XREF))
 
-    def test_the_fixture_really_models_the_collision(self):
-        # Both halves have to be real or every test below proves nothing: with no token collision the
-        # defect the identity key exists for never fires, and with no urn difference the identity key
-        # would answer the same value the bare token does.
-        host, xref = self._two_documents()
-        host_id, xref_id = ai._common.native_identity(host), ai._common.native_identity(xref)
-        assert host is not xref
-        assert host.entityToken == xref.entityToken == _COLLIDING_TOKEN     # the collision is real
-        assert host_id[1] == _URN_HOST and xref_id[1] == _URN_XREF          # and so is the separation
-        assert host_id != xref_id
+class TestSelfOverlapAttribution:
+    """burn94: entity A's OWN two bodies overlapping each other rode along in every cross pair A
+    joined and were reported as A x B interference. _run_pair now attributes each result's two
+    source bodies back to the entity that owns them and drops a cross-pair result whose bodies both
+    belong to the SAME entity - that overlap still stands, but only on A's own self-pair row."""
 
-    def test_the_owner_map_keeps_two_documents_bodies_apart(self):
-        host, xref = self._two_documents()
-        owners = ai._native_body_owners([_occ("Frame:1", bodies=[host]),
-                                         _occ("Lid:1", bodies=[xref])])
-        assert len(owners) == 2                                    # merged on the bare token: 1
-        assert owners[ai._common.native_identity(host)] == ["Frame:1"]
-        assert owners[ai._common.native_identity(xref)] == ["Lid:1"]
+    def _bodies(self):
+        # A owns two MUTUALLY overlapping bodies; B owns one body whose box touches A's combined
+        # box, so the cross pair is not pruned - but B is given no registered overlap by default.
+        a1 = _solid("A1", (0, 0, 0), (5, 5, 5))
+        a2 = _solid("A2", (3, 0, 0), (8, 5, 5))          # overlaps a1
+        b1 = _solid("B1", (6, 0, 0), (11, 5, 5))         # touches A's union box (0-8)
+        return a1, a2, b1
 
-    def test_a_pair_across_two_documents_names_the_two_instances_exactly(self, world):
-        # The end-to-end shape a merge wrecks: both bodies would look up ONE owner list, so both
-        # sides of the row would carry the same two-path label - collapsing a genuine pair into a
-        # self-pair and naming each document's instance as a suspect for the other's body.
-        host, xref = self._two_documents()
-        world([_occ("Frame:1", bodies=[host]), _occ("Lid:1", bodies=[xref])],
-                 [FakeResult(host, xref, 3.0)])
-        row = payload(ai.handler())["measured"]["interferences"][0]
-        assert {row["occurrence_one"], row["occurrence_two"]} == {"Frame:1", "Lid:1"}
-        assert "occurrence_one_candidates" not in row              # each side is EXACT
-        assert "occurrence_two_candidates" not in row
+    def _rig(self, world, a1, a2, b1, extra_pairs=None):
+        pair_volumes = {frozenset({id(a1), id(a2)}): 4.0}
+        pair_volumes.update(extra_pairs or {})
+        world([_occ("A:1", bodies=[a1, a2]), _occ("B:1", bodies=[b1])],
+             pair_volumes=pair_volumes)
+
+    def test_a_cross_pair_reports_no_interference_when_only_A_overlaps_itself(self, world):
+        self._rig(world, *self._bodies())
+        out = payload(ai.handler())
+        rows = {tuple(sorted([r["occurrence_one"], r["occurrence_two"]])): r
+                for r in out["measured"]["interferences"]}
+        assert tuple(sorted(["A:1", "B:1"])) not in rows           # no cross-pair interference
+        self_row = rows[("A:1", "A:1")]                            # the internal overlap still lands
+        assert self_row["overlap_volume_cm3"] == 4.0
+        assert out["measured"]["interference_count"] == 1
+
+    def test_a_cross_pair_reports_only_the_real_shared_volume(self, world):
+        a1, a2, b1 = self._bodies()
+        self._rig(world, a1, a2, b1, extra_pairs={frozenset({id(a1), id(b1)}): 1.5})
+        out = payload(ai.handler())
+        rows = {tuple(sorted([r["occurrence_one"], r["occurrence_two"]])): r
+                for r in out["measured"]["interferences"]}
+        cross = rows[tuple(sorted(["A:1", "B:1"]))]
+        assert cross["overlap_volume_cm3"] == 1.5                  # NOT 4.0 + 1.5
+        assert rows[("A:1", "A:1")]["overlap_volume_cm3"] == 4.0   # the self overlap is unchanged
+        assert out["measured"]["interference_count"] == 2
+
+    def test_a_result_whose_bodies_do_not_attribute_still_counts(self, world):
+        # entityOne/entityTwo whose native_identity does not read (a blank token) cannot be mapped
+        # to an owning entity - the safe default is to COUNT the result, never drop it.
+        a1 = _solid("A1", (0, 0, 0), (5, 5, 5))
+        a1.entityToken = ""
+        assert ai._common.native_identity(a1) is None
+        b1 = _solid("B1", (3, 0, 0), (8, 5, 5))
+        world([_occ("A:1", bodies=[a1]), _occ("B:1", bodies=[b1])],
+             pair_volumes={frozenset({id(a1), id(b1)}): 2.2})
+        out = payload(ai.handler())
+        assert out["measured"]["interference_count"] == 1
+        row = out["measured"]["interferences"][0]
+        assert {row["occurrence_one"], row["occurrence_two"]} == {"A:1", "B:1"}
+        assert row["overlap_volume_cm3"] == 2.2
+
+
+class TestPruning:
+    def test_a_pair_whose_boxes_cannot_touch_is_pruned_not_analysed(self, world):
+        near_a = _solid("A", (0, 0, 0), (1, 1, 1))
+        near_b = _solid("B", (0.5, 0, 0), (1.5, 1, 1))       # touches A
+        far = _solid("C", (1000, 0, 0), (1001, 1, 1))        # nowhere near either
+        occs = [_occ("A:1", bodies=[near_a]), _occ("B:1", bodies=[near_b]),
+                _occ("C:1", bodies=[far])]
+        des = world(occs, pair_volumes={frozenset({id(near_a), id(near_b)}): 0.0})
+        out = payload(ai.handler())
+        assert out["measured"]["pairs_pruned"] == 2            # A-C and B-C
+        assert out["measured"]["pairs_analyzed"] == 1           # only A-B
+        assert len(des.calls) == 1
+        assert {id(b) for b in des.calls[0]} == {id(near_a), id(near_b)}
+
+
+class TestPairCap:
+    def test_the_cap_stops_analysis_and_names_what_was_skipped(self, monkeypatch, world):
+        monkeypatch.setattr(ai, "_PAIR_CAP", 1)
+        # three mutually-overlapping occurrences -> C(3,2)=3 touching pairs, over the cap of 1.
+        a, b, c = (_solid(n, (0, 0, 0), (5, 5, 5)) for n in "ABC")
+        occs = [_occ("A:1", bodies=[a]), _occ("B:1", bodies=[b]), _occ("C:1", bodies=[c])]
+        des = world(occs, pair_volumes={})
+        res = ai.handler()
+        assert res["isError"] is True
+        assert "1-pair analysis cap" in res["message"]
+        assert "not analysed" in res["message"]
+        assert len(des.calls) == 1                              # the cap actually stopped the loop
+
+    def test_a_found_interference_still_stands_when_the_cap_left_pairs_unanalysed(
+            self, monkeypatch, world):
+        monkeypatch.setattr(ai, "_PAIR_CAP", 1)
+        a, b, c = (_solid(n, (0, 0, 0), (5, 5, 5)) for n in "ABC")
+        occs = [_occ("A:1", bodies=[a]), _occ("B:1", bodies=[b]), _occ("C:1", bodies=[c])]
+        world(occs, pair_volumes={frozenset({id(a), id(b)}): 2.0})
+        out = payload(ai.handler())
+        assert out["passed"] is False
+        assert out["measured"]["interference_count"] == 1
+        assert "cap" in out["note"].lower()
+
+    def test_pairs_exactly_at_the_cap_are_all_analysed_not_capped(self, monkeypatch, world):
+        # the boundary: total planned == cap must run every pair, not read as "over" it.
+        monkeypatch.setattr(ai, "_PAIR_CAP", 2)
+        a = _solid("A", (0, 0, 0), (5, 5, 5))
+        b = _solid("B", (4, 0, 0), (9, 5, 5))       # touches A
+        c = _solid("C", (8, 0, 0), (13, 5, 5))      # touches B, not A
+        occs = [_occ("A:1", bodies=[a]), _occ("B:1", bodies=[b]), _occ("C:1", bodies=[c])]
+        des = world(occs, pair_volumes={})
+        out = payload(ai.handler())
+        assert out["measured"]["pairs_analyzed"] == 2
+        assert len(des.calls) == 2
+        assert "cap" not in out["note"].lower()
+
+
+class TestBodylessCensus:
+    def test_two_body_less_occurrences_refuse_rather_than_pass(self, world):
+        # comparable count is ZERO, not two - the false pass this fix exists to close.
+        world([_occ("EmptyA:1", bodies=[]), _occ("EmptyB:1", bodies=[])], pair_volumes={})
+        res = ai.handler()
+        assert res["isError"] is True
+        assert "EmptyA:1" in res["message"] and "EmptyB:1" in res["message"]
+        assert "NOT a pass" in res["message"]
+
+    def test_one_body_less_occurrence_among_solids_is_excluded_not_refused(self, world):
+        # a wrapper-style occurrence with no bodies of its own must not block a real comparison
+        # between the two occurrences that DO own bodies.
+        a, b = _solid("A", (0, 0, 0), (5, 5, 5)), _solid("B", (0, 0, 0), (5, 5, 5))
+        occs = [_occ("Wrapper:1", bodies=[]), _occ("A:1", bodies=[a]), _occ("B:1", bodies=[b])]
+        world(occs, pair_volumes={frozenset({id(a), id(b)}): 3.0})
+        out = payload(ai.handler())
+        assert out["measured"]["occurrences_checked"] == 2
+        assert out["measured"]["interference_count"] == 1
 
 
 class TestInterferenceHandler:
     def test_reports_pairs_by_occurrence_with_volume(self, world):
-        wheel = _body("Body1", "Wheel:1")
-        fork = _body("Body1", "Fork:1")
-        world([_occ("Wheel:1"), _occ("Fork:1")],
-                 [FakeResult(wheel, fork, 7.7)])
+        wheel, fork = _solid("W", (0, 0, 0), (5, 5, 5)), _solid("F", (0, 0, 0), (5, 5, 5))
+        world([_occ("Wheel:1", bodies=[wheel]), _occ("Fork:1", bodies=[fork])],
+             pair_volumes={frozenset({id(wheel), id(fork)}): 7.7})
         out = payload(ai.handler())
         assert out["passed"] is False and out["measured"]["interference_count"] == 1
         assert out["relation"] == "interference_free"
         pair = out["measured"]["interferences"][0]
         assert {pair["occurrence_one"], pair["occurrence_two"]} == {"Wheel:1", "Fork:1"}
         assert pair["overlap_volume_cm3"] == 7.7
-        assert ai.RETURNS[0].assert_present(out) == ""       # the verdict contract holds
 
-    def test_aggregates_volume_per_pair(self, world):
-        # two interference bodies between the SAME pair -> summed into one entry
-        a, b = _body("B", "Crank:1"), _body("B", "Wheel:1")
-        world([_occ("Crank:1"), _occ("Wheel:1")],
-                 [FakeResult(a, b, 3.0), FakeResult(a, b, 2.0)])
+    def test_aggregates_multiple_interference_bodies_between_one_pair(self, world):
+        a, b = _solid("A", (0, 0, 0), (5, 5, 5)), _solid("B", (0, 0, 0), (5, 5, 5))
+        world([_occ("Crank:1", bodies=[a]), _occ("Wheel:1", bodies=[b])],
+             pair_volumes={frozenset({id(a), id(b)}): [3.0, 2.0]})
         out = payload(ai.handler())
         assert out["measured"]["interference_count"] == 1
         assert out["measured"]["interferences"][0]["overlap_volume_cm3"] == 5.0
 
-    def test_clear_when_results_empty(self, world):
-        world([_occ("A:1"), _occ("B:1")], [])
+    def test_clear_when_nothing_registers_a_volume(self, world):
+        a, b = _solid("A", (0, 0, 0), (5, 5, 5)), _solid("B", (0, 0, 0), (5, 5, 5))
+        world([_occ("A:1", bodies=[a]), _occ("B:1", bodies=[b])], pair_volumes={})
         out = payload(ai.handler())
         assert out["passed"] is True and out["measured"]["interference_count"] == 0
 
-    def test_under_two_entities_REFUSES_rather_than_passing(self, world):
-        # Nothing to compare is not the same as nothing wrong. A verdict payload has no "unknown"
-        # state, so the tool refuses; reporting passed=true would let a caller gate a build on a
-        # verdict this tool never formed.
-        world([_occ("Solo:1")], [FakeResult(_body("x"), _body("y"), 1.0)])
+    def test_under_two_comparable_entities_REFUSES_rather_than_passing(self, world):
+        a = _solid("A", (0, 0, 0), (1, 1, 1))
+        world([_occ("Solo:1", bodies=[a])], pair_volumes={})
         res = ai.handler()
         assert res["isError"] is True
-        assert "NOT a pass" in res["content"][0]["text"]
+        assert "NOT a pass" in res["message"]
 
     def test_nested_parts_under_ONE_top_level_occurrence_are_still_analysed(self, world):
-        # The whole assembly wrapped in a single occurrence: the analysis set is allOccurrences, so
-        # the wrapper's children are compared instead of the design reading as one entity.
-        a, b = _body("BoxA", "PartA"), _body("BoxB", "PartB")
-        occs = [_occ("Wrapper:1", "Wrapper:1"),
-                _occ("PartA:1", "Wrapper:1+PartA:1", bodies=[a]),
-                _occ("PartB:1", "Wrapper:1+PartB:1", bodies=[b])]
-        world(occs, [FakeResult(a, b, 500.0)])
+        # a wrapper occurrence owning no body of its own excludes it from the count, but its
+        # (flat-walked) children are still compared.
+        a, b = _solid("BoxA", (0, 0, 0), (5, 5, 5)), _solid("BoxB", (0, 0, 0), (5, 5, 5))
+        occs = [_occ("Wrapper:1", bodies=[]),
+                _occ("Wrapper:1+PartA:1", bodies=[a]),
+                _occ("Wrapper:1+PartB:1", bodies=[b])]
+        world(occs, pair_volumes={frozenset({id(a), id(b)}): 500.0})
         out = payload(ai.handler())
         assert out["passed"] is False
         assert out["measured"]["interferences"] == [
@@ -291,123 +355,42 @@ class TestInterferenceHandler:
              "overlap_volume_cm3": 500.0}]
 
     def test_pairs_sorted_by_descending_volume(self, world):
-        # three distinct pairs with different overlap volumes -> reported largest-overlap first.
-        a, b, c, d = (_body("x", "A:1"), _body("x", "B:1"),
-                      _body("x", "C:1"), _body("x", "D:1"))
-        world([_occ("A:1"), _occ("B:1"), _occ("C:1"), _occ("D:1")],
-                 [FakeResult(a, b, 1.0), FakeResult(c, d, 9.0), FakeResult(a, c, 4.0)])
+        bodies = {n: _solid(n, (0, 0, 0), (5, 5, 5)) for n in "ABCD"}
+        occs = [_occ(f"{n}:1", bodies=[bodies[n]]) for n in "ABCD"]
+        world(occs, pair_volumes={
+            frozenset({id(bodies["A"]), id(bodies["B"])}): 1.0,
+            frozenset({id(bodies["C"]), id(bodies["D"])}): 9.0,
+            frozenset({id(bodies["A"]), id(bodies["C"])}): 4.0,
+        })
         out = payload(ai.handler())
         vols = [p["overlap_volume_cm3"] for p in out["measured"]["interferences"]]
-        assert vols == [9.0, 4.0, 1.0]            # strictly descending
+        assert vols == [9.0, 4.0, 1.0]
         assert out["measured"]["interference_count"] == 3
 
     def test_coincident_flag_echoed(self, world):
-        world([_occ("A:1"), _occ("B:1")], [])
+        a, b = _solid("A", (0, 0, 0), (5, 5, 5)), _solid("B", (0, 0, 0), (5, 5, 5))
+        world([_occ("A:1", bodies=[a]), _occ("B:1", bodies=[b])], pair_volumes={})
         default = payload(ai.handler())
         assert default["tolerance_used"]["coincident_faces_included"] is False
         incl = payload(ai.handler(include_coincident_faces=True))
         assert incl["tolerance_used"]["coincident_faces_included"] is True
 
     def test_occurrences_checked_count(self, world):
-        world([_occ("A:1"), _occ("B:1"), _occ("C:1")], [])
+        bodies = [_solid(n, (i * 100, 0, 0), (i * 100 + 1, 1, 1)) for i, n in enumerate("ABC")]
+        occs = [_occ(f"{n}:1", bodies=[b]) for n, b in zip("ABC", bodies)]
+        world(occs, pair_volumes={})
         assert payload(ai.handler())["measured"]["occurrences_checked"] == 3
 
-    def test_owning_name_falls_back_when_parent_component_name_empty(self):
-        # parentComponent present but its name is falsy -> use assemblyContext, then body name.
-        b = _body("BodyZ", comp_name="", occ_name="Crank:1")
-        b.parentComponent = MakeComp(name="")    # present object, empty name
-        assert ai._owning_occurrence_name(b, {}) == ("Crank:1", None)
-
-    def test_multi_instance_pair_carries_candidates_and_the_note_explains(self, world):
-        # A multi-instance component collides with a single-instance one: the row must list every
-        # suspect path on the ambiguous side, and the note must say the platform (native bodies
-        # off analyzeInterference) is why the exact instance is not named.
-        shared = _body("Body1")                          # ONE native body...
-        o1 = _occ("Wheel:1", bodies=[shared])
-        o2 = _occ("Wheel:2", bodies=[shared])            # ...serving two instances
-        fork_body = _body("Body1", token="TOK::fork-native")   # same NAME, distinct native body
-        fork = _occ("Fork:1", bodies=[fork_body])
-        world([o1, o2, fork], [FakeResult(shared, fork_body, 2.5)])
-        out = payload(ai.handler())
-        row = out["measured"]["interferences"][0]
-        sides = {row["occurrence_one"]: row.get("occurrence_one_candidates"),
-                 row["occurrence_two"]: row.get("occurrence_two_candidates")}
-        ambiguous = [c for c in sides.values() if c]
-        assert ambiguous == [["Wheel:1", "Wheel:2"]]        # the ambiguous side lists both suspects
-        assert "Fork:1" in sides and sides["Fork:1"] is None   # the exact side carries no list
-        assert "candidates" in out["note"] and "native bodies" in out["note"]
-
-    def test_the_candidates_note_claims_only_the_shared_native_body(self, world):
-        # The note states what the owner map records - one native body, and the occurrences whose
-        # component owns it. It does NOT say the instances belong to one component: nothing in this
-        # module reads a component identity to back that.
-        shared = _body("Body1")
-        lone = _body("Body1", token="TOK::fork-native")
-        world([_occ("Wheel:1", bodies=[shared]), _occ("Wheel:2", bodies=[shared]),
-                               _occ("Fork:1", bodies=[lone])], [FakeResult(shared, lone, 2.5)])
-        note = payload(ai.handler())["note"]
-        assert "each candidate path is an occurrence whose component owns that body" in note
-
-    def test_both_sides_ambiguous_each_lists_its_own_candidates(self, world):
-        # a rail instanced twice collides with a rod instanced twice - BOTH sides of the pair
-        # carry their own candidate lists.
-        rail_body, rod_body = _body("Body1", token="TOK::rail"), _body("Body1", token="TOK::rod")
-        occs = [_occ("Rail:1", bodies=[rail_body]), _occ("Rail:2", bodies=[rail_body]),
-                _occ("Rod:1", bodies=[rod_body]), _occ("Rod:2", bodies=[rod_body])]
-        world(occs, [FakeResult(rail_body, rod_body, 0.5)])
-        row = payload(ai.handler())["measured"]["interferences"][0]
-        cands = {row["occurrence_one_candidates"][0], row["occurrence_two_candidates"][0]}
-        assert cands == {"Rail:1", "Rod:1"}
-        assert row["occurrence_one_candidates"] in (["Rail:1", "Rail:2"], ["Rod:1", "Rod:2"])
-        assert row["occurrence_two_candidates"] in (["Rail:1", "Rail:2"], ["Rod:1", "Rod:2"])
-
-    def test_exact_pair_carries_no_candidates_and_a_plain_note(self, world):
-        wheel, fork = _body("B1"), _body("B2")
-        world([_occ("Wheel:1", bodies=[wheel]), _occ("Fork:1", bodies=[fork])],
-                 [FakeResult(wheel, fork, 1.0)])
-        out = payload(ai.handler())
-        row = out["measured"]["interferences"][0]
-        assert "occurrence_one_candidates" not in row and "occurrence_two_candidates" not in row
-        assert "candidates" not in out["note"]
-
-    def test_candidates_over_the_cap_are_flagged_truncated_on_the_row(self, monkeypatch, world):
-        # the machine-readable incompleteness signal: a capped list must never read as the full
-        # suspect set - the row carries a truncated flag, not just a count buried in prose.
-        monkeypatch.setattr(ai, "_CANDIDATE_CAP", 2)
-        shared = _body("Body1")
-        occs = [_occ(f"Wheel:{i}", bodies=[shared]) for i in range(1, 5)]
-        lone = _body("B2", token="TOK::lone")
-        occs.append(_occ("Fork:1", bodies=[lone]))
-        world(occs, [FakeResult(shared, lone, 1.0)])
-        row = payload(ai.handler())["measured"]["interferences"][0]
-        side = "occurrence_one" if "occurrence_one_candidates" in row else "occurrence_two"
-        assert row[f"{side}_candidates"] == ["Wheel:1", "Wheel:2"]      # capped at 2
-        assert row[f"{side}_candidates_truncated"] is True
-        other = "occurrence_two" if side == "occurrence_one" else "occurrence_one"
-        assert f"{other}_candidates_truncated" not in row               # exact side unflagged
-
-    def test_candidates_exactly_at_the_cap_carry_no_truncated_flag(self, monkeypatch, world):
-        # the boundary: exactly cap-many candidates is a COMPLETE list - flagging it truncated
-        # would claim suspects were dropped when none were (a >= guard tells that lie).
-        monkeypatch.setattr(ai, "_CANDIDATE_CAP", 2)
-        shared = _body("Body1")
-        occs = [_occ("Wheel:1", bodies=[shared]), _occ("Wheel:2", bodies=[shared]),
-                _occ("Fork:1", bodies=[_body("B2", token="TOK::lone")])]
-        world(occs, [FakeResult(shared, _body("B2", token="TOK::lone"), 1.0)])
-        row = payload(ai.handler())["measured"]["interferences"][0]
-        side = "occurrence_one" if "occurrence_one_candidates" in row else "occurrence_two"
-        assert row[f"{side}_candidates"] == ["Wheel:1", "Wheel:2"]      # complete, at the cap
-        assert f"{side}_candidates_truncated" not in row
-        assert "occurrence_one_candidates_truncated" not in row
-        assert "occurrence_two_candidates_truncated" not in row
-
-    def test_self_pair_note_when_same_occurrence_overlaps(self, world):
-        # both bodies map to the same occurrence -> a self-pair (one entry, sorted key collapses).
-        a, b = _body("x", "Wheel:1"), _body("y", "Wheel:1")
-        world([_occ("Wheel:1"), _occ("Other:1")], [FakeResult(a, b, 2.0)])
+    def test_self_pair_when_one_occurrence_owns_two_overlapping_bodies(self, world):
+        # two bodies OF THE SAME occurrence overlapping each other - a self-pair.
+        a, b = _solid("BodyX", (0, 0, 0), (5, 5, 5)), _solid("BodyY", (0, 0, 0), (5, 5, 5))
+        wheel = _occ("Wheel:1", bodies=[a, b])
+        far = _occ("Other:1", bodies=[_solid("Far", (1000, 0, 0), (1001, 1, 1))])
+        world([wheel, far], pair_volumes={frozenset({id(a), id(b)}): 2.0})
         out = payload(ai.handler())
         pair = out["measured"]["interferences"][0]
         assert pair["occurrence_one"] == "Wheel:1" and pair["occurrence_two"] == "Wheel:1"
+        assert out["measured"]["interference_count"] == 1
 
     def test_no_design_errors(self, monkeypatch):
         monkeypatch.setattr(ai._common, "design", lambda: None)
@@ -417,8 +400,10 @@ class TestInterferenceHandler:
 
     def test_areCoincidentFacesIncluded_failure_surfaces_as_error(self, world):
         # a rejected areCoincidentFacesIncluded assignment must raise into the handler's error path,
-        # not be swallowed into a successful result that still echoes coincident_faces_included=True.
-        world([_occ("A:1"), _occ("B:1")], [], reject_coincident=True)
+        # not be swallowed into a successful result.
+        a, b = _solid("A", (0, 0, 0), (5, 5, 5)), _solid("B", (0, 0, 0), (5, 5, 5))
+        world([_occ("A:1", bodies=[a]), _occ("B:1", bodies=[b])], pair_volumes={},
+             reject_coincident=True)
         res = ai.handler(include_coincident_faces=True)
         assert res["isError"] is True
         assert "areCoincidentFacesIncluded rejected" in res["message"]
@@ -429,9 +414,8 @@ class TestUnresolvedReferences:
     analysis set EMPTY, and an empty set produces zero interferences - published as passed=true."""
 
     def test_a_raising_walk_no_longer_analyses_an_empty_set(self, world):
-        a = _occ("A:1", bodies=[_body("B1", "A:1")])
-        b = _occ("B:1", bodies=[_body("B2", "B:1")])
-        des = world([a, b], [])
+        a, b = _solid("A", (0, 0, 0), (1, 1, 1)), _solid("B", (100, 0, 0), (101, 1, 1))
+        des = world([_occ("A:1", bodies=[a]), _occ("B:1", bodies=[b])], pair_volumes={})
         des.rootComponent.allOccurrences = _NamedCollection(raises=RAISING_WALK)
         out = payload(ai.handler())
         assert out["measured"]["occurrences_checked"] == 2      # NOT 0, and NOT a refusal
@@ -440,24 +424,23 @@ class TestUnresolvedReferences:
 
     def test_a_clean_verdict_is_REFUSED_while_an_unresolved_reference_is_excluded(self, world):
         # a pass is a claim about everything, and an unresolved occurrence was never in the set.
-        a = _occ("A:1", bodies=[_body("B1", "A:1")])
-        b = _occ("B:1", bodies=[_body("B2", "B:1")], broken_children=[_broken_occ("45740")])
-        des = world([a, b], [])
+        a, b = _solid("A", (0, 0, 0), (1, 1, 1)), _solid("B", (100, 0, 0), (101, 1, 1))
+        occs = [_occ("A:1", bodies=[a]),
+                _occ("B:1", bodies=[b], broken_children=[_broken_occ("45740")])]
+        des = world(occs, pair_volumes={})
         des.rootComponent.allOccurrences = _NamedCollection(raises=RAISING_WALK)
         res = ai.handler()
         assert res["isError"] is True
         assert "Cannot certify interference-free" in res["message"]
         assert "45740" in res["message"]
-        assert "NOT a pass" not in res["message"] and "no pass was formed" in res["message"]
+        assert "no pass was formed" in res["message"]
 
     def test_a_POSITIVE_finding_still_stands_over_an_incomplete_set(self, world):
-        # finding one overlapping pair is proof on its own - it does not depend on completeness, so
-        # the refusal above must not swallow a real hit.
-        shared = _body("x", "A:1")
-        a = _occ("A:1", bodies=[shared])
-        b = _occ("B:1", bodies=[_body("y", "B:1")], broken_children=[_broken_occ("45740")])
-        des = world([a, b],
-                       [FakeResult(shared, _body("y", "B:1"), 2.0)])
+        # finding one overlapping pair is proof on its own - it does not depend on completeness.
+        a, b = _solid("A", (0, 0, 0), (5, 5, 5)), _solid("B", (0, 0, 0), (5, 5, 5))
+        occs = [_occ("A:1", bodies=[a]),
+                _occ("B:1", bodies=[b], broken_children=[_broken_occ("45740")])]
+        des = world(occs, pair_volumes={frozenset({id(a), id(b)}): 2.0})
         des.rootComponent.allOccurrences = _NamedCollection(raises=RAISING_WALK)
         out = payload(ai.handler())
         assert out["passed"] is False
@@ -465,7 +448,8 @@ class TestUnresolvedReferences:
         assert "were NOT compared" in out["note"]
 
     def test_zero_unresolved_leaves_the_pass_verdict_and_the_fast_walk(self, world):
-        world([_occ("A:1"), _occ("B:1")], [])
+        a, b = _solid("A", (0, 0, 0), (1, 1, 1)), _solid("B", (100, 0, 0), (101, 1, 1))
+        world([_occ("A:1", bodies=[a]), _occ("B:1", bodies=[b])], pair_volumes={})
         out = payload(ai.handler())
         assert out["passed"] is True
         assert out["measured"]["occurrences_walk"] == "allOccurrences"

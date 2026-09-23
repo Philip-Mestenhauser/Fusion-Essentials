@@ -364,15 +364,21 @@ class TestAsBuiltResultNote:
             assert "assembly_move" in note, jt
             assert "Pose it with joint_drive." not in note, jt
 
+    def test_a_motion_note_states_the_captured_pose_too(self, as_built):
+        as_built()
+        out = self._make(joint_type="revolute")
+        assert "CAPTURED, not driven" in out["note"]
+
     def test_anchor_warning_points_at_the_right_tool_for_a_ball_joint(self, as_built):
         as_built(geometry_readback=None)
         warn = self._make(joint_type="ball")["anchor_warning"]
         assert "assembly_move" in warn and "Pose it with joint_drive." not in warn
 
-    def test_rigid_note_is_unchanged(self, as_built):
+    def test_rigid_note_states_the_captured_pose(self, as_built):
         as_built()
         out = payload(ja.handler(occurrence_one="A:1", occurrence_two="B:1"))
-        assert out["note"] == "Occurrences rigidly joined where they already are."
+        assert out["note"].startswith("Occurrences rigidly joined where they already are.")
+        assert "CAPTURED, not driven" in out["note"]
 
 
 class TestConfiguredDesignNote:

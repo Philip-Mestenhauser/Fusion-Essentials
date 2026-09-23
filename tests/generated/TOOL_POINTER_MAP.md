@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 192  |  **description breadcrumbs:** 293  |  **note/error breadcrumbs:** 619
+**Tools:** 192  |  **description breadcrumbs:** 294  |  **note/error breadcrumbs:** 618
   |  **guidance smells flagged:** 8
 ## Blindspots to engineer
 
@@ -46,7 +46,7 @@ close orphans, factor duplicated guards into shared helpers.
 - `doc_open`  <- 23  (desc 5, note 18)
 - `sketch_create`  <- 23  (desc 7, note 16)
 - `sketch_get`  <- 22  (desc 5, note 17)
-- `assembly_get`  <- 21  (desc 3, note 18)
+- `assembly_get`  <- 21  (desc 4, note 17)
 
 ## The detected guidance surface
 
@@ -294,6 +294,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - NOTE: contact analysis is ON but scoped to ALL bodies, so the contact sets listed are IGNORED until assembly_edit_contacts action='set_analysis_scope' with scope='contact_sets'.
 - include=['contacts'] lists the design's contact sets - members, member count, suppressed - plus whether contact analysis is enabled and whether it uses those sets or all bodies. Edit with assembly_...
 - WARNING: the timeline marker is at / - features AFTER it (downstream joints included) are ROLLED BACK and reverted to home, so the joint state here is INCOMPLETE. Run design_recompute (or roll the ...
+- as-built joint(s) () hold a pose CAPTURED at creation, not driven - a parametric move upstream of either occurrence will not carry through it; re-check after such a change.
 - joint(s) publish NO healthy flag (): neither the joint nor its timeline item answered a compute state, so those rows carry health_unknown:true and is_healthy makes no claim about them.
 - WARNING: broken_joints is non-empty but the TIMELINE shows no errored feature - the joint health likely LAGS an uncommitted edit. Run design_recompute, then re-probe; the timeline (design_get) is a...
 - Joint rows: value_now, and frame (WORLD) whose z_axis is the direction a joint OFFSET drives along (param_set it, or joint_edit). Headings: rotation_axis (revolute/cylindrical), slide_direction (sl...
@@ -320,14 +321,14 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Cannot check interference: this design exposes
 - comparable solid entit
 - occurrence(s) at any depth,
-- root-level solid body(ies)), and interference needs at least two. No verdict was formed - this is NOT a pass.
+- root-level solid body(ies)
+- ), and interference needs at least two. No verdict was formed - this is NOT a pass.
 - Cannot certify interference-free:
-- root-level solid body(ies) WERE compared and none of them interfere, but that is not a verdict over the whole assembly - no pass was formed. Resolve the reference (see workspace_orient health.unres...
+- pair(s) WERE analysed and none interfere, but that is not a verdict over the whole assembly - no pass was formed. Resolve the reference (see workspace_orient health.unresolved_references) and re-run.
 - Interference analysis failed:
 - Cannot check interference: this design exposes  comparable solid entit ( occurrence(s) at any depth,  root-level solid body(ies)), and interference needs at least two. No verdict was formed - this ...
 - occurrence(s) hold an unresolved external reference () - their component could not be read, so they carry no geometry this analysis could compare
-- Cannot certify interference-free: .  occurrence(s) and  root-level solid body(ies) WERE compared and none of them interfere, but that is not a verdict over the whole assembly - no pass was formed. ...
-- A side with '*_candidates' resolved to ONE native body, and each candidate path is an occurrence whose component owns that body - analyzeInterference returns native bodies, so the exact instance ca...
+- Cannot certify interference-free: .  pair(s) WERE analysed and none interfere, but that is not a verdict over the whole assembly - no pass was formed. Resolve the reference (see workspace_orient he...
 - occurrence(s) with an unresolved external reference were NOT compared - their component could not be read, so they carry no geometry for this analysis; measured.unresolved_references names them.
 
 ### `assembly_move`
@@ -2087,7 +2088,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - '=' is a format= option, but this call asked for format= - the  export options carry no such setting. Drop '', or export with format=.
 
 ### `drawing_get`
-- collection_index is 1-based in the native collection; export_index is unknown. Export all sheets and inspect the PDF before choosing a page range. Width/height are mm; custom-size sheets read sheet...
+- collection_index is 1-based; export_index is unknown - export sheets and inspect the PDF for page order. Width/height are mm. include=['views'] adds index/type; include=['tables'] adds custom table...
 - Unknown include value(s):
 - The active document is not a 2D drawing. Activate the drawing document first (doc_activate), then read it.
 - The drawing's sheet count could not be read, so sheet name '
@@ -2220,6 +2221,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - . Rename it in the browser, or remove it with design_delete_feature and retry with a different name.
 - joint_drive does not drive this motion type (only revolute/slider/cylindrical take a value) - pose the part with assembly_move.
 - This design is CONFIGURED: an as-built joint holds the pair's relative POSE, so a configuration that MOVES the mating geometry leaves this member where it stands while the joint still reads healthy...
+- This joint's pose is CAPTURED, not driven - a later parametric move upstream of either occurrence will not carry through it; re-check with assembly_get after such a change.
 - joint_type '' needs 'geometry' - the anchor its motion runs on (a find_geometry handle, or '<occurrence>:<snap>' with snap = origin/center/top/bottom/left/right/front/back/cylinder). Fusion refuses...
 - joint_type 'rigid' takes no 'geometry' - a rigid as-built joint locks the two occurrences with no anchor to move along, so '' would be ignored. Drop 'geometry', or set joint_type to the motion you ...
 - 'geometry' resolved to the Joint Origin ''. An as-built joint anchors on a JointGeometry - real geometry (a face/edge/vertex handle, or an '<occurrence>:<snap>'). To joint AT a Joint Origin use joi...
@@ -3091,7 +3093,6 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - - a vertex handle from find_geometry.
 - 'angle_deg' must be a number (rotation in degrees), got
 - Move reported success but no moved geometry could be read back, so the result could not be verified. Re-read it with model_inspect.
-- 'axis': that entity could not be brought into the move's assembly context (). Pass a handle at geometry in the moved body's own component, or a world axis (x/y/z).
 - 'axis': the active component has no  origin construction axis to move along. Pass a find_geometry handle at a straight edge or sketch line.
 
 ### `model_offset_face`

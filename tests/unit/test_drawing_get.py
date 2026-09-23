@@ -10,8 +10,8 @@ include/scope plumbing.
 import pytest
 
 import live_api_facts
-from conftest import (FakeCustomSheetSize, FakeSheet, FakeView, FakeViews, load_tool, make_drawing,
-                      make_drawing_session, payload)
+from conftest import (FakeCustomSheetSize, FakeSheet, FakeView, FakeViews, _CustomTable,
+                      load_tool, make_drawing, make_drawing_session, payload)
 
 dg = load_tool("drawing_get")
 
@@ -214,13 +214,57 @@ class TestViewsSlice:
     def test_every_advertised_slice_actually_dispatches(self, install):
         # A name the guard admits but no branch reads returns the orientation read again under a
         # token that promised a deeper one.
-        adds = {"views": "view_rows"}
+        adds = {"views": "view_rows", "tables": "tables"}
         base, _proj = self._typed()
         install([_sheet("S", views=FakeViews([FakeView(base)]))])
         for name in dg._SLICES:
             assert name in adds, f"name the sheet key include=['{name}'] adds"
             row = payload(dg.handler(include=[name]))["sheets"][0]
             assert adds[name] in row, name
+
+
+class TestTablesSlice:
+    def test_tables_rows_carry_name_counts_and_the_cell_grid(self, install):
+        table = _CustomTable(name="BOM", row_count=2, column_count=2,
+                             cells={(0, 0): "Item", (0, 1): "Qty",
+                                   (1, 0): "Bolt", (1, 1): "4"})
+        install([_sheet("S", custom_tables=[table])])
+        row = payload(dg.handler(include=["tables"]))["sheets"][0]
+        assert row["tables"] == [{"name": "BOM", "row_count": 2, "column_count": 2,
+                                  "cells": [["Item", "Qty"], ["Bolt", "4"]]}]
+        assert "cells_truncated" not in row["tables"][0]
+
+    def test_a_sheet_with_no_tables_reads_an_empty_list_and_the_note_names_the_gap(self, install):
+        # the sheet also carries bendTables (measured: no .count) alongside customTables - the read
+        # must not raise on it.
+        drawing = install([_sheet("S")])
+        assert not hasattr(drawing.sheets.item(0).bendTables, "count")
+        out = payload(dg.handler(include=["tables"]))
+        assert out["sheets"][0]["tables"] == []
+        assert "parts lists" in out["note"] and "balloons" in out["note"]
+
+    def test_a_grid_exactly_at_the_cap_is_not_marked_truncated(self, install):
+        at_cap = _CustomTable(name="AtCap", row_count=dg._MAX_TABLE_ROWS,
+                             column_count=dg._MAX_TABLE_COLS)
+        install([_sheet("S", custom_tables=[at_cap])])
+        row = payload(dg.handler(include=["tables"]))["sheets"][0]["tables"][0]
+        assert len(row["cells"]) == dg._MAX_TABLE_ROWS
+        assert "cells_truncated" not in row
+
+    def test_the_table_grid_is_capped_with_a_truncated_flag(self, install):
+        big = _CustomTable(name="Big", row_count=dg._MAX_TABLE_ROWS + 3,
+                          column_count=dg._MAX_TABLE_COLS + 3)
+        install([_sheet("S", custom_tables=[big])])
+        row = payload(dg.handler(include=["tables"]))["sheets"][0]["tables"][0]
+        assert len(row["cells"]) == dg._MAX_TABLE_ROWS
+        assert len(row["cells"][0]) == dg._MAX_TABLE_COLS
+        assert row["cells_truncated"] is True
+
+    def test_without_the_slice_no_tables_are_read(self, install):
+        table = _CustomTable(name="BOM")
+        install([_sheet("S", custom_tables=[table])])
+        row = payload(dg.handler())["sheets"][0]
+        assert row["custom_tables"] == 1 and "tables" not in row
 
 
 class TestSheetScope:

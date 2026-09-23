@@ -69,9 +69,44 @@ def _views_rows(sheet, cap):
     return rows, count > cap
 
 
-_MAX_VIEWS_PER_SHEET = 50
+def _table_row(table, row_cap, col_cap):
+    """One custom table's name (if any), row/column counts, and its cell text capped at a small
+    grid - adsk.drawing has no parts-list/balloon class, so this table is the nearest readable
+    BOM-like content a sheet carries."""
+    name = safe(lambda: table.name)
+    rows = _common.counted(lambda: table.rowCount)
+    cols = _common.counted(lambda: table.columnCount)
+    out = {"name": name, "row_count": rows, "column_count": cols}
+    if rows and cols:
+        r_cap, c_cap = min(rows, row_cap), min(cols, col_cap)
+        out["cells"] = [[safe(lambda r=r, c=c: table.getCellData(r, c)) for c in range(c_cap)]
+                        for r in range(r_cap)]
+        if rows > r_cap or cols > c_cap:
+            out["cells_truncated"] = True
+    return out
 
-_SLICES = ("views",)
+
+def _tables_rows(sheet, cap, row_cap, col_cap):
+    """(rows, truncated) - one sheet's custom tables, or (None, False) when the collection did not
+    read. bendTables is a SEPARATE sheet member carrying no .count (measured) - untouched here."""
+    tables = safe(lambda: sheet.customTables)
+    count = _common.counted(lambda: tables.count) if tables is not None else None
+    if count is None:
+        return None, False
+    rows = []
+    for i in range(min(count, cap)):
+        t = safe(lambda i=i: tables.item(i))
+        if t is not None:
+            rows.append(_table_row(t, row_cap, col_cap))
+    return rows, count > cap
+
+
+_MAX_VIEWS_PER_SHEET = 50
+_MAX_TABLES_PER_SHEET = 20
+_MAX_TABLE_ROWS = 20
+_MAX_TABLE_COLS = 20
+
+_SLICES = ("views", "tables")
 
 
 def handler(include=None, sheet: str = "") -> dict:
@@ -85,6 +120,7 @@ def handler(include=None, sheet: str = "") -> dict:
         return error(f"Unknown include value(s): {', '.join(bad)}. "
                      f"This read offers: {', '.join(_SLICES)}.")
     want_views = "views" in raw
+    want_tables = "tables" in raw
 
     dd = _drawing_common.active_drawing_document()
     dwg = safe(lambda: dd.drawing) if dd is not None else None
@@ -145,14 +181,20 @@ def handler(include=None, sheet: str = "") -> dict:
             facts["view_rows"] = vrows
             if truncated:
                 facts["view_rows_truncated"] = True
+        if want_tables:
+            trows, ttrunc = _tables_rows(s, _MAX_TABLES_PER_SHEET, _MAX_TABLE_ROWS, _MAX_TABLE_COLS)
+            facts["tables"] = trows
+            if ttrunc:
+                facts["tables_truncated"] = True
         rows.append(facts)
     payload["sheets"] = rows
 
     payload["note"] = (
-        "collection_index is 1-based in the native collection; export_index is unknown. Export all "
-        "sheets and inspect the PDF before choosing a page range. Width/height are mm; custom-size "
-        "sheets read sheet_size null. include=['views'] adds index/type. viewCurves exposes no readable "
-        "geometry. View names, scales, positions and placed dimensions have no read API.")
+        "collection_index is 1-based; export_index is unknown - export sheets and inspect the PDF "
+        "for page order. Width/height are mm. include=['views'] adds index/type; include=['tables'] "
+        "adds custom tables. viewCurves exposes no readable geometry. View names/scales/positions, "
+        "parts lists, balloons, quantities and placed dimensions have no read API - the exported "
+        "PDF's text is the read.")
     return ok(payload)
 
 

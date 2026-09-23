@@ -6,6 +6,8 @@ folder), so an agent can study one at a time. Toggles Operation.isLightBulbOn - 
 property, unlike the modal simulation/in-process-stock UI commands, which this does not touch.
 Toolpaths only render in the Manufacture workspace."""
 
+import math
+
 import adsk.core
 
 from ..mcp_primitives.tool import Tool
@@ -13,7 +15,8 @@ from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, read_flag, safe
 from ._cam_common import (get_cam, resolve_cam_node, operation_nodes, operations_under, find_setup,
-                          is_additive_setup, owning_setup)
+                          is_additive_setup, owning_setup, setup_model_box, setup_stock_box)
+from . import _geom
 from . import _view_common
 
 app = adsk.core.Application.get()
@@ -97,12 +100,52 @@ def _activate_owning_setup(cam, setup_name):
     return setup_name, None
 
 
-def _fit_operation():
-    """Fit the camera (plain fit-to-all); returns the isSmoothTransition setter's error, or None.
-    Any API refusal to assign raises into the handler's error path."""
+# A plain fit excludes stock (measured: a facing op's toolpath overhanging a 220x180mm stock was
+# cropped against a 100x60mm model-only fit), so a stock box that reads widens the frame past it.
+_FIT_WIDEN_NO_MODEL = ("The setup's stock box read, but its model bodies did not, so the frame "
+                      "stayed on the plain fit (fitted_to='model').")
+_FIT_WIDEN_UNMEASURABLE = ("The stock box could not be measured against the model's, so the frame "
+                          "stayed on the plain fit (fitted_to='model').")
+
+
+def _box_center_diagonal(box):
+    """(center xyz, 3D diagonal) of a box - (None, None) when a corner will not read."""
+    lo, hi = safe(lambda: box.minPoint), safe(lambda: box.maxPoint)
+    if lo is None or hi is None:
+        return None, None
+    cx, cy, cz = (lo.x + hi.x) / 2, (lo.y + hi.y) / 2, (lo.z + hi.z) / 2
+    dx, dy, dz = hi.x - lo.x, hi.y - lo.y, hi.z - lo.z
+    return (cx, cy, cz), math.sqrt(dx * dx + dy * dy + dz * dz)
+
+
+def _fit_operation(setup):
+    """Fit onto the setup's models (isFitView), then widen to the union with its stock box.
+    Returns (fitted_to, union box or None, note or None, isSmoothTransition error or None); any
+    API refusal to assign the camera raises into the handler's error path."""
     vp = app.activeViewport
     _, smooth_error = _view_common.apply_camera(vp, vp.camera, fit=True)
-    return smooth_error
+    stock_box = setup_stock_box(setup) if setup is not None else None
+    if stock_box is None:
+        return "model", None, None, smooth_error
+    model_box = setup_model_box(setup)
+    if model_box is None:
+        return "model", None, _FIT_WIDEN_NO_MODEL, smooth_error
+    box = _geom.union_box([model_box, stock_box])
+    center, diag = _box_center_diagonal(box)
+    _, model_diag = _box_center_diagonal(model_box)
+    cam = vp.camera
+    eye, target = safe(lambda: cam.eye), safe(lambda: cam.target)
+    extents = safe(lambda: cam.viewExtents)
+    if (center is None or not diag or not model_diag
+            or eye is None or target is None or extents is None):
+        return "model", None, _FIT_WIDEN_UNMEASURABLE, smooth_error
+    cam.eye = adsk.core.Point3D.create(eye.x + (center[0] - target.x),
+                                       eye.y + (center[1] - target.y),
+                                       eye.z + (center[2] - target.z))
+    cam.target = adsk.core.Point3D.create(*center)
+    cam.viewExtents = extents * (diag / model_diag)
+    _, widen_error = _view_common.apply_camera(vp, cam, fit=False)
+    return "model+stock", box, None, (smooth_error or widen_error)
 
 
 def handler(action: str = "", operation: str = "", folder: str = "", fit: bool = False) -> dict:
@@ -280,14 +323,26 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
     activated, setup_warning = _activate_owning_setup(cam, onode.setup)
 
     fitted = False
+    fitted_to = None
+    fit_box = None
+    fit_note = None
     smooth_error = None
     if fit:
-        smooth_error = _fit_operation()   # raises on an API refusal to assign the camera
+        # raises on an API refusal to assign the camera
+        fitted_to, fit_box, fit_note, smooth_error = _fit_operation(owning_setup(onode))
         fitted = True
     app.activeViewport.refresh()
     note = ("Toolpath shown. Toolpaths render in the Manufacture workspace; pair with "
             "view_screenshot.")
     out = {"action": action, "operation": name, "fit": fitted, "setup": onode.setup}
+    if fitted_to:
+        out["fitted_to"] = fitted_to
+        if fit_box is not None:
+            lo, hi = fit_box.minPoint, fit_box.maxPoint
+            out["fit_box_cm"] = {"min": [round(lo.x, 3), round(lo.y, 3), round(lo.z, 3)],
+                                 "max": [round(hi.x, 3), round(hi.y, 3), round(hi.z, 3)]}
+        if fit_note:
+            note += " " + fit_note
     if activated:
         out["setup_activated"] = activated
         note += (f" Activated setup '{activated}' (the operation's own): the viewport renders only "

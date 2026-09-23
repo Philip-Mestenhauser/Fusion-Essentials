@@ -184,6 +184,27 @@ def _isolated(name):
     return check
 
 
+def _fit_widened_to_stock(op_key):
+    """cam_show_toolpath(fit=true): the frame widened past the model alone to the model+stock
+    union (FSAE-0922-TOOLPATH-FIT-CROP-1 - a plain fit cropped a toolpath overhanging the stock).
+    The union's X span is checked against cam_stock_x_span_cm, read off THIS setup's own
+    stock_extents rather than a literal that could drift from the fixture."""
+    def check(p):
+        want = _RECALL.get(op_key)
+        box = p.get("fit_box_cm") or {}
+        lo, hi = box.get("min"), box.get("max")
+        x_span = (hi[0] - lo[0]) if lo and hi else None
+        stock_x = _RECALL.get("cam_stock_x_span_cm")
+        return _measured("fit(true) widened to model+stock, at least as wide in X as the "
+                         "setup's own declared stock",
+                         {"fitted_to": p.get("fitted_to"), "operation": p.get("operation"),
+                          "fit_box_x_span_cm": x_span, "stock_x_span_cm": stock_x},
+                         p.get("fitted_to") == "model+stock" and want is not None
+                         and p.get("operation") == want
+                         and x_span is not None and stock_x is not None and x_span >= stock_x)
+    return check
+
+
 def _one_bulb(entry, action, fit):
     """(args, predicate) for one bulb of a reveal. An entry is the name the act CHOSE, or a
     (ctx key, label) pair for a name the PLATFORM picked at create time - a literal for one of
@@ -1946,6 +1967,17 @@ _CAM_DELIVER = [
 ] + _reveal([("face_op", "the face op"), ("adaptive_op", "the adaptive op"),
              ("contour_op", "the contour op"), _POCKET_OP, _BOSS_OP, _CHAMFER_OP, _ENGRAVE_OP,
              _SPOT_OP, ("drill_op", "the drill op"), _BORE_OP]) + [
+    # FSAE-0922-TOOLPATH-FIT-CROP-1: the setup's OWN stock_extents, read live rather than a
+    # literal, is what the widened fit below is checked against.
+    ("cam_get", {"include": ["parameters"], "setup": CAM_SETUP, "units": "cm"},
+     lambda p: bool(((p.get("parameters") or {}).get("stock_extents") or {}).get("stockXHigh")),
+     ("cam_stock_x_span_cm", _recall("cam_stock_x_span_cm", lambda p: (
+         p["parameters"]["stock_extents"]["stockXHigh"]["value"]
+         - p["parameters"]["stock_extents"]["stockXLow"]["value"])))),
+    ("cam_show_toolpath",
+     lambda c: {"action": "show", "operation": _ctx_get(c, "face_op", "the face op"), "fit": True},
+     _fit_widened_to_stock("face_op"), None),
+    _hide_all(),
     # ISOLATE, the third action and the only one that promises nothing else is drawn: it hides every
     # operation in the document and KEEPS the read-backs, so a bulb that would not go dark is
     # published as a hide_failure. fit stays false - the frame above it is the one this act set.

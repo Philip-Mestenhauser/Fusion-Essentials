@@ -19,9 +19,10 @@ from cloud_config import FOLDER, HUB, PROJECT
 from verify_acts_cam import (
     _launched_on, _op_created, _preset_applied, _template_applied, _template_path_state)
 from verify_core import (
-    EXPORT_DIR, MARKER_PNG, _RECALL, _activated, _ctx_get, _document_closed, _driven_slide, _dwell,
-    _extruded, _face_up_at, _fg, _home_address, _home_document, _jointed, _made_component,
-    _measured, _motion_linked, _new_document, _near, _num, _recall, _refused, _watch, facade)
+    EXPORT_DIR, MARKER_PNG, NOTE_MAX, _RECALL, _activated, _ctx_get, _document_closed,
+    _driven_slide, _dwell, _extruded, _face_up_at, _fg, _home_address, _home_document, _jointed,
+    _made_component, _measured, _motion_linked, _new_document, _near, _num, _recall, _refused,
+    _watch, facade)
 
 _STAMP = time.strftime("%Y%m%d-%H%M%S")
 
@@ -953,6 +954,23 @@ def _drawing_created(p):
                       "file_id": p.get("file_id"), "file_extension": p.get("file_extension")},
                      p.get("created") is True and bool(p.get("drawing_name"))
                      and str(p.get("file_id") or "").startswith("urn:"))
+
+
+def _drawing_tables_answer(p):
+    """drawing_get(include=['tables']) (FSAE-0922-DRAWING-PARTS-LIST-READ-1): adsk.drawing has no
+    parts-list/balloon class, so each sheet's 'tables' answers a LIST (customTables, empty on a
+    plain sheet) and the note names the parts-list/balloon/dimension gap rather than a count."""
+    sheets = p.get("sheets")
+    sheets = sheets if isinstance(sheets, list) else []
+    rows = [s.get("tables") for s in sheets if isinstance(s, dict)]
+    note = p.get("note") or ""
+    return _measured("include=['tables'] answers a list per sheet, the parts-list gap named",
+                     {"sheet_count": p.get("sheet_count"),
+                      "tables_per_sheet": [len(r) if isinstance(r, list) else r for r in rows],
+                      "note": note[:NOTE_MAX]},
+                     bool(sheets) and len(rows) == len(sheets)
+                     and all(isinstance(r, list) for r in rows)
+                     and "parts list" in note and "balloon" in note)
 
 
 def _sheets_answer(p):
@@ -2244,9 +2262,11 @@ _CLOUD_DOC = [
      _version_snapshot("plate_save_before"), ("plate_save_before", _recall("plate_save_before", _version_record))),
     ("doc_save", {"description": "the cloud tier's first changed version"},
      _versioned(SOURCE_DOC), None),
+    # the cloud's version metadata lags the save (measured ~20 s; burn95 read number 1 straight
+    # after a save that landed version 2), so the settled read waits the same tip settle first
+    _dwell(_TIP_SETTLE_S),
     ("data_get", lambda c: {"file": _ctx_get(c, "source_urn", "the source")},
      _version_settled("plate_save_before"), None),
-    _dwell(_TIP_SETTLE_S),
     ("doc_get", {"include": ["default", "versions"]}, _tip_advanced("plate_tip_before"), None),
     ("data_get", lambda c: {"file": _ctx_get(c, "source_urn", "the source")},
      _file_settled(FOLDER), None),
@@ -2401,6 +2421,7 @@ _CLOUD_DRAWING = [
     _dwell(4.0),
     # THE SHEET READ that answers - taken before the writes below, and again before each export.
     ("drawing_get", {}, _sheets_answer, None),
+    ("drawing_get", {"include": ["tables"]}, _drawing_tables_answer, None),
     ("drawing_update", {}, _drawing_current, None),
     ("doc_get", {}, _drawing_persistence_document("drawing_persist_opened"), None),
     ("drawing_get", {"include": ["views"]}, _drawing_persistence_sheets,

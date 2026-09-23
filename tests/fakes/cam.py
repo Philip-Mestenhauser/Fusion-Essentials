@@ -147,7 +147,9 @@ class FakeSetup(FakeCAMFolder):
     `operation_type` is unset the same way; pass adsk.cam.OperationTypes.AdditiveOperation for the
     additive exclusions (is_additive_setup). `models` is unset the same way too - a setup whose
     Setup.models does not read (measured: it can raise) stays a testable state; pass a list of
-    objects each carrying `entityToken` to model the bodies this setup's stock is defined against."""
+    objects each carrying `entityToken` to model the bodies this setup's stock is defined against.
+    `stock_solids` mirrors `models` for Setup.stockSolids - pass a list of objects each carrying
+    `boundingBox` to model the setup's stock geometry a camera fit reads."""
 
     _UNSET = object()
 
@@ -155,7 +157,8 @@ class FakeSetup(FakeCAMFolder):
 
     def __init__(self, name, ops=(), folders=(), patterns=(), others=(), parameters=None,
                  is_active=False, activate_ok=True, activate_lies=False, machine=_UNSET,
-                 has_error=_UNSET, error=_UNSET, operation_type=_UNSET, models=_UNSET):
+                 has_error=_UNSET, error=_UNSET, operation_type=_UNSET, models=_UNSET,
+                 stock_solids=_UNSET):
         super().__init__(name, ops=ops, folders=folders, patterns=patterns, others=others)
         self.parameters = parameters
         if machine is not FakeSetup._UNSET:
@@ -168,6 +171,8 @@ class FakeSetup(FakeCAMFolder):
             self.operationType = operation_type
         if models is not FakeSetup._UNSET:
             self.models = models
+        if stock_solids is not FakeSetup._UNSET:
+            self.stockSolids = stock_solids
         self.isActive = is_active
         self._activate_ok = activate_ok
         self._activate_lies = activate_lies

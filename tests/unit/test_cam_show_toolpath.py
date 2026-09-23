@@ -11,9 +11,11 @@ conftest), so the fake ops flow through unchanged.
 """
 
 import json
+import math
+import types
 
 from conftest import (Camera, FakeApplication, FakeFusionDocument, FakeProducts, FakeSelections,
-                      Viewport, _NamedCollection, load_tool, make_cam)
+                      Viewport, _NamedCollection, load_tool, make_bbox, make_cam)
 from conftest import FakeOperation as FakeOp, FakeSetup, FakeCAMFolder as CAMFolder
 
 st = load_tool("cam_show_toolpath")
@@ -816,3 +818,49 @@ class TestFit:
         st.app.activeViewport._cam = _RefusingCamera()
         with pytest.raises(RuntimeError, match="fit refused"):
             st.handler(action="show", operation="Rough Top", fit=True)
+
+
+class TestFitWidensToStock:
+    """A plain fit(True) frames the model alone, cropping a toolpath overhanging the stock
+    (measured live). A setup whose stock box reads widens the frame to the model+stock union; one
+    that does not falls back to the plain fit, unchanged."""
+
+    @staticmethod
+    def _body(lo, hi):
+        return types.SimpleNamespace(boundingBox=make_bbox(lo, hi))
+
+    def test_widens_the_frame_to_the_union_and_reports_it(self, monkeypatch):
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Point3D, "create",
+                            staticmethod(lambda x, y, z: types.SimpleNamespace(x=x, y=y, z=z)))
+        model = self._body((0, 0, 0), (10, 6, 2))
+        stock = self._body((-6, -6, -1), (16, 12, 3))
+        setup = FakeSetup("S1", [FakeOp("Face1", shown=False)], is_active=True,
+                          models=[model], stock_solids=[stock])
+        _install([setup])
+        out = _payload(st.handler(action="show", operation="Face1", fit=True))
+        assert out["fitted_to"] == "model+stock"
+        assert out["fit_box_cm"] == {"min": [-6.0, -6.0, -1.0], "max": [16.0, 12.0, 3.0]}
+        model_diag = math.sqrt(10 ** 2 + 6 ** 2 + 2 ** 2)
+        union_diag = math.sqrt(22 ** 2 + 18 ** 2 + 4 ** 2)
+        cam = st.app.activeViewport.camera
+        assert cam.viewExtents == 100.0 * (union_diag / model_diag)
+        assert (cam.target.x, cam.target.y, cam.target.z) == (5.0, 3.0, 1.0)
+
+    def test_falls_back_to_model_when_no_stock_is_configured(self):
+        setup = FakeSetup("S1", [FakeOp("Face1", shown=False)], is_active=True)
+        _install([setup])
+        out = _payload(st.handler(action="show", operation="Face1", fit=True))
+        assert out["fitted_to"] == "model"
+        assert "fit_box_cm" not in out
+        assert st.app.activeViewport.camera.isFitView is True
+
+    def test_falls_back_to_model_when_the_stock_reads_but_the_model_bodies_do_not(self):
+        stock = self._body((-6, -6, -1), (16, 12, 3))
+        setup = FakeSetup("S1", [FakeOp("Face1", shown=False)], is_active=True,
+                          stock_solids=[stock])
+        _install([setup])
+        out = _payload(st.handler(action="show", operation="Face1", fit=True))
+        assert out["fitted_to"] == "model"
+        assert "fit_box_cm" not in out
+        assert "model bodies did not" in out["note"]
