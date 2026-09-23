@@ -121,6 +121,22 @@ class TestSetText:
         msg = error_message(pe.handler(action="set_text", annotation="Note1", text="X"))
         assert "recreate" in msg and ann.segments is None
 
+    def test_an_unentitled_segments_write_names_the_extension_and_the_next_step(self, rig):
+        class Unentitled(_FakeAnn):
+            """A segments write that meets the platform's entitlement refusal."""
+
+            def __setattr__(self, key, value):
+                if key == "segments" and getattr(self, "_armed", False):
+                    raise RuntimeError("3 : Manufacturing or Design Extension is required")
+                object.__setattr__(self, key, value)
+
+        ann = Unentitled()
+        object.__setattr__(ann, "_armed", True)
+        rig.monkeypatch.setattr(pe._pmi, "find_annotation",
+                                lambda d, n, c="": (ann, rig.comp, None))
+        msg = error_message(pe.handler(action="set_text", annotation="Note1", text="X"))
+        assert "Extension is required" in msg and "entitlement" in msg and "pmi_get" in msg
+
     def test_a_segments_write_that_raises_is_an_error(self, rig):
         ann = _RefusingSet(raises=("segments",))
         rig.monkeypatch.setattr(pe._pmi, "find_annotation",

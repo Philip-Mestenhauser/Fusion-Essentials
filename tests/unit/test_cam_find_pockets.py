@@ -281,6 +281,30 @@ class TestRecognizerRouting:
         monkeypatch.setattr(adsk.cam.RecognizedPocket, "recognizePockets", boom, raising=False)
         pockets, err = cfp._recognize(BRepBody(name="Solid1"), object(), False)
         assert pockets is None and "InternalValidationError" in err and "Solid1" in err
+        assert "entitlement" not in err
+
+    def test_an_unentitled_recognizer_names_the_extension_and_the_by_hand_route(self, monkeypatch):
+        def boom(body, vector):
+            raise RuntimeError("3 : Requires the Manufacturing Extension to be active.")
+
+        monkeypatch.setattr(adsk.cam.RecognizedPocket, "recognizePockets", boom, raising=False)
+        pockets, err = cfp._recognize(BRepBody(name="Solid1"), object(), False)
+        assert pockets is None
+        assert "Manufacturing Extension" in err and "entitlement" in err
+        assert "find_geometry(kind='planar_face')" in err and "selection='pocket'" in err
+
+    def test_an_unentitled_boss_route_names_the_extension_not_the_plain_route(self, monkeypatch):
+        # the plain route is gated the same way, so pointing at it would send the agent in a loop
+        def boom(inp):
+            raise RuntimeError("3 : Requires the Manufacturing Extension to be active.")
+
+        monkeypatch.setattr(adsk.cam.RecognizedPocketInput, "create",
+                            lambda: type("I", (), {})(), raising=False)
+        monkeypatch.setattr(adsk.cam.RecognizedPocket, "recognizePocketsWithInput", boom,
+                            raising=False)
+        pockets, err = cfp._recognize(object(), object(), True)
+        assert pockets is None
+        assert "entitlement" in err and "include_bosses=false" not in err
 
     def test_a_recognizer_error_fails_the_call(self, scene, monkeypatch):
         scene([_Pocket()])

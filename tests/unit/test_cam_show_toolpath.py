@@ -791,6 +791,7 @@ class TestFit:
         vp = st.app.activeViewport
         assert vp.camera.isFitView is True     # the fit reached the camera...
         assert len(vp._assigned) == 1          # ...and the camera was written back to the viewport
+        assert vp._assigned[-1].isSmoothTransition is False
 
     def test_show_without_fit_leaves_the_camera_alone(self):
         _simple_world()

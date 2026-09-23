@@ -38,7 +38,7 @@ _PNG_EXT = ".png"
 # A TargetRef, not an OccurrenceRef: a single-body root design places no occurrence at all, so a
 # body handle/name is the only way to frame its part.
 _FIT_TO = _inputs.TargetRef("fit_to", allow=("occurrence", "body", "mesh"),
-        description="Hides the rest for the shot, then restores them.")
+        description="Isolates it for the shot (a body: its siblings hidden), then restores the view.")
 
 
 # The frame-on-one-occurrence isolate is shared with view_set(orient, focus=) - ONE visibility walk
@@ -61,17 +61,23 @@ def _restore_message(restore_fit_to):
 
 
 def _restore_camera(vp, saved_camera):
-    """Put the user's camera back. Returns the sentence naming the failure, or None.
-
-    EVERY exit that may have moved the camera runs this: a read tool that leaves the viewport
-    somewhere else has changed the document's state, and a swallowed restore never says so."""
+    """Glide the user's camera back - every exit that may have moved it runs this, so a swallowed
+    restore never leaves the document changed by a READ tool. Returns the sentence naming the
+    failure, or None."""
     if saved_camera is None:
         return None
     try:
-        vp.camera = saved_camera
+        read_back, smooth_error = _view_common.restore_camera(
+            vp, saved_camera, smooth=_view_common.SCREENSHOT_GLIDE)
     except Exception as e:
         return (f"The camera could NOT be put back where it was before this shot: {e}. The "
                 "viewport is left at the capture camera - view_set(orient) re-aims it.")
+    if not _view_common.camera_restored(read_back, saved_camera):
+        return ("The camera could NOT be put back where it was before this shot: the read-back "
+                "eye/target do not match the saved camera. The viewport is left at the capture "
+                "camera - view_set(orient) re-aims it.")
+    if smooth_error:
+        return f"isSmoothTransition could not be reset restoring the camera: {smooth_error}."
     return None
 
 
@@ -107,7 +113,7 @@ def _write_png(b64, path):
 
 
 def handler(view: str = "current", width: int = _WIDTH_DEFAULT, height: int = _HEIGHT_DEFAULT,
-            zoom: float = 1.0, fit_to: str = "", transparent_background=None,
+            zoom: float = 1.0, fit_to: str = "", fit: bool = False, transparent_background=None,
             anti_aliased=None, file_path: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     view = (view or "current").strip().lower()
@@ -130,9 +136,9 @@ def handler(view: str = "current", width: int = _WIDTH_DEFAULT, height: int = _H
     if perr:
         return error(perr)
 
-    # 'fit_to' frames the camera on ONE occurrence (best-effort: temporarily isolate it so fit()
-    # tightens onto it, then restore visibility). Returns the original visibility so a read tool
-    # leaves no permanent change.
+    # 'fit_to' frames the camera on ONE subject: the occurrence is isolated (a body's siblings are
+    # hidden) so fit() tightens onto it, and the restore puts the view back so a read tool leaves
+    # no permanent change.
     saved_camera = None
     restore_fit_to = None
     want_fit = (fit_to or "").strip()
@@ -148,7 +154,12 @@ def handler(view: str = "current", width: int = _WIDTH_DEFAULT, height: int = _H
     zoom_warning = None
     camera_snapshot_warning = None
     standoff_note = None
-    if view != "current" or want_fit or (zoom and zoom != 1.0):
+    smooth_warning = None
+    # A named view frames the visible geometry (aimed at the current distance it framed a 50 mm
+    # part as a blank shot); 'current' keeps the user's framing unless 'fit' asks, and a fit_to
+    # subject always needs the fit that frames it.
+    want_fit_view = bool(fit) or bool(want_fit) or view != "current"
+    if view != "current" or want_fit_view or (zoom and zoom != 1.0):
         # Captured OUTSIDE the try: a failure inside can already have moved the camera, and the
         # failure exit below can only put it back if the snapshot was taken first.
         saved_camera = safe(lambda: vp.camera)
@@ -161,14 +172,17 @@ def handler(view: str = "current", width: int = _WIDTH_DEFAULT, height: int = _H
                 # Every named view resolves in the shared table (_VIEWS is built from it). The
                 # orient answers the standoff it FELL BACK to, or None when the camera's own
                 # eye-target distance was the one it placed the eye at.
-                fallback_cm = _view_common.apply_named_view(vp, view)
+                fallback_cm, smooth_error = _view_common.apply_named_view(
+                    vp, view, fit=want_fit_view, smooth=_view_common.SCREENSHOT_GLIDE)
+                if smooth_error:
+                    smooth_warning = f"isSmoothTransition could not be set: {smooth_error}."
                 if fallback_cm is not None:
                     cm = f"{fallback_cm:g}"
                     standoff_note = (
                         f"standoff_fallback_cm={cm}: the camera's eye-target distance did not read "
                         f"as a positive number, so the eye was placed {cm} cm from the target along "
                         "the view direction before the fit.")
-            else:
+            elif want_fit_view:
                 vp.fit()
             # zoom: scale the camera-to-target distance after fitting (>1 zooms OUT, <1 zooms IN).
             z = float(zoom or 1.0)
@@ -176,7 +190,10 @@ def handler(view: str = "current", width: int = _WIDTH_DEFAULT, height: int = _H
                 cam = vp.camera
                 try:
                     cam.viewExtents = cam.viewExtents * z   # smaller extents = zoomed in
-                    vp.camera = cam
+                    _, zoom_smooth_error = _view_common.apply_camera(
+                        vp, cam, fit=False, smooth=_view_common.SCREENSHOT_GLIDE)
+                    if zoom_smooth_error and not smooth_warning:
+                        smooth_warning = f"isSmoothTransition could not be set: {zoom_smooth_error}."
                 except Exception as e:
                     # A dropped zoom is a request the image does not honour - say so rather than
                     # returning a fitted shot as if the zoom had applied.
@@ -228,7 +245,8 @@ def handler(view: str = "current", width: int = _WIDTH_DEFAULT, height: int = _H
     # The standoff rides only a shot that produced an image: a failed capture placed an eye but
     # returned no picture to describe. view_screenshot_multi records the same way.
     placed = standoff_note if not result.get("isError") else None
-    extra = " ".join(m for m in (placed, zoom_warning, camera_snapshot_warning,
+    smooth = smooth_warning if not result.get("isError") else None
+    extra = " ".join(m for m in (placed, smooth, zoom_warning, camera_snapshot_warning,
                                  cam_msg, stuck_msg) if m)
     if extra:
         if result.get("isError"):
@@ -248,7 +266,9 @@ tool = (
     .add_input_property("width", {"type": "integer"})
     .add_input_property("height", {"type": "integer"})
     .add_input_property("zoom", {"type": "number",
-            "description": "Applied after fitting: >1 out, <1 in."})
+            "description": "Applied after the frame: >1 out, <1 in."})
+    .add_input_property("fit", {"type": "boolean",
+            "description": "Frame the visible geometry for view='current' (a named view always does)."})
     .add_input_property(*_FIT_TO.as_property())
     .add_input_property("transparent_background", {"type": "boolean"})
     .add_input_property("anti_aliased", {"type": "boolean"})

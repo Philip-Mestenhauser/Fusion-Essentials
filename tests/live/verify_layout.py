@@ -465,7 +465,8 @@ def _framed(steps):
             # so a flat subject falls back to iso and renders edge-on. Rewriting the row here - and
             # only a row _watch itself wrote - shoots that sketch down its own normal.
             fresh = _watch(f)
-            if step[2:] == fresh[2:] and step[1] == dict(fresh[1], orientation="iso-top-right"):
+            if (step[2] in ("ok", fresh[2]) and step[3:] == fresh[3:]
+                    and step[1] == dict(fresh[1], orientation="iso-top-right")):
                 out[-1] = fresh
             # A hand-authored row that FITS on its focus IS the standing frame from here on.
             # Tracking only the rows this pass inserts leaves the frame where the camera no longer

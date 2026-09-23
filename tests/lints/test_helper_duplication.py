@@ -495,6 +495,15 @@ _DENYLIST = {
     "PAIR_USED": ("_joints", "assign"),
     "PAIR_USED_ANCHOR_NOTE": ("_joints", "assign"),
     "pair_used_clause": ("_joints", "def"),
+    # A camera assigned to the viewport: isSmoothTransition off (a snap, not a glide) and isFitView
+    # set explicitly. A re-rolled `vp.camera = cam` is how one tool keeps gliding after the others
+    # stop - view_set, view_screenshot(_multi), view_section, cam_show_toolpath, cam_activate_setup.
+    "apply_camera": ("_view_common", "def"),
+    # A saved camera put back on a FRESH read, type set before eye: reassigning the saved object
+    # directly multiplies a perspective camera's eye distance after an ortho switch (measured). One
+    # home so view_screenshot(_multi) and view_set's restore cannot re-roll the wrong order.
+    "restore_camera": ("_view_common", "def"),
+    "camera_restored": ("_view_common", "def"),
     # The orient + refresh-then-grab capture mechanics both screenshot tools share.
     "apply_named_view": ("_view_common", "def"),
     "capture_png_b64": ("_view_common", "def"),
@@ -519,6 +528,9 @@ _ALLOWLIST = {
     # cam_edit_setup's pointer names the SETUP's own parameters (cam_get(..., setup=...)), a
     # different read from the operation-scoped one in _cam_common - not a re-roll of it.
     ("cam_edit_setup", "PARAM_READ"): "the SETUP-scoped parameter read, not the operation's",
+    # view_screenshot's own try/except + mismatch-message wrapper around a call to the SHARED
+    # _view_common.restore_camera it uses internally - not a re-roll of the rebuild itself.
+    ("view_screenshot", "restore_camera"): "the tool's own restore orchestration, not the rebuild",
 }
 
 

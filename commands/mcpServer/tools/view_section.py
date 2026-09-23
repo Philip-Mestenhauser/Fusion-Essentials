@@ -69,9 +69,7 @@ def _aim_at_cut(normal, flipped):
         cam.upVector = adsk.core.Vector3D.create(0, 1, 0)
     else:
         cam.upVector = adsk.core.Vector3D.create(0, 0, 1)
-    cam.isFitView = True
-    vp.camera = cam
-    vp.refresh()
+    _view_common.apply_camera(vp, cam, fit=True)
 
 
 def handler(action: str = "", plane: str = "", through: str = "", offset: float = 0.0,

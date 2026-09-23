@@ -657,6 +657,29 @@ class TestOrient:
         res = iv.handler(action="orient", orientation="front", focus="Ghost")
         assert res["isError"] is True and "no occurrence matching" in res["message"].lower()
 
+    def test_smooth_transition_is_off_and_disclosed(self, monkeypatch):
+        # isSmoothTransition is CONSUMED on assignment (2705.1.25) - a read-back off vp.camera
+        # answers its default forever, so this publishes the value ASSIGNED, never a flag re-read.
+        _install(monkeypatch, [FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))])
+        out = _payload(iv.handler(action="orient", orientation="front", focus="Part"))
+        assert out["applied"]["smooth_transition"] is False
+
+    def test_smooth_transition_is_absent_when_the_setter_raises(self, monkeypatch):
+        _install(monkeypatch, [FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))])
+
+        class _NoSmoothCamera(Camera):
+            @property
+            def isSmoothTransition(self):
+                return True
+
+            @isSmoothTransition.setter
+            def isSmoothTransition(self, value):
+                raise RuntimeError("isSmoothTransition unavailable")
+        iv.app.activeViewport._cam.__class__ = _NoSmoothCamera
+        out = _payload(iv.handler(action="orient", orientation="front", focus="Part"))
+        assert "smooth_transition" not in out["applied"]
+        assert "isSmoothTransition could not be set" in out["note"]
+
     def test_front_orientation_sets_up_vector(self, monkeypatch):
         _install(monkeypatch, [FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))])
         out = _payload(iv.handler(action="orient", orientation="front", focus="Part"))
@@ -1197,6 +1220,23 @@ class TestProjection:
         assert out["applied"]["perspective_angle_deg"] == 40.0
 
 
+class TestProjectionStagingNoFit:
+    """Staging a projection with a focus must not fit the whole model first - the frame spans for
+    the ratio are read off the staged (non-fit) view, not a fit-everything one."""
+
+    def _part(self):
+        return FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))
+
+    def test_the_staged_camera_reads_isfitview_false_and_makes_no_fit_call(self, monkeypatch):
+        _install(monkeypatch, [self._part()])
+        out = _payload(iv.handler(action="orient", projection="perspective", focus="Part",
+                                  fit=False))
+        vp = iv.app.activeViewport
+        assert vp._fit_calls == 0
+        assert vp._assigned and vp._assigned[0].isFitView is False
+        assert out["applied"]["projection"] == "perspective"
+
+
 class TestProjectionExtents:
     """Flipping cameraType leaves the camera's extents inconsistent with the type it now carries -
     assigning such a camera raises 'Camera type must be orthographic for extents' unless isFitView
@@ -1479,6 +1519,18 @@ class TestSnapshotRestore:
         assert a.isLightBulbOn is True and b.isLightBulbOn is True
         # snapshot consumed (popped) on restore
         assert "RoundTrip" not in iv._SNAPSHOTS
+
+    def test_restore_puts_the_camera_back_as_a_snap_not_a_glide(self, monkeypatch):
+        # isSmoothTransition is CONSUMED on assignment (2705.1.25), so this is judged on the
+        # camera AS ASSIGNED (vp._assigned), never a read-back off vp.camera.
+        a = FakeOcc("A", full_path="A", bulb=True)
+        _install(monkeypatch, [a], doc_name="CameraRestore")
+        iv._SNAPSHOTS.clear()
+        _payload(iv.handler(action="snapshot"))
+        _payload(iv.handler(action="orient", orientation="front"))
+        out = _payload(iv.handler(action="restore"))
+        assert out["camera_restored"] is True
+        assert iv.app.activeViewport._assigned[-1].isSmoothTransition is False
 
     def test_restore_reinstates_isolation(self, monkeypatch):
         # snapshot captures an isolated occurrence; after clearing it, restore must put isolation back.

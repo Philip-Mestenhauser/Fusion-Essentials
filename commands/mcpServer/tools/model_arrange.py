@@ -555,8 +555,10 @@ def handler(boundary_sketch: str = "", shapes: str = "", solver: str = "true_sha
     except Exception as e:
         msg = str(e)
         if any(t in msg.lower() for t in ("extension", "entitle", "license", "subscrib")):
-            return error(f"Arrange ({label}) appears to need a Fusion extension on this "
-                          f"account: {msg}. Try solver='rectangular', or enable the extension.")
+            return error(f"Arrange ({label}) hit an extension-only setting on this account: "
+                          f"{msg}. The solvers run on the base licence with a boundary or an "
+                          "envelope and a spacing; drop the setting the call added (rotation, "
+                          "margin, quantity, part_in_part) or enable the Manufacturing Extension.")
         if _MISSING_FACE_CODE in msg:
             return error(_PLATFORM_MISSING_FACE.format(label=label, code=_MISSING_FACE_CODE,
                                                        msg=msg))

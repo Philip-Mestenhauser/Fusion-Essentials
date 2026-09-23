@@ -108,6 +108,10 @@ def _attack_direction(raw):
     return vector, None
 
 
+_BY_HAND = ("select the pocket by hand - a floor face handle from find_geometry(kind='planar_face') "
+            "feeds cam_select_geometry(selection='pocket')")
+
+
 def _recognize(body, vector, include_bosses):
     """(the RecognizedPockets for ONE body, error) - the two adsk.cam entry points in one place:
     the plain route, and the input route that also reports bosses."""
@@ -120,13 +124,16 @@ def _recognize(body, vector, include_bosses):
             inp.isIncludingBosses = True
             pockets = adsk.cam.RecognizedPocket.recognizePocketsWithInput(inp)
         except Exception as e:
-            return None, (f"Pocket recognition with bosses raised on body '{name}': {e}. Retry "
-                          "with include_bosses=false, which takes the plain route.")
+            clause = _common.entitlement_clause(e, "Manufacturing Extension", _BY_HAND)
+            return None, (f"Pocket recognition with bosses raised on body '{name}': {e}."
+                          + (clause or " Retry with include_bosses=false, which takes the plain "
+                                       "route."))
     else:
         try:
             pockets = adsk.cam.RecognizedPocket.recognizePockets(body, vector)
         except Exception as e:
-            return None, f"Pocket recognition raised on body '{name}': {e}"
+            return None, (f"Pocket recognition raised on body '{name}': {e}"
+                          + _common.entitlement_clause(e, "Manufacturing Extension", _BY_HAND))
     if pockets is None:
         return None, f"Pocket recognition returned nothing for body '{name}'."
     return pockets, None

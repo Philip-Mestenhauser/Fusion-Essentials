@@ -23,6 +23,14 @@ MAP_BLURB = ("the PMI substrate. walk_annotations/find_annotation - the design-w
              "build_tolerance/build_display - the tolerance/display codecs; apply_*/"
              "normalize_extension/set_* - the writers, each re-read")
 
+def entitlement_clause(exc):
+    """The next step after a content write raised the platform's entitlement refusal, else ''."""
+    return _common.entitlement_clause(
+        exc, "Design or Manufacturing Extension",
+        "PMI content writes need one, pmi_get still reads existing PMI, and pmi_edit hide/show "
+        "still apply")
+
+
 # The leader extension these tools refuse below, and the value pmi_create pins onto an input
 # arriving under it. Whether the platform's own floor is this constant is unmeasured on 2705;
 # normalize_extension tries the repair and reports a raise either way.

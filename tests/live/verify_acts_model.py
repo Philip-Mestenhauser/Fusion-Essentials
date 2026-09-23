@@ -23,7 +23,7 @@ from verify_core import (
     _param_traced, _path_count, _patterned, _piped, _pocket_boss, _pockets_recognized, _prof,
     _recall, _recognized_cbore_walls, _recognized_pocket_floor, _refused, _relation_measured,
     _relation_passes, _relation_read, _replaced_on_its_pivot, _revolved, _shelled,
-    _sits_on_a_face, _swept, _watch)
+    _sits_on_a_face, _swept, _unless, _watch)
 from verify_acts_cam import MACHINING_EXTENSION
 from verify_layout import _px, _py
 
@@ -1279,28 +1279,35 @@ _SOLIDS = [
     ("design_get", {"include": ["metadata"], "name_filter": "Bracket"},
      _component_metadata("Bracket", part_number="FE-BRACKET-001", description="Sweep bracket"),
      None),
-    # PMI authoring is entitled on this build, so the four rows assert the created/edited/deleted
-    # values read back off the annotations - on the real geometry a note would carry: the pocket
-    # floor and a mounting bore.
+    # PMI CONTENT writes need the Design or Manufacturing Extension (the platform raises
+    # "Manufacturing or Design Extension is required" without one - measured on the lapsed install),
+    # so the four write rows run entitled and assert the created/edited/deleted values read back off
+    # the annotations, while the unentitled variants assert the refusal names the extension and the
+    # next step. Reads and the blank-name guards run on either licence.
     ("find_geometry", {"target": "Bracket", "kind": "planar_face", "nearest_to": [-35, 0, 14],
                        "max_results": 1}, _face_up_at(-35, 0, 14, tol=2.0), _fg("pmi_floor")),
     ("pmi_create", lambda c: {"kind": "note", "geometry": [_ctx_get(c, "pmi_floor", "the pocket floor")], "text": "{flatness}0.05", "name": "PmiFlat"},
-     lambda p: p.get("annotation") == "PmiFlat" and p.get("markup") == "{flatness}0.05" and p.get("kind") == "note", None),
+     _needs(MACHINING_EXTENSION, lambda p: p.get("annotation") == "PmiFlat" and p.get("markup") == "{flatness}0.05" and p.get("kind") == "note"), None),
+    ("pmi_create", lambda c: {"kind": "note", "geometry": [_ctx_get(c, "pmi_floor", "the pocket floor")], "text": "{flatness}0.05", "name": "PmiFlat"},
+     _unless(MACHINING_EXTENSION, _refused("Extension is required", "pmi_get")), None),
     ("find_geometry", {"target": "Bracket", "kind": "cylinder_face", "radius": 3, "max_results": 1},
      _matched(1, "cylinder_face"), _fg("mount_bore")),
     ("pmi_create", lambda c: {"kind": "hole_note", "geometry": [_ctx_get(c, "mount_bore", "a mounting bore")]},
-     lambda p: p.get("kind") == "hole_note" and bool(p.get("annotation")) and "<HDIA>" in str(p.get("markup")), None),
+     _needs(MACHINING_EXTENSION, lambda p: p.get("kind") == "hole_note" and bool(p.get("annotation")) and "<HDIA>" in str(p.get("markup"))), None),
+    ("pmi_create", lambda c: {"kind": "hole_note", "geometry": [_ctx_get(c, "mount_bore", "a mounting bore")]},
+     _unless(MACHINING_EXTENSION, _refused("Extension is required", "pmi_get")), None),
     ("pmi_get", {"include": ["segments", "detail"]}, "ok", None),
     # an over-cap 'max_results' is CLAMPED, not refused - pmi_get's own contract, since every record
     # it returns crosses the wire whole. The answer still comes back with its census keys.
     ("pmi_get", {"max_results": 99999},
      lambda p: isinstance(p.get("annotations"), list) and "total" in p, None),
     ("pmi_edit", {"action": "set_text", "annotation": "PmiFlat", "text": "{perpendicularity}0.03"},
-     lambda p: p.get("name") == "PmiFlat" and p.get("markup") == "{perpendicularity}0.03", None),
-    # the blank name is its own guard, ahead of any lookup.
+     _needs(MACHINING_EXTENSION, lambda p: p.get("name") == "PmiFlat" and p.get("markup") == "{perpendicularity}0.03"), None),
+    # the blank name is its own guard, ahead of any lookup - on either licence.
     ("pmi_edit", {"action": "hide", "annotation": ""}, "refused", None),
+    ("pmi_delete", {"annotation": ""}, "refused", None),
     ("pmi_delete", {"annotation": "PmiFlat"},
-     lambda p: p.get("deleted") == "PmiFlat" and isinstance(p.get("remaining_pmi"), int), None),
+     _needs(MACHINING_EXTENSION, lambda p: p.get("deleted") == "PmiFlat" and isinstance(p.get("remaining_pmi"), int)), None),
     # THE DATUM BENCH: one bored block, and every way the API knows of hanging a plane, an axis or a
     # point off it. The modes divide by what they READ, so the bench has to carry all of it - six
     # faces, the linear edges where they meet, the vertices where those meet, and a bore for the
@@ -1923,18 +1930,26 @@ _DETAILS = [
     # and a broken rim is a hole of a different shape, so the recognizer's grouping is read while
     # the drilled pattern is still as model_hole left it. The saved handles drive the CAM act's
     # recognized-hole drill; BoreDia is PartHt * 0.3 = 12 mm.
-    ("cam_find_holes", {"bodies": ["Bracket:1"]}, _holes_recognized(2, 4, 12.0),
+    # Recognition needs the Manufacturing Extension (measured on the lapsed install: "Requires the
+    # Manufacturing Extension to be active"), so the recognizer rows ride the tier and the
+    # unentitled variant asserts the refusal names the extension and the by-hand route.
+    ("cam_find_holes", {"bodies": ["Bracket:1"]},
+     _needs(MACHINING_EXTENSION, _holes_recognized(2, 4, 12.0)),
      _recognized_cbore_walls("recognized_cbore_walls", count_key="holes_group_count")),
+    ("cam_find_holes", {"bodies": ["Bracket:1"]},
+     _unless(MACHINING_EXTENSION, _refused("Manufacturing Extension", "find_geometry")), None),
     # The window, on the same part: at 11 mm every BoreDia group falls out (the step bore and the
     # longer boss bore are separate groups - the recognizer groups by identical length) and the
     # 10.8 mm counterbores stay; kept plus dropped is the unwindowed total, so nothing is lost.
     ("cam_find_holes", {"bodies": ["Bracket:1"], "max_diameter": 11},
-     _holes_windowed(12.0, "holes_group_count"), None),
+     _needs(MACHINING_EXTENSION, _holes_windowed(12.0, "holes_group_count")), None),
     # THE POCKET AS THE MACHINE SEES IT, down the same axis a 3-axis setup attacks: PocketDepth is
     # PartHt * 0.4 = 16 mm, so the floor sits that far under the low top the cut opened, and the
     # four PocketRad corners round its single boundary loop. The saver takes that pocket's FLOOR
     # handle - the face whose locator sits lowest along the attack - which drives a 2D pocket of its
     # own in the CAM act; its count and its loop size are what the two rows after it read back.
+    # Plain pocket recognition runs on the base licence (measured on the lapsed install: 8 pockets
+    # read back); only the boss-aware route below rides the tier.
     ("cam_find_pockets", {"bodies": ["Bracket:1"]}, _pockets_recognized(16.0),
      _recognized_pocket_floor("pocket_floor", 16.0, count_key="pockets_plain_count",
                               loop_key="pocket_loop_segments")),

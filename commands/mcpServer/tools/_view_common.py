@@ -4,6 +4,7 @@
 """Camera-orientation table for the standard named views, plus the shared capture mechanics."""
 
 import base64
+import math
 import os
 import tempfile
 
@@ -13,13 +14,12 @@ from . import _common
 from . import _geom
 
 MAP_BLURB = (
-    "view_direction/look_direction/up_vector/is_ortho_face - a named view's vectors; "
-    "apply_named_view/capture_png_b64 - orient and grab; "
-    "standoff_distance/STANDOFF_FALLBACK_CM - the orient standoff; "
-    "activate_workspace - activate and read back; "
-    "DISPLAY_FOLDERS/all_display_components - non-body clutter; "
-    "keep_visible/all_bodies/same_body/isolate_for_fit/restore_message/focus_box - framing one "
-    "subject")
+    "view_direction/look_direction/up_vector/is_ortho_face/apply_camera/apply_named_view/"
+    "restore_camera/camera_restored/capture_png_b64 - camera math + capture; "
+    "standoff_distance/STANDOFF_FALLBACK_CM - standoff; activate_workspace - activate, read back; "
+    "DISPLAY_FOLDERS/all_display_components - clutter; "
+    "keep_visible/all_bodies/same_body/isolate_for_fit/restore_message/focus_box - one-subject "
+    "frame")
 
 app = adsk.core.Application.get()
 
@@ -206,20 +206,34 @@ def isolate_for_fit(name, ref):
                         f"{', '.join(str(s) for s in stuck[:5])} - the document is left with those "
                         "hidden; view_set(action='show', target=...) restores them.")
             return None, None, msg
-    else:
+    isolated = None
+    comps = all_display_components(design)
+    if kind not in ("body", "mesh"):
+        # Fusion's own isolate (Occurrence.isIsolated, what view_set(isolate) sets) hides every
+        # occurrence outside this one's lineage in ONE write; the bulb walk it replaces ran past
+        # the 30 s handler deadline on a 185-occurrence assembly.
+        _common.safe(lambda: setattr(target, "isIsolated", True))
+        got = _common.read_flag(lambda: target.isIsolated)
+        if got is not True:
+            return None, None, (f"{ref.name}: Fusion did not isolate '{_common.short_ref(name)}' "
+                                f"(isIsolated read back {got!r}), so nothing was hidden or "
+                                "captured. view_set(action='isolate') shows what it answers.")
+        isolated = target
+        # Only the isolated lineage stays on screen, so its components' folders are the clutter.
         target_path = _common.safe(lambda: target.fullPathName)
+        lineage = {id(root)}
         for o in _common.all_occurrences(design):
             if keep_visible(_common.safe(lambda o=o: o.fullPathName), target_path):
-                continue
-            was = _common.safe(lambda o=o: o.isLightBulbOn)
-            if was:
-                prev.append(o)
-                _common.safe(lambda o=o: setattr(o, "isLightBulbOn", False))
+                c = _common.safe(lambda o=o: o.component)
+                if c is not None:
+                    lineage.add(_common.native_identity(c) or id(c))
+        comps = [c for c in comps if id(c) in lineage
+                 or (_common.native_identity(c) or id(c)) in lineage]
 
-    # Viewport.fit() frames every VISIBLE entity, so construction geometry outside the isolated
-    # subject still blows the frame open; the folder bulbs switch that clutter off design-wide.
+    # Viewport.fit() frames every VISIBLE entity, so construction geometry beside the subject
+    # still blows the frame open; the folder bulbs switch that clutter off.
     folder_prev = []                       # (component, attr) - only bulbs we moved
-    for comp in all_display_components(design):
+    for comp in comps:
         for attr in DISPLAY_FOLDERS.values():
             if _common.read_flag(lambda comp=comp, attr=attr: getattr(comp, attr)):
                 folder_prev.append((comp, attr))
@@ -227,14 +241,19 @@ def isolate_for_fit(name, ref):
 
     def restore():
         stuck = _relight(prev)
+        if isolated is not None:
+            _common.safe(lambda: setattr(isolated, "isIsolated", False))
+            if _common.read_flag(lambda: isolated.isIsolated) is not False:
+                stuck.append(f"{_common.safe(lambda: isolated.fullPathName) or '?'} (still isolated)")
         for comp, attr in folder_prev:
             _common.safe(lambda comp=comp, attr=attr: setattr(comp, attr, True))
             if _common.read_flag(lambda comp=comp, attr=attr: getattr(comp, attr)) is not True:
                 stuck.append(f"{_common.safe(lambda comp=comp: comp.name) or '?'}:{attr}")
         return stuck
-    # What the isolate actually darkened, so the restore's message names bodies on a body subject
-    # and occurrences on an occurrence one rather than one word for both.
+    # What the isolate actually changed, so the restore's message names bodies on a body subject
+    # and the isolation on an occurrence one rather than one word for both.
     restore.hidden = "bodies" if kind in ("body", "mesh") else "occurrences"
+    restore.isolated = isolated is not None
     return restore, target, None
 
 
@@ -250,8 +269,14 @@ def restore_message(restore, label, purpose):
     if not stuck:
         return None
     hidden = getattr(restore, "hidden", "occurrences")
+    named = ", ".join(str(s) for s in stuck[:5])
+    if getattr(restore, "isolated", False):
+        return (f"{label} isolated the subject {purpose} and could NOT put {len(stuck)} thing(s) "
+                f"back: {named}. The document is left changed - view_set(action="
+                "'clear_isolation') clears the isolation and view_set(action='display') relights a "
+                "folder.")
     return (f"{label} hid the other {hidden} {purpose} and could NOT turn "
-            f"{len(stuck)} of them back on: {', '.join(str(s) for s in stuck[:5])}. "
+            f"{len(stuck)} of them back on: {named}. "
             f"The document is left with those {hidden} hidden - view_set(action='show', "
             "target=...) restores them.")
 
@@ -331,14 +356,79 @@ def standoff_distance(cam):
     return dist, None
 
 
-def apply_named_view(vp, name):
-    """Point the viewport's camera at a named view and fit; no-op for an unknown/'current' name.
-    Returns STANDOFF_FALLBACK_CM when the camera's eye-target distance did not read or read
-    non-positive, else None."""
+# A glide (isSmoothTransition True) blocks the assignment ~0.6 s while the viewport animates on
+# screen and reads back the LANDED camera (measured 2705.1.25), so a capture or a restore check
+# after it sees the final view. The screenshot tools glide so a watcher sees the shot happen.
+SCREENSHOT_GLIDE = True
+
+
+def apply_camera(vp, cam, fit=False, smooth=False):
+    """Assign 'cam' to the viewport with isSmoothTransition set to 'smooth' and isFitView to 'fit';
+    returns (the camera the viewport reads back, the isSmoothTransition setter's error or None)."""
+    # Both isFitView and isSmoothTransition are CONSUMED on assignment (measured 2705.1.25) - a
+    # read-back answers their defaults, so a caller judges the write by THIS CALL raising, never
+    # by reading either flag back. A raising isSmoothTransition setter is handed back, not raised.
+    smooth_error = None
+    try:
+        cam.isSmoothTransition = bool(smooth)
+    except Exception as e:
+        smooth_error = str(e)
+    cam.isFitView = bool(fit)
+    vp.camera = cam
+    vp.refresh()
+    return vp.camera, smooth_error
+
+
+_EYE_TARGET_TOLERANCE_CM = 1e-6
+
+
+def camera_restored(read_back, saved, tol=_EYE_TARGET_TOLERANCE_CM):
+    """Whether a restored camera's eye AND target read within 'tol' cm of the saved camera's - the
+    read-back proof a restore actually landed, not just that the assignment ran."""
+    vals = _common.safe(lambda: (
+        read_back.eye.x, read_back.eye.y, read_back.eye.z,
+        saved.eye.x, saved.eye.y, saved.eye.z,
+        read_back.target.x, read_back.target.y, read_back.target.z,
+        saved.target.x, saved.target.y, saved.target.z))
+    if vals is None:
+        return False
+    rex, rey, rez, sex, sey, sez, rtx, rty, rtz, stx, sty, stz = vals
+    return (abs(rex - sex) <= tol and abs(rey - sey) <= tol and abs(rez - sez) <= tol
+            and abs(rtx - stx) <= tol and abs(rty - sty) <= tol and abs(rtz - stz) <= tol)
+
+
+def restore_camera(vp, saved, smooth=False):
+    """Rebuild the viewport's camera on a FRESH read rather than reassigning 'saved' directly, as a
+    glide when 'smooth'; returns (the read-back camera, the isSmoothTransition setter's error or None)."""
+    # A type switch rescales the eye to the viewport's extents (measured: a perspective restore
+    # over a 5.347 cm orthographic view landed 13.4x farther) and drops an extents write made in
+    # the same assignment - so the switch lands alone, the rest on a fresh read of the new type.
+    fit = bool(_common.safe(lambda: saved.isFitView, False))
+    smooth_error = None
+    fresh = vp.camera
+    if _common.safe(lambda: fresh.cameraType) != saved.cameraType:
+        fresh.cameraType = saved.cameraType
+        _, smooth_error = apply_camera(vp, fresh, fit=False, smooth=smooth)
+        fresh = vp.camera
+    fresh.perspectiveAngle = saved.perspectiveAngle
+    if saved.cameraType == adsk.core.CameraTypes.OrthographicCameraType:
+        fresh.viewExtents = saved.viewExtents
+    fresh.eye = saved.eye
+    fresh.target = saved.target
+    fresh.upVector = saved.upVector
+    read_back, again_error = apply_camera(vp, fresh, fit=fit, smooth=smooth)
+    return read_back, smooth_error or again_error
+
+
+def apply_named_view(vp, name, fit=False, smooth=False):
+    """Point the viewport's camera at a named view, as a glide when 'smooth'; fits only when 'fit'
+    is true. No-op for an unknown/'current' name. Returns (STANDOFF_FALLBACK_CM when the camera's
+    eye-target distance did not read or read non-positive else None, the isSmoothTransition
+    setter's error or None)."""
     # Exact eye/up vectors, not a viewOrientation assignment: that leaves a tilt off world axes.
     look = look_direction(name)
     if look is None:
-        return None
+        return None, None
     up = up_vector(name)
     cam = vp.camera
     tgt = cam.target
@@ -346,11 +436,27 @@ def apply_named_view(vp, name):
     cam.eye = adsk.core.Point3D.create(
         tgt.x - look[0] * dist, tgt.y - look[1] * dist, tgt.z - look[2] * dist)
     cam.upVector = adsk.core.Vector3D.create(*up)
+    ortho_extents = None
     if is_ortho_face(name):
+        # Switching type off perspective keeps the PERSPECTIVE extents (measured 2705.1.25: a
+        # 0.4 cm window on a 485 cm shot) and drops an extents write made in the same assignment,
+        # so the window the perspective view showed lands in a second assignment below.
+        if _common.safe(lambda: cam.cameraType) != adsk.core.CameraTypes.OrthographicCameraType:
+            angle = _common.safe(lambda: cam.perspectiveAngle)
+            if angle is not None:
+                ortho_extents = 2 * dist * math.tan(angle / 2)
         cam.cameraType = adsk.core.CameraTypes.OrthographicCameraType
-    vp.camera = cam                   # assigning back applies the change
-    vp.fit()
-    return fallback
+    # isFitView stays False here: the eye/target above are exact, and a whole-model fit would
+    # override them. A caller wanting a fit asks for the explicit pass below instead.
+    _, smooth_error = apply_camera(vp, cam, fit=False, smooth=smooth)
+    if ortho_extents is not None and not fit:
+        again = vp.camera
+        again.viewExtents = ortho_extents
+        _, again_error = apply_camera(vp, again, fit=False, smooth=smooth)
+        smooth_error = smooth_error or again_error
+    if fit:
+        vp.fit()
+    return fallback, smooth_error
 
 
 def _write_image(vp, path, width, height, transparent_background, anti_aliased):

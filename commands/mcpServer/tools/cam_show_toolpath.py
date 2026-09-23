@@ -14,6 +14,7 @@ from ..mcp_primitives.registry import register
 from ._common import ok, error, read_flag, safe
 from ._cam_common import (get_cam, resolve_cam_node, operation_nodes, operations_under, find_setup,
                           is_additive_setup, owning_setup)
+from . import _view_common
 
 app = adsk.core.Application.get()
 
@@ -97,12 +98,11 @@ def _activate_owning_setup(cam, setup_name):
 
 
 def _fit_operation():
-    """Fit the camera (plain fit-to-all). Any API refusal raises into the handler's error path."""
+    """Fit the camera (plain fit-to-all); returns the isSmoothTransition setter's error, or None.
+    Any API refusal to assign raises into the handler's error path."""
     vp = app.activeViewport
-    cam = vp.camera
-    cam.isFitView = True
-    vp.camera = cam
-    vp.refresh()
+    _, smooth_error = _view_common.apply_camera(vp, vp.camera, fit=True)
+    return smooth_error
 
 
 def handler(action: str = "", operation: str = "", folder: str = "", fit: bool = False) -> dict:
@@ -280,8 +280,9 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
     activated, setup_warning = _activate_owning_setup(cam, onode.setup)
 
     fitted = False
+    smooth_error = None
     if fit:
-        _fit_operation()   # raises on an API refusal, so reaching the payload means it applied
+        smooth_error = _fit_operation()   # raises on an API refusal to assign the camera
         fitted = True
     app.activeViewport.refresh()
     note = ("Toolpath shown. Toolpaths render in the Manufacture workspace; pair with "
@@ -299,6 +300,8 @@ def handler(action: str = "", operation: str = "", folder: str = "", fit: bool =
         out["hide_failures"] = still_lit
         note += (f" {len(still_lit)} operation(s) did not read back isLightBulbOn=false during the "
                  "hide - see hide_failures; their toolpaths may still be drawn.")
+    if smooth_error:
+        note += f" isSmoothTransition could not be set: {smooth_error}."
     out["note"] = note
     return ok(out)
 

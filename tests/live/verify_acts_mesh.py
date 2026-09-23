@@ -13,7 +13,8 @@ from verify_core import (
     _datum_plane, _document_closed, _document_read, _drilled, _dwell, _extent_measured, _extruded,
     _fg, _fgn, _holder_computed, _made_component, _matched, _measured, _mesh_round_trip,
     _needs, _new_document, _num, _packed, _rebuilt, _recall, _refused, _repair_no_op,
-    _same_face_area, _split_bodies, _stitched, _trim_scoped_to_target, _unstitched, _watch)
+    _same_face_area, _split_bodies, _stitched, _trim_scoped_to_target, _unless, _unstitched,
+    _watch)
 from verify_acts_cam import MACHINING_EXTENSION
 from verify_layout import _px, _py
 
@@ -573,6 +574,9 @@ _NESTING = _box("ArrP1", ox=200, oy=350) + [
     # is exactly what a slanted wall is for. The solver places COPIES under an Envelope occurrence
     # and leaves the named inputs where they were, so the nested part is picked out of what the call
     # PUBLISHED - and it is that copy the reshape below is measured on.
+    # Every solver runs on the base licence with a boundary or an envelope and a spacing (measured
+    # on the lapsed install: this nest placed 4, the sheet 3, the box 3); the platform's "Cannot
+    # set extension value" is an OPTION the extension owns, which none of these rows pass.
     ("model_arrange", lambda c: {"boundary_sketch": "ArrB",
                                  "shapes": ["ArrP1:1", "ArrP2:1",
                                             _ctx_get(c, "arr_bar2", "the second bar"), "ArrP3:1"],
@@ -601,21 +605,30 @@ _NESTING = _box("ArrP1", ox=200, oy=350) + [
     # it left out - which the profile nest above cannot show. A sized envelope is anchored on its
     # plane's origin, so both are offset into clear ground rather than onto the vise and the CAM
     # stock, and each nest is deleted again: these rows are about the solver, not about the field.
+    # The sized rectangular sheet passes rotation and quantity, and one of those is the
+    # extension's (measured on the lapsed install: "Cannot set extension value" here while the
+    # boundary nest above and the 3D box below, which pass neither, place their shapes), so this
+    # row rides the tier and its unentitled variant asserts the refusal names the candidates.
     ("model_arrange", {"shapes": ["ArrP1:1", "ArrP2:1", "ArrP3:1"], "solver": "rectangular",
                        "envelope_plane": "xy", "envelope_length": 300, "envelope_width": 200,
                        "envelope_origin": [600, 400], "rotation": "none", "quantity": 1,
                        "spacing": 5},
-     _packed(3, extent=(300, 200)), ("arr_sheet", lambda p: p["feature"])),
+     _needs(MACHINING_EXTENSION, _packed(3, extent=(300, 200))),
+     ("arr_sheet", lambda p: p["feature"])),
+    ("model_arrange", {"shapes": ["ArrP1:1", "ArrP2:1", "ArrP3:1"], "solver": "rectangular",
+                       "envelope_plane": "xy", "envelope_length": 300, "envelope_width": 200,
+                       "envelope_origin": [600, 400], "rotation": "none", "quantity": 1,
+                       "spacing": 5},
+     _unless(MACHINING_EXTENSION, _refused("extension-only setting", "rotation")), None),
     ("design_delete_feature",
-     lambda c: {"feature": _ctx_get(c, "arr_sheet", "the plane-envelope nest")}, "ok", None),
+     lambda c: {"feature": _ctx_get(c, "arr_sheet", "the plane-envelope nest")},
+     _needs(MACHINING_EXTENSION, "ok"), None),
     ("model_arrange", {"shapes": ["ArrP1:1", "ArrP2:1", "ArrP3:1"], "solver": "3d",
                        "envelope_plane": "xy", "envelope_length": 200, "envelope_width": 200,
                        "envelope_height": 100, "envelope_origin": [600, 400], "spacing": 5},
-     _needs(MACHINING_EXTENSION, _packed(3, extent=(200, 200, 100))),
-     ("arr_box", lambda p: p["feature"])),
+     _packed(3, extent=(200, 200, 100)), ("arr_box", lambda p: p["feature"])),
     ("design_delete_feature",
-     lambda c: {"feature": _ctx_get(c, "arr_box", "the 3D nest")},
-     _needs(MACHINING_EXTENSION, "ok"), None),
+     lambda c: {"feature": _ctx_get(c, "arr_box", "the 3D nest")}, "ok", None),
     _dwell(2.0),
 ]
 

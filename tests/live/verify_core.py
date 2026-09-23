@@ -250,11 +250,29 @@ def _needs(capability, expect="ok"):
     return Needs(capability, expect)
 
 
+class Unless:
+    """expect=Unless("<capability>", expect) - a step that RUNS only where that capability is
+    measured ABSENT: the base-licence variant of a gated tool, usually the refusal the platform
+    answers there, judged exactly like a bare expectation. An unreadable probe holds it back the
+    way it holds a Needs step back - a flag that did not answer is evidence of nothing."""
+
+    def __init__(self, capability, expect="refused"):
+        self.capability = capability
+        self.expect = expect
+
+
+def _unless(capability, expect="refused"):
+    return Unless(capability, expect)
+
+
+_GATES = (Parked, Needs, Unless)
+
+
 def _unparked(expect):
-    """The expectation a step is actually judged by - the innermost expectation of the Parked and
-    Needs wrappers, or the expectation itself. Both wrappers carry ledger routing, never a
-    judgement, so neither may change what a step is measured against."""
-    while isinstance(expect, (Parked, Needs)):
+    """The expectation a step is actually judged by - the innermost expectation of the Parked,
+    Needs and Unless wrappers, or the expectation itself. The wrappers carry ledger routing, never
+    a judgement, so none may change what a step is measured against."""
+    while isinstance(expect, _GATES):
         expect = expect.expect
     return expect
 
@@ -262,17 +280,47 @@ def _unparked(expect):
 def step_capability(expect):
     """The capability a step DECLARES, or None - read off the expectation object, so the
     declaration travels with the row it gates however the wrappers are nested."""
-    while isinstance(expect, (Parked, Needs)):
-        if isinstance(expect, Needs):
+    while isinstance(expect, _GATES):
+        if isinstance(expect, (Needs, Unless)):
             return expect.capability
         expect = expect.expect
     return None
 
 
+def step_runs_unentitled(expect):
+    """True for a step wrapped in Unless - the variant that runs where its capability is absent."""
+    while isinstance(expect, _GATES):
+        if isinstance(expect, Unless):
+            return True
+        expect = expect.expect
+    return False
+
+
+def gate_allows(entitlements, expect):
+    """Whether the run may execute this step: a Needs step where its capability reads entitled, an
+    Unless step where it reads absent (False - an unreadable probe runs neither), any other step
+    always."""
+    capability = step_capability(expect)
+    if capability is None:
+        return True
+    if step_runs_unentitled(expect):
+        return entitlements.get(capability) is False
+    return capability_met(entitlements, capability)
+
+
+def gate_skip_reason(entitlements, expect):
+    """The receipt's bucket line for a gated step the run held back - an Unless step on an entitled
+    installation says so, every other case is the capability's own skip reason."""
+    capability = step_capability(expect)
+    if step_runs_unentitled(expect) and entitlements.get(capability) is True:
+        return f"{capability} entitled - this row runs only where it is absent"
+    return capability_skip_reason(capability, entitlements)
+
+
 def parked_reason(expect):
-    """The ledger reason a Parked wrapper carries, or None - read through a Needs wrapper, so a
-    step that is both gated and parked still renders its reason."""
-    while isinstance(expect, (Parked, Needs)):
+    """The ledger reason a Parked wrapper carries, or None - read through a Needs or Unless wrapper,
+    so a step that is both gated and parked still renders its reason."""
+    while isinstance(expect, _GATES):
         if isinstance(expect, Parked):
             return expect.reason
         expect = expect.expect
@@ -2354,7 +2402,14 @@ def _watch(occurrence):
         # one shared plane: look straight down its normal. Mixed planes have no such view, so iso
         # at least shows all of them at an angle rather than one of them edge-on.
         view = _PLANE_VIEW.get(planes.pop(), "top") if len(planes) == 1 else "iso-top-right"
-    return ("view_set", {"action": "orient", "orientation": view, "focus": occurrence}, "ok", None)
+    return ("view_set", {"action": "orient", "orientation": view, "focus": occurrence},
+            _smooth_off, None)
+
+
+def _smooth_off(p):
+    """The orient assigned its camera with smooth transitions off - the value it SET, since the
+    platform consumes the flag on assignment and a read-back answers the default."""
+    return (p.get("applied") or {}).get("smooth_transition") is False
 
 
 def _dwell(seconds):
@@ -2378,4 +2433,4 @@ def _watch_all():
     """A camera row with NO focus: fit the whole model. Correct only while the world IS the subject
     - the parametric skeleton, before the first cameo lands in its own grid slot - and wrong once
     the grid spreads the world over a metre, which is what _watch(occurrence) is for."""
-    return ("view_set", {"action": "orient", "orientation": "iso-top-right"}, "ok", None)
+    return ("view_set", {"action": "orient", "orientation": "iso-top-right"}, _smooth_off, None)

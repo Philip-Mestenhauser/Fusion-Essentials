@@ -138,7 +138,11 @@ def _recognize_groups(bodies, include_partial):
     try:
         groups = adsk.cam.RecognizedHoleGroup.recognizeHoleGroupsWithInput(list(bodies), inp)
     except Exception as e:
-        return None, f"Hole recognition raised on {len(bodies)} body/bodies: {e}"
+        return None, (f"Hole recognition raised on {len(bodies)} body/bodies: {e}"
+                      + _common.entitlement_clause(
+                          e, "Manufacturing Extension",
+                          "select the hole faces by hand - find_geometry(kind='cylinder_face') "
+                          "handles feed cam_select_geometry(selection='holes')"))
     if groups is None:
         return None, f"Hole recognition returned nothing for {len(bodies)} body/bodies."
     return groups, None

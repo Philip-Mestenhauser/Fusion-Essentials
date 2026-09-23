@@ -92,9 +92,12 @@ def rig(monkeypatch):
     monkeypatch.setattr(cv, "app", FakeApplication(active_viewport=vp))
     applied, captures = [], []
 
-    def fake_apply(viewport, name):
+    def fake_apply(viewport, name, fit=False, smooth=False):
         applied.append(name)
-        viewport.camera = f"cam-{name}"
+        # A restore now rebuilds a fresh camera from the saved one's fields, so the per-view
+        # placeholder must carry a real camera's shape - camera_type alone names which view it was.
+        viewport.camera = Camera(camera_type=f"cam-{name}")
+        return None, None
 
     switches = []
 
@@ -171,10 +174,11 @@ class TestCaptureSwitchPassThrough:
 
 class TestPerViewFailureIsolation:
     def test_one_orient_failure_reports_that_row_and_keeps_the_rest(self, rig, monkeypatch):
-        def flaky_apply(viewport, name):
+        def flaky_apply(viewport, name, fit=False, smooth=False):
             if name == "top":
                 raise ValueError("boom")
             rig.applied.append(name)
+            return None, None
 
         monkeypatch.setattr(cv._view_common, "apply_named_view", flaky_apply)
         result = cv.handler(views=["front", "top", "right"])
@@ -229,22 +233,19 @@ class TestCameraRestore:
     def test_a_camera_restore_the_viewport_refuses_is_named_on_the_summary(self, rig,
                                                                            monkeypatch):
         # write="read": a camera this tool cannot put back leaves the viewport moved BY A READ.
-        # Swallowing that in the finally reported a clean multi-shot over a changed document.
-        # The per-view orients still land; only putting the ORIGINAL camera back is refused, which
-        # is the state that leaves the viewport moved after the call returns.
-        # The camera the tool saves is the FIRST copy it reads; refusing that object alone leaves
-        # the per-view orients landing, which is the state this test is about.
-        reads = []
+        # The per-view orients still land; only the FINAL restore assignment is refused - the
+        # third camera-setter call for a two-view run (one per orient, one for the rebuilt
+        # restore - a restore now assigns a FRESH camera, never the saved object's own identity).
+        calls = {"n": 0}
 
-        def read_a_copy(self):
-            reads.append(self._cam._copy())
-            return reads[-1]
-
-        def refuse_the_restore(self, value):
-            if reads and value is reads[0]:
+        def refuse_the_last(self, value):
+            calls["n"] += 1
+            if calls["n"] > 2:
                 raise RuntimeError("viewport busy")
             self._assigned.append(value)
-        monkeypatch.setattr(type(rig.vp), "camera", property(read_a_copy, refuse_the_restore))
+            self._cam = value
+        monkeypatch.setattr(type(rig.vp), "camera",
+                            property(Viewport.camera.fget, refuse_the_last))
         result = cv.handler(views=["front", "top"])
         assert result["isError"] is False                 # the images were still captured
         summary = _texts(result)[0]
@@ -261,9 +262,9 @@ class TestStandoffFallbackDisclosure:
     where only some views did that must name WHICH, since silence means the camera's own distance."""
 
     def test_only_the_views_framed_from_the_fallback_are_named(self, rig, monkeypatch):
-        def apply(viewport, name):
-            viewport.camera = f"cam-{name}"
-            return 100.0 if name == "top" else None
+        def apply(viewport, name, fit=False, smooth=False):
+            viewport.camera = Camera(camera_type=f"cam-{name}")
+            return (100.0 if name == "top" else None), None
 
         monkeypatch.setattr(cv._view_common, "apply_named_view", apply)
         summary = _texts(cv.handler(views=["front", "top"]))[0]
@@ -278,7 +279,8 @@ class TestStandoffFallbackDisclosure:
     def test_a_view_that_fell_back_but_never_captured_is_not_claimed(self, rig, monkeypatch):
         # 'top' orients off the fallback and then fails to grab - naming it would report a
         # standoff for an image the sheet does not carry
-        monkeypatch.setattr(cv._view_common, "apply_named_view", lambda vp, name: 100.0)
+        monkeypatch.setattr(cv._view_common, "apply_named_view",
+                            lambda vp, name, fit=False, smooth=False: (100.0, None))
 
         calls = {"n": 0}
 
@@ -328,3 +330,23 @@ class TestOrthoCameraType:
         cv.handler(views=["iso-top-right", "front"])
         assert rig_real_orient.cam_types[0] == "user-camera-type"
         assert rig_real_orient.cam_types[1] is adsk.core.CameraTypes.OrthographicCameraType
+
+
+class TestFitParam:
+    """'fit' gates whether each orient actually fits the model - a fit-all per view is the bounce
+    this tool caused on every multi-shot."""
+
+    def test_fit_false_makes_no_fit_call(self, rig_real_orient):
+        result = cv.handler(views=["front", "top"], fit=False)
+        assert result["isError"] is False
+        assert rig_real_orient.vp._fit_calls == 0
+
+    def test_every_view_frames_the_visible_geometry_by_default(self, rig_real_orient):
+        result = cv.handler(views=["front", "top"])
+        assert result["isError"] is False
+        assert rig_real_orient.vp._fit_calls == 2
+
+    def test_every_orient_and_the_restore_glide(self, rig_real_orient):
+        cv.handler(views=["front", "top"])
+        assert len(rig_real_orient.vp._assigned) >= 3
+        assert all(c.isSmoothTransition is True for c in rig_real_orient.vp._assigned)

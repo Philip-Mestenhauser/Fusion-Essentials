@@ -11,6 +11,7 @@ from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import ok, error, safe
 from ._cam_common import get_cam, find_setup
+from . import _view_common
 
 app = adsk.core.Application.get()
 
@@ -44,19 +45,17 @@ def activate_setup_handler(setup: str = "") -> dict:
         return error(f"activate() ran but isActive cannot be read on '{want}', so the activation is "
                      "UNCONFIRMED. Re-read the setups with cam_get.")
 
-    # Fit the view so a subsequent view_screenshot frames the setup. A fit that does not run leaves
-    # the activation standing, so it is REPORTED rather than raised - and the note states only what
-    # this call observed, never a fit it did not see happen.
+    # Fit the view so a subsequent view_screenshot frames the setup. isFitView/isSmoothTransition
+    # are CONSUMED on assignment and read back at their defaults (measured 2705.1.25), so the fit is
+    # judged by this assignment NOT RAISING, never by reading either flag back afterward.
     fit_failure = None
+    smooth_error = None
     try:
         vp = app.activeViewport
         if not vp:
             fit_failure = "there is no active viewport"
-        # Gated on 'is not True' for the same reason the isActive read above is: fit() is declared
-        # bool ('Returns true if successful'), so anything else is an answer this call cannot read
-        # a completed fit out of.
-        elif vp.fit() is not True:
-            fit_failure = "Viewport.fit() did not answer true"
+        else:
+            _cam, smooth_error = _view_common.apply_camera(vp, vp.camera, fit=True)
     except Exception as e:
         fit_failure = str(e)
 
@@ -68,6 +67,8 @@ def activate_setup_handler(setup: str = "") -> dict:
         out["note"] = (f"Setup activated. The view fit did not complete ({fit_failure}), so the "
                        "camera may not frame this setup - orient it with view_set before "
                        "view_screenshot.")
+    if smooth_error:
+        out["note"] += f" isSmoothTransition could not be set: {smooth_error}."
     return ok(out)
 
 

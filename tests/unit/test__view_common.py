@@ -184,8 +184,69 @@ class TestViewportHandsBackACopy:
         assert vp.camera.viewExtents == 999.0
 
 
+class _NoSmoothCamera:
+    """A camera whose isSmoothTransition SETTER raises - the platform declining that flag."""
+
+    def __init__(self):
+        c = Camera()
+        self.eye, self.target, self.upVector = c.eye, c.target, c.upVector
+        self.cameraType, self.isFitView = c.cameraType, c.isFitView
+        self.perspectiveAngle, self.viewExtents = c.perspectiveAngle, c.viewExtents
+
+    @property
+    def isSmoothTransition(self):
+        return True
+
+    @isSmoothTransition.setter
+    def isSmoothTransition(self, value):
+        raise RuntimeError("isSmoothTransition unavailable")
+
+    def _copy(self):
+        dup = type(self).__new__(type(self))
+        dup.__dict__.update(self.__dict__)
+        return dup
+
+
+class TestApplyCamera:
+    """apply_camera: the ONE camera assignment every view tool shares - smooth transitions off
+    unless asked for, isFitView set explicitly, the read-back camera returned."""
+
+    def test_sets_smooth_transition_off_and_isfitview(self):
+        vp = _viewport()
+        read, smooth_error = vc.apply_camera(vp, vp._original_camera, fit=True)
+        assert smooth_error is None
+        assert vp._assigned[-1].isSmoothTransition is False
+        assert vp._assigned[-1].isFitView is True
+        assert read.isFitView is True
+
+    def test_smooth_true_assigns_a_glide(self):
+        vp = _viewport()
+        _, smooth_error = vc.apply_camera(vp, vp._original_camera, fit=False, smooth=True)
+        assert smooth_error is None
+        assert vp._assigned[-1].isSmoothTransition is True
+
+    def test_restore_passes_the_glide_to_every_assignment(self):
+        vp = _viewport()
+        saved = vp._original_camera._copy()
+        vc.restore_camera(vp, saved, smooth=True)
+        assert vp._assigned and all(c.isSmoothTransition is True for c in vp._assigned)
+
+    def test_fit_false_leaves_isfitview_false(self):
+        vp = _viewport()
+        vc.apply_camera(vp, vp._original_camera, fit=False)
+        assert vp._assigned[-1].isFitView is False
+
+    def test_a_setter_that_raises_is_reported_not_swallowed(self):
+        cam = _NoSmoothCamera()
+        vp = Viewport(camera=cam)
+        _, smooth_error = vc.apply_camera(vp, cam, fit=False)
+        assert smooth_error is not None and "isSmoothTransition" in smooth_error
+        # a soft isSmoothTransition failure never blocks the camera assignment itself
+        assert vp._assigned and vp._assigned[-1] is cam
+
+
 class TestApplyNamedView:
-    def test_named_view_assigns_camera_and_fits(self):
+    def test_named_view_assigns_camera(self):
         vp = _viewport()
         before = camera_state(vp._original_camera)
         vc.apply_named_view(vp, "front")
@@ -193,7 +254,30 @@ class TestApplyNamedView:
         # carrying the state it read, not on getting the same object returned.
         assert vp._assigned and vp._cam is vp._assigned[-1]
         assert camera_state(vp._cam) != before
+
+    def test_no_fit_by_default(self):
+        # apply_named_view aims the camera without fitting - a fit is a separate ask, or the
+        # viewport zooms out to fit everything on every reorient.
+        vp = _viewport()
+        vc.apply_named_view(vp, "front")
+        assert vp._fit_calls == 0
+
+    def test_fit_true_fits_exactly_once(self):
+        vp = _viewport()
+        vc.apply_named_view(vp, "front", fit=True)
         assert vp._fit_calls == 1
+
+    def test_the_assigned_camera_has_smooth_transition_off(self):
+        vp = _viewport()
+        vc.apply_named_view(vp, "front")
+        assert vp._assigned[-1].isSmoothTransition is False
+
+    def test_smooth_true_glides_every_assignment_of_the_orient(self):
+        # A true face orients in two assignments (the type switch, then the extents) - both glide.
+        vp = _viewport()
+        vc.apply_named_view(vp, "front", smooth=True)
+        assert len(vp._assigned) == 2
+        assert all(c.isSmoothTransition is True for c in vp._assigned)
 
     def test_true_face_forces_orthographic_camera(self):
         vp = _viewport()
@@ -238,7 +322,7 @@ class TestApplyNamedView:
         cam = _camera()
         cam.eye = _refusing_point(5, 0, 0)
         vp = _viewport(cam=cam)
-        used = vc.apply_named_view(vp, "front")
+        used, _smooth_error = vc.apply_named_view(vp, "front")
         assert used == vc.STANDOFF_FALLBACK_CM
         eye, tgt = vp._cam.eye, vp._cam.target
         assert math.isclose(math.dist((eye.x, eye.y, eye.z), (tgt.x, tgt.y, tgt.z)),
@@ -254,7 +338,7 @@ class TestApplyNamedView:
         cam.target = FakePoint(2, -3, 4)
         cam.eye = FakePoint(2, -3, 4)            # exactly on the target - a standoff of 0.0
         vp = _viewport(cam=cam)
-        assert vc.apply_named_view(vp, "front") == vc.STANDOFF_FALLBACK_CM
+        assert vc.apply_named_view(vp, "front")[0] == vc.STANDOFF_FALLBACK_CM
         eye, tgt = vp._cam.eye, vp._cam.target
         assert math.isclose(math.dist((eye.x, eye.y, eye.z), (tgt.x, tgt.y, tgt.z)),
                             vc.STANDOFF_FALLBACK_CM, rel_tol=1e-9)
@@ -268,10 +352,143 @@ class TestApplyNamedView:
         cam.target = FakePoint(2, -3, 4)
         cam.eye = FakePoint(5, 1, 16)            # (3, 4, 12) from it - a standoff of exactly 13
         vp = _viewport(cam=cam)
-        assert vc.apply_named_view(vp, "front") is None
+        assert vc.apply_named_view(vp, "front")[0] is None
         eye, tgt = vp._cam.eye, vp._cam.target
         assert math.isclose(math.dist((eye.x, eye.y, eye.z), (tgt.x, tgt.y, tgt.z)), 13.0,
                             rel_tol=1e-9)
+
+
+class TestRestoreCamera:
+    """restore_camera rebuilds on a FRESH read (cameraType set before eye) rather than reassigning
+    the saved object directly - the fix for a measured (2705.1.25) eye-distance multiply bug."""
+
+    def test_the_assigned_camera_is_not_the_saved_object(self):
+        saved = Camera(eye=(1, 2, 3), target=(4, 5, 6))
+        vp = _viewport()
+        vc.restore_camera(vp, saved)
+        assert vp._assigned[-1] is not saved
+
+    def test_a_same_type_perspective_restore_is_one_assignment_without_extents(self):
+        # MEASURED: a perspective camera's extents are a ratio to its eye distance, so the saved
+        # extents are NOT written - the eye/target carry the framing on the fresh read's extents.
+        import adsk.core
+        saved = Camera(eye=(1, 2, 3), target=(4, 5, 6), up=(0, 0, 1),
+                       camera_type=adsk.core.CameraTypes.PerspectiveCameraType,
+                       perspective_angle=0.7, view_extents=55.0)
+        vp = _viewport(cam=Camera(camera_type=adsk.core.CameraTypes.PerspectiveCameraType,
+                                  view_extents=5.347))
+        vc.restore_camera(vp, saved)
+        assert len(vp._assigned) == 1
+        got = vp._assigned[-1]
+        assert (got.eye.x, got.eye.y, got.eye.z) == (1, 2, 3)
+        assert (got.target.x, got.target.y, got.target.z) == (4, 5, 6)
+        assert (got.upVector.x, got.upVector.y, got.upVector.z) == (0, 0, 1)
+        assert got.perspectiveAngle == 0.7
+        assert got.viewExtents == 5.347
+
+    def test_a_type_switch_lands_alone_before_the_eye_and_target(self):
+        # MEASURED: a type switch rescales the eye to the viewport's current extents, so the
+        # switch is its own assignment and the eye/target follow on a fresh read of the new type.
+        import adsk.core
+        saved = Camera(eye=(1, 2, 3), target=(4, 5, 6), up=(0, 0, 1),
+                       camera_type=adsk.core.CameraTypes.PerspectiveCameraType,
+                       perspective_angle=0.7, view_extents=0.4)
+        vp = _viewport(cam=Camera(camera_type=adsk.core.CameraTypes.OrthographicCameraType,
+                                  view_extents=5.347))
+        vc.restore_camera(vp, saved)
+        assert len(vp._assigned) == 2
+        first, second = vp._assigned
+        assert first.cameraType == adsk.core.CameraTypes.PerspectiveCameraType
+        assert (second.eye.x, second.eye.y, second.eye.z) == (1, 2, 3)
+        assert (second.target.x, second.target.y, second.target.z) == (4, 5, 6)
+        assert second.viewExtents == 5.347          # never the saved 0.4 on a perspective restore
+
+    def test_an_orthographic_restore_writes_its_window_after_the_switch(self):
+        # MEASURED: an extents write is dropped when the type switches in the same assignment, so
+        # the window lands on the second assignment after the type has taken.
+        import adsk.core
+        saved = Camera(eye=(1, 2, 3), target=(4, 5, 6), up=(0, 0, 1),
+                       camera_type=adsk.core.CameraTypes.OrthographicCameraType,
+                       view_extents=55.0)
+        vp = _viewport(cam=Camera(camera_type=adsk.core.CameraTypes.PerspectiveCameraType,
+                                  view_extents=0.4))
+        vc.restore_camera(vp, saved)
+        assert len(vp._assigned) == 2
+        first, second = vp._assigned
+        assert first.cameraType == adsk.core.CameraTypes.OrthographicCameraType
+        assert second.viewExtents == 55.0
+        assert (second.eye.x, second.eye.y, second.eye.z) == (1, 2, 3)
+        assert (second.target.x, second.target.y, second.target.z) == (4, 5, 6)
+
+    def test_camera_type_is_set_before_eye(self):
+        class _OrderTrackingCamera(Camera):
+            """Records which of 'cameraType'/'eye' a caller wrote FIRST, once tracking is armed -
+            live Fusion multiplies a reassigned saved camera's eye unless type lands first."""
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                self._tracking = True
+
+            def __setattr__(self, key, value):
+                if getattr(self, "_tracking", False) and key in ("cameraType", "eye"):
+                    self.__dict__.setdefault("_set_order", []).append(key)
+                object.__setattr__(self, key, value)
+
+        vp = Viewport(camera=_OrderTrackingCamera())
+        saved = Camera(eye=(1, 2, 3), target=(4, 5, 6), camera_type="saved-type")
+        vc.restore_camera(vp, saved)
+        assert vp._assigned[-1]._set_order[:2] == ["cameraType", "eye"]
+
+    def test_the_isfitview_fed_to_apply_camera_comes_from_saved(self):
+        saved = Camera(eye=(1, 2, 3), target=(4, 5, 6), is_fit_view=True)
+        vp = _viewport()
+        vc.restore_camera(vp, saved)
+        assert vp._assigned[-1].isFitView is True
+
+
+class TestCameraRestored:
+    def test_a_matching_read_back_is_restored(self):
+        saved = Camera(eye=(1, 2, 3), target=(0, 0, 0))
+        read_back = Camera(eye=(1, 2, 3), target=(0, 0, 0))
+        assert vc.camera_restored(read_back, saved) is True
+
+    def test_an_eye_that_differs_is_not_restored(self):
+        # the measured trap: a reassigned saved camera's eye lands far from where it read before.
+        saved = Camera(eye=(1, 2, 3), target=(0, 0, 0))
+        read_back = Camera(eye=(13, 26, 39), target=(0, 0, 0))
+        assert vc.camera_restored(read_back, saved) is False
+
+    def test_a_target_that_differs_is_not_restored(self):
+        saved = Camera(eye=(1, 2, 3), target=(0, 0, 0))
+        read_back = Camera(eye=(1, 2, 3), target=(0, 0, 1))
+        assert vc.camera_restored(read_back, saved) is False
+
+    def test_within_tolerance_still_restores(self):
+        saved = Camera(eye=(1, 2, 3), target=(0, 0, 0))
+        read_back = Camera(eye=(1, 2, 3 + 1e-9), target=(0, 0, 0))
+        assert vc.camera_restored(read_back, saved) is True
+
+
+class TestOrthoExtentsFromPerspective:
+    """Switching camera type off perspective leaves viewExtents at the PERSPECTIVE value (measured
+    2705.1.25) - a named face view recomputes it so the apparent size survives the switch."""
+
+    def test_a_perspective_camera_gets_extents_matching_its_apparent_size(self, monkeypatch):
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        cam = Camera(eye=(0, -20, 0), target=(0, 0, 0), camera_type="perspective-like",
+                    perspective_angle=0.5, view_extents=999.0)
+        vp = _viewport(cam=cam)
+        vc.apply_named_view(vp, "top")
+        expected = 2 * 20.0 * math.tan(0.5 / 2)
+        assert math.isclose(vp._assigned[-1].viewExtents, expected, rel_tol=1e-9)
+
+    def test_an_already_orthographic_camera_keeps_its_extents(self, monkeypatch):
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        cam = Camera(eye=(0, -20, 0), target=(0, 0, 0), view_extents=42.0)   # default: Orthographic
+        vp = _viewport(cam=cam)
+        vc.apply_named_view(vp, "top")
+        assert vp._assigned[-1].viewExtents == 42.0
 
 
 class TestApplyNamedViewEyeSide:

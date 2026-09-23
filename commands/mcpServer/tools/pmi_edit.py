@@ -51,7 +51,7 @@ def _do_set_text(ann, comp, text):
     try:
         ann.segments = segs
     except Exception as e:
-        return error(f"Setting the note text failed: {e}")
+        return error(f"Setting the note text failed: {e}" + _pmi.entitlement_clause(e))
     got = _pmi.segments_markup(ann)
     if got is None:
         return error("The text edit did not take (segments unreadable after the set).")

@@ -395,7 +395,7 @@ class Camera:
     and `up` take a FakePoint or an (x, y, z) tuple."""
     def __init__(self, eye=(10.0, 10.0, 10.0), target=(0.0, 0.0, 0.0), up=None,
                  camera_type=None, is_fit_view=False, perspective_angle=0.0,
-                 view_extents=100.0):
+                 view_extents=100.0, is_smooth_transition=True):
         self.eye = FakePoint(*eye) if isinstance(eye, tuple) else eye
         self.target = FakePoint(*target) if isinstance(target, tuple) else target
         self.upVector = FakePoint(*up) if isinstance(up, tuple) else up
@@ -404,6 +404,7 @@ class Camera:
         self.isFitView = is_fit_view
         self.perspectiveAngle = perspective_angle
         self.viewExtents = view_extents
+        self.isSmoothTransition = is_smooth_transition
 
     def _copy(self):
         """A detached duplicate carrying the same field values - what a viewport read hands back

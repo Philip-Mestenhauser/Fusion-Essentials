@@ -36,8 +36,8 @@ if hasattr(sys.stdout, "reconfigure"):
 from verify_core import (
     NOTE_MAX, REFUSAL_NOTE_MAX, REPO_ROOT, SRC_ROOT, STEP_SLEEP_S, VERIFIED, _HERE, _RECALL,
     _Refusal, _leaves_no_row, _unparked, capability_met,
-    capability_skip_reason, facade, parked_reason, predicate_kind, probe_capabilities,
-    step_capability)
+    capability_skip_reason, facade, gate_allows, gate_skip_reason, parked_reason, predicate_kind,
+    probe_capabilities, step_capability)
 
 
 # tests/live also holds harnesses the sweep never imports - they measure API facts and drive the
@@ -1065,10 +1065,10 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
         # ...then the per-STEP half of the same tier: the unmet rows are dropped BEFORE the step
         # engine, so the by-position pairing between judged_steps and its rows is untouched.
         for step in judged_steps(steps):
-            cap = step_capability(step[2])
-            if not met(cap):
-                gated.setdefault(step[0], capability_skip_reason(cap, entitlements))
-        steps = [s for s in steps if met(step_capability(s[2]))]
+            met(step_capability(step[2]))          # the probe, taken once per capability
+            if not gate_allows(entitlements, step[2]):
+                gated.setdefault(step[0], gate_skip_reason(entitlements, step[2]))
+        steps = [s for s in steps if gate_allows(entitlements, s[2])]
         # judged_steps, not the act's raw list, is what pairs with the rows below - see its
         # docstring for what a dwell does to the pairing.
         act_rows = run_steps(

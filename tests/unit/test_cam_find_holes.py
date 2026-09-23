@@ -329,6 +329,22 @@ class TestRecognizerCall:
                             raising=False)
         groups, err = cfh._recognize_groups([object()], False)
         assert groups is None and "InternalValidationError" in err
+        assert "entitlement" not in err
+
+    def test_an_unentitled_recognizer_names_the_extension_and_the_by_hand_route(self, monkeypatch):
+        # measured on an install without the extension: the platform raises this text, and the
+        # agent's next step is the typed face selection, not a retry
+        def boom(bodies, inp):
+            raise RuntimeError("3 : Requires the Manufacturing Extension to be active.")
+
+        monkeypatch.setattr(adsk.cam.RecognizedHolesInput, "create",
+                            lambda: type("I", (), {"filterPartialHoles": None})(), raising=False)
+        monkeypatch.setattr(adsk.cam.RecognizedHoleGroup, "recognizeHoleGroupsWithInput", boom,
+                            raising=False)
+        groups, err = cfh._recognize_groups([object()], False)
+        assert groups is None
+        assert "Manufacturing Extension" in err and "entitlement" in err
+        assert "find_geometry(kind='cylinder_face')" in err and "selection='holes'" in err
 
 
 class TestGuards:

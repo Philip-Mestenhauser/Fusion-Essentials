@@ -27,17 +27,30 @@ class UnreadableActiveSetup(FakeSetup):
         pass
 
 
+class _RaisingCameraViewport(Viewport):
+    """The camera ASSIGNMENT itself raises - the platform refusing the write outright."""
+
+    def __init__(self, message):
+        super().__init__()
+        self._message = message
+
+    @property
+    def camera(self):
+        return Viewport.camera.fget(self)
+
+    @camera.setter
+    def camera(self, value):
+        raise RuntimeError(self._message)
+
+
 @pytest.fixture
 def viewport(monkeypatch):
-    """Point the module's app at one viewport, or at none. Viewport.fit() is declared bool
-    ('Returns true if successful'), so each test states what its fit ANSWERS - True, False, None, a
-    raise, or no viewport to ask at all. Mock stands in for the whole surface: only fit() is read
-    here, and every assertion below is on a concrete value."""
-    def _viewport(answer=True, raises=None, absent=False):
+    """Point the module's app at one viewport, or at none: a plain one, one whose camera
+    ASSIGNMENT raises, or no viewport."""
+    def _viewport(raises=None, absent=False):
         vp = None
         if not absent:
-            vp = Mock()
-            vp.fit = Mock(side_effect=RuntimeError(raises)) if raises else Mock(return_value=answer)
+            vp = _RaisingCameraViewport(raises) if raises else Viewport()
         monkeypatch.setattr(mod, "app", Mock(activeViewport=vp))
         return vp
     return _viewport
@@ -129,10 +142,13 @@ class TestViewFit:
     say the view was fit when the fit actually ran."""
 
     def test_a_successful_fit_is_run_once_and_claimed(self, wire, viewport):
+        # isFitView/isSmoothTransition are CONSUMED on assignment (2705.1.25) - the gate is
+        # apply_camera not raising, never a flag read back off the assigned camera.
         wire(setup=FakeSetup(name="Op10"))
         vp = viewport()
         out = payload(mod.activate_setup_handler(setup="Op10"))
-        assert vp.fit.call_count == 1
+        assert vp._fit_calls == 0
+        assert vp._assigned                    # the assignment reached the viewport
         assert out["view_fit"] is True and "view fit" in out["note"]
         assert "fit_error" not in out
 
@@ -145,23 +161,6 @@ class TestViewFit:
         assert "no graphics context" in out["fit_error"]
         assert "did not complete" in out["note"] and "and view fit" not in out["note"]
 
-    def test_a_fit_returning_false_is_not_claimed_as_a_fit(self, wire, viewport):
-        # Viewport.fit() is declared 'Returns true if successful'; discarding a false answer leaves
-        # the note claiming a fit the platform declined.
-        wire(setup=FakeSetup(name="Op10"))
-        viewport(answer=False)
-        out = payload(mod.activate_setup_handler(setup="Op10"))
-        assert out["view_fit"] is False and "did not answer true" in out["fit_error"]
-
-    def test_a_fit_answering_neither_true_nor_false_is_not_claimed_as_a_fit(self, wire, viewport):
-        # the gate is 'is not True', not 'is False': a fit() that answers None told this call
-        # nothing, and 'view fit' is a claim only a true answer supports.
-        wire(setup=FakeSetup(name="Op10"))
-        viewport(answer=None)
-        out = payload(mod.activate_setup_handler(setup="Op10"))
-        assert out["view_fit"] is False and "did not answer true" in out["fit_error"]
-        assert "and view fit" not in out["note"]
-
     def test_no_active_viewport_is_reported_not_claimed(self, wire, viewport):
         wire(setup=FakeSetup(name="Op10"))
         viewport(absent=True)
@@ -169,17 +168,11 @@ class TestViewFit:
         assert out["view_fit"] is False and "no active viewport" in out["fit_error"]
 
     def test_the_shared_viewport_fake_satisfies_the_gate(self, wire, monkeypatch):
-        # conftest's Viewport is the fake other suites hand this handler; a fit() answering None
-        # there reports a declined fit on a viewport that framed fine.
+        # conftest's Viewport is the fake other suites hand this handler; its assignment does not
+        # raise, so the gate reports success without reading isFitView back.
         wire(setup=FakeSetup(name="Op10"))
         vp = Viewport()
         monkeypatch.setattr(mod, "app", Mock(activeViewport=vp))
         out = payload(mod.activate_setup_handler(setup="Op10"))
-        assert vp._fit_calls == 1
+        assert vp._fit_calls == 0
         assert out["view_fit"] is True and "fit_error" not in out
-
-    def test_the_shared_viewport_fakes_declined_fit_reaches_the_gate(self, wire, monkeypatch):
-        wire(setup=FakeSetup(name="Op10"))
-        monkeypatch.setattr(mod, "app", Mock(activeViewport=Viewport(fit_ok=False)))
-        out = payload(mod.activate_setup_handler(setup="Op10"))
-        assert out["view_fit"] is False and "did not answer true" in out["fit_error"]

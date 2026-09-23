@@ -561,3 +561,27 @@ approval_mode = "approve"
 
 [mcp_servers.fusion-essentials.tools.workspace_orient]
 approval_mode = "approve"
+
+[mcp_servers.fusion-essentials.tools.cam_delete_machine]
+approval_mode = "approve"
+
+[mcp_servers.fusion-essentials.tools.cam_delete_template]
+approval_mode = "approve"
+
+[mcp_servers.fusion-essentials.tools.cam_find_holes]
+approval_mode = "approve"
+
+[mcp_servers.fusion-essentials.tools.cam_find_pockets]
+approval_mode = "approve"
+
+[mcp_servers.fusion-essentials.tools.design_set_metadata]
+approval_mode = "approve"
+
+[mcp_servers.fusion-essentials.tools.drawing_delete_sketch]
+approval_mode = "approve"
+
+[mcp_servers.fusion-essentials.tools.drawing_get_status]
+approval_mode = "approve"
+
+[mcp_servers.fusion-essentials.tools.sys_get_guidance]
+approval_mode = "approve"

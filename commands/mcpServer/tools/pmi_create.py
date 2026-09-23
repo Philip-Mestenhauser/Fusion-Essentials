@@ -170,7 +170,7 @@ def _create_note(d, ents, text, leader_point, plane, plane_face, align, valign,
         note_in.segments = segs
         ann = notes.add(note_in)
     except Exception as e:
-        return None, None, f"Leader note creation failed: {e}"
+        return None, None, f"Leader note creation failed: {e}" + _pmi.entitlement_clause(e)
     if ann is None:
         return None, None, ("The PMI add() returned nothing - no annotation was created. The "
                             "geometry may not support this note kind.")
@@ -196,9 +196,10 @@ def _create_hole_note(d, ents, text, align, valign, perpendicular, ext_cm, flags
             return None, None, ferr
         ann = notes.add(note_in)
     except Exception as e:
-        return None, None, (f"Hole/thread note creation failed: {e}. The faces must belong to "
-                            "geometric holes (cylinder/counterbore/countersink faces) or "
-                            "cylindrical bosses.")
+        clause = _pmi.entitlement_clause(e)
+        return None, None, (f"Hole/thread note creation failed: {e}." + (clause or (
+            " The faces must belong to geometric holes (cylinder/counterbore/countersink faces) "
+            "or cylindrical bosses.")))
     if ann is None:
         return None, None, ("The PMI add() returned nothing - no annotation was created. The "
                             "geometry may not support a hole/thread callout (hole_note needs a "

@@ -1064,6 +1064,9 @@ def _licence_partition(acts, act_needs, opt_in):
             cap = tool_verify.step_capability(step[2])
             if name in tiered_acts or cap in opt_in:
                 continue
+            if tool_verify.step_runs_unentitled(step[2]) and name not in gated_acts:
+                free.add(step[0])          # the base-licence variant itself
+                continue
             (held if (name in gated_acts or cap is not None) else free).add(step[0])
     return held, free
 
@@ -1245,6 +1248,42 @@ class TestCapabilityTier:
         assert ledger["a_get"] == "covered"
         assert seen == ["workspace_orient", "a_get"]
         assert modes == [("ACT E", "narrative")]
+
+    def test_an_unless_step_runs_where_the_capability_is_absent(self, monkeypatch):
+        # the base-licence variant: the Needs row is held back and the Unless row runs in its
+        # place, so the tool keeps a row on an unentitled installation
+        acts = [("ACT U", None, [
+            ("a_get", {}, "ok", None),
+            ("gated_get", {}, tool_verify._needs("machining_extension", lambda p: p["n"] == 1), None),
+            ("gated_get", {}, tool_verify._unless("machining_extension", lambda p: p["n"] == 1), None),
+        ], [])]
+        ledger, seen, _modes = self._run(
+            monkeypatch, acts, {}, entitled=False, tools=["a_get", "gated_get"])
+        assert ledger["gated_get"] == "covered"
+        assert seen == ["workspace_orient", "a_get", "gated_get"]
+
+    def test_an_unless_step_is_held_back_where_the_capability_is_entitled(self, monkeypatch):
+        acts = [("ACT U", None, [
+            ("a_get", {}, "ok", None),
+            ("unless_get", {}, tool_verify._unless("machining_extension", "refused"), None),
+        ], [])]
+        ledger, seen, _modes = self._run(
+            monkeypatch, acts, {}, entitled=True, tools=["a_get", "unless_get"])
+        assert ledger["unless_get"] == ("skipped: machining_extension entitled - this row runs "
+                                        "only where it is absent")
+        assert seen == ["workspace_orient", "a_get"]
+
+    def test_an_unless_step_carries_its_capability_and_its_inner_judgement(self):
+        # the probe registry reads the declaration through it, and the judgement stays inside
+        gate = tool_verify._unless("machining_extension", "refused")
+        assert tool_verify.step_capability(gate) == "machining_extension"
+        assert tool_verify.step_runs_unentitled(gate) is True
+        assert tool_verify.step_runs_unentitled(tool_verify._needs("machining_extension")) is False
+        assert tool_verify._unparked(gate) == "refused"
+        # an unreadable probe runs neither variant
+        assert tool_verify.gate_allows({"machining_extension": None}, gate) is False
+        assert tool_verify.gate_allows({"machining_extension": False}, gate) is True
+        assert tool_verify.gate_allows({"machining_extension": True}, gate) is False
 
     def test_a_gated_step_is_dropped_without_shifting_the_rows_after_it(self, monkeypatch):
         # The bug this exists to catch is silent and green: a gated step that still yielded a row

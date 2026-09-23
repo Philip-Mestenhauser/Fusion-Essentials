@@ -6,14 +6,15 @@ them back on. That's exactly the bug-prone part (matching + restore), so it gets
 """
 
 import base64
+import math
 import os
 from types import SimpleNamespace
 
 import pytest
 
-from conftest import (BRepBody, FakeApplication, FakeOccurrence, MakeComp, MakeDesign, Viewport,
-                      _NamedCollection, body_proxy, install, load_tool, make_design,
-                      make_occurrence)
+from conftest import (BRepBody, Camera, FakeApplication, FakeOccurrence, FakePoint, MakeComp,
+                      MakeDesign, Viewport, _NamedCollection, body_proxy, camera_state, install,
+                      load_tool, make_design, make_occurrence)
 
 gs = load_tool("view_screenshot")
 
@@ -39,17 +40,53 @@ def _install(occs):
 
 
 class TestIsolateForFit:
-    def test_hides_others_and_restores(self):
+    def test_isolates_the_subject_in_one_write_and_clears_it(self):
+        # Fusion's own isolate lock, not a bulb walk: 184 bulb writes ran past the 30 s handler
+        # deadline on a 185-occurrence assembly, and the siblings' bulbs are never touched.
         a, b, c = FakeOcc("A:1"), FakeOcc("B:1"), FakeOcc("C:1")
         _install([a, b, c])
         restore, target, err = gs._isolate_for_fit("B:1")
         assert restore is not None and err is None
         assert target is b                     # the resolved occurrence rides along
-        # only B stays on
-        assert b.isLightBulbOn is True
-        assert a.isLightBulbOn is False and c.isLightBulbOn is False
-        restore()
+        assert b.isIsolated is True
+        assert a.isIsolated is False and c.isIsolated is False
         assert a.isLightBulbOn is True and c.isLightBulbOn is True
+        assert restore() == []
+        assert b.isIsolated is False
+
+    def test_an_isolate_the_platform_declines_is_a_refusal_before_the_shot(self):
+        class Inert(FakeOccurrence):
+            """isIsolated takes the write and reads back False - the shot would be of everything."""
+
+            @property
+            def isIsolated(self):
+                return False
+
+            @isIsolated.setter
+            def isIsolated(self, value):
+                pass
+
+        a = Inert(path="A:1", component=MakeComp(name="A"))
+        _install([a])
+        restore, target, err = gs._isolate_for_fit("A:1")
+        assert restore is None and target is None
+        assert "did not isolate" in err and "A:1" in err
+
+    def test_a_folder_outside_the_lineage_is_never_written(self):
+        # the isolate hides the other components whole, so only the subject's lineage (and the
+        # root) has folders left on screen to switch off
+        a, b = FakeOcc("A:1"), FakeOcc("B:1")
+        design = _install([a, b])
+        design._all_components = [a.component, b.component]
+        a.component.entityToken, b.component.entityToken = "tok-a", "tok-b"
+        a.component.isSketchFolderLightBulbOn = True
+        b.component.isSketchFolderLightBulbOn = True
+        restore, _target, err = gs._isolate_for_fit("A:1")
+        assert err is None
+        assert a.component.isSketchFolderLightBulbOn is False
+        assert b.component.isSketchFolderLightBulbOn is True
+        assert restore() == []
+        assert a.component.isSketchFolderLightBulbOn is True
 
     def test_display_folders_hidden_for_the_shot_and_restored(self):
         # vp.fit() frames every VISIBLE entity, so a big construction plane in the fitted
@@ -79,7 +116,7 @@ class TestIsolateForFit:
         a = FakeOcc("Bracket:1")
         _install([a, FakeOcc("Other:1")])
         restore, _target, err = gs._isolate_for_fit("bracket")
-        assert restore is not None and err is None and a.isLightBulbOn is True
+        assert restore is not None and err is None and a.isIsolated is True
 
     def test_no_match_returns_none(self):
         _install([FakeOcc("A:1")])
@@ -96,13 +133,13 @@ class TestIsolateForFit:
         assert "ambiguous" in err.lower()
         assert "Sub-A:1+Bolt:1" in err and "Sub-B:1+Bolt:1" in err
 
-    def test_already_hidden_others_not_restored_on(self):
-        # an occurrence that was already OFF should stay off after restore (we only flip ones we hid)
+    def test_a_hidden_sibling_is_never_written(self):
+        # an occurrence that was already OFF stays off through the isolate and its clear
         a, b = FakeOcc("A:1", on=True), FakeOcc("B:1", on=False)
         _install([a, b])
         restore, _target, err = gs._isolate_for_fit("A:1")
         restore()
-        assert b.isLightBulbOn is False      # we never turned it on
+        assert b.isLightBulbOn is False and b.isIsolated is False
 
     def test_a_clean_restore_reports_nothing_stuck(self):
         a, b = FakeOcc("A:1"), FakeOcc("B:1")
@@ -110,29 +147,29 @@ class TestIsolateForFit:
         restore, _target, _err = gs._isolate_for_fit("A:1")
         assert restore() == []
 
-    def test_a_bulb_that_will_not_come_back_on_is_named_by_the_restore(self):
-        # This tool MUTATES visibility to take its picture. A restore that silently failed leaves
+    def test_an_isolation_that_will_not_clear_is_named_by_the_restore(self):
+        # This tool MUTATES the view to take its picture. A restore that silently failed leaves
         # a read tool having changed the document, so the failure has to be reportable.
-        class OneWay(FakeOccurrence):
-            """A bulb that switches OFF and then refuses to come back ON - so the hide takes and
-            the restore silently does not, which is the only shape that leaves a read tool
-            having changed the document."""
+        class Sticky(FakeOccurrence):
+            """An isolate lock that takes and then refuses to clear."""
 
-            def __init__(self, path):
-                super().__init__(path=path, light_bulb_on=True,
-                                 component=MakeComp(name=path.split("+")[-1].split(":")[0]))
-                object.__setattr__(self, "_armed", True)
+            @property
+            def isIsolated(self):
+                return object.__getattribute__(self, "_isolated")
 
-            def __setattr__(self, key, value):
-                if key == "isLightBulbOn" and value is True and getattr(self, "_armed", False):
+            @isIsolated.setter
+            def isIsolated(self, value):
+                if value is False and object.__getattribute__(self, "_isolated"):
                     return
-                object.__setattr__(self, key, value)
+                object.__setattr__(self, "_isolated", value)
 
-        stuck = OneWay("Sub:1+B:1")
+        stuck = Sticky(path="Sub:1+B:1", component=MakeComp(name="B"))
         _install([FakeOcc("A:1"), stuck])
-        restore, _target, _err = gs._isolate_for_fit("A:1")
-        assert stuck.isLightBulbOn is False           # the hide DID take
-        assert restore() == ["Sub:1+B:1"]
+        restore, _target, _err = gs._isolate_for_fit("Sub:1+B:1")
+        assert stuck.isIsolated is True               # the isolate DID take
+        assert restore() == ["Sub:1+B:1 (still isolated)"]
+        msg = gs._restore_message(restore)
+        assert "clear_isolation" in msg and "Sub:1+B:1" in msg
 
 
 class TestFitToOnABody:
@@ -390,18 +427,61 @@ class TestCaptureSwitchPassThrough:
         assert result["isError"] is True and "capture failed" in result["message"]
 
 
+class TestFitParam:
+    """'fit' gates whether a named-view orient actually fits the model - the bounce (zoom out to
+    fit everything, then bounce to a new zoom) this tool caused on every reorient. Drives the REAL
+    _view_common orient against the shared Viewport/Camera fakes, not a mock."""
+
+    @pytest.fixture
+    def rig(self, monkeypatch):
+        import adsk.core
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        vp = Viewport(camera=Camera(eye=(0.0, -20.0, 0.0), target=(0.0, 0.0, 0.0)))
+        monkeypatch.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
+        monkeypatch.setattr(gs._common, "design", lambda: None)
+        monkeypatch.setattr(gs._view_common, "capture_png_b64", lambda *a, **k: ("B64DATA", None))
+        return vp
+
+    def test_a_named_view_frames_the_visible_geometry(self, rig):
+        # a named view aimed at the current distance framed a 50 mm part as a blank shot (measured
+        # on a 185-occurrence assembly), so every named view fits; the exact restore takes it back
+        result = gs.handler(view="iso-top-right")
+        assert result["isError"] is False
+        assert rig._fit_calls == 1
+
+    def test_current_keeps_the_users_framing(self, rig):
+        before = rig._original_camera.eye.distanceTo(rig._original_camera.target)
+        result = gs.handler(view="current", zoom=1.5)
+        assert result["isError"] is False
+        assert rig._fit_calls == 0
+        after = rig._assigned[-1]
+        assert math.isclose(after.eye.distanceTo(after.target), before, rel_tol=1e-9)
+
+    def test_fit_true_frames_the_current_view(self, rig):
+        result = gs.handler(view="current", fit=True)
+        assert result["isError"] is False
+        assert rig._fit_calls == 1
+
+    def test_the_orient_and_the_restore_glide(self, rig):
+        # A shot's camera moves are the one place the view family glides: the orient and the
+        # restore both assign with isSmoothTransition True so a watcher sees the shot happen.
+        gs.handler(view="iso-top-right")
+        assert len(rig._assigned) >= 2
+        assert all(c.isSmoothTransition is True for c in rig._assigned)
+
+
 class TestFitToRestoreDisclosure:
     """fit_to hides the other occurrences to frame one - a mutation a READ tool must undo. A
     restore that did not take is surfaced on the result, never swallowed in a finally."""
 
     @pytest.fixture
     def rig(self, monkeypatch):
-        vp = SimpleNamespace(camera=SimpleNamespace(viewExtents=1.0), fit=lambda: None)
+        vp = Viewport(camera=Camera())
         monkeypatch.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
         monkeypatch.setattr(gs._common, "design", lambda: None)
         monkeypatch.setattr(gs._view_common, "capture_png_b64",
                             lambda *a, **k: ("B64DATA", None))
-        monkeypatch.setattr(gs._view_common, "apply_named_view", lambda v, name: None)
+        monkeypatch.setattr(gs._view_common, "apply_named_view", lambda v, name, fit=False, smooth=False: (None, None))
         return monkeypatch
 
     def _stub_isolate(self, monkeypatch, stuck):
@@ -443,7 +523,7 @@ class TestFitToRestoreDisclosure:
         # the document is left with occurrences hidden.
         self._stub_isolate(rig, ["Sub:1+Gear:1"])
         rig.setattr(gs._view_common, "apply_named_view",
-                    lambda v, name: (_ for _ in ()).throw(RuntimeError("camera is busy")))
+                    lambda v, name, fit=False, smooth=False: (_ for _ in ()).throw(RuntimeError("camera is busy")))
         result = gs.handler(view="top", fit_to="Bracket:1")
         assert result["isError"] is True
         assert "Failed to set view 'top'" in result["message"]
@@ -452,7 +532,7 @@ class TestFitToRestoreDisclosure:
     def test_a_failed_orient_with_a_clean_restore_says_nothing_extra(self, rig):
         self._stub_isolate(rig, [])
         rig.setattr(gs._view_common, "apply_named_view",
-                    lambda v, name: (_ for _ in ()).throw(RuntimeError("camera is busy")))
+                    lambda v, name, fit=False, smooth=False: (_ for _ in ()).throw(RuntimeError("camera is busy")))
         result = gs.handler(view="top", fit_to="Bracket:1")
         assert result["isError"] is True and "could NOT turn" not in result["message"]
 
@@ -467,8 +547,8 @@ class TestFitToRestoreDisclosure:
     def test_the_description_discloses_the_hide_and_restore(self):
         # disclosed on 'fit_to' itself - the input whose value triggers the visibility change
         desc = gs.tool.to_dict()["inputSchema"]["properties"]["fit_to"]["description"]
-        assert "Hides the rest" in desc
-        assert "restores them" in desc
+        assert "Isolates" in desc
+        assert "restores the view" in desc
 
 
 class TestCameraRestore:
@@ -489,11 +569,12 @@ class TestCameraRestore:
             def viewExtents(self, value):
                 raise RuntimeError("extents locked")
 
-        def __init__(self, refuse_assign=False, zoom_raises=False, camera_unreadable=False):
-            super().__init__(camera=(self._StuckExtents() if zoom_raises
-                                     else SimpleNamespace(viewExtents=1.0)))
+        def __init__(self, refuse_assign=False, zoom_raises=False, camera_unreadable=False,
+                     mismatch_restore=False):
+            super().__init__(camera=(self._StuckExtents() if zoom_raises else Camera()))
             self._refuse = refuse_assign
             self._unreadable = camera_unreadable
+            self._mismatch = mismatch_restore
 
         @property
         def camera(self):
@@ -505,6 +586,11 @@ class TestCameraRestore:
         def camera(self, value):
             if self._refuse:
                 raise RuntimeError("viewport busy")
+            if self._mismatch:
+                # the measured trap: the write succeeds (no raise) but the eye reads back
+                # multiplied - the write is NOT what a naive success check would assume.
+                value = Camera(eye=(value.eye.x * 13, value.eye.y * 13, value.eye.z * 13),
+                               target=value.target)
             self._assigned.append(value)
             self._cam = value
 
@@ -522,28 +608,39 @@ class TestCameraRestore:
         original = vp.camera
         rig.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
 
-        def move_then_fail(viewport, name):
-            viewport.camera = SimpleNamespace(viewExtents=99.0)   # the camera HAS moved
+        def move_then_fail(viewport, name, fit=False, smooth=False):
+            viewport.camera = Camera(view_extents=99.0)   # the camera HAS moved
             raise RuntimeError("camera is busy")
         rig.setattr(gs._view_common, "apply_named_view", move_then_fail)
         result = gs.handler(view="top")
         assert result["isError"] is True and "Failed to set view 'top'" in result["message"]
-        assert vp.camera is original                              # put back on the failure exit
+        # a restore rebuilds a FRESH camera rather than reassigning 'original' - judged on state.
+        assert camera_state(vp.camera) == camera_state(original)
 
     def test_a_camera_restore_the_viewport_refuses_is_named_on_the_shot(self, rig):
         vp = self._Viewport(refuse_assign=True)
         rig.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
-        rig.setattr(gs._view_common, "apply_named_view", lambda v, name: None)
+        rig.setattr(gs._view_common, "apply_named_view", lambda v, name, fit=False, smooth=False: (None, None))
         result = gs.handler(view="top")
         assert result["isError"] is False                         # the picture WAS taken
         text = result["content"][0]["text"]
         assert "could NOT be put back" in text and "viewport busy" in text
         assert "view_set(orient)" in text
 
+    def test_a_restore_whose_read_back_eye_does_not_match_is_reported(self, rig):
+        # no exception - the platform accepts the write and lies about it (measured 2705.1.25).
+        vp = self._Viewport(mismatch_restore=True)
+        rig.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
+        rig.setattr(gs._view_common, "apply_named_view", lambda v, name, fit=False, smooth=False: (None, None))
+        result = gs.handler(view="top")
+        assert result["isError"] is False                         # the picture WAS taken
+        text = result["content"][0]["text"]
+        assert "could NOT be put back" in text and "do not match" in text
+
     def test_a_clean_restore_says_nothing_extra(self, rig):
         vp = self._Viewport()
         rig.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
-        rig.setattr(gs._view_common, "apply_named_view", lambda v, name: None)
+        rig.setattr(gs._view_common, "apply_named_view", lambda v, name, fit=False, smooth=False: (None, None))
         result = gs.handler(view="top")
         assert [c["type"] for c in result["content"]] == ["image"]
 
@@ -554,7 +651,8 @@ class TestCameraRestore:
         vp = self._Viewport(camera_unreadable=True)
         rig.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
         oriented = []
-        rig.setattr(gs._view_common, "apply_named_view", lambda v, name: oriented.append(name))
+        rig.setattr(gs._view_common, "apply_named_view",
+                    lambda v, name, fit=False, smooth=False: (oriented.append(name), None))
         result = gs.handler(view="front")
         assert result["isError"] is False and oriented == ["front"]   # the camera DID move
         assert [c["type"] for c in result["content"]] == ["text", "image"]
@@ -567,7 +665,7 @@ class TestCameraRestore:
         # zoom had applied, and the image is read as the requested framing.
         vp = self._Viewport(zoom_raises=True)
         rig.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
-        rig.setattr(gs._view_common, "apply_named_view", lambda v, name: None)
+        rig.setattr(gs._view_common, "apply_named_view", lambda v, name, fit=False, smooth=False: (None, None))
         result = gs.handler(view="top", zoom=0.5)
         assert result["isError"] is False
         text = result["content"][0]["text"]
@@ -581,14 +679,14 @@ class TestStandoffFallbackDisclosure:
 
     @pytest.fixture
     def rig(self, monkeypatch):
-        vp = SimpleNamespace(camera=SimpleNamespace(viewExtents=1.0), fit=lambda: None)
+        vp = Viewport(camera=Camera())
         monkeypatch.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
         monkeypatch.setattr(gs._common, "design", lambda: None)
         monkeypatch.setattr(gs._view_common, "capture_png_b64", lambda *a, **k: ("B64DATA", None))
         return monkeypatch
 
     def test_a_used_fallback_rides_on_the_shot(self, rig):
-        rig.setattr(gs._view_common, "apply_named_view", lambda v, name: 100.0)
+        rig.setattr(gs._view_common, "apply_named_view", lambda v, name, fit=False, smooth=False: (100.0, None))
         result = gs.handler(view="top")
         assert result["isError"] is False
         text = result["content"][0]["text"]
@@ -600,7 +698,7 @@ class TestStandoffFallbackDisclosure:
     def test_a_capture_that_failed_claims_no_eye_placement(self, rig):
         # the orient placed an eye, but there is no picture the placement produced - saying so on
         # the failure describes a shot that does not exist
-        rig.setattr(gs._view_common, "apply_named_view", lambda v, name: 100.0)
+        rig.setattr(gs._view_common, "apply_named_view", lambda v, name, fit=False, smooth=False: (100.0, None))
         rig.setattr(gs._view_common, "capture_png_b64",
                     lambda *a, **k: (None, "Viewport capture failed."))
         result = gs.handler(view="top")
@@ -608,13 +706,13 @@ class TestStandoffFallbackDisclosure:
         assert "standoff_fallback_cm" not in result["message"]
 
     def test_a_camera_that_framed_the_shot_itself_publishes_nothing(self, rig):
-        rig.setattr(gs._view_common, "apply_named_view", lambda v, name: None)
+        rig.setattr(gs._view_common, "apply_named_view", lambda v, name, fit=False, smooth=False: (None, None))
         result = gs.handler(view="top")
         assert [c["type"] for c in result["content"]] == ["image"]
 
     def test_the_current_view_never_claims_a_fallback(self, rig):
         # view='current' does not orient at all, so no eye was placed at a fallback standoff
-        rig.setattr(gs._view_common, "apply_named_view", lambda v, name: 100.0)
+        rig.setattr(gs._view_common, "apply_named_view", lambda v, name, fit=False, smooth=False: (100.0, None))
         result = gs.handler(view="current")
         assert all("standoff_fallback_cm" not in c.get("text", "") for c in result["content"])
 
@@ -628,12 +726,12 @@ class TestFilePathWrite:
 
     @pytest.fixture
     def rig(self, monkeypatch):
-        vp = SimpleNamespace(camera=SimpleNamespace(viewExtents=1.0), fit=lambda: None)
+        vp = Viewport(camera=Camera())
         monkeypatch.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
         monkeypatch.setattr(gs._common, "design", lambda: None)
         oriented = []
         monkeypatch.setattr(gs._view_common, "apply_named_view",
-                            lambda v, name: oriented.append(name))
+                            lambda v, name, fit=False, smooth=False: (oriented.append(name), None))
         monkeypatch.setattr(gs._view_common, "capture_png_b64",
                             lambda *a, **k: (base64.b64encode(self.PNG).decode("ascii"), None))
         return SimpleNamespace(monkeypatch=monkeypatch, oriented=oriented)
@@ -722,12 +820,14 @@ class TestFilePathWrite:
         vp = gs.app.activeViewport
         snapshot = vp.camera
 
-        def orient(viewport, name):
-            viewport.camera = SimpleNamespace(viewExtents=9.0)    # the orient moves the camera
+        def orient(viewport, name, fit=False, smooth=False):
+            viewport.camera = Camera(view_extents=9.0)    # the orient moves the camera
+            return None, None
 
         rig.monkeypatch.setattr(gs._view_common, "apply_named_view", orient)
         gs.handler(view="top", file_path=str(tmp_path / "shot.png"))
-        assert vp.camera is snapshot
+        # a restore rebuilds a FRESH camera rather than reassigning 'snapshot' - judged on state.
+        assert camera_state(vp.camera) == camera_state(snapshot)
 
     def test_the_surface_offers_the_path_and_says_the_image_still_returns(self):
         props = gs.tool.to_dict()["inputSchema"]["properties"]
@@ -766,10 +866,10 @@ class TestHandlerInputGuards:
 
     @pytest.fixture
     def rig(self, monkeypatch):
-        vp = SimpleNamespace(camera=SimpleNamespace(viewExtents=1.0), fit=lambda: None)
+        vp = Viewport(camera=Camera())
         monkeypatch.setattr(gs, "app", SimpleNamespace(activeViewport=vp))
         monkeypatch.setattr(gs._common, "design", lambda: None)
-        monkeypatch.setattr(gs._view_common, "apply_named_view", lambda v, name: None)
+        monkeypatch.setattr(gs._view_common, "apply_named_view", lambda v, name, fit=False, smooth=False: (None, None))
         return monkeypatch
 
     def test_unknown_view_is_refused_and_lists_the_valid_ones(self, rig):

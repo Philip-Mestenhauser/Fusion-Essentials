@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 192  |  **description breadcrumbs:** 289  |  **note/error breadcrumbs:** 620
+**Tools:** 192  |  **description breadcrumbs:** 290  |  **note/error breadcrumbs:** 620
   |  **guidance smells flagged:** 8
 ## Blindspots to engineer
 
@@ -37,7 +37,7 @@ close orphans, factor duplicated guards into shared helpers.
 ### Hubs (most breadcrumbs lead here - the connective tissue)
 - `doc_new`  <- 83  (desc 0, note 83)
 - `design_get`  <- 50  (desc 10, note 40)
-- `find_geometry`  <- 49  (desc 13, note 36)
+- `find_geometry`  <- 50  (desc 14, note 36)
 - `design_delete_feature`  <- 40  (desc 16, note 24)
 - `view_screenshot`  <- 34  (desc 5, note 29)
 - `cam_get`  <- 32  (desc 15, note 17)
@@ -748,6 +748,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - surface_bodies_skipped
 - unreadable_bodies_skipped
 - 'attack_vector'  has no direction, so it names no approach. Pass the direction the tool comes DOWN, e.g. [0, 0, -1] for a 3-axis setup.
+- select the pocket by hand - a floor face handle from find_geometry(kind='planar_face') feeds cam_select_geometry(selection='pocket')
 - No solid body to recognize pockets on:  surface,  mesh and  unreadable body/bodies were skipped. Name a solid body in 'bodies' (find_geometry / design_get(include=['tree'])).
 
 ### `cam_generate`
@@ -2662,8 +2663,8 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Could not create the arrange input (solver may be unavailable).
 - Could not set the arrange envelope from the inputs given.
 - The arrange input exposes no 'definition' on this Fusion version, so move_originals, rotation, quantity and part_in_part cannot be set.
-- ) appears to need a Fusion extension on this account:
-- . Try solver='rectangular', or enable the extension.
+- ) hit an extension-only setting on this account:
+- . The solvers run on the base licence with a boundary or an envelope and a spacing; drop the setting the call added (rotation, margin, quantity, part_in_part) or enable the Manufacturing Extension.
 - No face of these shapes reads a plane, which solver='{label}' needs: {names}. Nothing was created. Drop them from 'shapes' to nest the rest, or pass solver='3d', which packed a body with no planar ...
 - Arrange (solver='{label}') failed with '{code}': a shape it holds carries no planar face and the platform names none of them. The feature is gone from the timeline, so nothing was created. Arrange ...
 - {names} read isGroundToParent True - the platform refuses to arrange a pinned component with move_originals=true. Nothing was created. Release each with assembly_ground(ground_to_parent=false), or ...
@@ -2674,6 +2675,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Pass exactly ONE envelope: 'boundary_sketch' (a sketch profile), or 'envelope_plane' with 'envelope_length' and 'envelope_width'. Given boundary_sketch='', envelope_plane=''.
 - solver='3d' packs into a 3D envelope: pass 'envelope_plane' with 'envelope_length', 'envelope_width' and 'envelope_height' instead of 'boundary_sketch' ('').
 - 'envelope_origin' offsets a SIZED envelope from its plane's origin, and the profile envelope this call takes from sketch '' carries no origin offsets. Drop it, or pass 'envelope_plane' with its sizes.
+- Arrange () hit an extension-only setting on this account: . The solvers run on the base licence with a boundary or an envelope and a spacing; drop the setting the call added (rotation, margin, quan...
 - Arrange reported success but NOTHING happened - no input occurrence moved and no occurrence was added.  Check the  holds the shapes at this spacing.
 - Arrange left  component(s) UNPLACED - its statistics read arranged , unarranged . The feature '' IS in the model with the rest placed: enlarge the envelope, lower 'spacing', or pass partial=true, t...
 - new_occurrences holds the copies; moved reads empty - re-arranging stacks another set, design_delete_feature removes it.
@@ -3426,7 +3428,6 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - ' - reposition with pmi_edit)
 - 'leader_extension' must be a number (in 'units').
 - setAnnotationPlane() declined - face/custom_face need plane_face (face: an ADJACENT face), circular_edge/cylinder_axis need matching geometry.
-- Hole/thread note creation failed: . The faces must belong to geometric holes (cylinder/counterbore/countersink faces) or cylindrical bosses.
 - The PMI add() returned nothing - no annotation was created. The geometry may not support a hole/thread callout (hole_note needs a recognizable hole or cylindrical boss).
 
 ### `pmi_delete`
@@ -4132,6 +4133,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - fit_to: nothing matched '
 - '. Use design_get(include=['tree']) for occurrences, find_geometry for a body.
 - The camera could NOT be put back where it was before this shot: . The viewport is left at the capture camera - view_set(orient) re-aims it.
+- The camera could NOT be put back where it was before this shot: the read-back eye/target do not match the saved camera. The viewport is left at the capture camera - view_set(orient) re-aims it.
 - Active component is '' - everything outside it renders dimmed/translucent in this image (activation scope, not a lighting issue). Activate the root to see all parts solid.
 - The camera could not be captured before this shot, so the viewport is LEFT at the capture view (no restore was possible) - view_set(orient) re-aims it.
 - standoff_fallback_cm=: the camera's eye-target distance did not read as a positive number, so the eye was placed  cm from the target along the view direction before the fit.
@@ -4139,6 +4141,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 ### `view_screenshot_multi`
 - No active viewport (is a document open?).
 - No views were captured.
+- The camera could NOT be put back where it was before these shots: the read-back eye/target do not match the saved camera. The viewport is left at the last captured view - view_set(orient) re-aims it.
 - The camera could NOT be put back where it was before these shots: . The viewport is left at the last captured view - view_set(orient) re-aims it.
 - standoff_fallback_cm= on : the camera's eye-target distance did not read as a positive number, so the eye was placed  cm from the target along each of those view directions before the fit.
 
@@ -4215,7 +4218,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - 'focus': nothing named '
 - ' to frame - no occurrence and no sketch carries that name.
 - Occurrence lookup said:
-- ' after fitting the whole model, but the viewport frame could not be read before aiming at '
+- ' after staging the projection, but the viewport frame could not be read before aiming at '
 - '; the focus was not applied.
 - ' against the current view (a bounding box, the camera's axes, or its extents would not read), so the view is NOT framed on it. Re-run with fit=false to re-aim only.
 - Visibility changed. view_screenshot to view; view_set(restore) to undo.
@@ -4263,7 +4266,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - 'perspective_angle_deg'= needs a perspective camera, but the projection in effect is ''. Pass projection='perspective' in the same call.
 - After staging projection '', camera target reads , isFitView reads '', and cameraType could not be read back - projection and focus are unverified.
 - After staging projection '', camera target reads , isFitView reads '', and projection reads back '' - the requested projection did not take and focus is unverified.
-- Projection reads '' after fitting the whole model, but the viewport frame could not be read before aiming at ''; the focus was not applied.
+- Projection reads '' after staging the projection, but the viewport frame could not be read before aiming at ''; the focus was not applied.
 - Could not read what the viewport currently shows, so the view could not be framed on '' and the camera was NOT moved. Re-run with fit=false to re-aim only.
 - Could not measure '' against the current view (a bounding box, the camera's axes, or its extents would not read), so the view is NOT framed on it. Re-run with fit=false to re-aim only.
 - Camera re-aimed at '' WITHOUT zooming to it - fit=false keeps the current eye-to-target distance. Pass fit=true (the default) to frame it.

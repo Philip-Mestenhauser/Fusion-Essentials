@@ -148,14 +148,16 @@ def _camera_focus_read(projection, *keys, differs_from=()):
     return check
 
 
-def _retained_png(path):
-    """Return a predicate requiring the requested screenshot file to contain bytes."""
+def _retained_png(path, at_least=1):
+    """Return a predicate requiring the requested screenshot file to hold at least 'at_least' bytes
+    (a blank frame of the fixture's backdrop is a few KB; a framed shot is tens of KB)."""
     def check(payload):
         size = os.path.getsize(path) if os.path.isfile(path) else None
         reported = f"file_path={path}" in str(payload)
-        return _measured("current-view PNG retained on disk",
-                         {"file_path": path, "size_bytes": size, "reported": reported},
-                         reported and _num(size) and size > 0)
+        return _measured("PNG retained on disk",
+                         {"file_path": path, "size_bytes": size, "at_least": at_least,
+                          "reported": reported},
+                         reported and _num(size) and size >= at_least)
     return check
 
 
@@ -392,6 +394,20 @@ _SHOWCASE = [
     ("view_set", {"action": "apply_view", "view_name": "SweepHero"}, "ok", None),
     ("view_set", {"action": "list_views"},
      lambda p: "SweepHero" in [v.get("name") for v in (p.get("named_views") or [])], None),
+    # A NAMED shot frames the visible geometry whatever the camera was framing (here the moving
+    # jaw alone), and fit_to isolates its subject in ONE write and clears it again - so the
+    # clear_isolation that follows finds nothing to clear. Both shots are retained.
+    ("view_set", {"action": "orient", "focus": "JawMoving:1"}, "ok", None),
+    ("view_screenshot", {"view": "front", "width": 500, "height": 400,
+                         "file_path": EXPORT_DIR + "/view-frame-" + _VIEW_FOCUS_RUN + "-front.png"},
+     _retained_png(EXPORT_DIR + "/view-frame-" + _VIEW_FOCUS_RUN + "-front.png", 1000), None),
+    ("view_screenshot", {"view": "iso-top-right", "fit_to": "JawMoving:1", "width": 500,
+                         "height": 400,
+                         "file_path": EXPORT_DIR + "/view-frame-" + _VIEW_FOCUS_RUN + "-fit-to.png"},
+     _retained_png(EXPORT_DIR + "/view-frame-" + _VIEW_FOCUS_RUN + "-fit-to.png", 1000), None),
+    ("view_set", {"action": "clear_isolation"},
+     lambda p: _measured("fit_to left no isolation behind", {"cleared_count": p.get("cleared_count")},
+                         p.get("cleared_count") == 0), None),
     ("view_set", {"action": "restore"}, "ok", None),
     # one contact sheet, four presets. This tool walks the camera per view and fits each one, so its
     # cost on screen is one zoom-out per view in the list - a seven-view sheet and an 'all' sheet

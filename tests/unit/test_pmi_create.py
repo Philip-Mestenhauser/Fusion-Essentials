@@ -68,6 +68,36 @@ class TestNoteGuards:
             pc.handler(kind="note", geometry=["a"], text="X"))
 
 
+class TestEntitlement:
+    """PMI content writes raise the platform's entitlement refusal on an install without the
+    Design or Manufacturing Extension; the error names the extension and what still works."""
+
+    @staticmethod
+    def _refuse(_note_input):
+        raise RuntimeError("3 : Manufacturing or Design Extension is required")
+
+    def test_an_unentitled_note_write_names_the_extension_and_the_next_step(self, rig):
+        rig.stub_geometry([_face(rig.comp)])
+        rig.notes.add = self._refuse
+        msg = error_message(pc.handler(kind="note", geometry=["a"], text="X"))
+        assert "Extension is required" in msg and "entitlement" in msg and "pmi_get" in msg
+
+    def test_another_raise_carries_no_entitlement_clause(self, rig):
+        rig.stub_geometry([_face(rig.comp)])
+
+        def boom(_note_input):
+            raise RuntimeError("bad face")
+        rig.notes.add = boom
+        msg = error_message(pc.handler(kind="note", geometry=["a"], text="X"))
+        assert "bad face" in msg and "entitlement" not in msg
+
+    def test_an_unentitled_hole_note_write_names_the_next_step_not_the_geometry(self, rig):
+        rig.stub_geometry([_face(rig.comp)])
+        rig.hole_notes.add = self._refuse
+        msg = error_message(pc.handler(kind="hole_note", geometry=["a"]))
+        assert "pmi_get" in msg and "geometric holes" not in msg
+
+
 class TestHoleNoteGuards:
     def test_hole_note_refuses_non_face_entities(self, rig):
         rig.stub_geometry([BRepEdge(None)])

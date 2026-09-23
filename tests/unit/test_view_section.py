@@ -351,6 +351,7 @@ class TestAutoViewAim:
         cam = sv.app.activeViewport.camera
         assert (cam.eye.x, cam.eye.y, cam.eye.z) == (10, 0, 0)   # +X side at distance 10
         assert (cam.upVector.x, cam.upVector.y, cam.upVector.z) == (0, 0, 1)  # side cut -> Z up
+        assert cam.isFitView is True and cam.isSmoothTransition is False
 
     def test_flip_reverses_the_revealing_side(self):
         self._patch_create()

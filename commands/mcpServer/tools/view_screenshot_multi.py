@@ -3,8 +3,9 @@
 
 """MCP building block: capture SEVERAL views of the model in one call (multi-view "eyes").
 
-Re-orients + fits + saveAsImageFile per requested view (the same mechanism view_screenshot uses for
-one viewport per call), restoring the user's camera at the end. Read-only.
+Re-orients (framing the visible geometry unless 'fit' is false) + saveAsImageFile per view, the
+mechanism view_screenshot uses for one viewport per call, restoring the user's camera at the end.
+Read-only.
 """
 
 import adsk.core
@@ -58,7 +59,7 @@ def _parse_views(views):
 
 
 def handler(views=None, width: int = _WIDTH_DEFAULT, height: int = _HEIGHT_DEFAULT,
-            transparent_background=None,
+            fit: bool = True, transparent_background=None,
             anti_aliased=None) -> dict:
     """See TOOL_DESCRIPTION."""
     names, err = _parse_views(views)
@@ -84,16 +85,20 @@ def handler(views=None, width: int = _WIDTH_DEFAULT, height: int = _HEIGHT_DEFAU
     content = []
     saved_camera = vp.camera   # restore once at the end
     camera_warning = None
+    smooth_warning = None
     captured = []
     standoff_views, standoff_cm = [], None
     try:
         for name in names:
             fallback_cm = None
             try:
-                # every parsed view name resolves in the shared table (_VIEWS is built from it); the
-                # shared apply sets exact world-axis vectors (guaranteed square) + ortho + fit, and
-                # answers the eye-target standoff it FELL BACK to when the camera's own did not read.
-                fallback_cm = _view_common.apply_named_view(vp, name)
+                # every parsed view name resolves in the shared table (_VIEWS is built from it);
+                # the shared apply frames the visible geometry unless 'fit' is false, and answers
+                # the eye-target standoff it FELL BACK to when the camera's own did not read.
+                fallback_cm, smooth_error = _view_common.apply_named_view(
+                    vp, name, fit=fit, smooth=_view_common.SCREENSHOT_GLIDE)
+                if smooth_error and not smooth_warning:
+                    smooth_warning = f"isSmoothTransition could not be set: {smooth_error}."
             except Exception as e:
                 content.append({"type": "text", "text": f"[{name}] failed to orient: {e}"})
                 continue
@@ -110,11 +115,20 @@ def handler(views=None, width: int = _WIDTH_DEFAULT, height: int = _HEIGHT_DEFAU
                 standoff_cm = fallback_cm
                 standoff_views.append(name)
     finally:
+        # This tool is write="read": a camera it cannot put back leaves the viewport moved by a
+        # read, so a raise OR a read-back mismatch is reported, never swallowed.
         try:
-            vp.camera = saved_camera
+            read_back, restore_smooth_error = _view_common.restore_camera(
+                vp, saved_camera, smooth=_view_common.SCREENSHOT_GLIDE)
+            if not _view_common.camera_restored(read_back, saved_camera):
+                camera_warning = ("The camera could NOT be put back where it was before these "
+                                  "shots: the read-back eye/target do not match the saved camera. "
+                                  "The viewport is left at the last captured view - "
+                                  "view_set(orient) re-aims it.")
+            elif restore_smooth_error:
+                camera_warning = (f"isSmoothTransition could not be reset restoring the camera: "
+                                  f"{restore_smooth_error}.")
         except Exception as e:
-            # This tool is write="read": a camera it cannot put back leaves the viewport moved by
-            # a read, so the failure is reported rather than swallowed.
             camera_warning = (f"The camera could NOT be put back where it was before these shots: "
                               f"{e}. The viewport is left at the last captured view - "
                               "view_set(orient) re-aims it.")
@@ -126,6 +140,8 @@ def handler(views=None, width: int = _WIDTH_DEFAULT, height: int = _HEIGHT_DEFAU
                "Each image is labelled with its view above it.")
     if camera_warning:
         summary += " " + camera_warning
+    if smooth_warning:
+        summary += " " + smooth_warning
     if standoff_views:
         cm = f"{standoff_cm:g}"
         summary += (f" standoff_fallback_cm={cm} on {', '.join(standoff_views)}: the camera's "
@@ -150,6 +166,8 @@ tool = (
             "description": "['all'] = the six orthographic views; omit for front/top/right/iso."})
     .add_input_property("width", {"type": "integer", "description": "Pixels."})
     .add_input_property("height", {"type": "integer", "description": "Pixels."})
+    .add_input_property("fit", {"type": "boolean",
+            "description": "Frame the visible geometry per view; false keeps the current distance."})
     .add_input_property("transparent_background", {"type": "boolean"})
     .add_input_property("anti_aliased", {"type": "boolean"})
     .strict_schema()

@@ -11,13 +11,14 @@ tests/generated/STRATEGY_COMPETENCE.md publishes beside the proven ones.
 """
 
 from verify_acts_cam import (
-    _all_cut, _launched_on, _offers, _op_deleted, _op_named, _reveal, _selected)
+    MACHINING_EXTENSION, _all_cut, _launched_on, _offers, _op_deleted, _op_named, _reveal,
+    _selected)
 from verify_acts_hub import (
     HUB_COMP, HUB_MILL_SETUP, HUB_TURN_SETUP, _BALL_AT, _CHAMFER_AT, _CHAMFER_R, _FLAT6_AT,
     _FLAT_AT, _FLANGE_R, _FLANGE_T, _GROOVE_AT, _HUB_X, _PART_END, _SLOT_AT, _setup_created,
     _THREAD_INSERT_AT, _TURN_AT)
 from verify_core import (
-    _RECALL, _ctx_get, _fg, _measured, _near, _num, _recall, _refused, _watch)
+    _RECALL, _ctx_get, _fg, _measured, _near, _needs, _num, _recall, _refused, _unless, _watch)
 
 # The three cutters the hub's shop set does not carry: the cutting family refuses a mill by TYPE,
 # the hub's 12 mm thread mill in an 11 mm counterbore says "Tool doesn't fit.", and a probing
@@ -115,6 +116,9 @@ MEASURED_NUANCE = (
 _MILL_NAMES = ([n for _s, n, _i in _WHOLE_MODEL]
                + ["Slot", "Circular", "ThreadMill", "TraceRim", "ProjectRim", "Adaptive2D",
                   "WaterjetProfile", "ThreePlusTwo", "MorphPair"])
+# ThreePlusTwo alone among these needs the Machining Extension (isGenerationAllowed false without
+# it), so the unentitled reveal/read is scoped to this list, which leaves it out.
+_MILL_BASE_NAMES = [n for n in _MILL_NAMES if n != "ThreePlusTwo"]
 # The Machining Extension's own families this milling setup can feed, each on the geometry kind it
 # was measured to take. The ROTARY families are not among them: they wrap a model about a rotary
 # axis, and the sibling that drives one builds a setup with a machine and a bound WCS to turn about.
@@ -363,16 +367,27 @@ _CENSUS_MILL = [
     # orientation kind lands the face on machiningDirections and engages toolAxisMode in one call.
     ("find_geometry", {"target": HUB_COMP, "kind": "planar_face", "nearest_to": _FLAT_NEAR,
                        "max_results": 1}, _wedge_flat, _fg("census_flat")),
+    # THE TILTED AXIS needs the Machining Extension (measured on the lapsed install: the strategy
+    # reads isGenerationAllowed false and names this licence as the remedy) - the create is proven
+    # on either licence, and the selection that follows only has an operation to land on when it did.
     ("cam_create_operation",
      lambda c: {"setup": HUB_MILL_SETUP, "strategy": "three_plus_two", "name": "ThreePlusTwo",
                 "tool_scope": "document",
                 "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _FLAT_AT,
                 "generate": False},
-     _op_named(HUB_MILL_SETUP, "three_plus_two", "ThreePlusTwo"), None),
+     _needs(MACHINING_EXTENSION, _op_named(HUB_MILL_SETUP, "three_plus_two", "ThreePlusTwo")),
+     None),
+    ("cam_create_operation",
+     lambda c: {"setup": HUB_MILL_SETUP, "strategy": "three_plus_two", "name": "ThreePlusTwo",
+                "tool_scope": "document",
+                "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _FLAT_AT,
+                "generate": False},
+     _unless(MACHINING_EXTENSION,
+             _refused("isGenerationAllowed false", "Manufacturing Extension")), None),
     ("cam_select_geometry",
      lambda c: {"operation": "ThreePlusTwo", "selection": "orientation",
                 "handles": [_ctx_get(c, "census_flat", "the shaft's inclined flat")],
-                "generate": False}, _selected(1), None),
+                "generate": False}, _needs(MACHINING_EXTENSION, _selected(1)), None),
     # THE CURVE PAIR: morph is driven by TWO rim circles, one CurveSelection each. Measured, the
     # same pair fed as ONE selection walks into a single path and reports 'No passes to link'.
     ("find_geometry", {"target": HUB_COMP, "kind": "circular_edge", "radius": _FLANGE_R,
@@ -405,11 +420,21 @@ _CENSUS_MILL = [
 
 # ACT 10c8: the milling census read, once the act boundary's poll has certified that generation -
 # the hub framed once, every strategy shown in that frame, then the non-empty oracle per strategy.
+# The reveal shows _MILL_BASE_NAMES on either licence and ThreePlusTwo where the extension is
+# entitled; the time read is asserted twice: the full list entitled, _MILL_BASE_NAMES (ThreePlusTwo
+# out) where it is not.
 _CENSUS_MILL_READ = [
     _watch(HUB_COMP + ":1"),
-] + _reveal(_MILL_NAMES) + [
+] + _reveal(_MILL_BASE_NAMES) + [
+    (t, a, _needs(MACHINING_EXTENSION, e), s) if t == "cam_show_toolpath" else (t, a, e, s)
+    for t, a, e, s in _reveal(["ThreePlusTwo"])
+] + [
     ("cam_get", {"include": ["time"], "setup": HUB_MILL_SETUP},
-     _all_cut(HUB_MILL_SETUP, len(_MILL_NAMES), names=_MILL_NAMES), None),
+     _needs(MACHINING_EXTENSION, _all_cut(HUB_MILL_SETUP, len(_MILL_NAMES), names=_MILL_NAMES)),
+     None),
+    ("cam_get", {"include": ["time"], "setup": HUB_MILL_SETUP},
+     _unless(MACHINING_EXTENSION,
+             _all_cut(HUB_MILL_SETUP, len(_MILL_BASE_NAMES), names=_MILL_BASE_NAMES)), None),
 ]
 
 

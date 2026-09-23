@@ -1069,10 +1069,13 @@ _CAM_STORY = [
     ("cam_create_operation", {"setup": CAM_SETUP, "strategy": "drill", "name": _RECOGNIZED_OP,
                               "tool_scope": "document", "tool_index": _DRILL, "generate": False},
      _op_named(CAM_SETUP, "drill", _RECOGNIZED_OP), None),
+    # the recognizer's handles exist only where recognition ran (the extension tier); the drill
+    # itself, its surface group and the compare below are base-licence rows.
     ("cam_select_geometry",
      lambda c: {"operation": _RECOGNIZED_OP, "selection": "holes",
                 "handles": _ctx_get(c, "recognized_cbore_walls", "the recognized counterbore walls"),
-                "generate": False}, _selected_saved("recognized_cbore_walls"), None),
+                "generate": False},
+     _needs(MACHINING_EXTENSION, _selected_saved("recognized_cbore_walls")), None),
     # THE SURFACE GROUP on a BASE-licence strategy: a drill carries checkSurfaceSelectionSets, so
     # two faces land on a direct group of their own, told to be AVOIDED rather than machined.
     # _surface_group_applied is defined below this list, so the predicate is built when it RUNS.

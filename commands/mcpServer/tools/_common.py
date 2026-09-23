@@ -567,6 +567,15 @@ def named_with_remainder(items, cap=_MAX_NAMED_CANDIDATES):
 _ECHO_CHARS = 60
 
 
+def entitlement_clause(exc, needs, alternative):
+    """The next step after a platform raise names a missing extension, else '': what this install
+    lacks, where that reads, and the route that still works."""
+    if "xtension" not in str(exc):
+        return ""
+    return (f" This install carries no {needs} entitlement (workspace_orient's "
+            f"machining_capabilities.entitled reads it); {alternative}.")
+
+
 def short_ref(value):
     """A caller's value as a message echoes it: the head, a cut marked with the full length."""
     s = "" if value is None else str(value)

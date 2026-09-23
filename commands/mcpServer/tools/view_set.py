@@ -360,11 +360,10 @@ def _perspective_frame(vp, cam, focus_bb, target, label):
     desired_w, desired_h = width / _FRAME_MARGIN, height / _FRAME_MARGIN
     last = None
     attempts = 0
+    smooth_error = None
     for attempts in range(1, _PERSPECTIVE_FRAME_ATTEMPTS + 1):
-        cam.isFitView = False
-        vp.camera = cam
-        vp.refresh()
-        read_cam = vp.camera
+        read_cam, cam_smooth_error = _view_common.apply_camera(vp, cam, fit=False)
+        smooth_error = smooth_error or cam_smooth_error
         actual_target = safe(lambda: read_cam.target)
         actual_type = safe(lambda: read_cam.cameraType)
         bounds = _projected_box(vp, focus_bb)
@@ -386,13 +385,14 @@ def _perspective_frame(vp, cam, focus_bb, target, label):
         span_w, span_h = right - left, bottom - top
         if span_w <= 0 and span_h <= 0:
             return {"camera": read_cam, "frame_fill": None,
-                    "no_measurable_size": True}, None
+                    "no_measurable_size": True, "smooth_error": smooth_error}, None
         fill = max(span_w / desired_w, span_h / desired_h)
         contained = left >= 0 and top >= 0 and right <= width and bottom <= height
         last = (bounds, fill, contained, actual_type)
         if (contained and 1 - _PERSPECTIVE_FILL_TOLERANCE <= fill
                 <= 1 + _PERSPECTIVE_FILL_TOLERANCE):
-            return {"camera": read_cam, "frame_fill": round(fill, 4)}, None
+            return {"camera": read_cam, "frame_fill": round(fill, 4),
+                    "smooth_error": smooth_error}, None
         eye = safe(lambda: read_cam.eye)
         target_read = safe(lambda: read_cam.target)
         eye_values, target_values = _point_values(eye), _point_values(target_read)
@@ -514,14 +514,13 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
         # Camera.perspectiveAngle reads and writes radians; this tool accepts degrees.
         cam.perspectiveAngle = math.radians(angle_deg)
 
+    smooth_error = None
     projection_staged = False
     if focus and want_key:
-        cam.isFitView = True
-        vp.camera = cam
-        vp.refresh()
+        # fit=False: staging the projection must not fit the whole model first - the frame spans
+        # below are read off THIS staged view, not a fit-everything one.
+        staged_cam, smooth_error = _view_common.apply_camera(vp, cam, fit=False)
         projection_staged = True
-        # Read the staged projection before rebuilding the camera around the focus.
-        staged_cam = safe(lambda: vp.camera)
         got_type = safe(lambda: staged_cam.cameraType)
         staged_target = _point_values(safe(lambda: staged_cam.target))
         staged_target_text = staged_target if staged_target is not None else "unreadable"
@@ -539,7 +538,6 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
                          f"reads back '{got_key}' - the requested projection did not take and focus "
                          "is unverified.")
         cam = staged_cam
-        cam.isFitView = False
         standoff_fallback = _aim_camera(cam, target, orientation_key)
         if fit and not _is_perspective(got_type):
             frame = _frame_world_spans(vp)
@@ -554,6 +552,7 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
         if framing_error:
             return error(framing_error)
         cam = perspective_frame["camera"]
+        smooth_error = smooth_error or perspective_frame.get("smooth_error")
         if perspective_frame.get("no_measurable_size"):
             applied["frame_ratio"] = None
             applied["no_measurable_size"] = True
@@ -562,7 +561,7 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
     elif focus and fit:
         if frame is None:
             if projection_staged:
-                return error(f"Projection reads '{want_key}' after fitting the whole model, but "
+                return error(f"Projection reads '{want_key}' after staging the projection, but "
                              f"the viewport frame could not be read before aiming at "
                              f"'{applied.get('focus')}'; the focus was not applied.")
             return error(f"Could not read what the viewport currently shows, so the view could not "
@@ -584,8 +583,9 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
         cam.isFitView = True
 
     if perspective_frame is None:
-        vp.camera = cam
-        vp.refresh()
+        _, final_smooth_error = _view_common.apply_camera(
+            vp, cam, fit=bool(safe(lambda: cam.isFitView)))
+        smooth_error = smooth_error or final_smooth_error
 
     note = "Camera aimed. Call view_screenshot to capture."
     if focus:
@@ -612,7 +612,7 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
             return error(f"Set projection '{want_key}' but the viewport camera reads back "
                          f"'{got_key}' - the change did not take.")
         applied["projection"] = got_key
-        if not fit:
+        if not fit and not projection_staged:
             note += (" Changing the projection recomputes the camera extents, so the view was "
                      "fitted even though fit was false.")
 
@@ -652,6 +652,12 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
                          f"not verify; {target_state} and projection reads '{projection_state}', "
                          "so the camera remains partially changed.")
         applied["frame_ratio"] = round(ratio, 6)
+    # isSmoothTransition is CONSUMED on assignment and reads back at its default (measured
+    # 2705.1.25), so this publishes the value ASSIGNED, present only when the setter did not raise.
+    if smooth_error:
+        note += f" isSmoothTransition could not be set: {smooth_error}."
+    else:
+        applied["smooth_transition"] = False
     return ok({"action": "orient", "applied": applied, "note": note})
 
 def _partial_suffix(done):
@@ -939,8 +945,12 @@ def _do_restore(design):
     if not style_restored:
         failed.append("visualStyle")
     camera_error = None
+    smooth_error = None
     try:
-        vp.camera = snap["camera"]
+        read_back, smooth_error = _view_common.restore_camera(vp, snap["camera"])
+        if not _view_common.camera_restored(read_back, snap["camera"]):
+            camera_error = "read-back eye/target do not match the saved camera"
+            failed.append("camera")
     except Exception as e:
         camera_error = str(e)
         failed.append("camera")
@@ -969,6 +979,8 @@ def _do_restore(design):
                        f"restored ({', '.join(str(f) for f in failed[:5])})"
                        + (f"; the camera assignment failed: {camera_error}" if camera_error else "")
                        + ". The snapshot was KEPT so view_set(restore) can be retried.")
+    if smooth_error:
+        out["note"] += f" isSmoothTransition could not be set: {smooth_error}."
     return ok(out)
 
 
