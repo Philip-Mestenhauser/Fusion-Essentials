@@ -1396,12 +1396,23 @@ class TestToolChange:
     def test_a_generating_operation_is_refused_before_the_assignment(self, monkeypatch):
         # A tool swap under a running generation is unmeasured, so the tool arm still refuses;
         # a parameter write on the same operation lands and discloses was_generating instead.
-        op = FakeOp("Adaptive1", {"tool_stepover": "2."}, is_generating=True)
+        # UNSETTLED: state reads 0 (a first generation) but no toolpath has landed yet - op_settled
+        # reads this as still in flight.
+        op = FakeOp("Adaptive1", {"tool_stepover": "2."}, is_generating=True, has_toolpath=False)
         _install_op(monkeypatch, op, doc_tools=[FakeLibTool("12mm Flat Endmill", 7)])
         res = ce.handler(operation="Adaptive1", tool_scope="document", tool_index=0)
         assert res["isError"] is True and "GENERATING" in res["message"]
         assert "cam_get_status" in res["message"]
         assert op.tool is None                       # nothing was assigned
+
+    def test_a_settled_operation_with_a_stale_generating_flag_is_assigned(self, monkeypatch):
+        # The boundary: state reads 0 WITH a toolpath already landed - op_settled reads this as
+        # DONE even while isGenerating stayed true (measured: 1.1 s past the Future's completion),
+        # so the swap is not refused over a flag that outlived the work.
+        op = FakeOp("Adaptive1", {"tool_stepover": "2."}, is_generating=True, has_toolpath=True)
+        _install_op(monkeypatch, op, doc_tools=[FakeLibTool("12mm Flat Endmill", 7)])
+        out = _payload(ce.handler(operation="Adaptive1", tool_scope="document", tool_index=0))
+        assert out["tool"] == "12mm Flat Endmill"
 
     def test_a_parameter_write_on_a_generating_operation_discloses_it(self, monkeypatch):
         op = FakeOp("Adaptive1", {"tool_stepover": "2."}, is_generating=True)

@@ -52,9 +52,10 @@ def FakeRoot(occurrences, bodies=(), bbox=None):
 
 
 class FakeNamedView:
-    def __init__(self, name, built_in=False):
+    def __init__(self, name, built_in=False, camera=None):
         self.name = name
         self.isBuiltIn = built_in
+        self.camera = camera        # the camera it was saved with, or None (a bare name-only view)
         self._deleted = False
         self.applied = False
         self._owner = None          # set when added to a FakeNamedViews
@@ -68,6 +69,16 @@ class FakeNamedView:
 
     def apply(self):
         self.applied = True
+
+
+class _BlindPoint:
+    """A point whose x will not read - the only route to a null eye/target field in a camera row."""
+    y = 2.0
+    z = 3.0
+
+    @property
+    def x(self):
+        raise RuntimeError("x unavailable")
 
 
 class FakeNamedViews:
@@ -89,8 +100,8 @@ class FakeNamedViews:
                 return v
         raise RuntimeError("not found")   # Fusion throws when absent
 
-    def add(self, _camera, name):
-        nv = FakeNamedView(name)
+    def add(self, camera, name):
+        nv = FakeNamedView(name, camera=camera)
         nv._owner = self
         self._views.append(nv)
         return nv
@@ -1495,6 +1506,45 @@ class TestNamedViews:
         by = {v["name"]: v["built_in"] for v in out["named_views"]}
         assert by["Home"] is True and by["Mine"] is False
 
+    def test_list_views_reports_the_saved_camera(self, monkeypatch):
+        # FSAE-0922-LIST-VIEWS-CAMERA-1: names alone left the executor unable to tell one saved
+        # view from another - each row now carries its own camera's eye/target/up/projection/extents.
+        import adsk.core
+        cam = Camera(eye=(1, 2, 3), target=(4, 5, 6), up=(0, 0, 1),
+                     camera_type=adsk.core.CameraTypes.OrthographicCameraType, view_extents=55.0)
+        _install(monkeypatch, [], named_views=FakeNamedViews([FakeNamedView("Angle", camera=cam)]))
+        out = _payload(iv.handler(action="list_views"))
+        row = out["named_views"][0]["camera"]
+        assert row["eye_cm"] == {"x": 1.0, "y": 2.0, "z": 3.0}
+        assert row["target_cm"] == {"x": 4.0, "y": 5.0, "z": 6.0}
+        assert row["up_cm"] == {"x": 0.0, "y": 0.0, "z": 1.0}
+        assert row["projection"] == "orthographic"
+        assert row["extents_cm"] == 55.0
+
+    def test_list_views_camera_fields_are_independently_null(self, monkeypatch):
+        # A camera whose eye will not read must not sink the row - target/up/projection/extents
+        # still publish, and eye reads null rather than a fabricated point.
+        cam = Camera(eye=_BlindPoint(), target=(4, 5, 6))
+        _install(monkeypatch, [], named_views=FakeNamedViews([FakeNamedView("Angle", camera=cam)]))
+        out = _payload(iv.handler(action="list_views"))
+        row = out["named_views"][0]["camera"]
+        assert row["eye_cm"] is None
+        assert row["target_cm"] == {"x": 4.0, "y": 5.0, "z": 6.0}
+
+    def test_a_view_saved_with_no_camera_publishes_a_null_camera(self, monkeypatch):
+        _install(monkeypatch, [], named_views=FakeNamedViews([FakeNamedView("Bare")]))
+        out = _payload(iv.handler(action="list_views"))
+        assert out["named_views"][0]["camera"] is None
+
+    def test_two_saved_views_read_back_distinct_cameras(self, monkeypatch):
+        front = Camera(eye=(0, -10, 0), target=(0, 0, 0))
+        top = Camera(eye=(0, 0, 10), target=(0, 0, 0))
+        _install(monkeypatch, [], named_views=FakeNamedViews(
+            [FakeNamedView("Front", camera=front), FakeNamedView("Top", camera=top)]))
+        out = _payload(iv.handler(action="list_views"))
+        by = {v["name"]: v["camera"]["eye_cm"] for v in out["named_views"]}
+        assert by["Front"] != by["Top"]
+
 
 # ── snapshot / restore round-trip ───────────────────────────────────────────
 
@@ -1979,7 +2029,8 @@ class TestRequestTracer:
 # ── display: the non-body folder bulbs ───────────────────────────────────────
 
 _FOLDER_ATTRS = ("isSketchFolderLightBulbOn", "isConstructionFolderLightBulbOn",
-                 "isOriginFolderLightBulbOn", "isJointsFolderLightBulbOn")
+                 "isOriginFolderLightBulbOn", "isJointsFolderLightBulbOn",
+                 "isJointOriginsFolderLightBulbOn")
 
 
 def _lit_root(design, token="root-tok"):
@@ -2021,7 +2072,8 @@ class TestDisplay:
         design = _install(monkeypatch)
         r = _lit_root(design)
         out = _payload(iv.handler(action="display", visible=False))
-        assert out["folders_set"] == {"sketches": 1, "construction": 1, "origins": 1, "joints": 1}
+        assert out["folders_set"] == {"sketches": 1, "construction": 1, "origins": 1, "joints": 1,
+                                      "joint_origins": 1}
         assert all(getattr(r, a) is False for a in _FOLDER_ATTRS)
         assert "Hidden" in out["note"]
 
@@ -2032,6 +2084,16 @@ class TestDisplay:
         assert out["folders_set"] == {"construction": 1}
         assert r.isConstructionFolderLightBulbOn is False
         assert r.isSketchFolderLightBulbOn is True          # untouched
+
+    def test_joint_origins_is_addressable_and_isolated(self, monkeypatch):
+        # FSAE-0922-JOINT-ORIGIN-FOLDER-1: the omitted-map bug hid this whole folder from a
+        # scoped call, not just from 'omit = all of them' - the enum has to accept it too.
+        design = _install(monkeypatch)
+        r = _lit_root(design)
+        out = _payload(iv.handler(action="display", visible=False, categories=["joint_origins"]))
+        assert out["folders_set"] == {"joint_origins": 1}
+        assert r.isJointOriginsFolderLightBulbOn is False
+        assert r.isJointsFolderLightBulbOn is True           # untouched
 
     def test_an_already_matching_bulb_is_not_rewritten(self, monkeypatch):
         design = _install(monkeypatch)
@@ -2047,7 +2109,8 @@ class TestDisplay:
         _install(monkeypatch, all_components=[a, b])
         out = _payload(iv.handler(action="display", visible=False))
         # 3 per category: the root component plus both of the colliding pair
-        assert out["folders_set"] == {"sketches": 3, "construction": 3, "origins": 3, "joints": 3}
+        assert out["folders_set"] == {"sketches": 3, "construction": 3, "origins": 3, "joints": 3,
+                                      "joint_origins": 3}
         assert out["components_walked"] == 3
         assert all(getattr(c, attr) is False for c in (a, b) for attr in _FOLDER_ATTRS)
 

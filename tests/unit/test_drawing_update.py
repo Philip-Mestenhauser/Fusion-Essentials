@@ -286,3 +286,11 @@ class TestGuards:
         res = du.handler()
         assert res["isError"] is True
         assert "not a drawing" in res["message"].lower()
+
+
+class TestSchema:
+    def test_expect_document_names_the_session_handle_for_deferred_calls(self):
+        # deferred=true refuses a name or URN (server._accept_deferred requires 'session:'), which
+        # the shared expect_document wording alone does not say.
+        desc = du.tool.input_schema["properties"]["expect_document"]["description"]
+        assert "session:" in desc and "doc_get" in desc

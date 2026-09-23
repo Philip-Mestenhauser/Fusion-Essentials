@@ -51,21 +51,6 @@ def _sketch_for_open(design, profile_raw, component):
     return sk, refusal
 
 
-def _path_sketch_curves(host, path_raw):
-    """How many SWEEPABLE curves the sketch a 'sketch:<name>' path names carries - None for any
-    other path form or an unreadable sketch. Construction geometry is not part of any path."""
-    if not (isinstance(path_raw, str) and path_raw.strip().lower().startswith("sketch:")):
-        return None
-    sk, _ = _common.target_sketch(host, path_raw.split(":", 1)[1].strip())
-    if sk is None:
-        return None
-    curves = safe(lambda: sk.sketchCurves)
-    if _common.counted(lambda: curves.count) is None:
-        return None
-    return sum(1 for c in _common.iter_collection(curves)
-               if not bool(safe(lambda c=c: c.isConstruction, False)))
-
-
 def _cut_check_bodies(comp):
     """The solid bodies an UNSCOPED cut/intersect sweep can act on: every solid directly in the
     feature's host component, resolved once so the same objects are re-read afterwards."""
@@ -129,7 +114,7 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
     # What the built Path HOLDS, beside what the request named: the profile is driven over these
     # curves and no others, so a chain that stopped short sweeps a stub of the intended run.
     path_curves = _common.counted(lambda: sweep_path.count)
-    sketch_curves = _path_sketch_curves(host, path)
+    sketch_curves = _common.path_sketch_curve_count(host, path)
 
     op = getattr(adsk.fusion.FeatureOperations, _common.OPERATIONS[op_key])
     try:
@@ -229,10 +214,9 @@ def handler(profile=None, path=None, operation: str = "new", orientation: str = 
     join_clause = _common.join_new_body_clause(op_key, bodies_before, body_names)
     if join_clause:
         note += " " + join_clause
-    if path_curves is not None and sketch_curves is not None and path_curves < sketch_curves:
-        note += (f" WARNING: the path chained {path_curves} of the sketch's {sketch_curves} curves, so "
-                 "the sweep covers only that run - chaining follows tangent continuity and a sharp "
-                 "corner stops it. Make the junction tangent, or sweep each run separately.")
+    warning = _common.path_chain_warning(path_curves, sketch_curves, "sweep")
+    if warning:
+        note += " " + warning
 
     payload = {
         "swept": True,

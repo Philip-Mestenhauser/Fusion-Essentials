@@ -10,9 +10,11 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import named_with_remainder, ok, error, safe, set_verified
-from ._cam_common import get_cam, find_setup, tree_nodes
+from ._cam_common import _MANUAL_NC_STRATEGY, get_cam, find_setup, is_additive_setup, tree_nodes
 from ._cam_templates import _LOCATION, _find_template_by_name, _template_library, hint_is_self_contained
 from . import _inputs
+# _read_tool_number is the one tool_number read - the fork check shares it with the add path.
+from .cam_edit_tools import _read_tool_number
 
 app = adsk.core.Application.get()
 
@@ -63,27 +65,37 @@ def _added_operations(setup_obj, before):
     return added, collisions
 
 
-def _applied_rows(ops):
-    """(rows, the names carrying no tool) - one {name, strategy, tool} row per applied operation,
-    'tool' being what that operation's own Operation.tool describes itself as."""
+def _applied_rows(ops, additive=False):
+    """(rows, unselected names, exempt count) - one {name, strategy, tool} row per applied
+    operation. A manual-NC or additive member takes no tool by design (the exclusion
+    _cam_read._op_blocked_by applies to a live read) and joins neither 'unselected' nor a
+    'read a tool back' claim - it is counted in `exempt` instead."""
     rows, unselected = [], []
+    exempt = 0
     for op in ops:
         name = safe(lambda op=op: op.name)
         t = safe(lambda op=op: op.tool)
-        row = {"name": name, "strategy": safe(lambda op=op: op.strategy),
+        strategy = safe(lambda op=op: op.strategy)
+        row = {"name": name, "strategy": strategy,
                "tool": safe(lambda t=t: t.description) if t is not None else None}
         if t is None:
-            unselected.append(name)
+            if strategy == _MANUAL_NC_STRATEGY or additive:
+                exempt += 1
+            else:
+                unselected.append(name)
         elif row["tool"] is None:
             # A tool IS assigned here and only its description did not read - not an unselected one.
             row["tool_description_unread"] = True
         rows.append(row)
-    return rows, unselected
+    return rows, unselected, exempt
 
 
 _TOOL_REMEDY = ("cam_edit_operation(operation=<name>, tool_scope='document', tool_index=<n>) "
                 "assigns one per operation; cam_edit_tools lists this document's tools, and adds "
                 "one when it holds none.")
+
+_FORK_REMEDY = ("renumber it with cam_edit_tools(action='edit', tool=<index>, "
+                "parameters={'tool_number': <n>}), or cam_post refuses the duplicate.")
 
 
 def _named(names) -> str:
@@ -91,8 +103,56 @@ def _named(names) -> str:
     return named_with_remainder([n or "(name unread)" for n in names])
 
 
-def _apply_note(rows, unselected, collisions, added_count, gen_key) -> str:
-    """What the post-apply read of the SETUP observed, and the call that follows from it."""
+def _library_rows(cam):
+    """[{index, number, description}] for this document's tool library, index-ordered; None where
+    documentToolLibrary did not read - the census a fork check reads before and after an apply."""
+    dtl = safe(lambda: cam.documentToolLibrary)
+    if dtl is None:
+        return None
+    rows = []
+    for i in range(safe(lambda: dtl.count, 0) or 0):
+        t = safe(lambda i=i: dtl.item(i))
+        if t is None:
+            continue
+        rows.append({"index": i, "number": _read_tool_number(t),
+                     "description": safe(lambda t=t: t.description)})
+    return rows
+
+
+def _forked_tools(before, after) -> list:
+    """The document-library rows an apply APPENDED (past the pre-apply count), each carrying
+    'duplicates_number_of' when its own tool_number is already held by an EARLIER row in the
+    post-apply census - the collision cam_post refuses to post over. [] where either census
+    could not be read."""
+    if before is None or after is None:
+        return []
+    first_index_of = {}
+    for row in after:
+        if row["number"] is not None and row["number"] not in first_index_of:
+            first_index_of[row["number"]] = row["index"]
+    forks = []
+    for row in after[len(before):]:
+        fork = dict(row)
+        dup_at = first_index_of.get(row["number"])
+        if dup_at is not None and dup_at != row["index"]:
+            fork["duplicates_number_of"] = dup_at
+        forks.append(fork)
+    return forks
+
+
+def _fork_clause(forks) -> str:
+    """The ONE warning for the first forked tool whose number collides with another library row -
+    '' where no fork carries a duplicate number."""
+    dup = next((f for f in forks if "duplicates_number_of" in f), None)
+    if dup is None:
+        return ""
+    return (f" Fork: library index {dup['index']} carries tool number {dup['number']}, already "
+            f"held by index {dup['duplicates_number_of']} - {_FORK_REMEDY}")
+
+
+def _apply_note(rows, unselected, collisions, added_count, gen_key, exempt=0, forks=()) -> str:
+    """What the post-apply read of the SETUP (and its tool library) observed, and the call that
+    follows from it."""
     if collisions:
         return (f"{_named(collisions)} names more than one operation in one container here, so "
                 "which of them this apply landed is not established: they are left out of "
@@ -105,9 +165,18 @@ def _apply_note(rows, unselected, collisions, added_count, gen_key) -> str:
         return (f"'operations' carries {len(rows)} row(s) read as new to the setup and does not "
                 "account for operations_added, so 'ready' is withheld. "
                 "cam_get(include=['operations'], setup=...) lists every operation it holds.")
-    return (f"All {len(rows)} applied operations read a tool back."
+    tooled = len(rows) - exempt
+    if not exempt:
+        lead = f"All {len(rows)} applied operations read a tool back."
+    elif tooled:
+        lead = (f"{tooled} of {len(rows)} applied operations read a tool back; {exempt} "
+                "operation(s) carry none by design (manual NC or additive).")
+    else:
+        lead = f"All {len(rows)} applied operations carry no tool by design (manual NC or additive)."
+    return (lead
             + (" Their toolpaths are not generated yet - run cam_generate."
-               if gen_key == "skip" else " cam_get(include=['operations']) reads their state."))
+               if gen_key == "skip" else " cam_get(include=['operations']) reads their state.")
+            + _fork_clause(forks))
 
 
 def handler(setup: str = "", template_url: str = "",
@@ -176,6 +245,7 @@ def handler(setup: str = "", template_url: str = "",
     # Build the input + apply.
     ops_before = safe(lambda: target_setup.allOperations.count)
     before_census = _path_census(_setup_op_nodes(target_setup))
+    library_before = _library_rows(cam)
     try:
         ti = adsk.cam.CreateFromCAMTemplateInput.create()
         ti.camTemplate = template
@@ -207,7 +277,9 @@ def handler(setup: str = "", template_url: str = "",
     # The per-op status is read off the SETUP's own walk: a template can land operations carrying
     # no tool, and what the apply call returned is not what the setup took.
     added_ops, collisions = _added_operations(target_setup, before_census)
-    rows, unselected = _applied_rows(added_ops)
+    rows, unselected, exempt = _applied_rows(added_ops, additive=is_additive_setup(target_setup))
+    library_after = _library_rows(cam)
+    forks = _forked_tools(library_before, library_after)
     return ok({
         "applied": True,
         "template": safe(lambda: template.name),
@@ -223,7 +295,14 @@ def handler(setup: str = "", template_url: str = "",
         "collisions": collisions,
         "ready": (bool(rows) and not unselected and not collisions
                   and (added_count is None or len(rows) == added_count)),
-        "note": _apply_note(rows, unselected, collisions, added_count, gen_key),
+        # tool_count before/after this document's library, null where documentToolLibrary did not
+        # read; 'forked' names a NEW row this apply appended (see _forked_tools).
+        "library_tools": {
+            "before": len(library_before) if library_before is not None else None,
+            "after": len(library_after) if library_after is not None else None,
+            "forked": forks,
+        },
+        "note": _apply_note(rows, unselected, collisions, added_count, gen_key, exempt, forks),
     })
 
 

@@ -15,8 +15,8 @@ import time
 import _dump_reader
 from verify_acts_cam import (
     _MX_SETUP, _TURNING_TYPE, _TURN_MACHINE, _all_cut, _landed_in_one_call, _launched_on, _offers,
-    _op_named, _param_landed, _posted_turning, _relaunched, _reveal, _setup_ready, _setup_row,
-    _turning_stock, _types_offered)
+    _op_named, _param_landed, _posted_turning, _reads_back, _relaunched, _reveal, _setup_ready,
+    _setup_row, _turning_stock, _types_offered)
 from verify_core import (
     EXPORT_DIR, _RECALL, _ctx_get, _datum, _drilled, _extruded, _face_up_at, _fg, _filleted,
     _joint_origin_computed, _made_component, _matched, _measured, _near, _num, _prof, _recall,
@@ -450,6 +450,20 @@ def _stock_mode_set(mode, was, previous=None):
                           "previous_setup_name": p.get("previous_setup_name")},
                          p.get("stock_mode_set") == mode and p.get("was_stock_mode") == was
                          and (previous is None or p.get("previous_setup_name") == previous))
+    return check
+
+
+def _stock_mode_unlocks_param(mode, was, previous, param, value):
+    """cam_edit_setup(stock_mode=..., parameters={param: value}) in ONE call: `param` reads
+    isEditable False until `mode` lands, so its read-back proves the mode was applied and the lock
+    re-checked within this same call, not a second one."""
+    mode_ok = _stock_mode_set(mode, was, previous)
+    def check(p):
+        rows = {r.get("name"): r for r in (p.get("changed") or [])}
+        row = rows.get(param) or {}
+        return mode_ok(p) and _measured(
+            f"'{param}'={value} unlocked by stock_mode '{mode}' in the same call",
+            {"changed": p.get("changed")}, _reads_back(row.get("after"), value))
     return check
 
 
@@ -969,6 +983,13 @@ _HUB_JOB = [
                 "tool_index": _ctx_get(c, "hub_tool_base", "the hub tool base") + _TURN_AT,
                 "generate": False},
      _op_named(HUB_TURN_SETUP, "turning_face", HUB_TURN_CYCLES[0]), None),
+    # a TURNING tool's holder carries none of the milling keys (description/product-id/vendor/
+    # segments), so it reads through its OWN keys instead - overall_length is one of them, a number.
+    ("cam_get", {"include": ["tool"], "operation": HUB_TURN_CYCLES[0]},
+     lambda p: _measured("a turning tool's holder reads its own overall_length, not null",
+                         {"holder": (p.get("tool") or {}).get("holder")},
+                         _num(((p.get("tool") or {}).get("holder") or {}).get("overall_length"))),
+     None),
     ("cam_create_operation",
      lambda c: {"setup": HUB_TURN_SETUP, "strategy": "turning_profile_roughing",
                 "name": HUB_TURN_CYCLES[1], "tool_scope": "document",
@@ -1001,8 +1022,12 @@ _HUB_JOB = [
     # which is what makes the two one process rather than two jobs on one model.
     ("cam_create_setup", {"models": [HUB_COMP + ":1"], "name": HUB_MILL_SETUP},
      _setup_created(HUB_MILL_SETUP, "milling"), None),
-    ("cam_edit_setup", {"setup": HUB_MILL_SETUP, "stock_mode": "previous_setup"},
-     _stock_mode_set("previous_setup", "relative_box", HUB_TURN_SETUP), None),
+    # stock_mode and the row it unlocks (job_continueMachining reads isEditable False until
+    # 'previous_setup' lands) in ONE call - the write-order fix, on what the lathe leaves.
+    ("cam_edit_setup", {"setup": HUB_MILL_SETUP, "stock_mode": "previous_setup",
+                        "parameters": {"job_continueMachining": "true"}},
+     _stock_mode_unlocks_param("previous_setup", "relative_box", HUB_TURN_SETUP,
+                               "job_continueMachining", "true"), None),
     ("cam_get", {}, _hub_setups, None),
     # launched behind every write this act makes, and certified by the act boundary's poll.
     ("cam_generate", {"target": HUB_TURN_SETUP, "skip_valid": False},
@@ -1101,9 +1126,14 @@ _HUB_ROTARY_READ = [
     # entry edited after an operation was made on it reads back ON that operation. The whole proof
     # runs on an entry and a setup of its own, both taken back out at the end - the shared mills are
     # run by the census, and nothing here is generated, so no operation is left stale behind it.
+    # the sized clone's OWN description restates the size token it was cloned from (the sample's
+    # wording pattern, e.g. '12mm Flat Endmill' -> '8mm Flat Endmill') - not the sample's number.
     ("cam_edit_tools", {"action": "add", "scope": "document",
                         "add_tools": [{"from_type": _REACH_TOOL, "diameter": "8 mm"}]},
-     _sized_by(_P_DIAMETER, "8 mm", 8.0),
+     lambda p: _sized_by(_P_DIAMETER, "8 mm", 8.0)(p)
+     and _measured("a sized clone restates its own size token in its description",
+                   {"description": (p.get("sized") or [{}])[0].get("description")},
+                   "8mm" in ((p.get("sized") or [{}])[0].get("description") or "")),
      ("reach_count", _recall("reach_count", lambda p: p["tool_count"]))),
     ("cam_edit_tools", lambda c: {"action": "parameters", "scope": "document",
                                   "tool": _ctx_get(c, "reach_count", "the reach-tool count") - 1},

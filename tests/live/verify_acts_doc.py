@@ -148,6 +148,21 @@ def _camera_focus_read(projection, *keys, differs_from=()):
     return check
 
 
+def _distinct_saved_cameras(names):
+    """Return a predicate requiring list_views' rows for `names` to publish READABLE, DIFFERING
+    eye_cm points - FSAE-0922-LIST-VIEWS-CAMERA-1: two saved views naming the same executor-visible
+    camera would mean the per-row camera is not the view's OWN, whatever eye/target it names."""
+    def check(p):
+        rows = {v.get("name"): (v.get("camera") or {}).get("eye_cm") or {}
+                for v in (p.get("named_views") or [])}
+        eyes = [rows.get(n) for n in names]
+        readable = all(all(type(e.get(ax)) in (int, float) for ax in ("x", "y", "z")) for e in eyes)
+        return _measured("saved views publish distinct, readable cameras",
+                         {"names": names, "eyes": eyes, "readable": readable},
+                         readable and eyes[0] != eyes[1])
+    return check
+
+
 def _retained_png(path, at_least=1):
     """Return a predicate requiring the requested screenshot file to hold at least 'at_least' bytes
     (a blank frame of the fixture's backdrop is a few KB; a framed shot is tens of KB)."""
@@ -394,6 +409,13 @@ _SHOWCASE = [
     ("view_set", {"action": "apply_view", "view_name": "SweepHero"}, "ok", None),
     ("view_set", {"action": "list_views"},
      lambda p: "SweepHero" in [v.get("name") for v in (p.get("named_views") or [])], None),
+    # FSAE-0922-LIST-VIEWS-CAMERA-1: a second saved view at a different orientation, and list_views'
+    # two rows read back distinct cameras - the executor can now tell one saved view from another
+    # without re-applying each one just to see where it points.
+    ("view_set", {"action": "orient", "orientation": "top", "fit": False}, "ok", None),
+    ("view_set", {"action": "save_view", "view_name": "CamRowTop"}, "ok", None),
+    ("view_set", {"action": "list_views"},
+     _distinct_saved_cameras(["SweepHero", "CamRowTop"]), None),
     # A NAMED shot frames the visible geometry whatever the camera was framing (here the moving
     # jaw alone), and fit_to isolates its subject in ONE write and clears it again - so the
     # clear_isolation that follows finds nothing to clear. Both shots are retained.
@@ -586,6 +608,19 @@ _SHOWCASE = [
     ("workspace_orient", {}, "ok", None),
     # the API silently IGNORES a sheet size from the other standard, so the pairing is guarded here.
     ("drawing_create", {"standard": "asme", "sheet_size": "a2"}, "refused", None),
+    # FSAE-0922-JOINT-ORIGIN-FOLDER-1: a joint origin NO joint consumes - the repro needs a free
+    # one, since a consumed one's triad clears through a different mechanism.
+    ("joint_create_origin", {"anchor": "coordinates", "target": "origin", "name": "FreeOrigin"},
+     "ok", None),
+    ("view_set", {"action": "display", "categories": ["joint_origins"], "visible": False},
+     lambda p: p.get("folders_set", {}).get("joint_origins", 0) >= 1
+     and not any(s.get("category") == "joint_origins" for s in (p.get("stuck") or [])), None),
+    # a SECOND, separately-issued call finds the bulb already false - a fresh read, not the first
+    # call's own report, is what proves the fold landed and held.
+    ("view_set", {"action": "display", "categories": ["joint_origins"], "visible": False},
+     lambda p: p.get("folders_set") == {"joint_origins": 0}, None),
+    ("view_set", {"action": "display", "categories": ["joint_origins"], "visible": True},
+     lambda p: p.get("visible") is True, None),
 ]
 
 # THE LAYOUT DRIFT GATE, on the field ACT 9 has finished dressing. verify_layout._MEASURED_BOX

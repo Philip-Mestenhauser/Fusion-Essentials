@@ -58,6 +58,7 @@ DISPLAY_FOLDERS = {
     "construction": "isConstructionFolderLightBulbOn",
     "origins": "isOriginFolderLightBulbOn",
     "joints": "isJointsFolderLightBulbOn",
+    "joint_origins": "isJointOriginsFolderLightBulbOn",
 }
 
 

@@ -248,6 +248,11 @@ tool = (
 item = Item.create_tool_item(tool=tool, write="write", handler=handler, run_on_main_thread=True,
                              enforce_timeout=False, deferred_capable=True,
                              postconditions=[_assert.FileLanded("file_path")])
+# deferred=true only accepts a session: handle (from doc_get's document_handle) here - a name or
+# URN, which the shared expect_document description would suggest, is refused.
+tool.add_input_property("expect_document", {
+    "type": "string",
+    "description": "Active doc. deferred needs doc_get session: handle, not name/URN."})
 
 
 def register_tool():

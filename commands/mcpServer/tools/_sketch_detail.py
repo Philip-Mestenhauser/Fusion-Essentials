@@ -844,10 +844,24 @@ def _transform(dx_cm, dy_cm, angle_deg, factor, cx_cm, cy_cm):
     return m, None
 
 
+def _identity_still_copies(design, sketch, target_sketch, target_component):
+    """True unless target_sketch is blank or resolves (by native identity) to `sketch` itself - an
+    identity transform still lands a copy in a genuinely different target sketch."""
+    want = (target_sketch or "").strip()
+    if not want:
+        return False
+    target, _err = scoped_sketch(design, want, target_component, "target_component")
+    if target is None:
+        return True   # let the real target-resolution error surface downstream, not this refusal
+    a, b = _common.native_identity(sketch), _common.native_identity(target)
+    return not (a is not None and b is not None and a == b)
+
+
 def _prepare(sketch_name, entities, units, dx, dy, rotation_deg, center_x, center_y, scale_factor,
-             component=""):
+             component="", target_sketch="", target_component=""):
     """Everything both tools need before the mutation: (design, sketch, ents, refs, coll, matrix,
-    unit, error_result)."""
+    unit, error_result). target_sketch/target_component let a same-sketch identity refusal stand
+    aside for a copy landing in a genuinely different sketch."""
     blank = (None,) * 7
     k, uerr = _inputs.UNITS.resolve(units)
     if uerr:
@@ -892,7 +906,8 @@ def _prepare(sketch_name, entities, units, dx, dy, rotation_deg, center_x, cente
         if lerr:
             return blank + (error(lerr),)
         lengths[kind.name] = float(value or 0.0)
-    if not (lengths["dx"] or lengths["dy"] or angle or factor != 1.0):
+    if not (lengths["dx"] or lengths["dy"] or angle or factor != 1.0) and not _identity_still_copies(
+            design, sketch, target_sketch, target_component):
         return blank + (error("Nothing to apply: give a 'dx'/'dy' translation, a 'rotation_deg', "
                               "or a 'scale_factor' other than 1."),)
 

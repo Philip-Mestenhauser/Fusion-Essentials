@@ -9,6 +9,7 @@ reports.
 """
 
 import difflib
+import re
 
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
@@ -43,6 +44,24 @@ def _catalog(design, selected=None):
     return out
 
 
+def _tokens(s):
+    """The lowercase alphanumeric word tokens of a name - punctuation dropped, so 'Rubber - Black'
+    and 'Rubber, Black' tokenize identically."""
+    return set(re.findall(r"[a-z0-9]+", (s or "").lower()))
+
+
+def _nearest(want, names, cap=6):
+    """Catalog `names` ranked for a no-match hint: those carrying every one of `want`'s tokens
+    first (a longer, more specific name over a same-prefix decoy difflib's edit distance would
+    rank ahead of it), difflib's similarity filling the rest, capped."""
+    want_tokens = _tokens(want)
+    contains = sorted((n for n in names if want_tokens and want_tokens <= _tokens(n)),
+                      key=len)
+    fuzzy = difflib.get_close_matches(want, [n for n in names if n not in contains], n=cap,
+                                      cutoff=0.4)
+    return (contains + [n for n in fuzzy if n not in contains])[:cap]
+
+
 def _find_material(design, name, library="", material_id=""):
     """Resolve an exact material name and optional source selectors, refusing multiple matches."""
     want = (name or "").strip()
@@ -61,14 +80,23 @@ def _find_material(design, name, library="", material_id=""):
     if not catalog:
         return None, None, "No materials available in the requested catalog scope."
     wl = want.lower()
-    exact = [(m, nm, scope) for m, nm, scope in catalog if nm.lower() == wl
-             and (not material_id or safe(lambda m=m: m.id) == material_id)]
+    name_hits = [(m, nm, scope) for m, nm, scope in catalog if nm.lower() == wl]
+    exact = [(m, nm, scope) for m, nm, scope in name_hits
+             if not material_id or safe(lambda m=m: m.id) == material_id]
     doc_hits = [row for row in exact if row[2] == "document"]
     if doc_hits and not library:
         exact = doc_hits
     if not exact:
+        # The name IS in the catalog, just not under the id asked for - a wrong SELECTOR, not a
+        # missing material, and the fuzzy 'Nearest' list below would bury the exact name under it.
+        if material_id and name_hits:
+            other = ", ".join(f"'{safe(lambda m=m: m.id)}' (in {scope})"
+                              for m, _nm, scope in name_hits[:6])
+            return None, None, (f"'{want}' exists in the requested catalog scope, but not under "
+                                f"material_id='{material_id}' - found under {other}. Drop "
+                                "'material_id' or pass the id design_get(include=['materials']) lists.")
         names = sorted({nm for _m, nm, _s in catalog})
-        near = difflib.get_close_matches(want, names, n=6, cutoff=0.4)
+        near = _nearest(want, names)
         hint = (" Nearest: " + ", ".join(f"'{n}'" for n in near)) if near else ""
         selector = f" with material_id='{material_id}'" if material_id else ""
         return None, None, f"No material named '{want}'{selector} in the requested catalog scope.{hint}"

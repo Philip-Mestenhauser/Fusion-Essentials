@@ -4453,8 +4453,12 @@ class _WalkColl(_NamedCollection):
         return self._items[i]
 
 
-def _tl_obj(name, index):
-    return FakeTimelineObject(name=name, index=index, entity=object())
+def _tl_obj(name, index, comp=None):
+    """A timeline object; `comp` seeds entity.parentComponent.name - the '<component>/<name>'
+    address and the ambiguity refusal's qualified candidates both read it."""
+    entity = (types.SimpleNamespace(parentComponent=types.SimpleNamespace(name=comp))
+             if comp is not None else object())
+    return FakeTimelineObject(name=name, index=index, entity=entity)
 
 
 class TestTimelineObjectsWalk:
@@ -4502,6 +4506,42 @@ class TestTimelineObjectsWalk:
         # must miss rather than resolve whatever sits there.
         objs = [_tl_obj("Extrude1", 0), _tl_obj("Fillet1", 1)]
         assert inp._match_timeline_objects(objs, "Extrude1@1") == []
+
+
+class TestQualifiedAndIndexAddressing:
+    """F039: a bare name several components hold ('Pipe4') refused ambiguity with no way to name
+    the right one. '<component>/<feature>' and a bare timeline index are the two ways to."""
+
+    def test_qualified_component_slash_name_resolves_the_right_one(self):
+        a, b = _tl_obj("Pipe4", 3, comp="COOLING - cockpit"), _tl_obj("Pipe4", 9, comp="FRAME")
+        assert inp._match_timeline_objects([a, b], "FRAME/Pipe4") == [b]
+
+    def test_a_bare_integer_resolves_by_its_own_index(self):
+        objs = [_tl_obj("Extrude1", 0), _tl_obj("Fillet1", 4)]
+        assert inp._match_timeline_objects(objs, "4") == [objs[1]]
+
+    def test_two_same_named_features_in_two_components_bare_name_refuses_naming_both(self):
+        a, b = _tl_obj("Pipe4", 3, comp="COOLING - cockpit"), _tl_obj("Pipe4", 9, comp="FRAME")
+        obj, err = inp.resolve_timeline_object([a, b], "Pipe4", "'feature'")
+        assert obj is None and "matches 2 timeline objects" in err
+        assert "COOLING - cockpit/Pipe4" in err and "FRAME/Pipe4" in err
+        assert "<component>/<name>" in err
+
+    def test_a_qualified_miss_names_the_component_and_the_feature(self):
+        objs = [_tl_obj("Pipe4", 3, comp="FRAME")]
+        obj, err = inp.resolve_timeline_object(objs, "FRAME/Pipe9", "'feature'")
+        assert obj is None and "no feature named 'Pipe9' in component 'FRAME'" in err
+
+    def test_a_bare_name_miss_lists_components_holding_a_near_name(self):
+        objs = [_tl_obj("Pipe4 (Fillet)", 3, comp="COOLING - cockpit"), _tl_obj("Extrude1", 0)]
+        obj, err = inp.resolve_timeline_object(objs, "Pipe4", "'feature'")
+        assert obj is None and "Components holding a near name" in err
+        assert "COOLING - cockpit" in err
+
+    def test_a_bare_unique_name_still_resolves(self):
+        objs = [_tl_obj("Pipe4", 3, comp="FRAME"), _tl_obj("Extrude1", 0)]
+        obj, err = inp.resolve_timeline_object(objs, "Pipe4", "'feature'")
+        assert err is None and obj is objs[0]
 
 
 class TestStaleTimelineIndex:
@@ -4851,16 +4891,17 @@ class TestRefusalListsDiscloseTheirRemainder:
         assert "not listed" not in err
 
     def test_an_ambiguous_feature_name_over_the_cap_counts_the_objects_it_did_not_name(self):
-        objs = [_tl_obj("Fillet1", i) for i in range(_OVER)]
+        objs = [_tl_obj("Fillet1", i, comp=f"Comp{i}") for i in range(_OVER)]
         obj, err = inp.resolve_timeline_object(objs, "Fillet1", "'feature'")
         assert obj is None and f"matches {_OVER} timeline objects" in err
-        assert err.count("Fillet1@") == _CAP and _HELD_BACK in err
+        assert err.count("/Fillet1") == _CAP and _HELD_BACK in err
+        assert f"Comp{_CAP - 1}/Fillet1" in err and f"Comp{_OVER - 1}/Fillet1" not in err
 
     def test_an_ambiguous_feature_name_AT_the_cap_names_every_object(self):
-        objs = [_tl_obj("Fillet1", i) for i in range(_CAP)]
+        objs = [_tl_obj("Fillet1", i, comp=f"Comp{i}") for i in range(_CAP)]
         obj, err = inp.resolve_timeline_object(objs, "Fillet1", "'feature'")
         assert obj is None and f"matches {_CAP} timeline objects" in err
-        assert err.count("Fillet1@") == _CAP and f"Fillet1@{_CAP - 1}" in err
+        assert err.count("/Fillet1") == _CAP and f"Comp{_CAP - 1}/Fillet1" in err
         assert "not listed" not in err
 
     def test_a_shared_plane_name_over_the_cap_counts_the_candidates_it_did_not_name(self):

@@ -18,7 +18,8 @@ from verify_core import (
     _filleted, _full_rounded, _gap_measured, _holes_recognized, _holes_windowed, _home_address,
     _home_document, _interference_measured, _joined,
     _joint_origin_at, _joint_origins_listed, _lofted, _made_component, _made_component_inactive,
-    _material_assigned, _matched, _measured, _metadata_set, _mirrored, _moved, _near, _needs,
+    _material_assigned, _matched, _measured, _metadata_set, _mirrored, _moved, _moved_occurrence,
+    _captured, _near, _needs,
     _new_document, _offset_faces, _param_added, _param_deleted, _param_read, _param_set_to,
     _param_traced, _path_count, _patterned, _piped, _pocket_boss, _pockets_recognized, _prof,
     _recall, _recognized_cbore_walls, _recognized_pocket_floor, _refused, _relation_measured,
@@ -1161,7 +1162,13 @@ _SOLIDS = [
      _joint_origin_at("StockCenter", 0, 0, 0), None),
     # THE TWO SOLID BUILDERS THE BRACKET HAS NO HOME FOR, each on a cameo of its own out on the
     # field: a base-to-post loft and a swept boss.
-    ("model_create_component", {"name": "LoftCameo", "activate": True}, _made_component, None),
+    # a default create with no 'part_number' input: the new component's own partNumber is WRITTEN
+    # to its name (the timestamp Fusion mints it with otherwise), read back off the receipt.
+    ("model_create_component", {"name": "LoftCameo", "activate": True},
+     lambda p: _made_component(p) and _measured("part_number defaults to the component's own name",
+                                                 {"part_number": p.get("part_number"),
+                                                  "component": p.get("component")},
+                                                 p.get("part_number") == p.get("component")), None),
     ("sketch_create", {"plane": "xy", "name": "LoftBase"}, "ok", None),
     ("sketch_add_geometry", {"geometry": [{"kind": "circle", "cx": 250, "cy": 0, "radius": 16}],
                              "sketch_name": "LoftBase"}, "ok", None),
@@ -1252,6 +1259,11 @@ _SOLIDS = [
     ("appearance_set", {"target": "LoftCameo", "color": "#8A94A6"}, "ok", None),
     ("appearance_set", {"target": "SweepCameo", "color": "#F5A623"}, "ok", None),
     ("model_set_material", {"target": "Bracket:1", "material": "Steel"}, _material_assigned, None),
+    # a miss whose catalog carries the actual entry ('Steel AISI 4130 259 QT') alongside several
+    # same-prefix decoys ('Steel AISI 1060/1061/...') - the CONTAINING name is what the Nearest
+    # list has to lead with, not the decoys difflib's edit distance would rank ahead of it.
+    ("model_set_material", {"target": "Bracket:1", "material": "Steel AISI 4130"},
+     _refused("Nearest: 'Steel AISI 4130 259 QT'"), None),
     # honest reads on the real part: the boss wall to its own bore, the two of them coaxial, and
     # the part's measured extent.
     ("find_geometry", {"target": "Bracket", "kind": "cylinder_face", "radius": 10,
@@ -1744,6 +1756,38 @@ _SOLIDS = [
                                           "quantity": 3,
                                           "axis": _ctx_get(c, "fc_cyl", "a cameo bore face")},
      lambda p: p.get("quantity") == 3 and p.get("axis") == "BRepFace", None),
+    # a circular_face axis inside a ROTATED occurrence: ConstructionAxis.geometry stays COMPONENT-
+    # LOCAL even through a face proxy, so the local axis must be LIFTED through the occurrence's own
+    # transform2 to read as world. A YZ-plane rod's local axis is world X before the rotation; a
+    # -90 deg Z turn carries it to world (0,-1,0).
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    # placed at x=1300 mm: clear of the story's stock and bracket in the interference census
+    ("model_create_component", {"name": "AxisFrameRig", "activate": True, "x": 1300},
+     _made_component, None),
+    ("sketch_create", {"plane": "yz", "name": "AxisFrameRigS"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "circle", "cx": 0, "cy": 0, "radius": 5}],
+                             "sketch_name": "AxisFrameRigS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "AxisFrameRigS", "profile_index": 0, "distance": 20},
+     _extruded, None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("assembly_move", {"occurrence": "AxisFrameRig:1", "rotate_deg": -90, "rotate_axis": "z"},
+     _moved_occurrence(), None),
+    # captured, or the add below recomputes the design and the uncaptured pose of this grounded
+    # occurrence reverts to identity (measured burn82) - the row would then pass on no rotation.
+    ("assembly_capture_position", {"action": "capture"}, _captured, None),
+    ("design_activate_component", {"occurrence": "AxisFrameRig:1"}, "ok", None),
+    ("find_geometry", {"target": "AxisFrameRig", "kind": "cylinder_face", "max_results": 1}, "ok",
+     _fg("afr_cyl")),
+    ("model_construction", lambda c: {"kind": "axis", "mode": "circular_face",
+                                      "face": _ctx_get(c, "afr_cyl", "the rotated rod's face"),
+                                      "name": "AxisFrameSpin"},
+     lambda p: _measured("a rotated occurrence's local axis lifts to the face proxy's world reading",
+                         {"frame": p.get("frame"),
+                          "direction": (p.get("geometry") or {}).get("direction"),
+                          "aligned": p.get("aligned_to_face_axis")},
+                         p.get("frame") == "world" and p.get("aligned_to_face_axis") is True
+                         and _near(abs(((p.get("geometry") or {}).get("direction") or [0, 0, 0])[1]),
+                                   1.0, 1e-3)), None),
     # a datum NAME reaches only the ACTIVE component, so the same name from the root is refused
     # rather than resolved to something else. (A second same-named axis is never ambiguous - Fusion
     # dedupes the name itself.) The activation is put back so the cameo tree is unchanged.
@@ -2530,6 +2574,35 @@ _DETAILS = [
     ("model_pipe", {"path": "sketch:PipeRunPath", "section_size": 10, "wall_thickness": 1.5},
      lambda p: p.get("hollow") is True and abs((p.get("wall_thickness") or 0) - 1.5) < 1e-6
      and "capped_ends" not in p, None),
+    # a five-curve TANGENT stadium (line, arc, line, arc, line), each joint coincident-constrained
+    # but the curves' own SketchPoints unmerged - the showcase's hoop as agents draw it. Curves
+    # that merely touch by coordinate are not a path at all (Path.create raises, measured burn83);
+    # constrained, the collection build takes every curve, so the pipe follows the whole 102.83 mm
+    # loop and its volume is the d10 section area times that length, not the first leg.
+    ("model_create_component", {"name": "PipeChain", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "PipeChainPath"}, "ok", None),
+    # (x >= 900: clear of the story's stock and bracket, which the interference census walks)
+    ("sketch_add_geometry", {"geometry": [
+        {"kind": "line", "x1": 905, "y1": 0, "x2": 920, "y2": 0},
+        {"kind": "arc", "cx": 920, "cy": 10, "x1": 920, "y1": 0, "sweep_deg": 180},
+        {"kind": "line", "x1": 920, "y1": 20, "x2": 900, "y2": 20},
+        {"kind": "arc", "cx": 900, "cy": 10, "x1": 900, "y1": 20, "sweep_deg": 180},
+        {"kind": "line", "x1": 900, "y1": 0, "x2": 905, "y2": 0}],
+                             "sketch_name": "PipeChainPath"}, "ok", None),
+    ("sketch_constrain", {"constraints": [
+        {"constraint": "coincident", "entity_one": "line:0:end", "entity_two": "arc:0:start"},
+        {"constraint": "coincident", "entity_one": "arc:0:end", "entity_two": "line:1:start"},
+        {"constraint": "coincident", "entity_one": "line:1:end", "entity_two": "arc:1:start"},
+        {"constraint": "coincident", "entity_one": "arc:1:end", "entity_two": "line:2:start"},
+        {"constraint": "coincident", "entity_one": "line:2:end", "entity_two": "line:0:start"}],
+                          "sketch_name": "PipeChainPath"}, "ok", None),
+    ("model_pipe", {"path": "sketch:PipeChainPath", "section_size": 10},
+     lambda p: _measured("5-curve tangent stadium pipes the whole 102.83 mm loop at d10",
+                         {"path_curves": p.get("path_curves"),
+                          "path_sketch_curves": p.get("path_sketch_curves"),
+                          "volume_cm3": p.get("volume_cm3")},
+                         p.get("path_curves") == 5 and p.get("path_sketch_curves") == 5
+                         and _near(p.get("volume_cm3"), 8.076396, 0.1)), None),
     ("model_create_component", {"name": "PipeHalf", "activate": True}, _made_component, None),
     ("sketch_create", {"plane": "xz", "name": "PipeHalfPath"}, "ok", None),
     ("sketch_add_geometry", {"geometry": [{"kind": "line", "x1": 760, "y1": 0,
@@ -2560,6 +2633,43 @@ _DETAILS = [
     ("model_pipe", {"path": "sketch:PipeCutPath", "section_size": 8, "operation": "cut",
                     "target_bodies": ["PipeCut"]},
      lambda p: "REQUESTED" in (p.get("note") or "") and p.get("scoped_to_bodies"), None),
+    # a pipe JOIN whose path touches nothing: the tube lands as a body of its own, so the error
+    # names the new orphan body and points at model_combine(join) instead of just "nothing changed".
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "PipeJoinMiss", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "PipeJoinTargetS"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 1000, "y1": 0,
+                                           "x2": 1020, "y2": 20}],
+                             "sketch_name": "PipeJoinTargetS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "PipeJoinTargetS", "profile_index": 0, "distance": 10},
+     _extruded, None),
+    ("sketch_create", {"plane": "xy", "name": "PipeJoinMissPath"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "line", "x1": 1050, "y1": 0,
+                                           "x2": 1050, "y2": 40}],
+                             "sketch_name": "PipeJoinMissPath"}, "ok", None),
+    ("model_pipe", {"path": "sketch:PipeJoinMissPath", "section_size": 6, "operation": "join"},
+     _refused("no body's volume changed", "operation='join' landed a NEW body (",
+              "model_combine(join) merges them"), None),
+    # a d70 CUT across a 100 x 30 x 8 plate: the tube is wider than the plate, so it DISCONNECTS
+    # the plate into two bodies - the split is named, not left for 'result_bodies' alone to imply.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "PipeSplit", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "PipeSplitS"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 1100, "y1": 0,
+                                           "x2": 1200, "y2": 30}],
+                             "sketch_name": "PipeSplitS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "PipeSplitS", "profile_index": 0, "distance": 8},
+     _extruded, None),
+    ("sketch_create", {"plane": "xy", "name": "PipeSplitPath"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "line", "x1": 1150, "y1": -20,
+                                           "x2": 1150, "y2": 50}],
+                             "sketch_name": "PipeSplitPath"}, "ok", None),
+    ("model_pipe", {"path": "sketch:PipeSplitPath", "section_size": 70, "operation": "cut",
+                    "target_bodies": ["PipeSplit"]},
+     lambda p: _measured("a d70 cut across a 100x30x8 plate DISCONNECTS it into 2 bodies",
+                         {"body_split": p.get("body_split"), "note": (p.get("note") or "")[:200]},
+                         isinstance(p.get("body_split"), list) and len(p["body_split"]) == 2
+                         and "DISCONNECTED" in (p.get("note") or "")), None),
     # BUILD_PATH's measured chaining rule, on two fixtures of its own. ONE seed handle is not one
     # edge: chaining follows TANGENT CONTINUITY and stops where that continuity breaks - a sharp
     # corner ends an open run, while a genuinely tangent loop chains the whole way round ([F52a],
@@ -2954,9 +3064,9 @@ _RESIZE = [
     ("design_edit_timeline", {"action": "delete_attribute", "feature": "StepFloor",
                               "attribute_group": "sweep_w11_8", "attribute_name": "note"},
      "refused", None),
-    # THE 'name@index' FORM, the one a FeatureRef refusal hands back when a name is ambiguous. It is
-    # resolved by reading each timeline object's OWN .index - the same number design_get publishes -
-    # never by position in a list, so the index taken from this read is the index that must resolve.
+    # THE 'name@index' FORM - a valid address in its own right, resolved by reading each timeline
+    # object's OWN .index - the same number design_get publishes - never by position in a list, so
+    # the index taken from this read is the index that must resolve.
     # the slice is a DICT (marker_position / count / summary / groups / timeline) and the ordered
     # rows sit under its own 'timeline' key - each a terse {index, name, type}.
     ("design_get", {"include": ["timeline"]},
@@ -2982,6 +3092,23 @@ _RESIZE = [
                                                          "the step floor's index") + 1),
         "attribute_group": "sweep_w1d", "attribute_name": "at", "attribute_value": "x"},
      _refused("'StepFloor' is at index", "design_get(include=['timeline'])"), None),
+    # THE '<component>/<name>' FORM: two components each hold a plane named 'AddrPlane', so the bare
+    # name is refused naming BOTH qualified candidates; the qualified form deletes the right one, and
+    # the bare name resolving alone afterwards is the independent proof it was the right one that went.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "AddrCompA", "activate": True}, _made_component, None),
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": 5, "name": "AddrPlane"},
+     _datum_plane("xy"), None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "AddrCompB", "activate": True}, _made_component, None),
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": 5, "name": "AddrPlane"},
+     _datum_plane("xy"), None),
+    ("design_delete_feature", {"feature": "AddrPlane"},
+     _refused("AddrCompA/AddrPlane", "AddrCompB/AddrPlane", "matches 2 timeline objects"), None),
+    ("design_delete_feature", {"feature": "AddrCompA/AddrPlane"},
+     lambda p: p["deleted"] is True and p["feature"] == "AddrPlane", None),
+    ("design_delete_feature", {"feature": "AddrPlane"},
+     lambda p: p["deleted"] is True and p["feature"] == "AddrPlane", None),
 ]
 
 # --- the retained SCRATCH fixtures - the precondition fallbacks (today's proven step bodies) ---

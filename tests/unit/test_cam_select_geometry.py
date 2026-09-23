@@ -1471,14 +1471,19 @@ class _ModeGatedParam(_Param):
         pass                      # the mode decides it here, not a constructor argument
 
 
-def _probe_op(name="Probe WCS1", stock=None, mode="selection-model", **kw):
+def _probe_op(name="Probe WCS1", stock=None, mode="selection-model", probing_type=None,
+              probing_type_choices=None, **kw):
     """A probe op: the model face set, the STOCK name set, and the probe_mode that decides which of
-    the two the operation reads - and which of them reads isEditable true."""
+    the two the operation reads - and which of them reads isEditable true. probing_type_choices
+    adds probingType (the parameter that gates whether generation can succeed at all)."""
     mode_param = _BoundaryModeParam(mode)
     params = {"probe_selection": _ModeGatedParam(_HoleParamValue(), mode_param, "selection-model"),
               "probe_mode": mode_param}
     if stock is not None:
         params["probe_stock_selection"] = _ModeGatedParam(stock, mode_param, "selection-stock")
+    if probing_type_choices is not None:
+        params["probingType"] = FakeCAMParameter("probingType", expression=probing_type,
+                                                  choices=probing_type_choices)
     return _Op(name, params, **kw)
 
 
@@ -1642,6 +1647,55 @@ class TestProbeStockFaces:
         assert res["isError"] is True
         assert "'stock_faces' does not apply to the 'holes' selection" in res["message"]
         assert op.parameters.itemByName("holeFaces").value.value == []
+
+
+class TestProbingType:
+    """probingType picks the probe STRATEGY variant and gates whether generation can produce a
+    path - MEASURED: left 'probing-unknown', a launch landed the op errored 'No valid probe
+    operations found.'."""
+
+    _CHOICES = ("probing-unknown", "probing-z", "probing-x")
+
+    def test_probe_without_a_type_on_an_unknown_op_refuses_naming_probing_type(self, monkeypatch):
+        op = _probe_op(probing_type="'probing-unknown'", probing_type_choices=self._CHOICES)
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Probe WCS1", selection="probe", handles=["f"], generate=True)
+        assert res["isError"] is True
+        assert "probingType" in res["message"] and "probing_type" in res["message"]
+        # nothing landed: no selection, no generation launch
+        assert op.parameters.itemByName("probe_selection").value.value == []
+        assert cam.generated == []
+
+    def test_an_already_typed_probe_needs_no_probing_type(self, monkeypatch):
+        # the boundary of the new comparison: probingType NOT 'probing-unknown' - no refusal.
+        op = _probe_op(probing_type="'probing-z'", probing_type_choices=self._CHOICES)
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        out = _payload(cg.handler(operation="Probe WCS1", selection="probe", handles=["f"],
+                                  generate=False))
+        assert out["selections"] == 1
+        assert op.parameters.itemByName("probingType").expression == "'probing-z'"
+
+    def test_probe_with_a_valid_type_writes_it_and_launches(self, monkeypatch):
+        op = _probe_op(probing_type="'probing-unknown'", probing_type_choices=self._CHOICES)
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        out = _payload(cg.handler(operation="Probe WCS1", selection="probe", handles=["f"],
+                                  probing_type="probing-z", generate=True))
+        assert op.parameters.itemByName("probingType").expression == "'probing-z'"
+        assert out["probing_type"] == "probing-z"
+        assert out["launched"] is True
+
+    def test_a_probing_type_matching_no_choice_is_refused_naming_the_choices(self, monkeypatch):
+        op = _probe_op(probing_type="'probing-unknown'", probing_type_choices=self._CHOICES)
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Face()])
+        res = cg.handler(operation="Probe WCS1", selection="probe", handles=["f"],
+                         probing_type="probing-bogus", generate=False)
+        assert res["isError"] is True
+        assert "probing-z" in res["message"] and "probing-x" in res["message"]
+        assert op.parameters.itemByName("probingType").expression == "'probing-unknown'"
 
 
 def _orientation_op(name="3+2 Roughing1", mode=None, editable=True, **kw):
@@ -2485,6 +2539,58 @@ class TestQuotingMatchesWhatTheParameterStores:
         assert held.expression == "'from contour'"
         assert out["heights_set"] == ["bottomHeight_mode='from contour'"]
         assert out["quoted"] == ["bottomHeight_mode"]
+
+    def test_a_ternary_current_expression_with_a_valid_choice_writes_the_quoted_choice(self,
+                                                                                        monkeypatch):
+        # MEASURED: bottomHeight_mode ships as a ternary over holeMode - not a quoted literal, so
+        # matched_quoting alone wrote the request bare and Fusion answered "Invalid enumeration
+        # value". The choice set (choice_quoting) settles it instead of the store's own shape.
+        op = _curve_op()
+        held = FakeCAMParameter(
+            "bottomHeight_mode",
+            expression="holeMode == 'selection-points' ? 'from hole top' : 'from hole bottom'",
+            choices=("from hole top", "from hole bottom", "from stock top", "from contour"))
+        op.parameters.swap("bottomHeight_mode", held)
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        out = _payload(cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                                  bottom_mode="from stock top", generate=False))
+        assert held.expression == "'from stock top'"
+        assert out["heights_set"] == ["bottomHeight_mode='from stock top'"]
+
+    def test_a_request_matching_no_choice_is_refused_before_the_write_naming_the_choices(
+            self, monkeypatch):
+        op = _curve_op()
+        held = FakeCAMParameter(
+            "bottomHeight_mode",
+            expression="holeMode == 'selection-points' ? 'from hole top' : 'from hole bottom'",
+            choices=("from hole top", "from hole bottom", "from stock top", "from contour"))
+        op.parameters.swap("bottomHeight_mode", held)
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                         bottom_mode="from orbit", generate=False)
+        assert res["isError"] is True
+        assert "probing_type" not in res["message"]     # sanity: the height path, not the probe one
+        assert "from hole top" in res["message"] and "from stock top" in res["message"]
+        # nothing was written - the current ternary expression is untouched
+        assert held.expression == ("holeMode == 'selection-points' ? 'from hole top' : "
+                                   "'from hole bottom'")
+
+    def test_a_mode_refused_by_its_own_choice_set_still_names_the_partial_state(self, monkeypatch):
+        # the partial-state sentence is unchanged: a landed top height is named as retained when
+        # the bottom mode is refused by the choice-set gate rather than by Fusion's own write.
+        op = _curve_op()
+        held = FakeCAMParameter(
+            "bottomHeight_mode", expression="'from contour'",
+            choices=("from hole top", "from hole bottom", "from stock top", "from contour"))
+        op.parameters.swap("bottomHeight_mode", held)
+        cam = _CAM([_Setup([op])])
+        _install(monkeypatch, cam, [_Edge()])
+        res = cg.handler(operation="2D Contour1", selection="chain", handles=["h"],
+                         top_offset="5 mm", bottom_mode="from orbit", generate=False)
+        assert res["isError"] is True
+        assert "topHeight_offset=5 mm" in res["message"] and "REMAIN" in res["message"]
 
 
 # ── the extension strategies' DRIVE parameters (swarf rails, deburr edges) ───────────────────

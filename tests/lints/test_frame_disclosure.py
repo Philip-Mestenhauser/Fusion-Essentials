@@ -61,6 +61,9 @@ _PUBLISHES_OTHERWISE = {
                            "third_axis_Y, with the origin beside it as 'location' - those names "
                            "carry WHICH axis the anchor mode drove, which a fixed x/y/z block "
                            "cannot express",
+    "model_construction": "circular_face's axis mode publishes 'frame' as a two-value LABEL "
+                          "('world' or 'component') naming the space its own 'geometry'/"
+                          "'aligned_to_face_axis' were read in - not an origin+axes block",
 }
 
 

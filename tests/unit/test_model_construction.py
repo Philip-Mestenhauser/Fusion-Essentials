@@ -14,9 +14,9 @@ import json
 import math
 import re
 
-from conftest import (BRepEdge, BRepFace, Circle3D, Cone, Cylinder, FakePoint, FakeUnitsManager,
-                      FakeVector3D, Line3D, MakeComp, Plane, _Vertex, install, load_tool,
-                      make_design)
+from conftest import (BRepEdge, BRepFace, Circle3D, Cone, Cylinder, FakeMatrix3D, FakePoint,
+                      FakeUnitsManager, FakeVector3D, Line3D, MakeComp, Plane, _Vertex, install,
+                      load_tool, make_design, make_occurrence)
 
 cn = load_tool("model_construction")
 
@@ -144,6 +144,18 @@ def _datum_component():
     return comp
 
 
+def _seed_adsk_creates():
+    """The adsk.core factory points every construction-datum test needs, assigned directly since
+    each test's adsk module is its own fresh instance."""
+    import adsk.core
+    adsk.core.Point3D.create = staticmethod(lambda x, y, z: ("pt", x, y, z))
+    adsk.core.Vector3D.create = staticmethod(lambda x, y, z: ("vec", x, y, z))
+    adsk.core.InfiniteLine3D.create = staticmethod(lambda o, d: ("line", o, d))
+    adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
+    adsk.core.ValueInput.createByString = staticmethod(lambda s: ("str", s))
+    adsk.core.Matrix3D.create = staticmethod(lambda: FakeMatrix3D())
+
+
 def _install(raise_env=False, design_type=0, active_occurrence=None):
     comp = _datum_component()
     if raise_env:
@@ -157,13 +169,25 @@ def _install(raise_env=False, design_type=0, active_occurrence=None):
     design.designType = design_type
     design.activeOccurrence = active_occurrence
     install(cn, design)
-    import adsk.core
-    adsk.core.Point3D.create = staticmethod(lambda x, y, z: ("pt", x, y, z))
-    adsk.core.Vector3D.create = staticmethod(lambda x, y, z: ("vec", x, y, z))
-    adsk.core.InfiniteLine3D.create = staticmethod(lambda o, d: ("line", o, d))
-    adsk.core.ValueInput.createByReal = staticmethod(lambda v: ("real", v))
-    adsk.core.ValueInput.createByString = staticmethod(lambda s: ("str", s))
+    _seed_adsk_creates()
     return comp
+
+
+def _install_sub_placed(occ_kwargs=None, rotation_deg=-90.0):
+    """sub ('Comp', the active component) placed under a SEPARATE root by an occurrence - the shape
+    circular_face's WORLD lift needs (the datum's own component is not root). `occ_kwargs`
+    overrides make_occurrence's defaults; otherwise the occurrence carries a `rotation_deg`
+    Z-rotation transform2."""
+    sub = _datum_component()
+    kwargs = dict(transform2=FakeMatrix3D(deg=rotation_deg))
+    kwargs.update(occ_kwargs or {})
+    occ = make_occurrence("Comp:1", component=sub, **kwargs)
+    root = MakeComp(name="Root", all_occurrences=[occ])
+    design = make_design(comp=root, all_components=[root, sub])
+    design.activeComponent = sub
+    install(cn, design)
+    _seed_adsk_creates()
+    return sub, occ
 
 
 def _payload(result):
@@ -783,6 +807,49 @@ class TestAxisCircularFace:
         _install()
         res = cn.handler(kind="axis", mode="circular_face")
         assert res["isError"] is True and "needs 'face'" in res["message"]
+
+
+class TestAxisCircularFaceWorldFrame:
+
+    """MEASURED: ConstructionAxis.geometry stays COMPONENT-LOCAL even under an active occurrence,
+    while the face proxy's own axis already reads WORLD - so aligned_to_face_axis and the published
+    'geometry' must lift the new axis through the FACE's own occurrence, never compare local to
+    world. A rotated occurrence (-90 deg about Z) turning local (1,0,0) into world (0,-1,0) is the
+    exact live-measured case."""
+
+    def test_a_rotated_occurrences_local_axis_lifts_to_the_face_proxys_world_reading(
+            self, monkeypatch):
+        sub, occ = _install_sub_placed(rotation_deg=-90.0)
+        face = _cylinder_face((0.0, -1.0, 0.0))       # the face proxy's WORLD axis (measured)
+        face.assemblyContext = occ
+        _stub_resolve(monkeypatch, cn._FACE, face)
+        sub.constructionAxes.result_geometry = _axis_geometry((1.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+        out = _payload(cn.handler(kind="axis", mode="circular_face"))
+        assert out["frame"] == "world"
+        assert out["geometry"]["direction"] == [0.0, -1.0, 0.0]
+        assert out["aligned_to_face_axis"] is True
+
+    def test_a_root_level_datum_is_already_world(self, monkeypatch):
+        comp = _install()
+        face = _cylinder_face((0.0, 0.0, 1.0))
+        _stub_resolve(monkeypatch, cn._FACE, face)
+        comp.constructionAxes.result_geometry = _axis_geometry((0.0, 0.0, 1.0), (0.0, 0.0, 0.0))
+        out = _payload(cn.handler(kind="axis", mode="circular_face"))
+        assert out["frame"] == "world"
+        assert out["aligned_to_face_axis"] is True
+
+    def test_an_unreadable_occurrence_transform_leaves_frame_component_and_alignment_unchecked(
+            self, monkeypatch):
+        sub, occ = _install_sub_placed(
+            occ_kwargs={"raises_on": {"transform2": "transform2 unavailable"}})
+        face = _cylinder_face((0.0, -1.0, 0.0))
+        face.assemblyContext = occ
+        _stub_resolve(monkeypatch, cn._FACE, face)
+        sub.constructionAxes.result_geometry = _axis_geometry((1.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+        out = _payload(cn.handler(kind="axis", mode="circular_face"))
+        assert out["frame"] == "component"
+        assert out["aligned_to_face_axis"] is None
+        assert "WORLD placement could not be determined" in out["note"]
 
 
 class TestAxisTwoPoints:
@@ -1553,16 +1620,8 @@ class TestPayloadSpaceUnderAnActiveOccurrence:
         out = _payload(cn.handler(kind="point", mode="circle_center", units="mm"))
         assert out["geometry"]["at"] == {"x": 60.0, "y": 30.0, "z": 20.0}
 
-    def test_axis_payload_and_alignment_both_read_the_world_direction(self, monkeypatch):
-        comp = _install(active_occurrence=_OCC)
-        _stub_resolve(monkeypatch, cn._FACE, _cylinder_face((0, 0, 1), (0, 0, 0)))
-        comp.constructionAxes.result_geometry = _axis_geometry((1, 0, 0), (0, 0, 0))
-        comp.constructionAxes.proxy_geometry = _axis_geometry((0, 0, 1), (0, 0, 3))
-        out = _payload(cn.handler(kind="axis", mode="circular_face", units="mm"))
-        assert out["geometry"]["direction"] == [0.0, 0.0, 1.0]
-        assert out["geometry"]["origin"] == {"x": 0.0, "y": 0.0, "z": 30.0}
-        # the face is proxy-resolved (WORLD); against the LOCAL direction this reads as misaligned
-        assert out["aligned_to_face_axis"] is True
+    # circular_face's own world-frame lift (a matrix through the FACE's occurrence, not the proxy
+    # read above) is pinned in TestAxisCircularFaceWorldFrame.
 
     def test_perpendicular_axis_alignment_reads_the_world_direction(self, monkeypatch):
         comp = _install(active_occurrence=_OCC)

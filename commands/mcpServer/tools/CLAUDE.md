@@ -41,7 +41,7 @@ don't edit between the markers.
 | `Choice` | one of a fixed set -> JSON enum |
 | `Distance` | a length in display units (pair with one UnitField) |
 | `EdgeLoopRef` | a closed/open edge-loop boundary from edge handles |
-| `FeatureRef` | a timeline feature by name (refuses an ambiguous name; 'name@index' picks one) |
+| `FeatureRef` | a timeline feature by name, '<component>/<name>', or timeline index (refuses an ambiguous bare name) |
 | `FeatureRefList` | several timeline features by name |
 | `GeometryHandle` | one face/edge/vertex by find_geometry handle (require=face/edge/...), not a coordinate |
 | `GeometryHandleList` | several faces/edges by handles (fillet/drill THESE) |

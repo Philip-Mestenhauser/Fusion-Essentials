@@ -623,6 +623,11 @@ item = Item.create_tool_item(
         evidence_test="tests/unit/test_drawing_create.py::TestGuards"
                       "::test_missing_file_id_on_created_drawing_errors"),
     deferred_capable=True)
+# deferred=true only accepts a session: handle (from doc_get's document_handle) here - a name or
+# URN, which the shared expect_document description would suggest, is refused.
+tool.add_input_property("expect_document", {
+    "type": "string",
+    "description": "Active doc. deferred needs doc_get session: handle, not name/URN."})
 
 
 def register_tool():

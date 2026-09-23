@@ -709,12 +709,13 @@ class TestAllDisplayComponents:
         design = SimpleNamespace(rootComponent=root)      # no allComponents at all
         assert vc.all_display_components(design) == [root]
 
-    def test_display_folders_name_the_four_component_folder_bulbs(self):
+    def test_display_folders_name_the_five_component_folder_bulbs(self):
         assert vc.DISPLAY_FOLDERS == {
             "sketches": "isSketchFolderLightBulbOn",
             "construction": "isConstructionFolderLightBulbOn",
             "origins": "isOriginFolderLightBulbOn",
             "joints": "isJointsFolderLightBulbOn",
+            "joint_origins": "isJointOriginsFolderLightBulbOn",
         }
 
 

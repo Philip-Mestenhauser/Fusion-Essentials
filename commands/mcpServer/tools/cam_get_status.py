@@ -331,11 +331,14 @@ def _owned_future_readiness(live: dict, key: str, future_done: bool) -> str:
     """The readiness line for a handle that owns the Future being read."""
     if future_done:
         return live.get("readiness", "")
-    pending = (f"Generation Future for handle '{key}' is incomplete; poll "
-               f"cam_get_status(handle='{key}') before launching generation again.")
     blocked = bool(live.get("errored") or live.get("setups_errored")
                    or live.get("programs_errored"))
-    return ((live.get("readiness") or "") + " " + pending).strip() if blocked else pending
+    # A blocked scope's own verdict IS the remedy (fix it, then re-run cam_generate) - a poll-again
+    # line beside it reads as advice to keep waiting on an item that will never complete.
+    if blocked:
+        return live.get("readiness") or ""
+    return (f"Generation Future for handle '{key}' is incomplete; poll "
+            f"cam_get_status(handle='{key}') before launching generation again.")
 
 
 def _status_future(entry: dict, key: str, include_operations: bool) -> dict:
@@ -472,34 +475,6 @@ def _op_tally(ops, cam=None) -> dict:
                         "warning": t["warning_sample"]}}
 
 
-def _scope_readiness(t: dict, ops=()) -> str:
-    """The scoped readiness verdict for an _op_tally. The postable sentence itself is
-    _cam_common.ready_verdict - the ONE builder live_readiness and cam_get's summary also end on -
-    so a scoped poll cannot say 'ready to post' over warnings, or over a blocked owning setup,
-    that the document poll would name."""
-    nonfinite = t.get("nonfinite", 0)
-    active_total = t["valid"] + t["out_of_date"] + t["errored"] + nonfinite
-    unsettled = _cam_common.unsettled_count(t)
-    unread = t.get("unread", 0)
-    measure = (f"{t['valid']} of {active_total} active ops valid" if active_total else
-               f"{t['total']} operation(s) in scope")
-    if t["errored"]:
-        # ONE sentence for both readiness surfaces: a scoped poll has no setup- or program-level
-        # error of its own to count, so it names the operation kind alone.
-        return _cam_common.errored_verdict(0, 0, t["errored"])
-    if nonfinite:
-        return _cam_common.nonfinite_verdict(measure, t.get("nonfinite_names") or [])
-    if unread:
-        return _cam_common.unread_verdict(measure, unread, unsettled, t["out_of_date"])
-    if active_total and t["valid"] == active_total:
-        return _cam_common.ready_verdict(measure, t.get("warnings", 0),
-                                         (t.get("samples") or {}).get("warning"),
-                                         t.get("setups_blocked"))
-    if active_total:
-        return _cam_common.unfinished_verdict(measure, ops, unsettled)
-    return "no active operations to assess."
-
-
 def _scope_state(cam, target: str):
     """(live_dict, scope_label, health_ops, err) - live_readiness for a document scope, a scoped op
     walk for a named setup/folder/operation, in that same shape. health_ops is a zero-arg callable
@@ -522,7 +497,9 @@ def _scope_state(cam, target: str):
     # verdict too.
     owner = _cam_common.owning_setup(node)
     tally["setups_blocked"] = _cam_common.blocked_setup_records([owner] if owner is not None else [])
-    tally["readiness"] = _scope_readiness(tally, ops)
+    warning_sample = (tally.get("samples") or {}).get("warning")
+    tally["readiness"] = _cam_common.readiness_verdict(tally, ops, warning_sample,
+                                                       tally["setups_blocked"])
     return tally, f"{kind} '{node.name or want}'", (lambda: nodes), None
 
 

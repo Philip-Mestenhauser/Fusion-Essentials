@@ -85,7 +85,10 @@ class FakeThickenFeatures:
     def add(self, inp):
         landed = None
         if self._thickness_readable:
-            landed = self._landed_cm if self._landed_cm is not None else inp.thick[1]
+            # MEASURED: Fusion thickens the input value on EACH side, so a symmetric wall's own
+            # thickness parameter reads back double the per-side input by default.
+            landed = (self._landed_cm if self._landed_cm is not None
+                     else inp.thick[1] * (2 if inp.sym else 1))
         return FakeFeature(name="Thicken1", bodies=self._result, faces=self._faces,
                            thickness_cm=landed)
 
@@ -219,6 +222,33 @@ class TestOffsetThickenKind:
         _wire(tf, handle_map={"F1": BRepFace(None)})
         payload(se.handler(faces=["F1"], thickness=3, symmetric=True))
         assert tf.last_input.sym is True
+
+    def test_symmetric_thickness_reading_double_is_ok_with_wall_total(self):
+        # MEASURED: symmetric thickens EACH side, so the feature's own parameter reads 2x - that is
+        # the correct landed wall, not a mismatch.
+        tf = FakeThickenFeatures(result_bodies=[BRepBody("Wall1", is_solid=True)])
+        _wire(tf, handle_map={"F1": BRepFace(None)})
+        out = payload(se.handler(faces=["F1"], thickness=4, units="mm", symmetric=True))
+        assert out["thickness"] == 4.0 and out["wall_total"] == 8.0
+
+    def test_a_one_sided_thickness_that_reads_double_is_still_an_error(self):
+        # symmetric=False: the feature's parameter must equal the request, not 2x it.
+        tf = FakeThickenFeatures(result_bodies=[BRepBody("Wall1", is_solid=True)], landed_cm=0.8)
+        _wire(tf, handle_map={"F1": BRepFace(None)})
+        res = se.handler(faces=["F1"], thickness=4, units="mm")
+        assert res["isError"] is True
+        assert "reads back 8.0" in res["message"] and "requested 4.0" in res["message"]
+
+    def test_a_symmetric_thickness_reading_the_wrong_total_is_an_error(self):
+        # symmetric=True but the readback is neither the request nor its double - a genuine defect.
+        tf = FakeThickenFeatures(result_bodies=[BRepBody("Wall1", is_solid=True)], landed_cm=0.5)
+        _wire(tf, handle_map={"F1": BRepFace(None)})
+        res = se.handler(faces=["F1"], thickness=4, units="mm", symmetric=True)
+        assert res["isError"] is True
+        assert "reads back 5.0" in res["message"] and "requested 8.0" in res["message"]
+
+    def test_symmetric_input_description_states_per_side(self):
+        assert "per side" in se.tool.input_schema["properties"]["symmetric"]["description"]
 
     def test_thicken_zero_thickness_guard(self):
         _wire(FakeThickenFeatures(), handle_map={"F1": BRepFace(None)})

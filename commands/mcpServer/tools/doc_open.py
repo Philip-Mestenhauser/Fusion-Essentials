@@ -175,9 +175,9 @@ tool = (
         input_param_description="A lineage or versioned URN, or a Fusion web URL.",
     )
     .add_input_property("force_api_open", {"type": "boolean",
-            "description": "For a NORMAL document."})
+            "description": "Required true for a NORMAL doc, unless is_cam_template is."})
     .add_input_property("is_cam_template", {"type": "boolean",
-            "description": "For a multi-reference CAM template; a UI open is instructed."})
+            "description": "Required true for a CAM template, unless force_api_open is."})
     .strict_schema()
 )
 

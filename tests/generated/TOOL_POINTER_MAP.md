@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 192  |  **description breadcrumbs:** 290  |  **note/error breadcrumbs:** 620
+**Tools:** 192  |  **description breadcrumbs:** 293  |  **note/error breadcrumbs:** 619
   |  **guidance smells flagged:** 8
 ## Blindspots to engineer
 
@@ -36,8 +36,8 @@ close orphans, factor duplicated guards into shared helpers.
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
 - `doc_new`  <- 83  (desc 0, note 83)
-- `design_get`  <- 50  (desc 10, note 40)
 - `find_geometry`  <- 50  (desc 14, note 36)
+- `design_get`  <- 49  (desc 10, note 39)
 - `design_delete_feature`  <- 40  (desc 16, note 24)
 - `view_screenshot`  <- 34  (desc 5, note 29)
 - `cam_get`  <- 32  (desc 15, note 17)
@@ -382,6 +382,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ', or the name alone to search for '
 - Failed to apply template:
 - cam_edit_operation(operation=<name>, tool_scope='document', tool_index=<n>) assigns one per operation; cam_edit_tools lists this document's tools, and adds one when it holds none.
+- renumber it with cam_edit_tools(action='edit', tool=<index>, parameters={'tool_number': <n>}), or cam_post refuses the duplicate.
 - names more than one operation in one container here, so which of them this apply landed is not established: they are left out of 'operations' and 'ready' is withheld. cam_get(include=['operations']...
 - 'operations' carries  row(s) read as new to the setup and does not account for operations_added, so 'ready' is withheld. cam_get(include=['operations'], setup=...) lists every operation it holds.
 - 'template_url' loads the template '', but 'template_name' says '' - nothing was applied. Pass the url alone to apply '', or the name alone to search for ''.
@@ -625,9 +626,9 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Nothing to do. Provide 'parameters' {name: expression}, 'models'/'fixtures'/'stock' body lists, a 'machine', a 'stock_mode', a 'wcs' binding, and/or 'rename'.
 - ' has no parameter(s):
 - . (Read the setup's parameter names first; only existing ones are settable.)
+- A setup exposes many parameters it takes no write to; set one it does - cam_get(include=['parameters'], setup=...) marks each refusing row editable false.
 - ' does not accept a write to:
-- (isEditable reads False on each). Nothing was applied. A setup exposes many parameters it takes no write to; set one it does - cam_get(include=['parameters'], setup=...) marks each refusing row edi...
-- parameter(s); no change was applied.
+- (isEditable reads False on each).
 - ' cannot be an empty list - clearing that setup selection is unsupported by this tool. Omit the field to leave it unchanged, or pass one or more bodies or occurrences to replace it.
 - ' and a 'stock' body list in one call set the setup's stock two ways - 'stock' is the from-solid mode with its bodies. Pass one or the other.
 - This Fusion build's SetupStockModes carries no '
@@ -657,7 +658,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - wcs.: a Joint Origin can bind the WCS ORIGIN only - the platform rejects one as an axis. Bind z_axis/x_axis to a face (its normal) or a straight edge via a find_geometry handle; to center a WCS on ...
 - '' cannot be an empty list - clearing that setup selection is unsupported by this tool. Omit the field to leave it unchanged, or pass one or more bodies or occurrences to replace it.
 - 'stock_mode=' and a 'stock' body list in one call set the setup's stock two ways - 'stock' is the from-solid mode with its bodies. Pass one or the other.
-- Setup '' does not accept a write to:  (isEditable reads False on each). Nothing was applied. A setup exposes many parameters it takes no write to; set one it does - cam_get(include=['parameters'], ...
+- Setup '' does not accept a write to:  (isEditable reads False on each). A setup exposes many parameters it takes no write to; set one it does - cam_get(include=['parameters'], setup=...) marks each...
 - (Every row in this call passed the isEditable check, so a locked parameter is not the reason - re-read the setup with cam_get(include=['parameters'], setup=...).)
 - That refusal names the simulation model: pass machine_strip_simulation=true to assign this machine without its simulation model - the spindle maximum and every axis range read back unchanged throug...
 - Set the name of setup '' to '' but Setup.name does not read back, so the rename is UNCONFIRMED. Re-read it with cam_get. Every other change in this call was applied and is NOT rolled back.
@@ -803,7 +804,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Exact queries use internal parameter names. Unavailable pages match readable rows whose visible and enabled flags did not both read true; each flag is independent and null means unread. Controlling...
 - Parameter lookup for '' on  failed: . Retry the scoped exact query; if it repeats, use include_unavailable=true to inspect readable rows.
 - No parameter with exact internal name '' on . Check its spelling and case, or use include_unavailable=true and follow next_offset to discover names.
-- 'dimensions' is what Operation.tool reads now in 'units': cutter, shoulder, shaft and both gauge lengths, null where the tool has no such parameter.
+- 'dimensions' is Operation.tool's geometry in 'units', shaped by tool family (milling or turning); null where the tool lacks that field.
 - 'preset' holds the tool LIBRARY preset's own numbers, not this operation's feeds - cam_get(include=['parameters'], operation=..., parameter_names=['tool_spindleSpeed', 'tool_feedCutting']) reads th...
 - '{name}' names {n} presets on this tool, so every match is returned under presets_sharing_name keyed by its index on the tool - the name alone does not pick one. Omit 'preset' for the preset_names ...
 - This tool carries no presets at all, so '' names none. cam_edit_tools(action='add_preset') authors one on a library tool.
@@ -939,6 +940,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - chain_groups requires selection='chain' and replaces handles.
 - chain_groups must contain nonempty lists of edge handles.
 - No cylinder faces left after the diameter filter.
+- ' and no 'probing_type' was given - generation would land 'No valid probe operations found.'. Pass 'probing_type' (this operation's own
+- choices - cam_get(include=['operations'])). Nothing was changed.
 - ' already separates each reference; use handles here.
 - chain_groups did not resolve one edge per handle; refresh the handles.
 - 'handles' cannot be checked for one chain - an edge's vertices did not read. Pass chain_groups, one list per contour. No heights or selections were changed.
@@ -973,6 +976,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - seed edge(s) resolved  chain(s) of  segments - each seed expands to its OWN whole loop, so two seeds on one loop cut that loop twice; pass one edge per loop.
 - stock_faces names the STOCK's own analytic faces, so it takes no model geometry -  was passed beside it. Pass stock_faces alone, or drop it and select model faces with 'handles'.
 - 'handles' holds  chains that share no vertex () - a flat list is taken as ONE connected chain. Pass chain_groups, one list per contour, to group them yourself. No heights or selections were changed.
+- Operation '' still reads ='' and no 'probing_type' was given - generation would land 'No valid probe operations found.'. Pass 'probing_type' (this operation's own  choices - cam_get(include=['opera...
 - Selection applied but generation failed to launch: . The selection is saved - fix the cause, then run cam_generate(target='').
 - Selection applied; generation is launched - check cam_get_status(target='') until completed=true. has_toolpath False on completion means no path was produced, and the warning channel can be silent ...
 
@@ -1527,7 +1531,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Could not read the timeline:
 - The active design is not a Configured Design (it has no configuration table) - e.g. a design with Variant A/Variant B style options.
 - include=['attributes'] needs 'attribute_group' - the group to read (the same group design_edit_timeline(action='set_attribute') wrote with). Leave 'attribute_key' empty to get every key in that group.
-- Light nodes: name, component, body_count, child_count. Narrow with name_filter='<text>' (top level), component='<name>' (roots the tree), max_depth, max_results (children per level). tree_handles=t...
+- Light nodes: name, component, body_count, child_count. Narrow: name_filter, component=<name>, max_depth, max_results. tree_handles=true adds handle/full_path/source ids. children_truncated = a leve...
 - Bodies directly in the root component (not occurrences). A root body can't be jointed - model_create_component then move it in to joint it.
 - Each params[].value is in Fusion internal units (cm / radians) - params[].expression carries the authored unit. Full records: param_get(include_model_parameters=true).
 - A group is ONE row here, carrying member_count and is_collapsed; a COLLAPSED group's members are not listed, though summary.states counts them (an exception from one carries index null - address it...
@@ -2289,7 +2293,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - NOTE: , pose-equivalent to the command (modulo 360 deg); the pre-drive value was unreadable, so whether the mechanism moved is not known from this receipt.
 - NOTE: the commanded angle equals the current pose modulo 360 deg - , so the physical pose already matches the command and nothing moved. A whole number of turns is an equivalent pose: command an an...
 - the occurrence walk did not run to the end (a collection would not enumerate, or a depth/node cap was hit), so part of the design was not scanned and these ground_to_parent readings cover only the ...
-- With no motion link on this joint, a parent-locked member is the CANDIDATE cause - release it with assembly_ground(ground_to_parent=false) and re-drive to test it.
+- With no motion link on this joint: a parent-locked member is a CANDIDATE cause, checked LAST - release it with assembly_ground(ground_to_parent=false) only once the steps above are ruled out.
 - These observations do not single out a cause. Read the mechanism with assembly_get (per-occurrence ground_to_parent, and the joint limits of every joint in the chain), then re-drive.
 - Drive of '' moved the placement of '' by  mm but its body geometry did not move ( mm) - the transform is a claim, the body corner is the evidence. Read the pose back with assembly_get.
 - 'moved' names the member whose placement changed across this drive: delta_mm is how far its origin moved (mm), delta_deg the angle between its before and after orientation (a magnitude, no sense), ...
@@ -2458,11 +2462,8 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - No active design. Open or create a document first (see doc_new).
 - ' for mesh import. Use mm, cm, m, in, or ft.
 - Mesh import returned no bodies (the file may be empty or unreadable as a mesh).
-- Omit target_component to import into the ACTIVE component, and set which that is with design_activate_component (it takes the occurrence, so it can name one of them).
-- ' to import into. Omit target_component to use the active component, or list components with design_get(include=['tree']).
 - Mesh import failed (meshBodies.add raised):
 - File not found: . (To import from the data model, first resolve the file to a local path with the data_* tools, then pass that path.)
-- No component named '' to import into. Omit target_component to use the active component, or list components with design_get(include=['tree']).
 
 ### `mesh_plane_cut`
 - Mesh cut by the plane. 'trim' keeps one side, 'split_body' makes two mesh bodies, 'split_faces' cuts the triangulation in place. fill controls the new opening (none / minimal / uniform). Use flip=t...
@@ -2748,6 +2749,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - 'handle' is this plane's entityToken - pass it as 'plane' to model_mirror, view_section, or model_split; sketch_create takes this datum's NAME instead.
 - A sketch on this plane takes its origin at the world origin's projection onto it, not at geometry.origin - sketch_create's frame.origin_mm reads it.
 - A null field above was NOT measured: an occurrence is active and the entity could not be read in its space, so the value is left unclaimed rather than reported in the component-local space the reso...
+- This datum's WORLD placement could not be determined, so 'aligned_to_face_axis' is unchecked and 'frame' stays 'component'.
 - This datum landed OFF the path: 'along_path' vs 'path_length', in 'units'. An absolute distance is not clamped at either end - Fusion extrapolates along the tangent and reports the feature healthy.
 - An absolute distance is measured from the path start and is not clamped at either end - a value outside the path places the datum off the curve instead of failing, so check 'geometry' and 'landed'.
 - mode='': 'at' must be between 0 and 1 when distance_type='proportional' (0 = the path's start, 1 = its end), got  - Fusion raises on a value outside that range. For a length along the path use dist...
@@ -2994,6 +2996,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - '. Use: low, medium, high, very_high.
 - Could not compute physical properties for
 - (no measurable solid? an empty or surface-only target has no mass).
+- per_body:  of  bodies shown (cap , per_body_truncated). Target a narrower occurrence/component - design_get(include=['tree']) lists them.
 - Joint Origin '' resolved, but its  axis vector did not read, so there is no frame to measure in. Omit 'frame' for a world-aligned box.
 - Joint Origin '' could not be placed in the same space as the target, so the frame its extents would be measured in is unknown. Target a body inside the occurrence you mean (find_geometry returns on...
 - Joint Origin '' resolved, but its axis vectors did not transform into the target's space, so there is no frame to measure in. Omit 'frame' for a world-aligned box.
@@ -3236,6 +3239,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Selected material source identity is unavailable (name or id could not be read); refusing mutation. Read design_get(include=['materials']) and retry with a source carrying both fields.
 - No body assignment was verified for material '
 - Empty target: the design's component list did not read, so only the ROOT component's bodies were reached - a child component's bodies keep the material they had.
+- '' exists in the requested catalog scope, but not under material_id='' - found under . Drop 'material_id' or pass the id design_get(include=['materials']) lists.
 - '' is ambiguous: . Pass 'library' and 'material_id' from design_get(include=['materials']); use library='document' for a document copy.
 - Physical material '' assigned (source: ). model_inspect mass/density now reflects this material. This is NOT color - use appearance_set for cosmetic color.
 
@@ -3302,7 +3306,6 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Remove the empty feature with design_delete_feature.
 - Sweep reported success but this  changed nothing -  measure the volumes they had before and none was consumed, so the profile does not sweep through any of them. A cut/intersect can only affect bod...
 - Sweep reported success but this  changed nothing - every solid body in '' measures the volume it had before and none was consumed, so the swept profile does not overlap any of them. Check the path ...
-- WARNING: the path chained  of the sketch's  curves, so the sweep covers only that run - chaining follows tangent continuity and a sharp corner stops it. Make the junction tangent, or sweep each run...
 
 ### `model_thread`
 - Provide 'designation' - the thread call-out, e.g. 'M8x1.25' or '1/4-20 UNC'.

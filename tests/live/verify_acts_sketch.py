@@ -338,6 +338,14 @@ _SKETCHWORK = [
      lambda p: p.get("target_sketch") == "XformDst" and p.get("curve_count_before") == 0
      and p.get("curve_count_after") == 1
      and "APPENDS" in (p.get("note") or "") and "RENUMBER" not in (p.get("note") or ""), None),
+    # an IDENTITY copy (no dx/dy/rotation/scale) into a DIFFERENT target sketch: 'nothing to apply'
+    # is refused only when the target IS the source, never for a target that merely asks for no
+    # transform - so this lands, and the target's own curve count is the independent read-back.
+    ("sketch_copy", {"sketch_name": "XformSrc", "target_sketch": "XformDst", "entities": "line:0"},
+     lambda p: p.get("copied") is True and p.get("target_sketch") == "XformDst"
+     and p.get("curve_count_before") == 1 and p.get("curve_count_after") == 2, None),
+    ("sketch_get", {"sketch_name": "XformDst", "include_entities": True},
+     lambda p: p.get("counts", {}).get("lines") == 2, None),
     # a mirror asked for as a negative scale, and a transform that asks for nothing: neither runs.
     ("sketch_move", {"sketch_name": "XformDst", "entities": "line:0", "scale_factor": -1},
      "refused", None),

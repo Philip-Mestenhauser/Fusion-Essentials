@@ -6,6 +6,8 @@ parameters, add/remove a named preset on an existing tool, find where a tool is 
 shared library. The fusion scope is the shipped sample libraries - readable, never written. Hub
 libraries can't be created via the API (importToolLibrary fails there) - create those in the UI."""
 
+import re
+
 import adsk.core
 import adsk.cam
 
@@ -15,7 +17,7 @@ from ..mcp_primitives.registry import register
 from ._common import (CM_TO_UNIT, iter_collection, named_with_remainder, ok, error, read_flag,
                       safe)
 from ._cam_common import (assets_named, get_cam, expression_error, library_assets, quote_expression,
-                          tool_dimension_value)
+                          tool_dimension_value, unquote_expression)
 from ._cam_presets import (_apply_preset_values, _persist_preset_change, _persisted_preset_names,
                            _preset_names, _preset_spec_error, _preset_tool, _presets_named)
 
@@ -456,7 +458,7 @@ def _tool_summary(tool, index):
         summ["tool_product_id"] = product_id
     if vendor:
         summ["tool_vendor"] = vendor
-    holder = tool_holder(tool)   # assigned holder identity - shown only when the tool carries one
+    holder = tool_holder(tool)   # milling or turning holder identity; absent if the JSON has none
     if holder:
         summ["holder"] = holder
     return summ
@@ -699,6 +701,20 @@ def _build_entry(ref):
         sized_field, derr = _apply_diameter(tool, ref["diameter"])
         if derr:
             return None, None, derr
+        # The sample's own description can carry the SAMPLE's size (e.g. "12mm Flat Endmill" on a
+        # tool just sized to 10mm) - restate the embedded number to what this call actually wrote.
+        desc_p = safe(lambda: tool.parameters.itemByName("tool_description"))
+        current_desc = safe(lambda p=desc_p: p.value.value) if desc_p is not None else None
+        restated = _restated_description(current_desc, _mm(_dia_value(tool, sized_field)))
+        if desc_p is not None and restated != current_desc:
+            try:
+                desc_p.expression = _quote(restated)
+            except Exception as e:
+                return None, None, f"Could not restate the description to '{restated}': {e}."
+            landed = safe(lambda p=desc_p: p.value.value)
+            if landed != restated:
+                return None, None, (f"Restated the description to '{restated}' but it read back "
+                                    f"{landed!r} - the description did not land.")
 
     # 3b) product_id / vendor are real tool parameters but NOT part of createFromJson's schema,
     # which drops those keys silently - so they are applied as quoted-string expressions after
@@ -751,6 +767,22 @@ def _mm(value):
     return None if value is None else round(value * CM_TO_UNIT["mm"], 4)
 
 
+# A sample's own '<n>mm' size token, e.g. "12mm Flat Endmill" - matched so a sized clone's
+# description can restate the NUMBER alone, keeping the sample's own spacing/unit spelling.
+_DESCRIPTION_SIZE_RE = re.compile(r"(\d+(?:\.\d+)?)(\s*mm)\b", re.IGNORECASE)
+
+
+def _restated_description(description, size_mm):
+    """`description` with its embedded '<n>mm' size token restated to `size_mm`; unchanged when it
+    carries no such token or `size_mm` is unknown."""
+    if not description or size_mm is None:
+        return description
+    m = _DESCRIPTION_SIZE_RE.search(description)
+    if not m:
+        return description
+    return description[:m.start(1)] + f"{size_mm:g}" + description[m.end(1):]
+
+
 def _stepped(row):
     """Whether a sized row shows a shoulder of its OWN size - BOTH values have to read, since a
     null beside a number is a read that did not answer and not a stepped tool."""
@@ -777,7 +809,9 @@ def _sized_rows(target, add_tools, built, fields, assigned):
         at = numbers.index(number) if numbers.count(number) == 1 else None
         row = {"entry": i, "sized_field": field,
                "reread_expression": target.reread_param(at, field) if at is not None else None,
-               "diameter_mm": _mm(_dia_value(tool, field))}
+               "diameter_mm": _mm(_dia_value(tool, field)),
+               "description": (unquote_expression(target.reread_param(at, "tool_description"))
+                               if at is not None else _tp(tool, "tool_description"))}
         if field == _P_DIAMETER:
             row["shoulder_diameter_mm"] = _mm(_dia_value(tool, _P_SHOULDER_DIAMETER))
         rows.append(row)

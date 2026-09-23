@@ -327,3 +327,12 @@ class TestConfiguredDesign:
         plain = self._open(monkeypatch, is_configured_design=False)
         assert plain["is_configured_design"] is False
         assert "configured_design_note" not in plain
+
+
+class TestSchema:
+    def test_declare_intent_flags_each_name_the_requirement(self):
+        # Neither flag alone can be schema-'required' (it is one OR the other) - so the caller
+        # meets the DECLARE-INTENT gate in the description before burning a refusal on it.
+        props = od.tool.input_schema["properties"]
+        assert "required" in props["force_api_open"]["description"].lower()
+        assert "required" in props["is_cam_template"]["description"].lower()

@@ -67,7 +67,7 @@ def handler(sketch_name: str = "", entities: str = "", target_sketch: str = "",
     """See TOOL_DESCRIPTION."""
     design, sketch, ents, refs, coll, matrix, unit, err = _prepare(
         sketch_name, entities, units, dx, dy, rotation_deg, center_x, center_y, scale_factor,
-        component)
+        component, target_sketch, target_component)
     if err:
         return err
 

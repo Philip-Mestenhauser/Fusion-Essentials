@@ -47,6 +47,7 @@ RETURNS = [
     _outputs.ReturnsValue("result_bodies", "the names of the bodies the pipe created/modified"),
     _outputs.ReturnsValue("hollow", "whether the CREATED pipe reads back hollow",
                           absent_when="no_timeline_feature"),
+    _outputs.ReturnsValue("path_curves", "how many curves the built path actually holds"),
 ]
 
 
@@ -153,6 +154,10 @@ def handler(path=None, section_size=None, section_type: str = "circular", operat
     pipe_path, path_label, patherr = build_path(comp, path)
     if patherr:
         return error(patherr)
+    # What the built Path HOLDS, beside what the request named: the pipe follows these curves and
+    # no others, so a chain that stopped short pipes a stub of the intended run.
+    path_curves = _common.counted(lambda: pipe_path.count)
+    sketch_curves = _common.path_sketch_curve_count(comp, path)
     path_closed = safe(lambda: pipe_path.isClosed)
     if frac_two is not None and path_closed is not True:
         if path_closed is None:
@@ -231,6 +236,10 @@ def handler(path=None, section_size=None, section_type: str = "circular", operat
         except Exception as e:
             return error(f"Could not scope to target_bodies: {e}")
 
+    # A join is told "grew a body" from "made a second one" by the census host's body NAMES before
+    # the add - the same before-image a no-volume-change join error names its orphan body from.
+    bodies_before = _common.component_body_names(census) if op_key == "join" else None
+
     try:
         feature = comp.features.pipeFeatures.add(pin)
     except Exception as e:
@@ -273,8 +282,15 @@ def handler(path=None, section_size=None, section_type: str = "circular", operat
                              "anything is UNVERIFIED. Re-read the bodies with model_inspect.")
             delta_total = None
         elif abs(delta_total) < _common.NO_VOLUME_CHANGE_CM3:
+            # No target grew - but a disjoint join still LANDS a new body nowhere else named, so the
+            # census after the add is checked before the error is composed.
+            extra = ""
+            if op_key == "join":
+                bodies_after = _common.component_body_names(census)
+                join_clause = _common.join_new_body_clause(op_key, bodies_before, bodies_after)
+                extra = (" " + join_clause) if join_clause else ""
             return error(f"Pipe reported success but no body's volume changed, so the {op_key} "
-                         "affected nothing. " + _common.failed_effect_remedy(design, feature))
+                         f"affected nothing.{extra} " + _common.failed_effect_remedy(design, feature))
 
     inv = 1.0 / scale_factor
     payload = {
@@ -282,6 +298,7 @@ def handler(path=None, section_size=None, section_type: str = "circular", operat
         "operation": op_key,
         "component": safe(lambda: comp.name),
         "path": path_label,
+        "path_curves": path_curves,
         "path_closed": bool(path_closed) if path_closed is not None else None,
         "section_type": st_key,
         "section_size": round(float(section_size), 6),
@@ -290,6 +307,19 @@ def handler(path=None, section_size=None, section_type: str = "circular", operat
         "scoped_to_bodies": scoped_to,
         "note": "Pipe built along the path. Pair with view_screenshot (iso) to view it.",
     }
+    if sketch_curves is not None:
+        payload["path_sketch_curves"] = sketch_curves
+    warning = _common.path_chain_warning(path_curves, sketch_curves, "pipe")
+    if warning:
+        payload["note"] += " " + warning
+    if op_key in ("cut", "intersect"):
+        # A cut across several bodies lists them all in feature.bodies; only a RISE in the host's
+        # solid count says a target was split.
+        is_split, split_warning = _common.body_split_clause(
+            op_key, body_names, count_before, _common.body_count(census))
+        if is_split:
+            payload["body_split"] = body_names
+            payload["note"] += " " + split_warning
     if scoped_to:
         payload["note"] += (" 'scoped_to_bodies' is what was REQUESTED: participantBodies is a "
                             "write-only property, so which bodies the pipe actually acted on cannot "

@@ -16,7 +16,7 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | `Choice` | One of a fixed set of string options. Emits a JSON-schema `enum` so the legal values are |
 | `Distance` | A length value in display 'units', resolved to Fusion's internal cm. The companion 'units' |
 | `EdgeLoopRef` | A boundary defined by edge handles from find_geometry. |
-| `FeatureRef` | A reference to ONE timeline FEATURE by name, as design_get(include=['timeline']) lists it. |
+| `FeatureRef` | A reference to ONE timeline FEATURE by name, '<component>/<name>', or timeline index, as |
 | `FeatureRefList` | A LIST of timeline features, resolving to (entities, labels) - the entity list plus the |
 | `GeometryHandle` | A reference to EXISTING geometry, as a SHORT-LIVED handle from find_geometry (an entityToken). |
 | `GeometryHandleList` | A LIST of geometry handles (e.g. the specific edges to fillet, the bodies to mirror). Accepts a |
@@ -68,7 +68,7 @@ Produces: feature -> design_delete_feature. |
 Produces: feature -> design_delete_feature. |
 | ✎ | `model_pattern_rectangular` | Pattern occurrences or bodies in a rectangular grid. |
 | ✎ | `model_pipe` | Build a pipe along a path.
-Produces: feature -> design_delete_feature, result_bodies, hollow. |
+Produces: feature -> design_delete_feature, result_bodies, hollow, path_curves. |
 | ✎ | `model_replace_face` | Replace body faces with an open surface (see surface_patch).
 Produces: feature -> design_delete_feature. |
 | ✎ | `model_revolve` | Revolve a sketch profile about an axis; sketch one half - the profile must not cross the axis. |

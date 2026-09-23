@@ -863,8 +863,17 @@ def _per_operation_only(label, ops, suppressed, block, exc) -> dict:
     return rec
 
 
-def get_machining_time_handler(setup: str = "", units: str = "mm") -> dict:
-    """Estimated machining time for the whole doc, or one setup (`setup`), per setup and per op."""
+def _tag_operation(rec, op_name):
+    """`rec` with an 'operation' key naming the ONE operation this row is scoped to - absent when
+    the row spans a whole setup."""
+    if op_name is not None:
+        rec["operation"] = op_name
+    return rec
+
+
+def get_machining_time_handler(setup: str = "", units: str = "mm", operation=None) -> dict:
+    """Estimated machining time for the whole doc, one setup (`setup`), or one already-resolved
+    operation (`operation`), per setup and per op."""
     cam, err = get_cam(sync=True)
     if err:
         return error(err)
@@ -880,29 +889,38 @@ def get_machining_time_handler(setup: str = "", units: str = "mm") -> dict:
     tool_change = 1.5           # seconds
     args = (feed_scale, rapid_feed, tool_change)
 
-    targets = []  # (label, object)
-    if (setup or "").strip():
+    op_name = safe(lambda: operation.name) if operation is not None else None
+    targets = []  # (label, object, ops_override)
+    if operation is not None:
+        parent = safe(lambda: operation.parentSetup)
+        label = (safe(lambda: parent.name) if parent is not None else None) or op_name
+        targets.append((label, parent, [operation]))
+    elif (setup or "").strip():
         node, rerr = resolve_cam_node(cam, setup, kinds=("setup",), label="setup")
         if rerr:
             return error(rerr)
-        targets.append((node.name, node.obj))
+        targets.append((node.name, node.obj, None))
     else:
         for s in setups(cam):
-            targets.append((safe(lambda s=s: s.name), s))
+            targets.append((safe(lambda s=s: s.name), s, None))
 
     results = []
     grand = 0.0
-    for label, obj in targets:
-        ops, suppressed = _timeable_ops(obj)
+    for label, obj, ops_override in targets:
+        if ops_override is not None:
+            is_supp = safe(lambda: ops_override[0].isSuppressed, False)
+            ops, suppressed = ([], 1) if is_supp else (ops_override, 0)
+        else:
+            ops, suppressed = _timeable_ops(obj)
         additive = is_additive_setup(obj)
         # getMachiningTime needs at least one VALID toolpath in the target. The failure raises
         # catchably here, but through sys_execute_script it takes the whole invocation down, so
         # the precondition is checked before the call.
         if not _any_valid_toolpath(ops):
-            results.append({"setup": label, "excluded_suppressed": suppressed,
+            results.append(_tag_operation({"setup": label, "excluded_suppressed": suppressed,
                 "error": "No generated toolpath to time - every unsuppressed operation is "
                          "out-of-date or ungenerated. Run cam_generate (in the Manufacture "
-                         "workspace), then retry."})
+                         "workspace), then retry."}, op_name))
             continue
         # The per-operation pass runs FIRST: a NaN reading saturates the whole-collection figure
         # too (measured), so it is held out and named instead - an ADDITIVE setup's ops the same
@@ -911,15 +929,15 @@ def get_machining_time_handler(setup: str = "", units: str = "mm") -> dict:
         timed_ops = [op for op in ops if not any(op is bad for bad in unreadable)]
         held_out = [safe(lambda o=o: o.name) for o in unreadable]
         if not timed_ops:
-            results.append(dict({"setup": label, "excluded_suppressed": suppressed,
+            results.append(_tag_operation(dict({"setup": label, "excluded_suppressed": suppressed,
                                  "machining_time_seconds": None,
-                                 "total_excludes_operations": held_out}, **block))
+                                 "total_excludes_operations": held_out}, **block), op_name))
             continue
         collection, added = _op_collection(timed_ops)
         if collection is None or added < len(timed_ops):
-            results.append({"setup": label, "excluded_suppressed": suppressed,
+            results.append(_tag_operation({"setup": label, "excluded_suppressed": suppressed,
                 "error": f"Could not build the operation collection to time: {added} of "
-                         f"{len(timed_ops)} unsuppressed operations went in."})
+                         f"{len(timed_ops)} unsuppressed operations went in."}, op_name))
             continue
         try:
             mt = cam.getMachiningTime(collection, *args)
@@ -936,7 +954,7 @@ def get_machining_time_handler(setup: str = "", units: str = "mm") -> dict:
             "tool_changes": counted(lambda: mt.toolChangeCount),
             "feed_distance": measured(lambda: mt.feedDistance, factor, 1),
             "rapid_distance": measured(lambda: mt.rapidDistance, factor, 1),
-            "timed_operations": added,
+            "operations_in_collection": added,
             "excluded_suppressed": suppressed,
             }
             if secs is not None:
@@ -950,11 +968,12 @@ def get_machining_time_handler(setup: str = "", units: str = "mm") -> dict:
             # The per-op sum disagrees with the aggregate above, so both are published and neither
             # is derived from the other.
             rec.update(block)
-            results.append(rec)
+            results.append(_tag_operation(rec, op_name))
         except Exception as e:
             # The whole-collection call raises where any operation in the setup is ERRORED, which
             # would hide every good per-operation reading behind one message.
-            results.append(_per_operation_only(label, ops, suppressed, block, e))
+            row = _per_operation_only(label, ops, suppressed, block, e)
+            results.append(_tag_operation(row, op_name))
 
     # A setup whose own total raised, or read as no number at all, contributes nothing to the grand
     # total while its per-operation rows ARE published - so the document figure names the partial.

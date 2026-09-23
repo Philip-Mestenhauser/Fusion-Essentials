@@ -104,9 +104,12 @@ def handler(faces=None, thickness: float = 0.0, units: str = "mm",
                      "did not close into a solid. The feature remains in the timeline; inspect it "
                      "with model_inspect or remove it with design_delete_feature.")
     # The solid gate above proves a solid wall LANDED; it says nothing about how thick it is, which
-    # is why the wall's own thickness parameter is read back here.
-    landed, rerr = _landed_length(lambda: feature.thickness.value, float(thickness) * k, k,
-                                  "wall", "thickness")
+    # is why the wall's own thickness parameter is read back here. MEASURED: Fusion thickens the
+    # requested value on EACH side, so thickness.value reads 2x the request when symmetric=true.
+    want_cm = float(thickness) * k
+    expect_cm = want_cm * 2 if symmetric else want_cm
+    landed_total, rerr = _landed_length(lambda: feature.thickness.value, expect_cm, k,
+                                        "wall", "thickness")
     if rerr:
         return error(rerr + " " + _common.failed_effect_remedy(design, feature))
     # The note states what the created body ACTUALLY read back - a hardcoded "isSolid=true" beside
@@ -130,11 +133,13 @@ def handler(faces=None, thickness: float = 0.0, units: str = "mm",
         "symmetric": bool(symmetric),
         "note": note,
     }
-    if landed is None:
+    if landed_total is None:
         unverified.append("thickness")
         payload["note"] += " Not read back off the feature: thickness."
     else:
-        payload["thickness"] = landed
+        payload["thickness"] = round(landed_total / 2, 6) if symmetric else landed_total
+        if symmetric:
+            payload["wall_total"] = landed_total
     if unverified:
         payload["unverified"] = unverified
     if tt_key:
@@ -164,7 +169,8 @@ tool = (
     .add_input_property("faces", _THICKEN_FACES.schema())
     .add_input_property("thickness", {"type": "number", "description": "In 'units'; non-zero."})
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("symmetric", {"type": "boolean", "description": "Thicken both sides."})
+    .add_input_property("symmetric", {"type": "boolean",
+        "description": "Thicken both sides; 'thickness' stays per side, so the wall lands 2x."})
     .add_input_property(*_inputs.boolean_op(options=("new", "join", "cut"), default="new").as_property())
     .add_input_property("chaining", {"type": "boolean", "description": "Select the connected face set."})
     .add_input_property(*_inputs.Choice("thicken_type", ["sharp", "rounded"],

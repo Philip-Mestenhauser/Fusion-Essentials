@@ -13,9 +13,10 @@ from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import CM_TO_UNIT, named_with_remainder, ok, error, safe, scale, set_verified
 from ._cam_common import (MACHINE_MODE_MEMBERS, PARAM_READ, SWARF_CONTOURS_PARAM, avoid_groups,
-                          enumeration_remedy, expression_error, get_cam, group_record,
-                          machine_mode_value, matched_quoting, owning_setup, resolve_cam_node,
-                          register_future, strategy_generation_allowed, unquote_expression)
+                          choice_quoting, enumeration_remedy, expression_error, get_cam,
+                          group_record, machine_mode_value, matched_quoting, owning_setup,
+                          resolve_cam_node, register_future, strategy_generation_allowed,
+                          unquote_expression)
 from . import _inputs
 from . import _sketch_detail
 
@@ -79,6 +80,12 @@ _PROBE_MODEL_MODE = "selection-model"
 _PROBE_STOCK_MODE = "selection-stock"
 _PROBE_MODEL_PARAM = "probe_selection"
 _PROBE_STOCK_PARAM = "probe_stock_selection"
+
+# probingType picks the probe STRATEGY variant and gates whether generation can succeed at all -
+# MEASURED: left at its default 'probing-unknown', generation launched and the op landed errored
+# 'No valid probe operations found.'.
+_PROBING_TYPE_PARAM = "probingType"
+_PROBING_TYPE_UNKNOWN = "probing-unknown"
 
 # The select-and-engage table: selection param -> (mode param, value, the noun the errors use,
 # payload key prefix). A selection landing on one of these is applied AND its mode engaged in the
@@ -1011,6 +1018,32 @@ def _apply_probe_stock(op, names, extra, setup=None):
     return (None, _mode_retained(_PROBE_STOCK_PARAM, err, held)) if err else (count, None)
 
 
+def _apply_probing_type(op, probing_type, extra):
+    """The error for writing probingType, or None - it decides the probe STRATEGY variant and gates
+    whether generation can produce a path at all, so it lands WITH the selection, not after."""
+    p = safe(lambda: op.parameters.itemByName(_PROBING_TYPE_PARAM))
+    if p is None:
+        return (f"Operation '{safe(lambda: op.name)}' has no '{_PROBING_TYPE_PARAM}' parameter, so "
+                "'probing_type' cannot be set on it. Drop 'probing_type'.")
+    before = safe(lambda: p.expression)
+    written, quoted, cerr = choice_quoting(p, before, probing_type)
+    if cerr:
+        return f"probing_type='{probing_type}' {cerr}"
+    try:
+        p.expression = written             # MUTATION
+    except Exception as e:
+        return (f"Could not set {_PROBING_TYPE_PARAM}='{probing_type}': {e}"
+                + enumeration_remedy(str(e), written, PARAM_READ, p))
+    after = safe(lambda: p.expression)
+    if after is None or unquote_expression(after) != unquote_expression(str(probing_type)):
+        shown = "UNCONFIRMED" if after is None else f"reads back '{after}'"
+        return f"Setting {_PROBING_TYPE_PARAM}='{probing_type}' did not take - it {shown}."
+    extra["probing_type"] = unquote_expression(after)
+    if quoted:
+        extra.setdefault("quoted", []).append(_PROBING_TYPE_PARAM)
+    return None
+
+
 def _surface_params(op):
     """({target key: (parameter name, param)} for every SETTABLE surface set THIS operation carries,
     in the canonical order of _SURFACE_TARGET_PARAM, [the parameter names it carries that did not
@@ -1237,9 +1270,12 @@ def _set_height_param(op, param_name, value):
     if p is None:
         return None, False, f"{param_name} not found on this operation."
     before = safe(lambda: p.expression)
-    # A height _mode is a STRING parameter: where the parameter already stores a QUOTED expression
-    # the bare request is wrapped to match it, through the ONE shared decision.
-    written, quoted = matched_quoting(before, value)
+    # A height _mode is a CHOICE parameter: a request matching its own choice set is quoted against
+    # THAT set whatever `before` looks like - a ternary current expression is not a quoted literal,
+    # and matched_quoting alone wrote it bare, which Fusion refused.
+    written, quoted, cerr = choice_quoting(p, before, value)
+    if cerr:
+        return None, False, f"{param_name}='{value}' {cerr}"
     try:
         p.expression = written            # ChoiceParameterValue takes the choice string
     except Exception as e:
@@ -1336,7 +1372,7 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
             machine_over_holes: bool = None, machine_mode: str = None,
             radial_offset: float = None, axial_offset: float = None,
             combined_offset: float = None,
-            stock_faces=None,
+            stock_faces=None, probing_type: str = None,
             top_mode: str = None, top_offset: str = None,
             bottom_mode: str = None, bottom_offset: str = None,
             units: str = "mm", generate: bool = True,
@@ -1453,6 +1489,20 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
         if not faces:
             return error("No cylinder faces left after the diameter filter. " + diam_note)
 
+    # A probe op whose probingType still reads its 'probing-unknown' default cannot generate a
+    # path ('No valid probe operations found.') - refused here, before ANYTHING lands, rather than
+    # letting the selection through for a launch that cannot succeed.
+    if selection == _PROBE and probing_type is None:
+        p = safe(lambda: op.parameters.itemByName(_PROBING_TYPE_PARAM))
+        current = unquote_expression(safe(lambda: p.expression) or "") if p is not None else None
+        if current == _PROBING_TYPE_UNKNOWN:
+            return error(
+                f"Operation '{safe(lambda: op.name)}' still reads {_PROBING_TYPE_PARAM}="
+                f"'{_PROBING_TYPE_UNKNOWN}' and no 'probing_type' was given - generation would "
+                "land 'No valid probe operations found.'. Pass 'probing_type' (this operation's "
+                f"own {_PROBING_TYPE_PARAM} choices - cam_get(include=['operations'])). Nothing "
+                "was changed.")
+
     # ── heights FIRST (before the selection) ──
     # A height _mode's valid enum is CONTEXT-DEPENDENT: setting bottomHeight_mode after re-applying
     # a chain threw 'Invalid enumeration value', so heights are set while the op is settled.
@@ -1474,6 +1524,10 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
     # 'quoted' names every parameter this call WRAPPED to match what it already stored - the mode
     # engage below appends to the same list. Absent means each request was written as it was sent.
     extra = {"quoted": wrapped} if wrapped else {}
+    if selection == _PROBE and probing_type is not None:
+        perr = _apply_probing_type(op, probing_type, extra)
+        if perr:
+            return error(_retained(applied, perr))
     if selection == _SURFACE_GROUP:
         offsets = {k: knobs.get(k) for k in _OFFSET_KNOBS_KEYS}
         count, aerr = _apply_surface_group(op, entities, machine_over_holes,
@@ -1571,7 +1625,7 @@ tool = (
             "properties": _POCKET_FILTER_PROPERTIES,
             "description": "Lengths in 'units'."})
     .add_input_property("min_diameter", {"type": "number",
-            "description": "In 'units'; filters the handles passed, never discovers them."})
+            "description": "In 'units'; filters, never discovers."})
     .add_input_property("max_diameter", {"type": "number", "description": "In 'units'."})
     .add_input_property(*SURFACE_TARGET.as_property())
     .add_input_property("machine_over_holes", {"type": "boolean",
@@ -1583,6 +1637,7 @@ tool = (
     .add_input_property("stock_faces", {"type": "array",
             "items": {"type": "string", "enum": list(_STOCK_FACE_NAMES)},
             "description": "probe: the STOCK's faces, instead of handles."})
+    .add_input_property("probing_type", {"type": "string"})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property("top_mode", {"type": "string", "description": "e.g. 'from stock top'."})
     .add_input_property("top_offset", {"type": "string"})

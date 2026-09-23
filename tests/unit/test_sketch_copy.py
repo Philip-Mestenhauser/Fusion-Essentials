@@ -4,7 +4,7 @@ import math
 import types
 import adsk.core
 import pytest
-from conftest import FakeBoundingBox3D, FakePoint, error_message, install, load_tool, make_design, make_sketch, make_sketch_curve, payload
+from conftest import FakeBoundingBox3D, FakePoint, Sketch, SketchCurves, error_message, install, load_tool, make_design, make_sketch, make_sketch_curve, payload
 
 
 def _rebox(curve):
@@ -166,6 +166,34 @@ class TestCopy:
         assert out["target_sketch"] == "Other" and out["new_curves"] == ["line:0"]
         assert out["curve_count_before"] == 0 and out["curve_count_after"] == 1
         assert _lines(plate).count == 2       # the source is untouched
+
+    def test_an_identity_copy_lands_in_a_different_target_sketch(self, mod, monkeypatch):
+        # no dx/dy/rotation/scale given: a differing target makes the identity transform the copy.
+        plate = Sketch("Plate", curves=SketchCurves(lines=[_boxed("L0", 0.0, 0.0)]),
+                       entity_token="TOK-PLATE")
+        other = Sketch("Other", curves=SketchCurves(lines=[]), entity_token="TOK-OTHER")
+        install(mod, make_design(sketches=[other, plate]))
+        monkeypatch.setattr(adsk.core.Matrix3D, "create", lambda: _matrix())
+        monkeypatch.setattr(adsk.core.Vector3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        calls = []
+        plate.copy = _copier(calls, plate, made=[_boxed("L9", 9.0, 0.0)])
+        out = payload(mod.handler(entities="line:0", target_sketch="Other"))
+        assert calls[0][2] is other
+        assert out["target_sketch"] == "Other"
+        assert out["curve_count_before"] == 0 and out["curve_count_after"] == 1
+
+    def test_an_identity_copy_into_the_same_sketch_still_refuses(self, mod, monkeypatch):
+        # target_sketch names the SAME sketch (by native identity) as the source: still nothing to
+        # apply, the same sentence as a same-sketch copy with no target_sketch at all.
+        plate = Sketch("Plate", curves=SketchCurves(lines=[_boxed("L0", 0.0, 0.0)]),
+                       entity_token="TOK-PLATE")
+        install(mod, make_design(sketches=[plate]))
+        monkeypatch.setattr(adsk.core.Matrix3D, "create", lambda: _matrix())
+        monkeypatch.setattr(adsk.core.Vector3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        msg = error_message(mod.handler(entities="line:0", target_sketch="Plate"))
+        assert "Nothing to apply" in msg
 
     def test_a_copy_that_lands_nothing_in_the_target_is_an_error(self, mod, sketches):
         plate, second = sketches

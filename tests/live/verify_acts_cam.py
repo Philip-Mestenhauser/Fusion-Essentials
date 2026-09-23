@@ -1122,6 +1122,21 @@ _CAM_STORY = [
      lambda c: {"operation": _BORE_OP, "selection": "holes",
                 "handles": _ctx_get(c, "through_bores", "the two through bores"),
                 "generate": False}, _selected(2), None),
+    # BOTH height modes on the same bore, in one call: a mode matching the operation's own choice
+    # set lands quoted whatever its CURRENT expression looks like, and heights_set names both writes.
+    ("cam_select_geometry",
+     lambda c: {"operation": _BORE_OP, "selection": "holes",
+                "handles": _ctx_get(c, "through_bores", "the two through bores"),
+                "top_mode": "from stock top", "bottom_mode": "from stock top",
+                "generate": False},
+     lambda p: _measured("both heights land on the bore, heights_set names both writes",
+                         {"heights_set": p.get("heights_set")},
+                         isinstance(p.get("heights_set"), list) and len(p["heights_set"]) == 2
+                         and any(e.startswith("topHeight_mode=") and "from stock top" in e
+                                 for e in p["heights_set"])
+                         and any(e.startswith("bottomHeight_mode=") and "from stock top" in e
+                                 for e in p["heights_set"])),
+     None),
     ("cam_get", {"include": ["operations"], "setup": CAM_SETUP}, "ok", None),
     # SKETCH: the scratch circle drawn at the top of this act, asserted on the entity set the applied
     # selection reports rather than on outputGeometry (a curve path count on an ungenerated op is not
@@ -1261,10 +1276,20 @@ _CAM_STORY = [
     ("find_geometry", {"target": PART_COMP, "kind": "planar_face", "nearest_to": [25, 0, 40],
                        "max_results": 1},
      _needs(MACHINING_EXTENSION, _face_up_at(25, 0, 40, tol=2.0)), _fg("probe_face")),
+    # OMITTED probing_type, on the fresh op whose probingType still reads its 'probing-unknown'
+    # default: refused before ANYTHING lands - the identical call right after succeeds once the
+    # type is given.
     ("cam_select_geometry", lambda c: {"operation": _PROBE_OP, "selection": "probe",
                                        "handles": [_ctx_get(c, "probe_face", "the stepped top")],
                                        "generate": False},
-     _needs(MACHINING_EXTENSION, _probe_applied(1)), None),
+     _needs(MACHINING_EXTENSION,
+            _refused("probingType='probing-unknown'", "no 'probing_type' was given",
+                     "Nothing was changed")), None),
+    ("cam_select_geometry", lambda c: {"operation": _PROBE_OP, "selection": "probe",
+                                       "handles": [_ctx_get(c, "probe_face", "the stepped top")],
+                                       "probing_type": "probing-z", "generate": False},
+     _needs(MACHINING_EXTENSION, lambda p: _probe_applied(1)(p)
+            and p.get("probing_type") == "probing-z"), None),
     # THE OTHER PROBING ROUTE is refused HERE: this setup's stock is the billet SOLID, and under a
     # stock with no analytic faces the names read back empty (measured), so the route refuses
     # before probe_mode is touched. The positive beat runs on a box-stock setup (the template act).
@@ -1467,6 +1492,15 @@ _CAM_STORY = [
     ("cam_generate", {"target": CAM_SETUP, "skip_valid": False},
      lambda p: p["launched"] is True and p["target"] == f"setup '{CAM_SETUP}'"
      and p["skip_valid"] is False and bool(p["handle"]), None),
+    # READ IMMEDIATELY, before the act-boundary poll below settles it: a state-0 op counts 'valid'
+    # in the tally while its own generation is still landing, so readiness must not claim 'ready to
+    # post' while operations in this real, multi-operation job are still generating.
+    # A job that has already settled by this read proves nothing and is not a failure.
+    ("cam_get_status", {"target": CAM_SETUP},
+     lambda p: _measured("readiness withholds 'ready to post' while the job is still generating",
+                         {"completed": p.get("completed"), "readiness": p.get("readiness")},
+                         p.get("completed") is True
+                         or "ready to post" not in (p.get("readiness") or "")), None),
     # generation completion is gated by the bounded poll run() performs after this act (an
     # errored op or an EMPTY toolpath - a 'valid' op that cuts nothing - fails the run).
 ]
@@ -1546,25 +1580,31 @@ def _template_applied(name, setup, minimum, generation_mode):
     """cam_apply_template of a template bundled from an operation that CARRIES a tool: the row count
     accounts for operations_added, nothing is named in 'tool_unselected', and 'ready' reads true -
     the opposite reading from the shipped bundle below, which is why neither is asserted
-    symmetrically."""
+    symmetrically. 'library_tools' is the document tool library's own before/after census, taken
+    on every apply - present and well-formed whether or not this particular apply forked a tool."""
     def check(p):
         rows = p.get("operations") or []
         tool_less = p.get("tool_unselected")
         created = p.get("created_operations") or []
         row_names = [r.get("name") for r in rows]
+        lib = p.get("library_tools") or {}
         return _measured(f"{name!r} applied to '{setup}', every added operation carrying a tool",
                          {"applied": p.get("applied"), "template": p.get("template"),
                           "setup": p.get("setup"), "operations_added": p.get("operations_added"),
                           "operations": rows, "created_operations": created,
                           "generation_mode": p.get("generation_mode"),
-                          "tool_unselected": tool_less, "ready": p.get("ready")},
+                          "tool_unselected": tool_less, "ready": p.get("ready"),
+                          "library_tools": lib},
                          p.get("applied") is True and p.get("template") == name
                          and p.get("setup") == setup and (p.get("operations_added") or 0) >= minimum
                          and p.get("generation_mode") == generation_mode
                          and p.get("created_count") == len(created) == len(rows)
                          and sorted(created) == sorted(row_names)
                          and _applied_rows_account(p, rows, tool_less)
-                         and tool_less == [] and p.get("ready") is True)
+                         and tool_less == [] and p.get("ready") is True
+                         and _num(lib.get("before")) and _num(lib.get("after"))
+                         and lib.get("after") >= lib.get("before")
+                         and isinstance(lib.get("forked"), list))
     return check
 
 
@@ -1859,6 +1899,14 @@ _CAM_DELIVER = [
     # zero. The act-boundary poll fails on an EMPTY toolpath; this says the same thing per
     # operation, with the seconds on the row.
     ("cam_get", {"include": ["time"], "setup": CAM_SETUP}, _all_cut(CAM_SETUP, 9), None),
+    # the SAME slice, scoped to ONE operation by its breadcrumb: one row, not the whole setup's -
+    # and that row's own collection holds exactly the one operation asked for.
+    ("cam_get", {"include": ["time"], "operation": f"{CAM_SETUP} / Drilling / {_SPOT_OP}"},
+     lambda p: _measured("time scoped to one operation: one row, one op in its own collection",
+                         {"setups": (p.get("time") or {}).get("setups")},
+                         len((p.get("time") or {}).get("setups") or []) == 1
+                         and (p["time"]["setups"][0].get("operation") == _SPOT_OP)
+                         and (p["time"]["setups"][0].get("operations_in_collection") == 1)), None),
     # THE PROBING PASS the job act created, read once the act boundary's poll has certified the
     # generation: the Probe WCS cycle reads valid on its own row. It is gated with the rows that
     # made it - where the extension is not entitled there is no such operation to read.
@@ -2048,6 +2096,33 @@ _CAM_DELIVER = [
                 "selection": "holes",
                 "handles": _ctx_get(c, "tmpl_cbores", "the counterbores"),
                 "generate": False}, _selected(4, on="Counterbore"), None),
+    # A TEMPLATE HOLDING A MANUAL NC MEMBER: bundled, applied to a fresh setup, and read ready - a
+    # manual member carries no tool by construction, so it must not sink readiness or draw the
+    # tool-assignment remedy the way a genuinely toolless operation does.
+    ("cam_create_operation", {"setup": CAM_SETUP, "strategy": "manual", "name": "TmplManualSrc"},
+     _op_named(CAM_SETUP, "manual", "TmplManualSrc"), None),
+    ("cam_save_template", {"template_name": TEMPLATE_NAME + " Manual", "setup": CAM_SETUP,
+                           "operations": "TmplManualSrc", "location": "local"},
+     lambda p: p["saved"] is True and p["template"] == TEMPLATE_NAME + " Manual"
+     and p["operation_count"] == 1 and bool(p["template_url"]),
+     ("manual_template_url", _recall("manual_template_url", lambda p: p["template_url"]))),
+    ("cam_delete", {"entity": "TmplManualSrc"}, lambda p: _op_deleted("TmplManualSrc")(p), None),
+    ("cam_create_setup", {"models": [PART_COMP], "name": "SetupManualTmpl"},
+     lambda p: p["created"] is True and p["setup_name"] == "SetupManualTmpl"
+     and p["operation_count"] == 0, None),
+    ("cam_apply_template",
+     lambda c: {"setup": "SetupManualTmpl",
+                "template_url": _ctx_get(c, "manual_template_url", "the manual template's url"),
+                "template_name": TEMPLATE_NAME + " Manual", "location": "local", "generate": "skip"},
+     lambda p: _measured("a manual-NC template applies and reads ready, no tool-assignment remedy",
+                         {"applied": p.get("applied"), "tool_unselected": p.get("tool_unselected"),
+                          "ready": p.get("ready"), "note": (p.get("note") or "")[:200]},
+                         p.get("applied") is True and (p.get("operations_added") or 0) >= 1
+                         and p.get("tool_unselected") == [] and p.get("ready") is True), None),
+    ("cam_delete_template",
+     lambda c: {"template_url": _ctx_get(c, "manual_template_url", "the manual template's url"),
+                "confirm_name": TEMPLATE_NAME + " Manual"},
+     lambda p: p["deleted"] is True, None),
     ("cam_delete", lambda c: {"entity": _ctx_get(c, "adaptive_op", "the created adaptive op")},
      _op_deleted("adaptive_op"), None),
     # SUPPRESSION, last of the job edits: the flag is a WRITE here, and it is what gives
@@ -2137,8 +2212,11 @@ _CAM_TEMPLATE_MODES = [
                                                                "the cloned probe's index"),
                                         "generate": False},
      _needs(MACHINING_EXTENSION, _op_named(_TEMPLATE_SKIP_SETUP, "probe", _PROBE_STOCK_OP)), None),
+    # a FRESH probe op still reads probingType='probing-unknown', so this call needs 'probing_type'
+    # too (see the omitted-type refusal in ACT 10a) - without it the pre-flight guard, not the
+    # stock route, would be what answers this call.
     ("cam_select_geometry", {"operation": _PROBE_STOCK_OP, "selection": "probe",
-                             "stock_faces": ["Top"], "generate": False},
+                             "stock_faces": ["Top"], "probing_type": "probing-z", "generate": False},
      _needs(MACHINING_EXTENSION, lambda p: _stock_probed(["Top"], "selection-stock")(p)), None),
     ("cam_delete", {"entity": _PROBE_STOCK_OP},
      _needs(MACHINING_EXTENSION, _op_deleted(_PROBE_STOCK_OP)), None),

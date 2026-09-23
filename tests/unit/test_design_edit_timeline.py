@@ -526,12 +526,15 @@ class TestSuppress:
 
 class TestNameResolution:
     def test_repeated_name_is_refused_with_candidates(self, wire):
-        tl = wire(FakeTimeline([FakeTimelineObject("Extrude1", 0), FakeTimelineObject("Extrude1", 2)]))
+        a_ent = types.SimpleNamespace(parentComponent=types.SimpleNamespace(name="CompA"))
+        b_ent = types.SimpleNamespace(parentComponent=types.SimpleNamespace(name="CompB"))
+        tl = wire(FakeTimeline([FakeTimelineObject("Extrude1", 0, entity=a_ent),
+                                FakeTimelineObject("Extrude1", 2, entity=b_ent)]))
         msg = error_message(et.handler(action="suppress", feature="Extrude1"))
         # the shared timeline vocabulary, prefixed by THIS call's noun for the target
         assert msg.startswith("the object to suppress: ")
         assert "matches 2 timeline objects" in msg
-        assert "Extrude1@0" in msg and "Extrude1@2" in msg
+        assert "CompA/Extrude1" in msg and "CompB/Extrude1" in msg
         assert [o.isSuppressed for o in tl._items] == [False, False]
 
     def test_name_at_index_targets_that_item(self, wire):
@@ -895,11 +898,17 @@ class TestSetAttribute:
         assert "timeline GROUP" in msg
 
     def test_a_repeated_feature_name_is_refused(self, wire):
-        wire(_tagged(names=("Extrude1", "Extrude1")))
+        a_ent = types.SimpleNamespace(attributes=FakeAttributes(),
+                                      parentComponent=types.SimpleNamespace(name="CompA"))
+        b_ent = types.SimpleNamespace(attributes=FakeAttributes(),
+                                      parentComponent=types.SimpleNamespace(name="CompB"))
+        wire(FakeTimeline([FakeTimelineObject("Extrude1", 0, entity=a_ent),
+                           FakeTimelineObject("Extrude1", 1, entity=b_ent)]))
         msg = error_message(et.handler(action="set_attribute", feature="Extrude1",
                                        attribute_group="shop", attribute_name="finish",
                                        attribute_value="anodized"))
-        assert "matches 2 timeline objects" in msg and "Extrude1@1" in msg
+        assert "matches 2 timeline objects" in msg
+        assert "CompA/Extrude1" in msg and "CompB/Extrude1" in msg
 
     def test_name_at_index_targets_that_entity(self, wire):
         tl = wire(_tagged(names=("Extrude1", "Extrude1")))

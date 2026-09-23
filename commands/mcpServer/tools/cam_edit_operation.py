@@ -11,9 +11,10 @@ from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import CM_TO_UNIT, apply_rename, ok, error, safe, read_flag
 from ._cam_common import (NONFINITE_POST, PARAM_READ, get_cam, enumeration_remedy,
-                          expression_error, matched_quoting, op_primary_state, op_state_facts,
-                          operation_name_clash, owning_setup, parse_parameters, resolve_cam_node,
-                          tool_dimensions, tree_nodes, unquote_expression, validity_basis)
+                          expression_error, matched_quoting, op_primary_state, op_settled,
+                          op_state_facts, operation_name_clash, owning_setup, parse_parameters,
+                          resolve_cam_node, tool_dimensions, tree_nodes, unquote_expression,
+                          validity_basis)
 from ._cam_presets import resolve_operation_preset
 from .cam_create_operation import (_NO_INDEX, _doc_tool_at, _names_the_same_tool, _tool_at,
                                    _tool_facts, index_request_error, tool_index_of)
@@ -106,7 +107,10 @@ def _set_tool(cam, op, name, scope, library_url, index):
     """(record, error) - point the operation at a library tool by the addressing
     cam_create_operation takes, then read Operation.tool back and compare its identity."""
     # A tool swap under a running generation is unmeasured, unlike a rename or a parameter write.
-    if read_flag(lambda: op.isGenerating) is True:
+    # op_settled is the same judge cam_get_status settles completion on: the isGenerating flag
+    # alone stays true past an operation whose own state already reads valid, errored or suppressed.
+    facts = op_state_facts(op)
+    if facts.get("is_generating") and not op_settled(facts):
         return None, (f"Operation '{name}' is GENERATING, so no tool was assigned. Poll it with "
                       "cam_get_status and retry once the generation has finished.")
     # Never a bare comparison: the wire can deliver the index as TEXT, and '<' against text raises

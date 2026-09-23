@@ -196,3 +196,10 @@ class TestSaveTemplateRename:
         lib.templateAtURL = lambda u: _FakeTemplate("Slot MILL")
         out = _payload(ct.handler(template_name="slot mill", operations="Face1", setup="S"))
         assert out["template"] == "Slot MILL"
+
+
+class TestSchema:
+    def test_operations_is_a_required_input(self):
+        # The handler refuses without 'operations' - the schema should say so up front rather than
+        # burning a call on the refusal.
+        assert "operations" in ct.tool.input_schema["required"]

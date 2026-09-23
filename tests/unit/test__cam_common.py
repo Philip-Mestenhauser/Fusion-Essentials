@@ -1420,6 +1420,37 @@ class TestMachiningTimeConstants:
         assert out["total_machining_time_seconds"] == 0.0
 
 
+class TestMachiningTimeOperationScope:
+    """An already-resolved 'operation' filters the row to that ONE operation - not the whole setup
+    it sits in, which is what an unscoped ask still returns."""
+
+    def test_operation_scope_returns_exactly_that_operations_row(self, install, object_collection,
+                                                                  operation_cast_passthrough):
+        face = _MTOp("RigFace", valid=True)
+        profile = _MTOp("RigProfile", valid=False, has_toolpath=False)   # ungenerated
+        setup = _MTSetup("Rig", ops=[face, profile])
+        face.parentSetup = setup
+        cam = _MTCam([setup], per_op_by_name={"RigFace": 12.0})
+        install(cam)
+        row = _payload(cr.get_machining_time_handler(operation=face))["setups"][0]
+        assert [r["operation"] for r in row["operations"]] == ["RigFace"]
+        assert row["operations_in_collection"] == 1          # count matches the one row
+        assert row["operation"] == "RigFace" and row["setup"] == "Rig"
+
+    def test_setup_wide_ask_still_counts_every_op_added_to_the_collection(
+            self, install, object_collection, operation_cast_passthrough):
+        # unchanged: an ungenerated op is skipped from 'operations' but still enters the
+        # whole-collection call, so operations_in_collection outruns the rows that got a figure.
+        face = _MTOp("RigFace", valid=True)
+        profile = _MTOp("RigProfile", valid=False, has_toolpath=False)
+        cam = _MTCam([_MTSetup("Rig", ops=[face, profile])], per_op_by_name={"RigFace": 12.0})
+        install(cam)
+        row = _payload(cr.get_machining_time_handler())["setups"][0]
+        assert len(row["operations"]) == 1
+        assert row["operations_in_collection"] == 2
+        assert "operation" not in row
+
+
 # ── tool_holder: a CAM tool's assigned HOLDER identity, read from its JSON (adsk.cam.Tool has no ──
 # ── holder accessor). Shared by cam_get(include=['tool']) and the cam_edit_tools library listing. ──
 
@@ -1449,6 +1480,21 @@ class TestToolHolder:
 
     def test_bad_json_is_none_not_a_raise(self):
         assert cc.tool_holder(_HolderTool("{not json")) is None
+
+    def test_a_turning_tools_full_holder_reads_its_own_fields_not_null(self):
+        # MEASURED on a 'turning general' sample: none of the milling keys answer, so a reader that
+        # tries only those collapses a genuinely full holder to None.
+        j = json.dumps({"holder": {"CW": 25, "H": 20, "HAND": "R", "LH": 32, "MTP": "D",
+                                   "OAL": 125, "THSC": "L", "W": 20, "tool_roundShank": False}})
+        assert cc.tool_holder(_HolderTool(j)) == {
+            "type": "L", "head_length": 32, "overall_length": 125, "shank_width": 20,
+            "shank_height": 20, "hand": "R", "clamping": "D"}
+
+    def test_milling_keys_win_over_turning_keys_when_both_present(self):
+        # a holder carrying BOTH shapes (unmeasured, but a safe default) reads as milling - the
+        # turning read is a fallback for when the milling keys are absent, never a merge.
+        j = json.dumps({"holder": {"description": "CAT40", "THSC": "L"}})
+        assert cc.tool_holder(_HolderTool(j)) == {"name": "CAT40"}
 
 
 # ── tool_dimension_value: the ONE tool-dimension read behind cam_get's tool slice, ──
@@ -1495,6 +1541,30 @@ class TestDimensionValue:
     def test_a_readable_flute_count_survives_unscaled(self):
         tool = _DimTool(tool_numberOfFlutes=3)
         assert cc.tool_dimensions(tool, 10.0, "mm")["flutes"] == 3
+
+
+class TestTurningDimensions:
+    """tool_isTurning selects the dimension ROWS (CAM tool sample columns rule): a turning tool
+    reads insert type/size, cutting width, hand and clamping instead of the milling fallbacks."""
+
+    def _turning_tool(self, **overrides):
+        params = {"tool_isTurning": True, "tool_insertType": "C", "tool_insertSize": 0.967,
+                 "tool_cuttingWidth": 2.5, "tool_hand": "R", "tool_clamping": "D"}
+        params.update(overrides)
+        return FakeTool(parameters=FakeCAMParameters(
+            [FakeCAMParameter(name, value=value) for name, value in params.items()]))
+
+    def test_a_turning_tool_reads_insert_rows_not_milling_fallbacks(self):
+        out = cc.tool_dimensions(self._turning_tool(), 10.0, "mm")
+        assert out["insert_type"] == "C" and out["hand"] == "R" and out["clamping"] == "D"
+        assert out["insert_size"] == 9.67 and out["cutting_width"] == 25.0
+        assert "flute_length" not in out and "flutes" not in out
+
+    def test_tool_is_turning_false_still_reads_the_milling_shape(self):
+        # the exact boundary: an EXPLICIT False must not be mistaken for the absent-flag default.
+        tool = _DimTool(tool_diameter=1.0, tool_isTurning=False)
+        out = cc.tool_dimensions(tool, 10.0, "mm")
+        assert out["diameter"] == 10.0 and "insert_type" not in out
 
 
 # ── find_setup (setup, available_names, error) / find_operation (obj, available_names) / setup_names ──
@@ -2569,6 +2639,59 @@ class TestExpressionError:
         assert cc.expression_error(SimpleNamespace()) == (None, None)
 
 
+# --- choice_quoting: a choice-typed request is quoted against the parameter's OWN choice set,
+# whatever the current expression looks like (a ternary is not a quoted literal) ---
+
+class TestChoiceQuoting:
+    def test_a_ternary_current_expression_with_a_valid_choice_writes_the_quoted_choice(self):
+        # MEASURED: bottomHeight_mode ships as a ternary - matched_quoting alone reads that as
+        # "nothing quoted to match" and writes the choice bare, which Fusion refused.
+        p = FakeCAMParameter("bottomHeight_mode",
+                             expression="holeMode == 'selection-points' ? 'from hole top' : "
+                                        "'from hole bottom'",
+                             choices=("from hole top", "from hole bottom", "from stock top"))
+        written, quoted, err = cc.choice_quoting(p, p.expression, "from stock top")
+        assert err is None
+        assert written == "'from stock top'" and quoted is True
+
+    def test_a_request_matching_no_choice_is_refused_naming_the_choices(self):
+        p = FakeCAMParameter("bottomHeight_mode", expression="'from contour'",
+                             choices=("from hole top", "from hole bottom", "from stock top"))
+        written, quoted, err = cc.choice_quoting(p, p.expression, "from orbit")
+        assert written is None and quoted is False
+        assert "from hole top" in err and "from stock top" in err
+
+    def test_a_non_choice_parameter_falls_back_to_matched_quoting(self):
+        # no getChoices at all - the offset params this call also writes go through here.
+        p = FakeCAMParameter("bottomHeight_offset", expression="0 mm")
+        written, quoted, err = cc.choice_quoting(p, p.expression, "-10 mm")
+        assert err is None and written == "-10 mm" and quoted is False
+
+    def test_a_request_already_quoted_and_matching_is_not_reported_as_this_calls_wrap(self):
+        # 'current' is irrelevant once a choice set exists - the match decides, not the store shape.
+        p = FakeCAMParameter("bottomHeight_mode", expression="silhouette",
+                             choices=("from hole top", "from stock top"))
+        written, quoted, err = cc.choice_quoting(p, p.expression, "'from stock top'")
+        assert err is None and written == "'from stock top'" and quoted is False
+
+    def test_choices_given_already_quoted_still_match_by_their_unquoted_value(self):
+        # MEASURED: probingType's own choices read back quoted ("'probing-z'") - the match strips
+        # the wrapper on both sides, so the value compares, not the punctuation.
+        p = FakeCAMParameter("probingType", expression="'probing-unknown'",
+                             choices=("'probing-unknown'", "'probing-z'"))
+        written, quoted, err = cc.choice_quoting(p, p.expression, "probing-z")
+        assert err is None and written == "'probing-z'"
+
+    def test_a_refusal_over_many_choices_stays_inside_the_wire_budget(self):
+        # probingType carries 40 choices on the live op - the capped renderer keeps the refusal a
+        # single composed sentence rather than one that grows with the choice set.
+        choices = [f"probing-{i}" for i in range(40)]
+        p = FakeCAMParameter("probingType", expression="'probing-unknown'", choices=choices)
+        _written, _quoted, err = cc.choice_quoting(p, p.expression, "probing-bogus")
+        assert len(err) <= 400, len(err)
+        assert "more not listed" in err
+
+
 # --- clamp_rows: the ONE max_results clamp, so no caller can lift a wire cap ---
 
 class TestClampRows:
@@ -2807,13 +2930,16 @@ class TestOpStateTallyEdges:
 
 
 def _tally_op(name, state=0, error=False, warning=False, suppressed=False, generating=False,
+              has_toolpath=True,
               warning_text="Contour Selection: One or more contours are missing selections.",
               error_text="Toolpath is empty"):
     """One operation as the tally reads it. The warning default is the measured live text a
-    geometry-less 2D Contour carries while its state still reads valid."""
+    geometry-less 2D Contour carries while its state still reads valid. has_toolpath=False models
+    a FIRST generation still landing at state 0 - op_settled's unsettled case."""
     op = FakeOperation(name, operation_state=state, suppressed=suppressed,
                        has_error=error, error=error_text if error else "",
-                       has_warning=warning, warning=warning_text if warning else "")
+                       has_warning=warning, warning=warning_text if warning else "",
+                       has_toolpath=has_toolpath)
     op.isGenerating = generating
     return op
 
@@ -2984,6 +3110,33 @@ class TestSettledOverTheGeneratingFlag:
         sig, err = cc.live_readiness()
         assert err is None
         assert sig["generating"] == 1 and sig["generating_settled"] == 1
+
+    def test_an_unsettled_state_zero_op_does_not_read_ready(self, install,
+                                                            operation_cast_passthrough):
+        # THE BUG: op_state_tally buckets a state-0 op 'valid' even mid-generation, so the ladder
+        # must read the unsettled count BEFORE it can say 'ready to post'.
+        install(make_cam(_machined_setup(
+            [_tally_op("Rough1", state=0, generating=True, has_toolpath=False)])))
+        sig, err = cc.live_readiness()
+        assert err is None
+        assert sig["valid"] == 1 and cc.unsettled_count(sig) == 1
+        assert "ready to post" not in sig["readiness"]
+        assert "still generating" in sig["readiness"]
+
+    def test_readiness_verdict_reads_the_unsettled_rung_ahead_of_ready(self):
+        # The shared builder direct: a tally where every active op counts 'valid' but one is still
+        # generating and unsettled must not read ready.
+        tally = {"valid": 1, "out_of_date": 0, "errored": 0, "nonfinite": 0, "unread": 0,
+                "total": 1, "generating": 1, "generating_settled": 0, "warnings": 0}
+        verdict = cc.readiness_verdict(tally)
+        assert "ready to post" not in verdict and "still generating" in verdict
+
+    def test_readiness_verdict_reads_ready_once_the_flag_is_the_only_holdout(self):
+        # The boundary: generating_settled == generating (a stale flag over a settled state) reads
+        # ready, same as the pre-existing settled test above at the live_readiness level.
+        tally = {"valid": 1, "out_of_date": 0, "errored": 0, "nonfinite": 0, "unread": 0,
+                "total": 1, "generating": 1, "generating_settled": 1, "warnings": 0}
+        assert "ready to post" in cc.readiness_verdict(tally)
 
 
 _HAAS = FakeMachine(description="Haas VF-2")
@@ -4780,7 +4933,7 @@ class TestMachiningTimeExcludesSuppressed:
         out = _payload(cr.get_machining_time_handler())
         assert [op.name for op in object_collection[0]] == ["Cut"]
         assert out["setups"][0]["excluded_suppressed"] == 2
-        assert out["setups"][0]["timed_operations"] == 1
+        assert out["setups"][0]["operations_in_collection"] == 1
         # the SETUP object itself is never the target - that is the shape that fails live
         assert not any(isinstance(underlying(c[0]), FakeSetup) for c in cam.calls)
 

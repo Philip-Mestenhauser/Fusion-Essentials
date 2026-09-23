@@ -1042,3 +1042,11 @@ class TestJustSavedLag:
         res = dc.handler()
         assert res["isError"] is True
         assert "minute" not in res["message"]
+
+
+class TestSchema:
+    def test_expect_document_names_the_session_handle_for_deferred_calls(self):
+        # deferred=true refuses a name or URN (server._accept_deferred requires 'session:'), which
+        # the shared expect_document wording alone does not say.
+        desc = dc.tool.input_schema["properties"]["expect_document"]["description"]
+        assert "session:" in desc and "doc_get" in desc

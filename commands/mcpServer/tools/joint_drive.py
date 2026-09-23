@@ -19,7 +19,8 @@ from . import _geom
 from . import _inputs
 from . import _write_guard
 from .design_move_occurrence import _corner
-from ._joints import (DRIVES_ANGLE, DRIVES_ANY, DRIVES_SLIDE, find_joint as _find_joint,
+from ._joints import (DRIVES_ANGLE, DRIVES_ANY, DRIVES_SLIDE, all_joints as _all_joints,
+                      find_joint as _find_joint,
                       find_joints_by_name as _find_joints_by_name,
                       current_joint_type as _current_joint_type,
                       motion_link_record as _motion_link_record)
@@ -253,6 +254,41 @@ def _ground_lock_census(design):
             locked.append(safe(lambda o=o: o.fullPathName)
                           or safe(lambda o=o: o.name) or "(unnamed occurrence)")
     return locked, unanswered, total, walk.complete
+
+
+def _reversed_retry_clause(applied, units):
+    """The retry command with every applied value's SIGN FLIPPED, as text offered before the
+    remedy names the ground: a negative-first drive that did not take has driven clean on the
+    opposite sign with no grounding change."""
+    parts = []
+    if "angle_deg" in applied:
+        parts.append(f"angle_deg={-applied['angle_deg']}")
+    if "distance" in applied:
+        parts.append(f"distance={-applied['distance']} (units='{units}')")
+    if not parts:
+        return ""
+    return f"re-drive with {' and '.join(parts)} (the reversed direction) first; "
+
+
+def _loop_joint_names(design, joint, locked):
+    """Other joints in the design carrying one of `locked`'s occurrences - what suppressing one
+    of them, rather than releasing the ground, could free instead."""
+    if not locked:
+        return []
+    my_id = _common.native_identity(joint)
+    names = []
+    for j in _all_joints(design):
+        if j is joint or (my_id is not None and _common.native_identity(j) == my_id):
+            continue
+        for attr in ("occurrenceOne", "occurrenceTwo"):
+            occ = safe(lambda j=j, a=attr: getattr(j, a))
+            path = safe(lambda o=occ: o.fullPathName) if occ is not None else None
+            if path and path in locked:
+                nm = safe(lambda j=j: j.name)
+                if nm:
+                    names.append(nm)
+                break
+    return names
 
 
 def _limit_refusal(limits, value, fmt):
@@ -708,11 +744,17 @@ def handler(joint_name: str = "", angle_deg=None, distance=None, units: str = "m
         if cause:
             verdict = " " + cause
         elif link["linked"] is False and locked and not moved_at_all:
-            # A frozen chain is the only shape this candidate describes, so a value that MOVED
-            # across the drive takes it off the table - the observation still stands in `seen`.
-            verdict = (" With no motion link on this joint, a parent-locked member is the CANDIDATE "
-                       "cause - release it with assembly_ground(ground_to_parent=false) and re-drive "
-                       "to test it.")
+            # A frozen chain is the shape this candidate describes: a value that MOVED across the
+            # drive rules it out (the observation stays in `seen`). The ground is named LAST since
+            # a reversed retry or suppressing a loop joint can free the value without releasing it.
+            retry = _reversed_retry_clause(applied, units)
+            loop_names = _loop_joint_names(design, joint, locked)
+            loop_clause = (f"try suppressing one of {_common.named_with_remainder(loop_names)} "
+                           "(the loop's other joints on that member) next; " if loop_names else "")
+            verdict = (
+                " With no motion link on this joint: " + retry + loop_clause
+                + "a parent-locked member is a CANDIDATE cause, checked LAST - release it with "
+                "assembly_ground(ground_to_parent=false) only once the steps above are ruled out.")
         else:
             verdict = (" These observations do not single out a cause. Read the mechanism with "
                        "assembly_get (per-occurrence ground_to_parent, and the joint limits of every "

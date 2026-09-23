@@ -194,6 +194,21 @@ _MACHINING = [
     ("surface_thicken", lambda c: {"faces": [_ctx_get(c, "salign_face", "aligned sheet face")],
                                    "thickness": 1, "thicken_type": "rounded"},
      lambda p: p.get("thicken_type") == "rounded", None),
+    # symmetric thicken: 'thickness' stays the PER-SIDE number asked for, and 'wall_total' - the
+    # raw feature readback, published only when symmetric - is the wall that actually landed (2x).
+    ("model_create_component", {"name": "ThkSym", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "ThkSymS"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 760, "y1": 200,
+                                           "x2": 790, "y2": 220}],
+                             "sketch_name": "ThkSymS"}, "ok", None),
+    ("surface_extrude", {"sketch_name": "ThkSymS", "distance": 15}, "ok", None),
+    ("find_geometry", {"target": "ThkSym", "kind": "planar_face", "max_results": 1}, "ok",
+     _fg("thksym_face")),
+    ("surface_thicken", lambda c: {"faces": [_ctx_get(c, "thksym_face", "symmetric sheet face")],
+                                   "thickness": 4, "symmetric": True},
+     lambda p: _measured("symmetric thicken: wall_total is 2x the per-side thickness",
+                         {"thickness": p.get("thickness"), "wall_total": p.get("wall_total")},
+                         p.get("thickness") == 4.0 and p.get("wall_total") == 8.0), None),
     # back to the component that was active before this cameo, so the ones after it nest as before.
     ("design_activate_component", {"occurrence": "Surf:1"}, "ok", None),
     ("model_create_component", {"name": "SDel", "activate": True}, _made_component, None),
@@ -1045,8 +1060,10 @@ _MESH = [
     # below is what makes that a failure instead of a surprise.
     # the row is the imported body read back: the name it answers to (a dedupe leaves the model_inspect
     # below naming a mesh that is not this one) and a triangle count off the mesh itself.
+    # target_component is the OCCURRENCE PATH 'MshIn:1', not a bare component name - the typed
+    # occurrence kind this input resolves through accepts that spelling every other tool does.
     ("mesh_insert", {"file_path": EXPORT_DIR + "/eval_mesh.stl", "name": "MshIns",
-                     "units": "mm"},
+                     "units": "mm", "target_component": "MshIn:1"},
      lambda p: (len(p["bodies"]) == 1 and p["bodies"][0]["name"] == "MshIns"
                 and (p["bodies"][0]["triangle_count"] or 0) > 0
                 and p.get("name_applied") is True

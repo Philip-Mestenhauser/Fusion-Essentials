@@ -121,17 +121,18 @@ def _subtree_occurrences(entity, limit):
 
 
 def _body_rows(entity, occs, acc, inv, limit):
-    """(rows, truncated) - one row per BREP BODY the target holds: its own, then each subtree
-    occurrence's, named by the occurrence it was reached through. A component holding three bodies
-    is three rows here and ONE row in the per-occurrence breakdown, which sums them. The walk is
-    bRepBodies, so an open SURFACE body gets a row carrying is_solid false and a mesh body none."""
+    """(rows, truncated, true_total) - one row per BREP BODY the target holds, true_total counting
+    every holder's bRepBodies regardless of the cap. A component holding three bodies is three rows
+    here and ONE row in the per-occurrence breakdown, which sums them. The walk is bRepBodies, so an
+    open SURFACE body gets a row carrying is_solid false and a mesh body none."""
     holders = [(None, entity)] + [(safe(lambda o=o: o.fullPathName) or safe(lambda o=o: o.name), o)
                                   for o in occs]
+    total = sum(_common.counted(lambda h=holder: h.bRepBodies.count) or 0 for _p, holder in holders)
     rows = []
     for path, holder in holders:
         for b in _common.iter_collection(safe(lambda h=holder: h.bRepBodies)):
             if len(rows) >= limit:
-                return rows, True
+                return rows, True, total
             # A body whose properties will not compute still gets its row: the name and lump count
             # are the census, and a missing mass is published null rather than dropping the body.
             bpp = safe(lambda b=b: b.getPhysicalProperties(acc))
@@ -147,7 +148,13 @@ def _body_rows(entity, occs, acc, inv, limit):
                            if bpp is not None else None),
                 "lump_count": _geom.lump_count(b),
             })
-    return rows, False
+    return rows, False, total
+
+
+def _body_cut_note(shown, true_total, cap):
+    """The FIRST sentence when per_body was cut: shown vs true count, and the scoped remedy."""
+    return (f"per_body: {shown} of {true_total} bodies shown (cap {cap}, per_body_truncated). "
+            "Target a narrower occurrence/component - design_get(include=['tree']) lists them.")
 
 
 def _joint_origin_axes(frame_name):
@@ -408,7 +415,7 @@ def _physical_properties(design, entity, desc, units, accuracy, per_body):
         # The per-BODY census beside it: an occurrence row covers its whole component, so a part
         # built as several bodies is invisible in the occurrence rows - and a leaf occurrence, which
         # has no subtree at all, produces none of them.
-        body_rows, body_cut = _body_rows(entity, occs, acc, 1.0 / k, _MAX_PER_BODY_ROWS)
+        body_rows, body_cut, body_total = _body_rows(entity, occs, acc, 1.0 / k, _MAX_PER_BODY_ROWS)
         result["per_body"] = body_rows
         result["per_body_count"] = len(body_rows)
         result["per_body_truncated"] = body_cut
@@ -430,8 +437,9 @@ def _physical_properties(design, entity, desc, units, accuracy, per_body):
             note += (f" Cut at {_MAX_PER_OCCURRENCE_ROWS} rows - there are more occurrences than "
                      "that (per_occurrence_truncated).")
         if body_cut:
-            note += (f" The body rows were cut at {_MAX_PER_BODY_ROWS} too "
-                     "(per_body_truncated).")
+            # The truncation an agent hits FIRST goes first: shown/true counts + remedy ahead of
+            # the shape description above, not buried after it.
+            note = _body_cut_note(len(body_rows), body_total, _MAX_PER_BODY_ROWS) + " " + note
     result["note"] = note
     return ok(result)
 

@@ -225,7 +225,7 @@ def test_path_is_built_from_the_sketch_curves():
     ppf = _wire(bodies=["Boss"], sketches=[_path_sketch(curves=3)])
     out = payload(pp.handler(bodies="Boss", path="sketch:Spine", quantity=3, distance=10))
     built = ppf.last_input.path
-    assert built.kind == "path" and built.is_chain is True    # chaining requested for the curves
+    assert built.kind == "path" and built.is_chain is False   # the whole collection, unchained
     assert out["path"] == "sketch:Spine"
 
 

@@ -68,12 +68,16 @@ _TREE_BODY_CAP = 25          # per-node body records when tree_bodies=true
 _TREE_CHILDREN_DEFAULT = 30  # children listed per LEVEL; the rest ride on child_count
 
 # The narrowings a capped level is answered with, plus the flag that restores the withheld address.
-_TREE_NOTE = ("Light nodes: name, component, body_count, child_count. Narrow with "
-              "name_filter='<text>' (top level), component='<name>' (roots the tree), max_depth, "
-              "max_results (children per level). tree_handles=true adds the addresses an "
-              "occurrence-taking tool accepts: each node's handle + full_path, and an xref's "
-              "source_id + source_url. children_truncated marks a level cut; child_count is the "
-              "true count.")
+_TREE_NOTE = ("Light nodes: name, component, body_count, child_count. Narrow: name_filter, "
+              "component=<name>, max_depth, max_results. tree_handles=true adds handle/full_path/"
+              "source ids. children_truncated = a level cut; child_count = the true count.")
+
+
+def _body_cut_note(cut):
+    """The FIRST sentence when a node's bodies were cut: which node, shown vs true count, and the
+    remedy - model_inspect's per_body list (a 'mass' slice) is not capped at the tree's 25."""
+    return (f"'{cut['node']}' bodies: {cut['shown']} of {cut['true']} shown (cap {_TREE_BODY_CAP}). "
+            f"model_inspect(target='{cut['node']}', include=['mass'], per_body=true) has all.")
 
 
 def _body_rows(bodies):
@@ -180,6 +184,9 @@ def _walk_occurrence(occ, depth, max_depth, counter, with_bodies=False, with_han
             node["bodies"] = rows
             if truncated:
                 node["bodies_truncated"] = True
+                if counter.get("body_cut") is None:
+                    counter["body_cut"] = {"node": node.get("component") or node.get("name"),
+                                           "shown": len(rows), "true": node["body_count"]}
     # None (the flag did not read) takes the SAME branch as True: a local occurrence simply has no
     # documentReference, so attempting the read costs one safe() read and publishes real freshness
     # for an xref whose own flag is unreadable - where the False branch would silently drop it.
@@ -256,7 +263,7 @@ def _slice_tree(design, max_depth, component, with_bodies=False, with_handles=Fa
     root = safe(lambda: design.rootComponent)
     if root is None:
         return None, error("No root component.")
-    counter = {"n": 0, "truncated": False}
+    counter = {"n": 0, "truncated": False, "body_cut": None}
     if (component or "").strip():
         start, amb = _find_occurrence_by_name(root, component)
         if amb:
@@ -266,8 +273,10 @@ def _slice_tree(design, max_depth, component, with_bodies=False, with_handles=Fa
         # Walk FIRST, read the truncated flag AFTER: a dict literal evaluates its values in
         # order, so reading counter["truncated"] before the walk would pin the pre-walk False.
         scoped_tree = _walk_occurrence(start, 0, depth, counter, with_bodies, with_handles, cap)
+        cut = counter["body_cut"]
+        note = (_body_cut_note(cut) + " " + _TREE_NOTE) if cut else _TREE_NOTE
         return {"root": component, "max_depth": depth, "truncated": counter["truncated"],
-                "tree": scoped_tree, "note": _TREE_NOTE}, None
+                "tree": scoped_tree, "note": note}, None
     wanted = (name_filter or "").strip().lower()
     children, total, matched = [], 0, 0
     try:
@@ -284,7 +293,7 @@ def _slice_tree(design, max_depth, component, with_bodies=False, with_handles=Fa
         return None, error(f"Could not read root occurrences: {e}")
     out = {"root": safe(lambda: root.name), "max_depth": depth, "node_count": counter["n"],
            "child_count": total, "children_truncated": matched > len(children),
-           "truncated": counter["truncated"], "children": children, "note": _TREE_NOTE}
+           "truncated": counter["truncated"], "children": children}
     if wanted:
         out["name_filter"] = name_filter.strip()
         out["matched"] = matched
@@ -297,6 +306,9 @@ def _slice_tree(design, max_depth, component, with_bodies=False, with_handles=Fa
             out["root_bodies"] = root_rows
             if root_tr:
                 out["root_bodies_truncated"] = True
+                if counter["body_cut"] is None:
+                    counter["body_cut"] = {"node": safe(lambda: root.name), "shown": len(root_rows),
+                                           "true": _common.counted(lambda: root.bRepBodies.count)}
     else:
         root_bodies, root_names_tr = _root_body_names(root)
         if root_bodies:
@@ -306,6 +318,8 @@ def _slice_tree(design, max_depth, component, with_bodies=False, with_handles=Fa
     if out.get("root_bodies"):
         out["root_bodies_note"] = ("Bodies directly in the root component (not occurrences). A root body "
                                    "can't be jointed - model_create_component then move it in to joint it.")
+    cut = counter["body_cut"]
+    out["note"] = (_body_cut_note(cut) + " " + _TREE_NOTE) if cut else _TREE_NOTE
     return out, None
 
 

@@ -283,7 +283,33 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
         return error(serr)
     target = node.obj
 
-    # ── validate EVERYTHING before applying anything (no half-edited setup) ──
+    # stock_mode can UNLOCK another wanted parameter (job_continueMachining reads isEditable False
+    # until 'previous_setup' lands) - applied and verified FIRST, so the lock check below sees the
+    # post-mode state instead of forcing a caller into two calls.
+    predecessor = None
+    stock_mode_applied = None
+    if want_stock_mode == _PREVIOUS_SETUP:
+        predecessor, pserr = _preceding_setup(node, setup_row)
+        if pserr:
+            return error(pserr)
+    if want_stock_mode is not None:
+        member = stock_mode_member(want_stock_mode)
+        if member is None:
+            return error(f"This Fusion build's SetupStockModes carries no "
+                         f"'{STOCK_MODES[want_stock_mode]}' member, so 'stock_mode="
+                         f"{want_stock_mode}' cannot be assigned. Pick another mode.")
+        was_stock_mode = stock_mode_name(safe(lambda: target.stockMode))
+        try:
+            target.stockMode = member
+        except Exception as e:
+            return error(f"Could not set stock_mode='{want_stock_mode}' on setup '{setup}': {e}.")
+        applied_mode = stock_mode_name(safe(lambda: target.stockMode))
+        if applied_mode != want_stock_mode:
+            return error(f"Stock mode did not take on setup '{setup}': set '{want_stock_mode}' but "
+                         f"Setup.stockMode now reads '{applied_mode}'.")
+        stock_mode_applied = {"stock_mode_set": applied_mode, "was_stock_mode": was_stock_mode}
+
+    # ── validate EVERYTHING else before applying anything more (no half-edited setup) ──
     if want_rename:
         clash = setup_name_clash(cam, want_rename, safe(lambda: target.name) or setup)
         if clash:
@@ -307,9 +333,12 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
     locked = [name for name, p in resolved_params.items()
               if read_flag(lambda p=p: p.isEditable) is False]
     if locked:
+        hint = ("" if not stock_mode_applied else
+                f" 'stock_mode' already landed on '{stock_mode_applied['stock_mode_set']}' in this "
+                "call; nothing else was applied.")
         return error(f"Setup '{setup}' does not accept a write to: {', '.join(locked)} "
-                     "(isEditable reads False on each). Nothing was applied. A setup exposes many "
-                     "parameters it takes no write to; set one it does - "
+                     "(isEditable reads False on each)." + (hint or " Nothing was applied.") +
+                     " A setup exposes many parameters it takes no write to; set one it does - "
                      "cam_get(include=['parameters'], setup=...) marks each refusing row "
                      "editable false.")
 
@@ -319,12 +348,6 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
         if berr:
             return error(f"{arg}: {berr}")
         resolved_bodies[arg] = bodies
-
-    predecessor = None
-    if want_stock_mode == _PREVIOUS_SETUP:
-        predecessor, pserr = _preceding_setup(node, setup_row)
-        if pserr:
-            return error(pserr)
 
     resolved_machine = None
     if want_machine:
@@ -406,8 +429,11 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
                       "setup=...).)")
         else:
             remedy = "(Re-read the setup with cam_get(include=['parameters'], setup=...).)"
+        no_change = ("no change was applied." if not stock_mode_applied else
+                     f"'stock_mode' already landed on '{stock_mode_applied['stock_mode_set']}' and "
+                     "was not rolled back; no other parameter change was applied.")
         return error(f"Setup '{setup}': {'; '.join(parts)}. Rolled back all "
-                     f"{len(changed)} parameter(s); no change was applied. {remedy}")
+                     f"{len(changed)} parameter(s); {no_change} {remedy}")
 
     result = {
         "edited": True,
@@ -416,23 +442,8 @@ def handler(setup: str = "", parameters=None, models=None, fixtures=None, stock=
         "changed": changed,
     }
 
-    if want_stock_mode is not None:
-        member = stock_mode_member(want_stock_mode)
-        if member is None:
-            return error(f"This Fusion build's SetupStockModes carries no "
-                         f"'{STOCK_MODES[want_stock_mode]}' member, so 'stock_mode="
-                         f"{want_stock_mode}' cannot be assigned. Pick another mode.")
-        was = stock_mode_name(safe(lambda: target.stockMode))
-        try:
-            target.stockMode = member
-        except Exception as e:
-            return error(f"Could not set stock_mode='{want_stock_mode}' on setup '{setup}': {e}.")
-        applied = stock_mode_name(safe(lambda: target.stockMode))
-        if applied != want_stock_mode:
-            return error(f"Stock mode did not take on setup '{setup}': set '{want_stock_mode}' but "
-                         f"Setup.stockMode now reads '{applied}'.")
-        result["stock_mode_set"] = applied
-        result["was_stock_mode"] = was
+    if stock_mode_applied is not None:
+        result.update(stock_mode_applied)
         if predecessor is not None:
             # absent = another mode, or the position or the predecessor's own name did not read
             result["previous_setup_name"] = predecessor

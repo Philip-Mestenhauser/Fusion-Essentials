@@ -150,7 +150,8 @@ tool = (
     .add_input_property("curves", _CURVES.schema())
     .add_input_property("distance", {"type": "number", "description": "Depth in 'units' (negative reverses)."})
     .add_input_property(*_inputs.UNITS.as_property())
-    .add_input_property("symmetric", {"type": "boolean"})
+    .add_input_property("symmetric", {"type": "boolean",
+        "description": "Extrude both ways; 'distance' is per side (sheet spans 2x)."})
     .add_input_property(*_inputs.boolean_op(options=("new", "join"), default="new").as_property())
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .strict_schema()

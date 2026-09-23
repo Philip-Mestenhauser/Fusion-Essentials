@@ -51,7 +51,21 @@ def handler(sketch_name: str = "", entities: str = "", units: str = "mm", dx=Non
     try:
         did = sketch.move(coll, matrix)
     except Exception as e:
-        return error(f"Could not move {', '.join(refs)} in sketch '{name}': {e}")
+        # A raise can still have landed the transform before failing later in the same call (a
+        # stitch/thicken/fillet dependency downstream) - the re-read coordinates say which, not
+        # the exception text alone.
+        after = [_assert.entity_position(ent) for ent in ents]
+        verdicts = [_moved(b, a) for b, a in zip(before, after)]
+        if any(v is True for v in verdicts):
+            errors_after, _warn_after, _total_after = _common.timeline_health(design)
+            broke = [n for n in errors_after if n not in errors_before]
+            outcome = (f"the coordinates changed - it landed, and {len(broke)} dependent "
+                       "feature(s) now read error/warning")
+        elif verdicts and all(v is False for v in verdicts):
+            outcome = "the coordinates read the same as before the call - it rolled back"
+        else:
+            outcome = "the coordinates did not re-read, so whether it rolled back is not known"
+        return error(f"Could not move {', '.join(refs)} in sketch '{name}': {e}. {outcome}.")
     # The bool cannot be the verdict: "Transform respects any constraints that would normally
     # prohibit the move", so a refused entity and a moved one share one true return. Coordinates
     # decide instead - and isFixed does NOT hold an entity still against an API move.

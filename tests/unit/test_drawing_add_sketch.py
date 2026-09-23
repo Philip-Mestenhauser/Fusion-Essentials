@@ -476,3 +476,14 @@ class TestStrictGeometryGuards:
         ]))
         assert out["curves_landed"] == 2
         assert [kind for kind, _ in state.sketch._drawn] == ["rectangles", "ellipses"]
+
+
+class TestSchema:
+    def test_points_entries_are_typed_number_pairs_not_untyped_arrays(self):
+        # An untyped inner array renders Array<Array<string>> to a client, which then sends
+        # ["25", "25"] - the strict validator refuses that before the handler ever sees it.
+        points_schema = dw.tool.input_schema["properties"]["geometry"]["items"]["properties"]["points"]
+        pair_schema = points_schema["items"]
+        assert pair_schema["type"] == "array"
+        assert pair_schema["items"] == {"type": "number"}
+        assert pair_schema["minItems"] == 2 and pair_schema["maxItems"] == 2

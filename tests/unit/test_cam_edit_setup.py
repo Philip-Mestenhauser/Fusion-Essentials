@@ -642,6 +642,48 @@ class TestStockMode:
         assert cam.setups.item(0).stockMode == _STOCK_MODES["RelativeBoxStock"]
 
 
+class _StockGatedParam(FakeCAMParameter):
+    """job_continueMachining: isEditable reads False until stock_mode lands on 'previous_setup' -
+    the write-order fix applies the mode before the lock check sees this row."""
+
+    def __init__(self, name, expression, setup):
+        super().__init__(name, expression, value=expression)
+        self._setup = setup
+
+    @property
+    def isEditable(self):
+        return self._setup.stockMode == _STOCK_MODES["PreviousSetupStock"]
+
+    @isEditable.setter
+    def isEditable(self, value):
+        pass
+
+
+class TestStockModeUnlocksParameters:
+    """stock_mode is applied and verified BEFORE the isEditable lock check, so a parameter it
+    unlocks lands in the SAME call instead of needing two."""
+
+    def test_a_param_the_mode_unlocks_applies_in_one_call(self, monkeypatch):
+        cam = _install(monkeypatch, setups=("Turn", "Mill"))
+        setup = cam.setups.item(1)
+        _replace(setup.parameters, _StockGatedParam("job_continueMachining", "false", setup))
+        out = _payload(ces.handler(setup="Mill", stock_mode="previous_setup",
+                                   parameters={"job_continueMachining": "true"}))
+        assert out["stock_mode_set"] == "previous_setup"
+        assert setup.parameters.itemByName("job_continueMachining").expression == "true"
+
+    def test_a_row_still_locked_after_the_mode_lands_is_still_refused(self, monkeypatch):
+        cam = _install(monkeypatch, setups=("Turn", "Mill"))
+        setup = cam.setups.item(1)
+        _replace(setup.parameters, FakeCAMParameter("otherLocked", "0", editable=False))
+        res = ces.handler(setup="Mill", stock_mode="previous_setup", parameters={"otherLocked": "1"})
+        assert res["isError"] is True
+        assert "otherLocked" in res["message"]
+        assert "already landed on 'previous_setup'" in res["message"]
+        # stock_mode still landed even though the OTHER param stays refused (not rolled back)
+        assert setup.stockMode == _STOCK_MODES["PreviousSetupStock"]
+
+
 # ── assign a machine (the setup-level prerequisite for posting) ─────────────
 
 class TestMachine:

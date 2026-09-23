@@ -341,7 +341,8 @@ tool = (
                        "mm under ISO, in under ASME.",
         "items": {"type": "object", "properties": {
             "kind": {"type": "string", "enum": sorted(_KINDS)},
-            "points": {"type": "array", "items": {"type": "array"}},
+            "points": {"type": "array", "items": {
+                "type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}},
             "radius": {"type": "number"}}}})
     .add_required_input("geometry")
     .add_input_property("sheet_name", {"type": "string",

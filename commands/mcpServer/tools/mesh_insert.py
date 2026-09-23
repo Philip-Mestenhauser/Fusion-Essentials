@@ -16,7 +16,7 @@ from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
 from ._common import target_component as _target_component
-from . import _export          # find_component - the one design-wide by-name component resolve
+from . import _inputs
 from ._mesh_common import _mesh_summary
 from ._design_common import run_in_base_feature
 
@@ -27,6 +27,10 @@ app = adsk.core.Application.get()
 # isEditing), so a recheck after startEdit reads false-negative on a write that succeeded.
 
 _VALID_EXTS = (".stl", ".obj", ".3mf")
+
+# The occurrence a name/path targets - not a bare component-name walk, so an occurrence spelling
+# ('Name:1') every other tool accepts resolves here too.
+_TARGET_COMPONENT = _inputs.OccurrenceRef("target_component")
 
 # authored unit -> (MeshUnits enum member the import takes, cm per unit its stats are scaled by).
 # mm/cm/in take their factor from the shared _common.scale(); m and ft are exact multiples of those
@@ -74,6 +78,24 @@ def _insert_meshes(comp, design, full_path, mesh_units):
     return result["mesh_list"], result["base_feature_name"], None
 
 
+def _target_of(design, target_component):
+    """(component, error) for the component `target_component` names (an occurrence handle/path/
+    name), or the active component when it is blank."""
+    raw = (target_component or "").strip() if isinstance(target_component, str) else ""
+    if not raw:
+        comp = _target_component(design)
+        if comp is None:
+            return None, "The active design exposes no component to import into."
+        return comp, None
+    occ, oerr = _TARGET_COMPONENT.resolve(raw)
+    if oerr:
+        return None, oerr
+    comp = safe(lambda: occ.component)
+    if comp is None:
+        return None, f"Occurrence '{raw}' has no component to import into."
+    return comp, None
+
+
 def handler(file_path: str = "", target_component: str = "",
             units: str = "mm", name: str = "") -> dict:
     """Import an STL/OBJ/3MF from a local path as a MeshBody into the active (or named) component.
@@ -93,18 +115,9 @@ def handler(file_path: str = "", target_component: str = "",
     if not design:
         return error("No active design. Open or create a document first (see doc_new).")
 
-    comp = _target_component(design)
-    tc = (target_component or "").strip() if isinstance(target_component, str) else ""
-    if tc:
-        picked, comp_err = _export.find_component(design, tc)
-        if comp_err:
-            return error(comp_err + " Omit target_component to import into the ACTIVE component, "
-                         "and set which that is with design_activate_component (it takes the "
-                         "occurrence, so it can name one of them).")
-        if picked is None:
-            return error(f"No component named '{tc}' to import into. Omit target_component to use the "
-    "active component, or list components with design_get(include=['tree']).")
-        comp = picked
+    comp, terr = _target_of(design, target_component)
+    if terr:
+        return error(terr)
 
     mesh_units, ukey, unit_cm = _mesh_units(units)
     if mesh_units is None:
@@ -162,7 +175,7 @@ TOOL_DESCRIPTION = (
 tool = (
     Tool.create_simple(name="mesh_insert", description=TOOL_DESCRIPTION)
     .add_input_property("file_path", {"type": "string", "description": "Local path to the mesh file."})
-    .add_input_property("target_component", {"type": "string", "description": "Default: the active component."})
+    .add_input_property(*_TARGET_COMPONENT.as_property())
     .add_input_property("units", {"type": "string", "enum": list(_MESH_UNIT_TABLE),
             "description": "The unit the file is authored in; stats are reported in it."})
     .add_input_property("name", {"type": "string", "description": "Renames the imported body; single-body imports only."})

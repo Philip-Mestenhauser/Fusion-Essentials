@@ -1632,10 +1632,11 @@ class TestDistanceReadBack:
 # result body (confirmed live), so a design-wide pre/post volume snapshot is what reveals which bodies,
 # and whose components, actually lost material: it powers both the warning and the 'component' field.
 
-def _install_multi(bodyA_after, bodyB_after):
+def _install_multi(bodyA_after, bodyB_after, feature_owner="A"):
     """A design with two co-located components: the sketch lives in CompA (bodyA); CompB (bodyB) is a
     separate part sharing space. The fake cut sets each body's post-volume, so the snapshot read-back
-    sees exactly which bodies lost material. Returns (bodyA, bodyB)."""
+    sees which bodies lost material. `feature_owner` ('A' or 'B') is the component the FEATURE'S OWN
+    parentComponent reads as - 'B' is the cross-component shape. Returns (bodyA, bodyB)."""
     ef = FakeExtrudeFeatures()
     bodyA = BRepBody("BodyA", volume=48.0, entity_token="BodyA")
     bodyB = BRepBody("BodyB", volume=48.0, entity_token="BodyB")
@@ -1646,11 +1647,12 @@ def _install_multi(bodyA_after, bodyB_after):
     sk.parentComponent = compA
     design = make_design(comp=root, all_components=[root, compA, compB])
     design.activeComponent = compA
+    owners = {"A": compA, "B": compB}
 
     def _add(inp):
         bodyA.volume, bodyB.volume = bodyA_after, bodyB_after
         f = FakeFeature()
-        f.parentComponent = compA
+        f.parentComponent = owners[feature_owner]
         return f
     ef.add = _add
 
@@ -1695,12 +1697,14 @@ class TestCrossComponentCut:
         assert "hide the bodies that must be spared" in note
         assert "a named body is cut even if hidden" in note
 
-    def test_component_field_names_where_material_landed_not_sketch_owner(self):
-        # Case: the cut removes material ONLY from CompB, though the sketch lives in CompA. The
-        # 'component' field must name CompB (where it landed), not the sketch's owning component.
-        _install_multi(bodyA_after=48.0, bodyB_after=45.6)   # CompA untouched
+    def test_component_names_the_features_own_parent_not_the_sketch_owner(self):
+        # THE BITE: 'component' names the FEATURE's own parent, never a volume-loss guess or the
+        # sketch's owner - a cross-component cut can land the feature outside the sketch's own
+        # component, and 'sketch_component' discloses the sketch's owner beside it when they differ.
+        _install_multi(bodyA_after=48.0, bodyB_after=45.6, feature_owner="B")
         out = _payload(ex.handler(sketch_name="S", distance=5, operation="cut"))
         assert out["component"] == "CompB"
+        assert out["sketch_component"] == "CompA"
         assert out["cut_touched_other_components"] == ["CompB"]
 
     def test_same_component_cut_gets_no_warning(self):
@@ -1735,12 +1739,14 @@ class TestCrossComponentCut:
 
     def test_scoped_cut_to_other_component_body_lands_there_no_warning(self):
         # Probe (c) at the mock level: target_bodies explicitly names the OTHER component's body, so
-        # the cut lands on CompB alone (CompA, unnamed, is spared). scoped_to suppresses the warning
-        # and 'component' names where the material actually left - CompB, not the sketch's own CompA.
+        # the cut lands on CompB alone (CompA, unnamed, is spared). scoped_to suppresses the warning;
+        # 'component' names the feature's own parent (the fixture's default: CompA, same as the
+        # sketch), so no 'sketch_component' is published.
         _install_multi(bodyA_after=48.0, bodyB_after=45.6)   # only CompB (the named body) loses material
         out = _payload(ex.handler(sketch_name="S", distance=5, operation="cut", target_bodies="CompB"))
         assert out["scoped_to_bodies"] == ["BodyB"]
-        assert out["component"] == "CompB"
+        assert out["component"] == "CompA"
+        assert "sketch_component" not in out
         assert "cut_touched_other_components" not in out
         assert "WARNING" not in out["note"]
 
@@ -1968,6 +1974,7 @@ class TestComputeFailedFeature:
         import adsk.fusion
         f = FakeFeature()
         f.healthState = adsk.fusion.FeatureHealthStates.HealthyFeatureHealthState
+        f.parentComponent = types.SimpleNamespace(name="CompA")
         _install_scoped_cut(volume_after=45.6, feature=f)
         out = _payload(ex.handler(sketch_name="S", distance=-20, operation="cut",
                                   target_bodies="BodyA"))

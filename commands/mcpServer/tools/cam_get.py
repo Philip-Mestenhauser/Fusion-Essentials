@@ -205,9 +205,15 @@ def _slice_nc_programs(cam):
     return payload, err
 
 
-def _slice_time(cam, setup, units):
-    """Machining cycle-time estimate (per setup + per operation), suppressed ops excluded."""
-    return _unwrap(_cr.get_machining_time_handler(setup=setup, units=units))
+def _slice_time(cam, operation, setup, units):
+    """Machining cycle-time estimate: one operation's row when 'operation' resolves, else per
+    setup + per operation, suppressed ops excluded."""
+    op = None
+    if (operation or "").strip():
+        op, oerr = _resolve_op_in_scope(cam, operation, setup)
+        if oerr:
+            return None, oerr
+    return _unwrap(_cr.get_machining_time_handler(setup=setup, units=units, operation=op))
 
 
 def _slice_machine(cam, setup, units):
@@ -657,8 +663,8 @@ def _slice_parameters(cam, operation, setup, units="mm", parameter_names=None,
 
 
 _TOOL_COPY_NOTE = (
-    "'dimensions' is what Operation.tool reads now in 'units': cutter, shoulder, shaft and both "
-    "gauge lengths, null where the tool has no such parameter.")
+    "'dimensions' is Operation.tool's geometry in 'units', shaped by tool family (milling or "
+    "turning); null where the tool lacks that field.")
 
 _PRESET_SCOPE_NOTE = (
     " 'preset' holds the tool LIBRARY preset's own numbers, not this operation's feeds - "
@@ -704,7 +710,7 @@ def _slice_tool(cam, operation, preset, setup="", units="mm"):
     active = safe(lambda: op.toolPreset)
     out = {"operation": safe(lambda: op.name),
            "tool": safe(lambda: t.description),
-           "holder": _cc.tool_holder(t),          # assigned holder identity (None if the tool has none)
+           "holder": _cc.tool_holder(t),      # assigned holder identity (milling or turning shape)
            "dimensions": _cc.tool_dimensions(t, factor, unit),
            "active_preset": ({"name": safe(lambda: active.name), "id": safe(lambda: active.id)}
                              if active is not None else None),
@@ -807,7 +813,7 @@ def handler(include=None, setup: str = "", operation: str = "", preset: str = ""
         if e:
             return e
     if "time" in inc:
-        out["time"], e = _slice_time(cam, setup, units)
+        out["time"], e = _slice_time(cam, operation, setup, units)
         if e:
             return e
     if "machine" in inc:                        # the assigned machine's spindle/axis limits

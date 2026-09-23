@@ -82,6 +82,24 @@ def choice_expressions(p):
     return values or None
 
 
+def choice_quoting(param, current, request):
+    """(the expression to WRITE, whether this call quoted it, refusal_or_None) - a request matching
+    one of PARAM's own CHOICE values is quoted against THAT set whatever `current` looks like; an
+    unmatched request is refused before any write, naming the set; a parameter with no choice set
+    falls back to matched_quoting."""
+    choices = choice_expressions(param)
+    if not choices:
+        text, quoted = matched_quoting(current, request)
+        return text, quoted, None
+    want = unquote_expression(str(request))
+    for choice in choices:
+        if unquote_expression(choice) == want:
+            written = quote_expression(want)
+            return written, written != str(request), None
+    return None, False, (f"is not one of this parameter's own values: "
+                          f"{named_with_remainder(choices)}.")
+
+
 def enumeration_remedy(message, written, read_call, param=None):
     """The clause a platform refusal naming an INVALID ENUMERATION VALUE carries - the expression
     this call actually wrote, then `param`'s own values where getChoices answers them, else the
@@ -241,9 +259,18 @@ def get_cam(sync: bool = False):
     return cam, None
 
 
+# The turning holder JSON's own short field codes (measured on a 'turning general' sample), read
+# only when none of the milling keys above answer - a milling and a turning holder never share a
+# JSON shape.
+_TURNING_HOLDER_KEYS = (("THSC", "type"), ("LH", "head_length"), ("OAL", "overall_length"),
+                       ("W", "shank_width"), ("H", "shank_height"), ("HAND", "hand"),
+                       ("MTP", "clamping"))
+
+
 def tool_holder(t):
-    """A CAM Tool's holder identity {name, product_id, vendor, segment_count}, or None - read out
-    of the tool's JSON, which is where adsk.cam.Tool carries it."""
+    """A CAM Tool's holder identity: milling {name, product_id, vendor, segment_count}, or - when
+    those are absent - turning {type, head_length, overall_length, shank_width, shank_height,
+    hand, clamping}; None only when the JSON carries no holder dict at all."""
     raw = safe(lambda: t.toJson())
     if not raw:
         return None
@@ -264,6 +291,10 @@ def tool_holder(t):
     segs = h.get("segments")
     if isinstance(segs, list) and segs:
         out["segment_count"] = len(segs)
+    if not out:
+        for key, field in _TURNING_HOLDER_KEYS:
+            if h.get(key) is not None:
+                out[field] = h[key]
     return out or None
 
 
@@ -284,25 +315,45 @@ _TOOL_DIMENSION_PARAMS = (("diameter", "tool_diameter"),
 # The one COUNT among them: a flute count is not a length, so it is published unscaled.
 _TOOL_FLUTES_PARAM = "tool_numberOfFlutes"
 
+# The family flag tool_dimensions() reads to pick the turning shape (CAM tool sample columns rule:
+# a family flag selects the size field, never presence or a positive value).
+_TURNING_FLAG_PARAM = "tool_isTurning"
 
-def tool_dimension_value(p, factor):
-    """One TOOL dimension parameter's number, or None when it did not read OR its expression failed
-    to evaluate: a failed CAM expression is stored verbatim and its value reads a finite 0.0, so
-    .error is the only channel separating a real zero from an unusable one."""
+# insert_size/cutting_width are LENGTHS (scaled); the rest are the insert's own text/enum values -
+# measured on a 'turning general' sample via cam_edit_tools(action='parameters').
+_TURNING_LENGTH_PARAMS = (("insert_size", "tool_insertSize"), ("cutting_width", "tool_cuttingWidth"))
+_TURNING_RAW_PARAMS = (("insert_type", "tool_insertType"), ("hand", "tool_hand"),
+                       ("clamping", "tool_clamping"))
+
+
+def tool_dimension_value(p, factor=None):
+    """One TOOL parameter's number, scaled by `factor` (raw when None) or None when it did not read
+    or its expression failed to evaluate - a failed CAM expression stores verbatim and reads a
+    finite 0.0, so .error is the only channel separating a real zero from an unusable one."""
     if p is None or expression_error(p)[0]:
         return None
+    if factor is None:
+        return safe(lambda: p.value.value)
     return measured(lambda: p.value.value, factor)
 
 
 def tool_dimensions(t, factor, unit):
-    """A CAM Tool's own geometry - cutter, shoulder, shaft and both gauge lengths - each length
-    scaled from cm by 'factor', 'flutes' unscaled, and null where the parameter is absent, does not
-    read, or holds an expression that will not evaluate."""
+    """A CAM Tool's own geometry, shaped by the tool_isTurning family flag: milling/drill/jet reads
+    cutter/shoulder/shaft/gauge lengths plus flutes, turning reads insert type/size, cutting width,
+    hand and clamping - each length scaled from cm by 'factor', null where a parameter is absent,
+    does not read, or holds an expression that will not evaluate."""
     params = safe(lambda: t.parameters)
 
     def _param(pname):
         return safe(lambda: params.itemByName(pname)) if params is not None else None
 
+    if tool_dimension_value(_param(_TURNING_FLAG_PARAM)) is True:
+        out = {key: tool_dimension_value(_param(pname), factor)
+               for key, pname in _TURNING_LENGTH_PARAMS}
+        for key, pname in _TURNING_RAW_PARAMS:
+            out[key] = tool_dimension_value(_param(pname))
+        out["units"] = unit
+        return out
     out = {key: tool_dimension_value(_param(pname), factor)
            for key, pname in _TOOL_DIMENSION_PARAMS}
     # the COUNT carries the same false-zero channel as the lengths: a probe's flute count reads 0
@@ -1184,6 +1235,34 @@ def nonfinite_verdict(measure: str, names) -> str:
     return lead + named_with_remainder(names, cap=_length_capped(names, lead, tail)) + tail
 
 
+def readiness_verdict(tally: dict, ops=(), warning_sample=None, blocked=None,
+                       setups_errored: int = 0, programs_errored: int = 0) -> str:
+    """The ONE readiness ladder live_readiness and cam_get_status's scoped poll both read an
+    op_state_tally-shaped `tally` through: errored > nonfinite > unread > UNSETTLED generation
+    (ahead of ready - a state-0 op counts 'valid' in the tally while its own generation is still
+    landing, so it must not read ready) > ready > unfinished > no active operations."""
+    valid, ood, errored = tally["valid"], tally["out_of_date"], tally["errored"]
+    nonfinite = tally.get("nonfinite", 0)
+    active_total = valid + ood + errored + nonfinite   # active = everything not suppressed
+    unsettled = unsettled_count(tally)
+    unread = tally.get("unread", 0)
+    measure = (f"{valid} of {active_total} active ops valid" if active_total else
+               f"{tally['total']} operation(s) in scope")
+    if errored or setups_errored or programs_errored:
+        return errored_verdict(setups_errored, programs_errored, errored)
+    if nonfinite:
+        return nonfinite_verdict(measure, tally.get("nonfinite_names") or [])
+    if unread:
+        return unread_verdict(measure, unread, unsettled, ood)
+    if active_total and unsettled:
+        return unfinished_verdict(measure, ops, unsettled)
+    if active_total and valid == active_total:
+        return ready_verdict(measure, tally.get("warnings", 0), warning_sample, blocked)
+    if active_total:
+        return unfinished_verdict(measure, ops, unsettled)
+    return "no active operations to assess."
+
+
 def live_readiness():
     """(signal, None) or (None, reason) - the CAM readiness signal for the active document: the op
     tally, the setup- and NC-program-level errors, setups_blocked, one sample per level, and the
@@ -1215,31 +1294,14 @@ def live_readiness():
                     samples["program"] = {"name": safe(lambda p=p: p.name), "error": first_error_line(p)}
     except Exception as e:
         return None, str(e)
-    valid, ood, errored = tally["valid"], tally["out_of_date"], tally["errored"]
-    warned = tally["warnings"]
-    nonfinite = tally["nonfinite"]
-    active_total = valid + ood + errored + nonfinite   # active = everything not suppressed
-    unsettled = unsettled_count(tally)
-    unread = tally["unread"]
-    measure = (f"{valid} of {active_total} active ops valid" if active_total else
-               f"{tally['total']} operation(s) in scope")
-    if errored or setups_errored or programs_errored:
-        readiness = errored_verdict(setups_errored, programs_errored, errored)
-    elif nonfinite:
-        readiness = nonfinite_verdict(measure, tally["nonfinite_names"])
-    elif unread:
-        readiness = unread_verdict(measure, unread, unsettled, ood)
-    elif active_total and valid == active_total:
-        readiness = ready_verdict(measure, warned, samples["warning"], blocked)
-    elif active_total:
-        readiness = unfinished_verdict(measure, ops, unsettled)
-    else:
-        readiness = "no active operations to assess."
-    signal = {"valid": valid, "out_of_date": ood, "errored": errored,
+    readiness = readiness_verdict(tally, ops, samples["warning"], blocked,
+                                  setups_errored, programs_errored)
+    signal = {"valid": tally["valid"], "out_of_date": tally["out_of_date"], "errored": tally["errored"],
               "generating": tally["generating"],
               "generating_settled": tally["generating_settled"],
-              "suppressed": tally["suppressed"], "unread": unread, "nonfinite": nonfinite,
-              "warnings": warned, "total": tally["total"],
+              "suppressed": tally["suppressed"], "unread": tally["unread"],
+              "nonfinite": tally["nonfinite"],
+              "warnings": tally["warnings"], "total": tally["total"],
               "active": tally["active"],
               "setups_errored": setups_errored, "programs_errored": programs_errored,
               "setups_blocked": blocked,

@@ -64,6 +64,28 @@ class _LockedComponent(MakeComp):
         object.__setattr__(self, key, value)
 
 
+class _PartNumberRaises(MakeComp):
+    """A component whose partNumber reads Fusion's creation-timestamp default and whose setter
+    refuses every write - the create must still land."""
+    def __init__(self, name="Component1", stamp="20260922204259123", **kw):
+        super().__init__(name=name, **kw)
+        self._stamp = stamp
+
+    @property
+    def partNumber(self):
+        return self._stamp
+
+    @partNumber.setter
+    def partNumber(self, value):
+        raise RuntimeError("no permission")
+
+
+class _TimestampComponent(MakeComp):
+    """A freshly-created component carrying Fusion's own creation-timestamp partNumber default."""
+    def __init__(self, name="Component1", stamp="20260922204259123", **kw):
+        super().__init__(name=name, part_number=stamp, **kw)
+
+
 class FakeMatrix(FakeMatrix3D):
     """Matrix3D.create()'s product, recording what the handler wrote in this file's own `_assigned`
     and `rotation` rather than through the shared translation column."""
@@ -381,3 +403,35 @@ class TestGroundToParentDisclosure:
         out = _payload(cc.handler(name="Arm"))
         assert out["ground_to_parent"] is None
         assert "ground_to_parent reads TRUE" not in out["note"]
+
+
+# ── part_number : a component's timestamp default is replaced by its name unless an explicit value
+# was given (MEASURED: a created component's partNumber reads as a creation timestamp, not its name).
+
+class TestPartNumber:
+    def test_default_replaces_the_timestamp_with_the_name(self):
+        design = _install()
+        comp = _TimestampComponent()
+        design.rootComponent.occurrences.addNewComponent = lambda t: _NewOccurrence(component=comp)
+        out = _payload(cc.handler(name="Mast"))
+        assert out["part_number"] == "Mast"
+        assert comp.partNumber == "Mast"
+        assert "part_number_warning" not in out
+
+    def test_explicit_part_number_input_is_honoured(self):
+        design = _install()
+        comp = _TimestampComponent()
+        design.rootComponent.occurrences.addNewComponent = lambda t: _NewOccurrence(component=comp)
+        out = _payload(cc.handler(name="Mast", part_number="FE-100"))
+        assert out["part_number"] == "FE-100"
+        assert comp.partNumber == "FE-100"
+
+    def test_a_raising_write_is_disclosed_not_a_failed_create(self):
+        design = _install()
+        comp = _PartNumberRaises()
+        design.rootComponent.occurrences.addNewComponent = lambda t: _NewOccurrence(component=comp)
+        out = _payload(cc.handler(name="Mast"))
+        assert out["created"] is True
+        assert out["part_number"] == "20260922204259123"     # the write failed, so unchanged
+        assert "part_number_warning" in out
+        assert "no permission" in out["part_number_warning"]

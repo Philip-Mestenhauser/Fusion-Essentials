@@ -41,9 +41,29 @@ def _ensure_multi_component_intent(design):
     return None
 
 
+def _apply_part_number(component, part_number_input, final_name):
+    """(landed_part_number, warning_or_None) - explicit input wins, else name replaces a non-name
+    default; a raise or read-back mismatch is a disclosure, never a failed create."""
+    requested = (part_number_input or "").strip()
+    current = safe(lambda: component.partNumber)
+    desired = requested if requested else (final_name if current != final_name else None)
+    if desired is None:
+        return current, None
+    try:
+        component.partNumber = desired
+    except Exception as e:
+        return current, f"part_number '{desired}' could not be set: {e} (component still created)."
+    landed = safe(lambda: component.partNumber)
+    if landed != desired:
+        return landed, (f"part_number '{desired}' did not land - component reads '{landed}' "
+                        "(component still created).")
+    return landed, None
+
+
 def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
             units: str = "mm", activate: bool = False,
-            rotate_deg: float = 0.0, rotate_axis: str = "z", parent: str = "") -> dict:
+            rotate_deg: float = 0.0, rotate_axis: str = "z", parent: str = "",
+            part_number: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
     k = scale(units)
     if k is None:
@@ -90,6 +110,8 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
         return error("Component creation returned nothing.")
 
     _final_name, name_warning = _common.apply_rename(occ.component, name)
+    part_number_value, part_number_warning = _apply_part_number(occ.component, part_number,
+                                                                 _final_name)
 
     # A component created via a sub-component's occurrences is NATIVE to it, so its own fullPathName
     # shows only the child; the proxy into the chosen parent's context carries the nested path.
@@ -126,6 +148,7 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
         "units": units,
         "activated": activated,
         "ground_to_parent": ground_to_parent,
+        "part_number": part_number_value,
         "note": ("Empty component created" + (f" nested inside '{safe(lambda: parent_occ.fullPathName)}'"
                  if parent_occ is not None else " at root")
                  + ". Activate it (or it is active) then model into it with sketch_create / extrude; "
@@ -138,6 +161,8 @@ def handler(name: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
                         "one. assembly_ground(ground_to_parent=false) releases it.")
     if name_warning:
         out["name_warning"] = name_warning
+    if part_number_warning:
+        out["part_number_warning"] = part_number_warning
     if intent_note:
         out["design_intent_promoted"] = intent_note
     return ok(out)
@@ -151,6 +176,9 @@ TOOL_DESCRIPTION = (
 tool = (
     Tool.create_simple(name="model_create_component", description=TOOL_DESCRIPTION)
     .add_input_property("name", {"type": "string"})
+    .add_input_property("part_number", {"type": "string",
+            "description": "Left unchanged when omitted; defaults to 'name' if Fusion's own "
+                            "default (a creation timestamp) is still on the component."})
     .add_input_property("x", {"type": "number", "description": "Placement X, in 'units'."})
     .add_input_property("y", {"type": "number"})
     .add_input_property("z", {"type": "number"})

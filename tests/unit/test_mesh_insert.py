@@ -5,7 +5,7 @@ import pytest
 
 from conftest import (BRepBody, FakeBaseFeature, FakeBaseFeatures, FakeFeatures, MakeComp,
                       MeshBody, _MeshBodies, _NamedCollection, install, load_tool, make_design,
-                      payload)
+                      make_occurrence, payload)
 
 mo = load_tool("mesh_insert")
 mesh_get = load_tool("mesh_get")
@@ -48,9 +48,9 @@ def _file_present(monkeypatch):
     monkeypatch.setattr(mo.os.path, "isfile", lambda p: True)
 
 
-def _comp(name="Comp", mesh_bodies=None, base_feature=None):
+def _comp(name="Comp", mesh_bodies=None, base_feature=None, occurrences=()):
     """A component whose meshBodies is the importing collection and whose features carry the scope."""
-    comp = MakeComp(name)
+    comp = MakeComp(name, occurrences=occurrences)
     comp.meshBodies = mesh_bodies if mesh_bodies is not None else _ImportingMeshBodies()
     comp.features = FakeFeatures(base_features=FakeBaseFeatures(made=base_feature))
     return comp
@@ -128,37 +128,53 @@ class TestMeshInsert:
         assert res["isError"] is True and "not found" in res["message"].lower()
 
     def test_named_target_component_imports_into_it(self):
-        # target_component=<name> imports into THAT component, not the active one
+        # target_component=<name> resolves through the OCCURRENCE kind and imports into THAT
+        # component, not the active one - a bare name still lands via the substring fallback over
+        # the occurrence's own name ('SubPart:1').
         sub_coll = _ImportingMeshBodies(import_result=_NamedCollection([MeshBody("Imported", tri=64)]))
-        root = _comp("Root", base_feature=FakeBaseFeature())
         sub = _comp("SubPart", mesh_bodies=sub_coll, base_feature=FakeBaseFeature())
-        _wire(root, design_type=0, all_components=[root, sub])
+        occ = make_occurrence("SubPart:1", component=sub)
+        root = _comp("Root", base_feature=FakeBaseFeature(), occurrences=[occ])
+        _wire(root, design_type=0)
         out = payload(mo.handler(file_path="C:/scan.stl", target_component="SubPart"))
         assert out["imported"] is True
         assert out["component"] == "SubPart"
         assert sub_coll.add_args is not None        # the import went into SubPart's collection
         assert root.meshBodies.add_args is None     # NOT the active/root component
 
+    def test_target_component_accepts_an_occurrence_path_spelling(self):
+        # THE BITE: an occurrence fullPathName ('CHECK - STL units:1') is a spelling every other
+        # tool wired to OccurrenceRef accepts - the hand-rolled component-name walk refused it.
+        sub_coll = _ImportingMeshBodies(import_result=_NamedCollection([MeshBody("Imported")]))
+        sub = _comp("CHECK - STL units", mesh_bodies=sub_coll, base_feature=FakeBaseFeature())
+        occ = make_occurrence("CHECK - STL units:1", component=sub)
+        root = _comp("Root", base_feature=FakeBaseFeature(), occurrences=[occ])
+        _wire(root, design_type=0)
+        out = payload(mo.handler(file_path="C:/scan.stl",
+                                 target_component="CHECK - STL units:1"))
+        assert out["imported"] is True
+        assert out["component"] == "CHECK - STL units"
+        assert sub_coll.add_args is not None
+
     def test_duplicate_target_component_name_refused_no_import(self):
-        # two components named 'SubPart': importing into whichever the walk reached first would put
-        # the mesh in the wrong part, so the import refuses before it runs
-        root = _comp("Root", base_feature=FakeBaseFeature())
+        # two occurrences whose own names both carry 'SubPart': which one a bare name means is
+        # refused rather than guessed at, naming the occurrences it could mean.
         a = _comp("SubPart", base_feature=FakeBaseFeature())
         b = _comp("SubPart", base_feature=FakeBaseFeature())
-        _wire(root, design_type=0, all_components=[root, a, b])
+        occ_a = make_occurrence("SubPart:1", component=a)
+        occ_b = make_occurrence("SubPart:2", component=b)
+        root = _comp("Root", base_feature=FakeBaseFeature(), occurrences=[occ_a, occ_b])
+        _wire(root, design_type=0)
         res = mo.handler(file_path="C:/scan.stl", target_component="SubPart")
         assert res["isError"] is True
-        assert "2 components match 'SubPart'" in res["message"]
-        # target_component is this tool's ONLY component vocabulary, so the remedy is the active
-        # component - the one route that still reaches a specific instance here
-        assert "design_activate_component" in res["message"]
-        assert "rename" not in res["message"].lower()
+        assert "ambiguous" in res["message"]
+        assert "SubPart:1" in res["message"] and "SubPart:2" in res["message"]
         assert a.meshBodies.add_args is None and b.meshBodies.add_args is None
         assert root.meshBodies.add_args is None       # and not into the active component either
 
     def test_unknown_target_component_errors(self):
         root = _comp("Root", base_feature=FakeBaseFeature())
-        _wire(root, design_type=0, all_components=[root])
+        _wire(root, design_type=0)
         res = mo.handler(file_path="C:/scan.stl", target_component="Ghost")
         assert res["isError"] is True
         assert "Ghost" in res["message"]

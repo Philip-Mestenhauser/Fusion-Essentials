@@ -9,6 +9,7 @@ mode (an edge/face/plane/vertex reference) is parametric-legal.
 """
 
 import math
+import types
 
 import adsk.core
 import adsk.fusion
@@ -20,6 +21,7 @@ from ._common import error, ok, safe, scale, target_component
 from . import _common
 from . import _geom
 from . import _inputs
+from . import _joints
 
 app = adsk.core.Application.get()
 
@@ -151,8 +153,25 @@ def _require_circular_edge(edge_ent, m):
     return None
 
 
-def _datum_geometry(design, obj):
-    """An entity's geometry in the SAME space the resolved input geometry reads in, or None."""
+def _datum_geometry(design, obj, comp=None, occurrence=None):
+    """An entity's geometry in the SAME space the resolved input geometry reads in, or None. `comp`
+    (the datum's owning component) opts into a MATRIX lift through `occurrence`'s placement instead
+    of the proxy lift below - MEASURED: ConstructionAxis.geometry stays component-local even through
+    createForAssemblyContext, unlike a face/vertex proxy."""
+    if comp is not None:
+        g = safe(lambda: obj.geometry)
+        if g is None:
+            return None
+        m = _joints.component_world_matrix(design, comp, occurrence)
+        if m is None:
+            return None
+        direction = safe(lambda: g.direction.copy())
+        origin = safe(lambda: g.origin.copy())
+        if direction is None or origin is None:
+            return None
+        if not (safe(lambda: direction.transformBy(m)) and safe(lambda: origin.transformBy(m))):
+            return None
+        return types.SimpleNamespace(direction=direction, origin=origin)
     # A NATIVE datum reads component-LOCAL off .geometry while a proxy-resolved vertex/face reads
     # WORLD; createForAssemblyContext(activeOccurrence) restores world space. An entity that ALREADY
     # carries an assemblyContext reads world and RAISES '3 : object is not a native object' if lifted.
@@ -195,6 +214,11 @@ _SKETCH_ORIGIN_NOTE = (" A sketch on this plane takes its origin at the world or
 _UNREAD_SPACE_NOTE = (" A null field above was NOT measured: an occurrence is active and the entity "
                       "could not be read in its space, so the value is left unclaimed rather than "
                       "reported in the component-local space the resolved inputs are not in.")
+
+# circular_face's WORLD lift needs a single placement of the axis's owning component; a multi-placed
+# or unreadable one leaves the comparison unchecked rather than false.
+_AXIS_FRAME_UNRESOLVED_NOTE = (" This datum's WORLD placement could not be determined, so "
+                               "'aligned_to_face_axis' is unchecked and 'frame' stays 'component'.")
 
 
 # distance_type='absolute' measures from the path START and is not clamped at EITHER end: a negative
@@ -678,22 +702,34 @@ def _axis_datum(m, comp, design, k, x, y, z, axis_raw, plane_raw, plane2_raw, fa
         cerr = _require_curved_face(face, m)
         if cerr:
             return None, None, cerr
-        face_axis = _geom.unit_vector(safe(lambda: face.geometry.axis))
         cai = comp.constructionAxes.createInput()
         if not cai.setByCircularFace(face):
             return None, None, ("mode='circular_face': Fusion rejected this face "
                                 "(setByCircularFace returned false).")
         obj = comp.constructionAxes.add(cai)
         extra = {}
-        # The face is proxy-resolved (WORLD); the created axis reads component-LOCAL while an
-        # occurrence is active, so it is lifted into the same space before the directions are dotted.
-        new_dir = _geom.unit_vector(safe(lambda: _datum_geometry(design, obj).direction)) if obj else None
+        # Both directions are read AFTER the add: it recomputes the design, and an uncaptured
+        # occurrence move reverts on that recompute (measured), so a face axis read before it
+        # would be compared against a placement the call no longer leaves in the document.
+        face_axis = _geom.unit_vector(safe(lambda: face.geometry.axis))
+        # The face proxy's axis reads WORLD; ConstructionAxis.geometry never does (measured, even
+        # through createForAssemblyContext), so the face's OWN occurrence's matrix lifts the new
+        # axis's local direction/origin into that same WORLD frame before the two are dotted.
+        occ = safe(lambda: face.assemblyContext)
+        g = _datum_geometry(design, obj, comp, occ) if obj else None
+        new_dir = _geom.unit_vector(safe(lambda: g.direction)) if g is not None else None
+        if g is not None:
+            extra["frame"] = "world"
+            extra["geometry"] = {"direction": new_dir,
+                                 "origin": _common.ptxyz(safe(lambda: g.origin), 1.0 / k)}
+        else:
+            extra["frame"] = "component"
         dot = _geom.dot(face_axis, new_dir)
         if dot is not None:
             extra["aligned_to_face_axis"] = bool(abs(dot) > 0.999999)
-        elif _space_unread(design, obj):
+        elif g is None:
             extra["aligned_to_face_axis"] = None
-            extra["space_unread"] = True
+            extra["axis_frame_unresolved"] = True
         return obj, extra, None
 
     if m == "two_points":
@@ -937,6 +973,8 @@ def handler(kind: str = "point", mode: str = "", x: float = 0.0, y: float = 0.0,
     # reason.
     if out.pop("space_unread", False) or _space_unread(design, obj):
         out["note"] += _UNREAD_SPACE_NOTE
+    if out.pop("axis_frame_unresolved", False):
+        out["note"] += _AXIS_FRAME_UNRESOLVED_NOTE
     # An absolute placement measured to be INSIDE the path needs no warning at all - 'path_length'
     # and 'along_path' already say where it sits. The warning is for the one that landed outside,
     # and the generic form for the path whose length could not be measured.

@@ -35,9 +35,12 @@ def mirror_feature(name="Mirror1", bodies=(), is_combine=False):
                                  isCombine=is_combine, healthState=0)
 
 
-def feature_entity(name="Extrude1", bodies=()):
-    """A timeline feature's `.entity` - the object the mirror collection is handed."""
-    return types.SimpleNamespace(name=name, parentComponent=None,
+def feature_entity(name="Extrude1", bodies=(), comp=None):
+    """A timeline feature's `.entity` - the object the mirror collection is handed. `comp` seeds a
+    REAL parentComponent (bodies census-readable, not a bare label) - the qualifier a
+    '<component>/<feature>' address resolves against."""
+    parent = MakeComp(name=comp, entity_token=f"TOKEN:{comp}") if comp else None
+    return types.SimpleNamespace(name=name, parentComponent=parent,
                                  bodies=_NamedCollection(list(bodies)))
 
 
@@ -182,13 +185,14 @@ class TestFeatureResolution:
     def test_duplicate_name_is_refused_with_the_candidates(self, scene):
         scene(tl=timeline(timeline_object("Sketch1", 0, feature_entity("Sketch1")),
                           timeline_object("Extrude1", 1, feature_entity("Extrude1")),
-                          timeline_object("Fillet1", 2, feature_entity("Fillet1")),
-                          timeline_object("Fillet1", 3, feature_entity("Fillet1"))))
+                          timeline_object("Fillet1", 2, feature_entity("Fillet1", comp="CompA")),
+                          timeline_object("Fillet1", 3, feature_entity("Fillet1", comp="CompB"))))
         msg = error_message(mr.handler(features=["Fillet1"], plane="yz"))
-        assert "matches 2 timeline objects" in msg and "Fillet1@2" in msg and "Fillet1@3" in msg
+        assert "matches 2 timeline objects" in msg
+        assert "CompA/Fillet1" in msg and "CompB/Fillet1" in msg
 
     def test_a_printed_candidate_resolves_to_its_own_object(self, scene):
-        third, fourth = feature_entity("Fillet1"), feature_entity("Fillet1")
+        third, fourth = feature_entity("Fillet1", comp="CompA"), feature_entity("Fillet1", comp="CompB")
         sc = scene(tl=timeline(timeline_object("Sketch1", 0, feature_entity("Sketch1")),
                                timeline_object("Extrude1", 1, feature_entity("Extrude1")),
                                timeline_object("Fillet1", 2, third),
@@ -196,8 +200,8 @@ class TestFeatureResolution:
         msg = error_message(mr.handler(features=["Fillet1"], plane="yz"))
         # the candidates the refusal prints must be usable verbatim - the LAST one proves the form
         # addresses a specific object rather than falling back to the first hit
-        candidates = re.findall(r"Fillet1@\d+", msg)
-        assert candidates == ["Fillet1@2", "Fillet1@3"]
+        candidates = re.findall(r"Comp[AB]/Fillet1", msg)
+        assert candidates == ["CompA/Fillet1", "CompB/Fillet1"]
         _payload(mr.handler(features=[candidates[-1]], plane="yz"))
         assert sc.mf.last.entities.item(0) is fourth
 

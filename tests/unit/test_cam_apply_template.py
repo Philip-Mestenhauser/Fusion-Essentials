@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import (FakeCAMFolder, FakeOperation, FakeSetup, FakeTool, _NamedCollection,
-                      load_tool, make_cam)
+                      load_tool, make_cam, make_cam_parameters)
 
 ct = load_tool("cam_apply_template")
 
@@ -66,10 +66,11 @@ class _ApplySetup(FakeSetup):
     `count_unreadable` an allOperations that raises, `returns` what the apply call hands back."""
 
     def __init__(self, name, adds=1, existing=(), folders=(), phantom=0, count_unreadable=False,
-                 returns=None):
+                 returns=None, operation_type=FakeSetup._UNSET):
         super().__init__(name, ops=[_ApplyOp(*row) for row in existing],
                          folders=[FakeCAMFolder(fname, ops=[_ApplyOp(*row) for row in ops])
-                                  for fname, ops in folders])
+                                  for fname, ops in folders],
+                         operation_type=operation_type)
         self.applied = []
         self._adds = ([(f"Op{i + 1}", None) for i in range(adds)]
                       if isinstance(adds, int) else list(adds))
@@ -277,6 +278,120 @@ class TestApplyTemplateToolStatus:
         assert out["operations"][0]["tool"] is None
         assert out["operations"][0]["tool_description_unread"] is True
         assert out["tool_unselected"] == [] and out["ready"] is True
+
+
+# ── a manual-NC / additive member carries no tool by DESIGN, so it is exempt from 'unselected' ────
+
+
+class TestApplyTemplateToollessExemptions:
+    def test_a_manual_nc_member_alone_reads_ready_with_no_tool_advice(self, monkeypatch):
+        setup = _ApplySetup("Setup1", adds=[("RigManualNC (2)", None, "manual")])
+        out = _apply(monkeypatch, setup)
+        assert out["tool_unselected"] == [] and out["ready"] is True
+        assert "cam_edit_operation" not in out["note"]
+
+    def test_an_additive_build_op_alone_reads_ready_with_no_tool_advice(self, monkeypatch):
+        setup = _ApplySetup("Setup1", adds=[("Build1", None)],
+                            operation_type=ct.adsk.cam.OperationTypes.AdditiveOperation)
+        out = _apply(monkeypatch, setup)
+        assert out["tool_unselected"] == [] and out["ready"] is True
+        assert "cam_edit_operation" not in out["note"]
+
+    def test_a_manual_member_beside_a_toolless_drill_exempts_only_the_manual_one(self, monkeypatch):
+        # The boundary: one toolless op is exempt by strategy, the other is not - only the drill
+        # withholds 'ready'.
+        setup = _ApplySetup("Setup1", adds=[("Drill1", None), ("RigManualNC (2)", None, "manual")])
+        out = _apply(monkeypatch, setup)
+        assert out["tool_unselected"] == ["Drill1"] and out["ready"] is False
+        assert "cam_edit_operation" in out["note"]
+
+
+# ── a fork: the template's own tool clones into a new document-library entry ───────────────────
+
+
+class _ForkingApplySetup(_ApplySetup):
+    """An apply whose createFromCAMTemplate2 ALSO appends a tool to `library` - the measured side
+    effect a template apply can carry: its own tool forks into a new document-library entry."""
+
+    def __init__(self, *a, library=None, fork_tool=None, **kw):
+        super().__init__(*a, **kw)
+        self._library = library
+        self._fork_tool = fork_tool
+
+    def createFromCAMTemplate2(self, template_input):
+        made = super().createFromCAMTemplate2(template_input)
+        if self._fork_tool is not None:
+            self._library._items.append(self._fork_tool)
+        return made
+
+
+def _library_tool(description, number):
+    return FakeTool(description, parameters=make_cam_parameters(("tool_number", str(number), number)))
+
+
+def _wire_forking_apply(monkeypatch, setup, cam):
+    monkeypatch.setattr(ct, "get_cam", lambda: (cam, None))
+    monkeypatch.setattr(ct, "_template_library", lambda: (SimpleNamespace(), None))
+    monkeypatch.setattr(ct, "find_setup", lambda cam, name: (setup, [setup.name], None))
+    monkeypatch.setattr(ct, "_find_template_by_name",
+                        lambda lib, loc, name: (_FakeTemplate(name), None))
+
+
+class TestApplyTemplateToolFork:
+    def test_a_forked_duplicate_number_carries_one_warning(self, monkeypatch):
+        lib = _NamedCollection([_library_tool("RigFace", 1)])
+        fork = _library_tool("RigFace (2)", 1)          # SAME number as index 0 - the collision
+        setup = _ForkingApplySetup("Setup1", adds=[("Face1", "#1 - 16mm Flat Endmill")],
+                                   library=lib, fork_tool=fork)
+        cam = make_cam(setup)
+        cam.documentToolLibrary = lib
+        _wire_forking_apply(monkeypatch, setup, cam)
+        out = _payload(ct.handler(setup="Setup1", template_name="T"))
+        assert out["library_tools"] == {"before": 1, "after": 2, "forked": [
+            {"index": 1, "number": 1, "description": "RigFace (2)", "duplicates_number_of": 0}]}
+        assert "Fork: library index 1 carries tool number 1, already held by index 0" in out["note"]
+        assert "cam_edit_tools(action='edit', tool=<index>" in out["note"]
+
+    def test_a_forked_free_number_carries_no_warning(self, monkeypatch):
+        # The boundary: a fork whose number is FREE (not held by another entry) draws no warning.
+        lib = _NamedCollection([_library_tool("RigFace", 1)])
+        fork = _library_tool("RigFace (2)", 2)
+        setup = _ForkingApplySetup("Setup1", adds=[("Face1", "#1 - 16mm Flat Endmill")],
+                                   library=lib, fork_tool=fork)
+        cam = make_cam(setup)
+        cam.documentToolLibrary = lib
+        _wire_forking_apply(monkeypatch, setup, cam)
+        out = _payload(ct.handler(setup="Setup1", template_name="T"))
+        assert out["library_tools"]["forked"] == [
+            {"index": 1, "number": 2, "description": "RigFace (2)"}]
+        assert "Fork:" not in out["note"]
+
+    def test_an_apply_reusing_an_existing_tool_forks_nothing(self, monkeypatch):
+        lib = _NamedCollection([_library_tool("RigFace", 1)])
+        setup = _ForkingApplySetup("Setup1", adds=[("Face1", "#1 - 16mm Flat Endmill")],
+                                   library=lib, fork_tool=None)
+        cam = make_cam(setup)
+        cam.documentToolLibrary = lib
+        _wire_forking_apply(monkeypatch, setup, cam)
+        out = _payload(ct.handler(setup="Setup1", template_name="T"))
+        assert out["library_tools"] == {"before": 1, "after": 1, "forked": []}
+        assert "Fork:" not in out["note"]
+
+    def test_the_worst_case_composed_note_stays_in_budget(self, monkeypatch):
+        # exempt(manual) + tooled + a forked duplicate in ONE apply - the worst composition this
+        # tool builds at runtime. The static prose lint cannot see a runtime '+' join across
+        # _apply_note/_fork_clause, so this is the bite proof for the 400-char note budget.
+        lib = _NamedCollection([_library_tool("RigFace", 1)])
+        fork = _library_tool("RigFace (2)", 1)
+        setup = _ForkingApplySetup(
+            "Setup1", adds=[("Face1", "#1 - 16mm Flat Endmill"), ("RigManualNC (2)", None, "manual")],
+            library=lib, fork_tool=fork)
+        cam = make_cam(setup)
+        cam.documentToolLibrary = lib
+        _wire_forking_apply(monkeypatch, setup, cam)
+        out = _payload(ct.handler(setup="Setup1", template_name="T"))
+        assert out["ready"] is True
+        assert len(out["note"]) <= 400, out["note"]
 
 
 class _TemplateInputDouble:

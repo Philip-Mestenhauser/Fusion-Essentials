@@ -27,9 +27,10 @@ _ERROR = _api_facts.ENUMS["fusion.FeatureHealthStates"]["ErrorFeatureHealthState
 
 # ── fakes ────────────────────────────────────────────────────────────────────
 
-def _entity(type_name="ExtrudeFeature", delete_returns=True, breaks=None):
+def _entity(type_name="ExtrudeFeature", delete_returns=True, breaks=None, comp=None):
     """A feature entity whose CLASS NAME is `type_name`, so the handler's type(entity).__name__
-    reports the right entity_type. `breaks` is a timeline the delete injects an error into."""
+    reports the right entity_type. `breaks` is a timeline the delete injects an error into; `comp`
+    seeds parentComponent.name - what a '<component>/<feature>' address resolves against."""
     def deleteMe(self):
         self._deletes += 1
         if self._breaks is not None:
@@ -37,18 +38,19 @@ def _entity(type_name="ExtrudeFeature", delete_returns=True, breaks=None):
         return self._delete_ok
 
     inst = type(type_name, (FakeFeature,), {"deleteMe": deleteMe})(
-        name=type_name, delete_ok=delete_returns)
+        name=type_name, delete_ok=delete_returns,
+        parent_component=MakeComp(name=comp) if comp is not None else None)
     inst._breaks = breaks
     return inst
 
 
 def _tl(name, index, is_group=False, entity="auto", health=_HEALTHY,
-        entity_type="ExtrudeFeature", delete_returns=True):
+        entity_type="ExtrudeFeature", delete_returns=True, comp=None):
     """One timeline object; `entity` defaults to a fresh feature of class `entity_type`."""
     if is_group:
         ent = None
     elif entity == "auto":
-        ent = _entity(entity_type, delete_returns)
+        ent = _entity(entity_type, delete_returns, comp=comp)
     else:
         ent = entity
     return FakeTimelineObject(name=name, index=index, is_group=is_group, entity=ent, health=health)
@@ -150,15 +152,16 @@ class TestAtIndexForm:
         assert df._find_object(tl, "Joint1@1")[0] is None
 
     def test_the_candidates_the_refusal_prints_resolve_back(self):
-        # the ambiguity error advertises 'name@index' pairs; every one it prints must be a string
-        # this same tool can resolve, or the refusal names a target the user cannot act on
-        _install([_tl("Joint1", 4), _tl("Joint1", 7)])
+        # the ambiguity error advertises '<component>/<name>' pairs; every one it prints must be a
+        # string this same tool can resolve, or the refusal names a target the user cannot act on
+        objs = [_tl("Joint1", 4, comp="CompA"), _tl("Joint1", 7, comp="CompB")]
+        _install(objs)
         msg = error_message(df.handler(feature="Joint1"))
-        for cand in ("Joint1@4", "Joint1@7"):
+        for cand, want_index in (("CompA/Joint1", 4), ("CompB/Joint1", 7)):
             assert cand in msg
-            tl = _install([_tl("Joint1", 4), _tl("Joint1", 7)])
+            tl = _install([_tl("Joint1", 4, comp="CompA"), _tl("Joint1", 7, comp="CompB")])
             obj, err = df._find_object(tl, cand)
-            assert err is None and f"Joint1@{obj.index}" == cand
+            assert err is None and obj.index == want_index
 
     def test_resolves_through_the_shared_matcher_not_a_local_copy(self):
         # design_delete_feature, design_edit_timeline and _inputs.FeatureRef answer the SAME wire
@@ -182,6 +185,37 @@ class TestAtIndexForm:
         _install([a, s, b])
         out = payload(df.handler(feature="Extrude1@2"))
         assert out["deleted"] is True and out["index"] == 2
+        assert b.entity._deletes == 1 and a.entity._deletes == 0
+
+
+class TestQualifiedAndIndexForm:
+    """F039: 'Pipe4' names a feature in many components. A bare name several own is refused, naming
+    the '<component>/<name>' qualified forms - the address that actually picks one."""
+
+    def test_bare_name_in_two_components_refuses_naming_both_qualified_forms(self):
+        a = _tl("Pipe4", 3, entity_type="ExtrudeFeature", comp="COOLING - cockpit side firewall")
+        b = _tl("Pipe4", 9, entity_type="ExtrudeFeature", comp="FRAME - 4130 steel space frame")
+        _install([a, b])
+        msg = error_message(df.handler(feature="Pipe4"))
+        assert "matches 2 timeline objects" in msg
+        assert "COOLING - cockpit side firewall/Pipe4" in msg
+        assert "FRAME - 4130 steel space frame/Pipe4" in msg
+        assert a.entity._deletes == 0 and b.entity._deletes == 0
+
+    def test_qualified_name_deletes_the_right_one(self):
+        a = _tl("Pipe4", 3, entity_type="ExtrudeFeature", comp="COOLING - cockpit side firewall")
+        b = _tl("Pipe4", 9, entity_type="ExtrudeFeature", comp="FRAME - 4130 steel space frame")
+        _install([a, b])
+        out = payload(df.handler(feature="FRAME - 4130 steel space frame/Pipe4"))
+        assert out["deleted"] is True and out["index"] == 9
+        assert b.entity._deletes == 1 and a.entity._deletes == 0
+
+    def test_bare_timeline_index_deletes(self):
+        a = _tl("Pipe4", 3, entity_type="ExtrudeFeature", comp="COOLING - cockpit side firewall")
+        b = _tl("Pipe4", 9, entity_type="ExtrudeFeature", comp="FRAME - 4130 steel space frame")
+        _install([a, b])
+        out = payload(df.handler(feature="9"))
+        assert out["deleted"] is True and out["index"] == 9
         assert b.entity._deletes == 1 and a.entity._deletes == 0
 
 
@@ -279,12 +313,12 @@ class TestGuards:
         assert "no timeline feature named" in msg.lower()
         assert "Extrude1" in msg                            # what IS there
 
-    def test_a_repeated_name_is_refused_with_the_indexed_candidates(self):
-        # two timeline objects carry the name - refuse, listing the 'name@index' form that picks one
-        _install([_tl("Joint1", 4), _tl("Joint1", 7)])
+    def test_a_repeated_name_is_refused_with_the_qualified_candidates(self):
+        # two timeline objects carry the name - refuse, listing the '<component>/<name>' form
+        _install([_tl("Joint1", 4, comp="CompA"), _tl("Joint1", 7, comp="CompB")])
         msg = error_message(df.handler(feature="Joint1"))
         assert "matches 2 timeline objects" in msg
-        assert "Joint1@4" in msg and "Joint1@7" in msg
+        assert "CompA/Joint1" in msg and "CompB/Joint1" in msg
 
     def test_group_refused(self):
         _install([_tl("Group1", 2, is_group=True)])

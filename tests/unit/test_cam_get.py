@@ -46,7 +46,8 @@ def stub_slices(monkeypatch):
                         lambda cam, setup: ({"setup_count": 0, "setups": []}, None))
     monkeypatch.setattr(cg, "_slice_references", lambda cam, setup: ({"references": []}, None))
     monkeypatch.setattr(cg, "_slice_nc_programs", lambda cam: ({"nc_programs": []}, None))
-    monkeypatch.setattr(cg, "_slice_time", lambda cam, setup, units: ({"total_minutes": 12}, None))
+    monkeypatch.setattr(cg, "_slice_time",
+                        lambda cam, operation, setup, units: ({"total_minutes": 12}, None))
     monkeypatch.setattr(cg, "_slice_machine",
                         lambda cam, setup, units: ({"setup_count": 0, "setups": []}, None))
     monkeypatch.setattr(cg, "_slice_tools", lambda cam: ({"tools": []}, None))
@@ -208,7 +209,8 @@ class TestDeepReadDropsTheDefaultSlice:
         monkeypatch.setattr(cg, "get_cam", lambda **_:(object(), None))
         monkeypatch.setattr(cg, "_slice_setups", lambda cam, setup, units: (
             {"setups": [{"name": "S", "op_states": {"out_of_date": 6}}]}, None))
-        monkeypatch.setattr(cg, "_slice_time", lambda cam, setup, units: ({"total_minutes": 5}, None))
+        monkeypatch.setattr(cg, "_slice_time",
+                            lambda cam, operation, setup, units: ({"total_minutes": 5}, None))
         out = _payload(cg.handler(include=["time"]))
         assert "pointers" not in out and "setups" not in out
 
@@ -630,7 +632,8 @@ class TestOrientationDedup:
             {"name": "Op1", "machine": "Haas", "op_states": {"out_of_date": 2},
              "invalidation_reasons": ["Design changed: WCS origin"]}]}, None))
         monkeypatch.setattr(cg, "_slice_operations", lambda cam, setup: ({"operations": []}, None))
-        monkeypatch.setattr(cg, "_slice_time", lambda cam, setup, units: ({"total_minutes": 5}, None))
+        monkeypatch.setattr(cg, "_slice_time",
+                            lambda cam, operation, setup, units: ({"total_minutes": 5}, None))
 
     def test_default_keeps_setup_invalidation_reasons(self, stub_with_reasons):
         out = _payload(cg.handler())
@@ -1448,6 +1451,30 @@ class TestOperationScopedBySetup:
         cg.handler(include=["tool"], operation="Shared", setup="Bottom", units="in")
         assert seen == {"operation": "Shared", "setup": "Bottom", "units": "in"}
 
+    def test_the_time_slice_takes_the_same_scoping(self, monkeypatch):
+        # a shared 'Shared' name resolves through the SAME setup-scoped resolver as parameters/tool -
+        # an unscoped resolve over both setups is refused as ambiguous.
+        cam = self._cam(monkeypatch)
+        crd = load_tool("_cam_read")
+        seen = {}
+        monkeypatch.setattr(crd, "get_machining_time_handler",
+                            lambda setup, units, operation: (
+                                seen.update(operation=operation)
+                                or {"isError": False, "content": [{"type": "text", "text": "{}"}]}))
+        out, err = cg._slice_time(cam, "Shared", "Bottom", "mm")
+        assert err is None
+        # the RESOLVED object is Bottom's own 'Shared' (feed 800), never Top's (feed 3000)
+        assert seen["operation"].parameters.itemByName("tool_feedCutting").expression == "800"
+
+    def test_the_router_passes_operation_through_to_the_time_slice(self, monkeypatch, stub_slices):
+        seen = {}
+        monkeypatch.setattr(cg, "_slice_time",
+                            lambda cam, operation, setup, units: (
+                                seen.update(operation=operation, setup=setup, units=units)
+                                or ({}, None)))
+        cg.handler(include=["time"], operation="Shared", setup="Bottom", units="in")
+        assert seen == {"operation": "Shared", "setup": "Bottom", "units": "in"}
+
     def test_a_miss_inside_the_scope_lists_THAT_setups_operations(self, monkeypatch):
         # a scoped miss that listed the whole document's operations would offer names this call
         # just excluded - 'TopOnly' is not reachable under setup='Bottom'
@@ -1719,12 +1746,12 @@ class TestToolSliceDimensions:
         assert dims["units"] == "mm"
         assert all(v is None for k, v in dims.items() if k != "units")
 
-    def test_the_note_names_the_geometry_the_slice_publishes_and_claims_nothing_else(self):
+    def test_the_note_names_the_family_shape_and_claims_nothing_else(self):
         # MEASURED live: a document-library tool edit reads straight through Operation.tool on an
         # operation created before it, so a note claiming the opposite would teach a wrong model.
         out, _err = cg._slice_tool(self._wire(self._full()), "Adaptive1", "")
         note = out["note"]
-        assert all(word in note for word in ("cutter", "shoulder", "shaft", "gauge", "units"))
+        assert all(word in note for word in ("milling", "turning", "units"))
         assert "created before" not in note and "own copy" not in note
 
     def test_an_unknown_unit_is_refused_before_anything_is_read(self):
@@ -1741,7 +1768,7 @@ class TestToolSliceDimensions:
         op = type("O", (), {"name": "Adaptive1", "tool": tool, "toolPreset": None})()
         out, err = cg._slice_tool(make_cam(FakeSetup("Setup1", ops=[op])), "Adaptive1", "Alu Rough")
         assert err is None
-        assert "shoulder" in out["note"] and "2 presets" in out["note"]
+        assert "milling or turning" in out["note"] and "2 presets" in out["note"]
         assert len(out["note"]) <= 400, len(out["note"])   # test_prose_budget.NOTE_BUDGET_CHARS
 
 
@@ -1782,13 +1809,13 @@ class TestMachineSlice:
         crd = load_tool("_cam_read")
         seen = {}
         monkeypatch.setattr(crd, "get_machining_time_handler",
-                            lambda setup, units: (
-                                seen.update(setup=setup, units=units)
+                            lambda setup, units, operation: (
+                                seen.update(setup=setup, units=units, operation=operation)
                                 or {"isError": False, "content": [{"type": "text",
                                                                    "text": json.dumps({"units": units})}]}))
-        out, err = cg._slice_time(object(), "Op1", "in")
+        out, err = cg._slice_time(object(), "", "Op1", "in")
         assert err is None and out["units"] == "in"
-        assert seen == {"setup": "Op1", "units": "in"}
+        assert seen == {"setup": "Op1", "units": "in", "operation": None}
 
 
 class _SetupParams(FakeCAMParameters):

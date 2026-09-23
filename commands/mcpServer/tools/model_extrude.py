@@ -787,21 +787,15 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     # only the own-component result - also catches a split in a co-located component.
     split_count = solid_delta if op_key in ("cut", "intersect") else 0
 
-    # 'component' names where the cut landed - not merely where the sketch lives - from the same
-    # affected-bodies read, and an unscoped cut that reached a co-located component is flagged
-    # (the footgun).
+    # 'component' is the FEATURE's own parent - the timeline's answer - never inferred from which
+    # body lost the most volume; a co-located cut can land the feature outside the sketch's own
+    # component. affected-bodies still drives the footgun warning below.
     sketch_owner = safe(lambda: sketch.parentComponent.name)
+    component_field = safe(lambda: feature.parentComponent.name)
     affected_comps = []
     for _n, _cn, _rem in affected:
         if _cn and _cn not in affected_comps:
             affected_comps.append(_cn)
-    if affected_comps:
-        # the sketch's own component if it was touched (the expected primary), else the one that lost
-        # the most material (a consumed body counts as maximal).
-        component_field = (sketch_owner if sketch_owner in affected_comps
-                           else max(affected, key=lambda r: float("inf") if r[2] is None else r[2])[1])
-    else:
-        component_field = safe(lambda: feature.parentComponent.name)
 
     # Surface the result either way: read isSolid back off the feature (never assumed).
     is_solid = safe(lambda: feature.isSolid)
@@ -878,6 +872,8 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         "result_bodies": body_names,
         "note": note,
     }
+    if sketch_owner and sketch_owner != component_field:
+        result["sketch_component"] = sketch_owner
     if model_params:
         result["model_parameters"] = model_params
     if enclosed:

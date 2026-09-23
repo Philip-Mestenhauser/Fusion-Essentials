@@ -1163,6 +1163,22 @@ class TestPerBodyRows:
         out, rows = self._rows(e)
         assert len(rows) == 2 and out["per_body_truncated"] is False
 
+    def test_at_201_bodies_the_cut_sentence_leads_the_note(self):
+        # the whole-design per_body cap (F032's sibling defect): the shown-vs-true count and the
+        # remedy must be the FIRST sentence, not buried after the shape description.
+        e = SimpleNamespace(getPhysicalProperties=lambda acc: _make_pp(),
+                            bRepBodies=_NamedCollection([self._body(f"B{i}") for i in range(201)]))
+        out, rows = self._rows(e)
+        assert out["per_body_count"] == mi._MAX_PER_BODY_ROWS
+        assert out["note"].startswith(f"per_body: {mi._MAX_PER_BODY_ROWS} of 201 bodies shown "
+                                      "(cap 200, per_body_truncated).")
+
+    def test_body_cut_note_composed_stays_in_budget_at_a_measured_worst_case(self):
+        # the static lint cannot see this f-string's rendered length; a design with far more bodies
+        # than the cap is the realistic worst case for the digit count alone.
+        n = mi._body_cut_note(mi._MAX_PER_BODY_ROWS, 999999, mi._MAX_PER_BODY_ROWS)
+        assert len(n) <= 400, len(n)
+
 
 def _walkable_occ(path):
     """An occurrence the shared census can classify and descend: `component` READS (a real

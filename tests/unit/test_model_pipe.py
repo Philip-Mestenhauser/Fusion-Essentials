@@ -34,8 +34,10 @@ def _adsk(monkeypatch):
 # ── fakes: the pipe feature graph only ──────────────────────────────────────
 
 class _Path:
-    def __init__(self, is_closed=False):
+    def __init__(self, is_closed=False, count=None):
         self.isClosed = is_closed
+        if count is not None:
+            self.count = count
 
 
 class _UnreadablePath:
@@ -154,7 +156,7 @@ def _wire(bodies=(), path_closed=False, design_type=1, sketch_curves=1, path_unr
                                           lines=[make_sketch_curve(f"c{i}")
                                                  for i in range(sketch_curves)])])
     pf = _PipeFeatures(comp, **kw)
-    made_path = _UnreadablePath() if path_unreadable else _Path(path_closed)
+    made_path = _UnreadablePath() if path_unreadable else _Path(path_closed, sketch_curves)
     comp.features = types.SimpleNamespace(
         pipeFeatures=pf, createPath=lambda seed, is_chain=True: made_path)
     design = make_design(comp=comp, tokens=tokens, all_components=all_components)
@@ -628,6 +630,124 @@ class TestGuards:
     def test_no_active_design(self):
         _wire()
         assert_no_active_design(mp, mp.handler, path="sketch:Spine", section_size=20)
+
+
+# ── path_curves: what the built path HOLDS, beside what the request named ───────────────────────
+
+class TestPathCurves:
+    def test_sketch_path_publishes_both_counts(self):
+        _wire(sketch_curves=5)
+        out = payload(mp.handler(path="sketch:Spine", section_size=20))
+        assert out["path_curves"] == 5
+        assert out["path_sketch_curves"] == 5
+        assert "WARNING" not in out["note"]
+
+    def test_a_chain_that_stopped_short_warns_naming_both_counts(self):
+        pf = _wire(sketch_curves=5)
+        pf.comp.features.createPath = lambda seed, is_chain=True: _Path(False, 1)
+        out = payload(mp.handler(path="sketch:Spine", section_size=20))
+        assert out["path_curves"] == 1 and out["path_sketch_curves"] == 5
+        assert "chained 1 of the sketch's 5 curves" in out["note"]
+        assert "tangent continuity" in out["note"]
+
+    def test_a_construction_curve_is_not_counted(self):
+        pf = _wire(sketch_curves=3)
+        spine = pf.comp.sketches.itemByName("Spine")
+        spine.sketchCurves._items.append(types.SimpleNamespace(isConstruction=True))
+        out = payload(mp.handler(path="sketch:Spine", section_size=20))
+        assert out["path_sketch_curves"] == 3          # 4 curves, one of them construction
+        assert "WARNING" not in out["note"]
+
+
+# ── the pipe receipt names a new body (a failed join) and a split (a cut) ────────────────────────
+
+class TestJoinNamesTheOrphanBody:
+    def test_a_disjoint_join_names_the_new_body_in_its_error(self):
+        existing = BRepBody("Existing", volume=8.0)
+
+        def _land_new_body(comp):
+            comp.bRepBodies._items.append(BRepBody("Body7", volume=3.0))
+
+        _wire(bodies=[existing], effect=_land_new_body)
+        res = mp.handler(path="sketch:Spine", section_size=20, operation="join")
+        msg = error_message(res)
+        assert "volume changed" in msg
+        assert "Body7" in msg and "model_combine(join)" in msg
+
+    def test_a_growing_join_carries_no_orphan_clause(self):
+        existing = BRepBody("Existing", volume=8.0)
+
+        def _grow(comp):
+            existing.volume = 11.0
+
+        _wire(bodies=[existing], effect=_grow)
+        out = payload(mp.handler(path="sketch:Spine", section_size=20, operation="join"))
+        assert "body_split" not in out
+        assert "model_combine(join)" not in out["note"]
+
+    def test_the_worst_case_composed_join_error_stays_under_budget(self):
+        existing = BRepBody("Existing", volume=8.0)
+
+        def _land_direct(comp):
+            comp.bRepBodies._items.append(BRepBody("Body7", volume=3.0))
+
+        _wire(bodies=[existing], design_type=0, returns_none=True, effect=_land_direct)
+        res = mp.handler(path="sketch:Spine", section_size=20, operation="join")
+        msg = error_message(res)
+        assert "Body7" in msg
+        assert len(msg) <= 400
+
+
+class TestBodySplit:
+    def test_a_splitting_cut_carries_body_split_and_the_warning(self):
+        plate = BRepBody("Body3", volume=24.0)
+
+        def _split(comp):
+            plate.volume = 20.0
+            comp.bRepBodies._items.append(BRepBody("Body8", volume=3.0))
+
+        _wire(bodies=[plate], body_names=("Body3", "Body8"), effect=_split)
+        out = payload(mp.handler(path="sketch:Spine", section_size=20, operation="cut"))
+        assert out["body_split"] == ["Body3", "Body8"]
+        assert "DISCONNECTED" in out["note"]
+        assert "Body3" in out["note"] and "Body8" in out["note"]
+
+    def test_a_cut_across_two_bodies_lists_both_without_a_split(self):
+        # feature.bodies names every body the cut touched; the host's solid count did not rise.
+        plate, block = BRepBody("Body3", volume=24.0), BRepBody("Body4", volume=30.0)
+
+        def _cut_both(comp):
+            plate.volume = 20.0
+            block.volume = 27.0
+
+        _wire(bodies=[plate, block], body_names=("Body3", "Body4"), effect=_cut_both)
+        out = payload(mp.handler(path="sketch:Spine", section_size=20, operation="cut"))
+        assert "body_split" not in out
+        assert "DISCONNECTED" not in out["note"]
+
+    def test_a_single_piece_cut_carries_no_split(self):
+        plate = BRepBody("Body3", volume=24.0)
+
+        def _shrink(comp):
+            plate.volume = 20.0
+
+        _wire(bodies=[plate], body_names=("Body3",), effect=_shrink)
+        out = payload(mp.handler(path="sketch:Spine", section_size=20, operation="cut"))
+        assert "body_split" not in out
+
+    def test_the_worst_case_composed_note_stays_under_budget(self):
+        # scoped_to_bodies' write-only clause AND the split WARNING both land in the same note.
+        plate = BRepBody("Body3", volume=24.0)
+
+        def _split(comp):
+            plate.volume = 20.0
+            comp.bRepBodies._items.extend([BRepBody("Body8", volume=1.0), BRepBody("Body9", volume=1.0)])
+
+        _wire(bodies=[plate], body_names=("Body3", "Body8", "Body9"), effect=_split)
+        out = payload(mp.handler(path="sketch:Spine", section_size=20, operation="cut",
+                                 target_bodies=["Body3"]))
+        assert out["body_split"] == ["Body3", "Body8", "Body9"]
+        assert len(out["note"]) <= 400
 
 
 # ── declared outputs ────────────────────────────────────────────────────────

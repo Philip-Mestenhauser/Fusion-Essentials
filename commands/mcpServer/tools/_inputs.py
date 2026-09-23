@@ -1168,10 +1168,34 @@ def _timeline_objects(timeline):
     return list(_common.iter_collection(timeline))
 
 
+def _split_qualified(want):
+    """(component, feature) for a '<component>/<feature>' address (split on the FIRST '/'), or
+    (None, None) when `want` carries no '/' or either half is blank."""
+    if "/" not in want:
+        return None, None
+    comp, _sep, feat = want.partition("/")
+    comp, feat = comp.strip(), feat.strip()
+    return (comp, feat) if comp and feat else (None, None)
+
+
+def _owner_component_name(obj):
+    """The component owning this timeline object's feature - the qualifier a 'component/feature'
+    address resolves against, and what an ambiguous bare name's candidates are named with."""
+    ent = _common.safe(lambda: obj.entity)
+    if ent is None:
+        return None
+    comp = _common.safe(lambda: ent.parentComponent)
+    # A construction datum carries no parentComponent; its owner reads off .component.
+    if comp is None and "Construction" in (_common.safe(lambda: ent.objectType) or ""):
+        comp = _common.safe(lambda: ent.component)
+    return _common.safe(lambda: comp.name) if comp is not None else None
+
+
 def _match_timeline_objects(objs, want):
-    """Every timeline object `want` names: the 'name@index' pair - the object whose OWN .index is
-    that number, confirmed by name - else an EXACT case-insensitive name match, never a substring.
-    '@index' reads each object's .index rather than indexing this list, which carries holes."""
+    """Every timeline object `want` names: the 'name@index' pair (the object whose OWN .index is
+    that number, confirmed by name), a '<component>/<feature>' pair (the owning component plus the
+    name), a bare INTEGER (the object's own .index, as design_get's timeline slice publishes it) -
+    else an EXACT case-insensitive name match, never a substring."""
     # MEASURED: Fusion names an occurrence-create timeline object with a LEADING SPACE
     # (' InsProbe:1'), invisible in every listing an agent reads, so both sides are STRIPPED and
     # two objects differing only by whitespace are one ambiguity.
@@ -1181,6 +1205,20 @@ def _match_timeline_objects(objs, want):
         low = base.strip().lower()
         return [o for o in objs
                 if _common.safe(lambda o=o: o.index) == i and _name_key(o) == low]
+    # A qualified or numeric form that names nothing falls through to the exact name: a feature
+    # literally named 'A/B' or '12' stays addressable.
+    comp, feat = _split_qualified(want)
+    if comp is not None:
+        clow, flow = comp.lower(), feat.lower()
+        hits = [o for o in objs if _name_key(o) == flow
+                and (_owner_component_name(o) or "").strip().lower() == clow]
+        if hits:
+            return hits
+    stripped = want.strip()
+    if stripped.isdigit():
+        hits = [o for o in objs if _common.safe(lambda o=o: o.index) == int(stripped)]
+        if hits:
+            return hits
     low = want.strip().lower()
     return [o for o in objs if _name_key(o) == low]
 
@@ -1188,6 +1226,23 @@ def _match_timeline_objects(objs, want):
 def _name_key(obj):
     """A timeline object's name, stripped and lower-cased - both sides of every comparison."""
     return (_common.safe(lambda: obj.name) or "").strip().lower()
+
+
+def _near_name_components(objs, want):
+    """The DISTINCT components owning a timeline object whose name CONTAINS `want` (case-insensitive
+    substring) - a miss's near-match census, more useful than a random sample of what exists."""
+    low = want.strip().lower()
+    if not low:
+        return []
+    seen, out = set(), []
+    for o in objs:
+        if low not in _name_key(o):
+            continue
+        comp = _owner_component_name(o)
+        if comp and comp not in seen:
+            seen.add(comp)
+            out.append(comp)
+    return out
 
 
 def _index_mismatch(objs, want):
@@ -1211,10 +1266,10 @@ def _index_mismatch(objs, want):
 
 
 def resolve_timeline_object(objs, want, label, miss_hint=None):
-    """(timeline object, error) - the ONE object `want` names out of `objs`: a miss lists a sample
-    of what IS there, a name several objects carry is refused with the 'name@index' candidates.
-    `label` is the caller's own noun, prefixing the refusal; `miss_hint(want)` is consulted on a
-    MISS only, standing in for the generic text where the caller can explain the absence."""
+    """(timeline object, error) - the ONE object `want` names out of `objs`: a miss on a QUALIFIED
+    '<component>/<feature>' names the pair; a bare-name miss lists components holding a near name,
+    else a sample of what IS there; a name several objects carry is refused with the qualified
+    candidates. `miss_hint(want)` is consulted on a MISS only, before either fallback."""
     hits = _match_timeline_objects(objs, want)
     if not hits:
         stale = _index_mismatch(objs, want)
@@ -1223,29 +1278,38 @@ def resolve_timeline_object(objs, want, label, miss_hint=None):
         hinted = miss_hint(want) if miss_hint is not None else None
         if hinted:
             return None, f"{label}: {hinted}"
+        comp, feat = _split_qualified(want)
+        if comp is not None:
+            return None, (f"{label}: no feature named '{feat}' in component '{comp}'. Use "
+                          "design_get(include=['timeline']) for the full list.")
+        near = _near_name_components(objs, want)
+        if near:
+            return None, (f"{label}: no timeline feature named '{want}'. Components holding a "
+                          f"near name: {_common.named_with_remainder(near)}. Address it as "
+                          "'<component>/<name>' or its timeline index.")
         sample = ", ".join(n for n in (_common.safe(lambda o=o: o.name) for o in objs[:12]) if n)
         return None, (f"{label}: no timeline feature named '{want}'. Available (sample): "
                       f"{sample or '(none)'}. Use design_get(include=['timeline']) for the full "
                       "list.")
     if len(hits) > 1:
         cands = _common.named_with_remainder(
-            [f"{_common.safe(lambda o=o: o.name)}@{_common.safe(lambda o=o: o.index)}"
-             for o in hits])
+            [f"{_owner_component_name(o) or '?'}/{_common.safe(lambda o=o: o.name)}" for o in hits])
         return None, (f"{label}: '{want}' matches {len(hits)} timeline objects ({cands}) - name "
-                      "one with the 'name@index' form.")
+                      "one with the '<component>/<name>' form, or its timeline index.")
     return hits[0], None
 
 
 class FeatureRef(InputKind):
-    """A reference to ONE timeline FEATURE by name, as design_get(include=['timeline']) lists it.
-    Resolves to (entity, label) - the timeline object's `.entity` plus the name the TIMELINE object
-    carries. An ambiguous name is refused with the 'name@index' candidates; a timeline GROUP is
-    refused, having no feature entity."""
+    """A reference to ONE timeline FEATURE by name, '<component>/<name>', or timeline index, as
+    design_get(include=['timeline']) lists them. Resolves to (entity, label) - the timeline
+    object's `.entity` plus the name the TIMELINE object carries. An ambiguous bare name is refused
+    with the qualified candidates; a timeline GROUP is refused, having no feature entity."""
 
-    MAP_HINT = "a timeline feature by name (refuses an ambiguous name; 'name@index' picks one)"
+    MAP_HINT = ("a timeline feature by name, '<component>/<name>', or timeline index (refuses an "
+               "ambiguous bare name)")
 
     def contract_note(self) -> str:
-        return "A timeline feature name (design_get timeline)."
+        return "A timeline feature: name, '<component>/<name>', or timeline index."
 
     def _objects(self):
         """(timeline objects, error) for the active design."""

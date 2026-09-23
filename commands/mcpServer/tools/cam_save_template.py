@@ -184,7 +184,8 @@ tool = (
         input_param_description="Name for the new template.",
     )
     .add_input_property("operations", {"type": "string",
-            "description": "Comma-separated names within 'setup'."})
+            "description": "Required. Comma-separated names within 'setup'."})
+    .add_required_input("operations")
     .add_input_property("setup", {"type": "string",
             "description": "Setup holding the operations."})
     .add_input_property(*_LOCATION.as_property())

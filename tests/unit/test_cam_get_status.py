@@ -498,6 +498,28 @@ class TestStatusHandler:
         assert "run cam_generate" not in out["readiness"]
         assert "Future" in out["note"] and "cam_get_status(handle='gen1')" in out["note"]
 
+    def test_a_blocked_owned_future_states_the_errored_remedy_once(self, monkeypatch):
+        # MEASURED: an owned Future over an errored op said BOTH "...is incomplete; poll
+        # cam_get_status(handle='gen8') before launching generation again" (readiness) AND
+        # "Waiting will NOT complete an errored item" (note) - contradicting advice riding in the
+        # SAME response. readiness carries the errored verdict alone; the poll-again line drops.
+        st._GENERATIONS["gen1"] = {
+            "future": SimpleNamespace(isGenerationCompleted=False, numberOfOperations=1,
+                                      numberOfCompleted=0),
+            "target": "Probe1", "started_at": 0.0, "total": 1,
+            "doc_name": "Doc", "doc_urn": "urn:doc", "doc_key": "urn:doc"}
+        st._HANDLE_SEQ[0] = 1
+        readiness = "BLOCKER: 1 operation(s) have errors - those operations will not post."
+        monkeypatch.setattr(st._cam_common, "live_readiness",
+                            self._readiness(errored=1, generating=0, total=1, readiness=readiness))
+        out = _payload(st.handler(handle="gen1"))
+        assert out["completed"] is False
+        assert out["readiness"] == readiness
+        assert "poll" not in out["readiness"]
+        assert "before launching generation again" not in out["readiness"]
+        assert "Waiting will NOT complete an errored item" in out["note"]
+        assert len(out["readiness"]) <= 400, len(out["readiness"])
+
     # ── operations_completed is DISCLOSED, not smoothed (CAM-13b) ───────────────────────────────
     #
     # The Future's numberOfCompleted has been observed to FALL between two reads of one generation

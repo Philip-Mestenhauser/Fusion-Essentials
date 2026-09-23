@@ -184,7 +184,8 @@ _DESC = (
 tool = (
     Tool.create_simple(name="design_delete_feature", description=_DESC)
     .add_input_property("feature", {"type": "string",
-            "description": "Timeline object name, from design_get(include=['timeline'])."})
+            "description": "Timeline object: name, '<component>/<name>', or its timeline index - "
+                           "from design_get(include=['timeline'])."})
     .strict_schema()
 )
 item = Item.create_tool_item(

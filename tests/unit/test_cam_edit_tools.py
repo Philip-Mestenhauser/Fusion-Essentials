@@ -654,7 +654,7 @@ class TestAddRich:
         # the nozzle column every mill also carries is left where the sample had it
         assert built.parameters.itemByName("tool_nozzleDiameter").expression == "0.01"
         assert out["sized"] == [{"entry": 0, "sized_field": "tool_diameter",
-                                 "reread_expression": "1.0",
+                                 "reread_expression": "1.0", "description": None,
                                  "diameter_mm": 10.0, "shoulder_diameter_mm": 10.0}]
         assert "stepped shoulder" not in out["note"]
 
@@ -676,7 +676,7 @@ class TestAddRich:
         built = tgt.tools[-1]
         assert built.parameters.itemByName("tool_shoulderDiameter").expression == "1.2"
         assert out["sized"] == [{"entry": 0, "sized_field": "tool_diameter",
-                                 "reread_expression": "1.0",
+                                 "reread_expression": "1.0", "description": None,
                                  "diameter_mm": 10.0, "shoulder_diameter_mm": 12.0}]
         assert "stepped shoulder" in out["note"]
 
@@ -700,7 +700,7 @@ class TestAddRich:
         built = tgt.tools[-1]
         assert built.parameters.itemByName("tool_shoulderDiameter").expression == "tool_diameter"
         assert out["sized"] == [{"entry": 0, "sized_field": "tool_diameter",
-                                 "reread_expression": "1.0",
+                                 "reread_expression": "1.0", "description": None,
                                  "diameter_mm": 10.0, "shoulder_diameter_mm": 10.0}]
 
     def test_a_diameter_that_failed_to_evaluate_is_not_read_as_a_stepped_sample(self, monkeypatch):
@@ -722,12 +722,46 @@ class TestAddRich:
                                   add_tools=[{"from_type": "flat end mill", "diameter": "1.0"}]))
         # the unreadable cutter publishes null, never the 0 its value holds
         assert out["sized"] == [{"entry": 0, "sized_field": "tool_diameter",
-                                 "reread_expression": "1.0",
+                                 "reread_expression": "1.0", "description": None,
                                  "diameter_mm": None, "shoulder_diameter_mm": 12.0}]
         assert len(tgt.tools) == 3          # the add still landed; only the carry was withheld
         # a null beside a number is a read that did not answer - calling it a stepped sample would
         # hand back a remedy for a shoulder nothing established.
         assert "stepped shoulder" not in out["note"]
+
+    def test_a_sized_clones_description_restates_its_own_size_token(self, monkeypatch):
+        # MEASURED: a 10mm-sized clone of the "12mm Flat Endmill" sample kept that sample's OWN
+        # "12mm" wording - the size written and the size claimed disagreed.
+        tgt = _install(monkeypatch)
+
+        def _from_json(js):
+            t = _Tool(json.loads(js).get("description", "built"))
+            _replace(t.parameters, _Param("tool_description", "12mm Flat Endmill"))
+            _replace(t.parameters, _NumParam("tool_diameter", "1.2"))
+            return t
+
+        monkeypatch.setattr(ct, "_tool_from_json", _from_json)
+        out = _payload(ct.handler(action="add", scope="cloud", library="L",
+                                  add_tools=[{"from_type": "flat end mill", "diameter": "1.0"}]))
+        assert out["sized"][0]["description"] == "10mm Flat Endmill"
+        built = tgt.tools[-1]
+        assert built.parameters.itemByName("tool_description").value.value == "10mm Flat Endmill"
+
+    def test_a_description_with_no_size_token_is_left_untouched(self, monkeypatch):
+        tgt = _install(monkeypatch)
+
+        def _from_json(js):
+            t = _Tool(json.loads(js).get("description", "built"))
+            _replace(t.parameters, _Param("tool_description", "Sample Endmill"))
+            _replace(t.parameters, _NumParam("tool_diameter", "1.2"))
+            return t
+
+        monkeypatch.setattr(ct, "_tool_from_json", _from_json)
+        out = _payload(ct.handler(action="add", scope="cloud", library="L",
+                                  add_tools=[{"from_type": "flat end mill", "diameter": "1.0"}]))
+        assert out["sized"][0]["description"] == "Sample Endmill"
+        built = tgt.tools[-1]
+        assert built.parameters.itemByName("tool_description").value.value == "Sample Endmill"
 
     def _sample(self, monkeypatch, kind):
         """The tool a clone of one MEASURED shipped sample builds to, behind the add's own seam."""
@@ -755,7 +789,8 @@ class TestAddRich:
         assert built.parameters.itemByName("tool_nozzleDiameter").expression == "0.1"
         assert built.parameters.itemByName("tool_diameter").expression == "0.0"
         assert out["sized"] == [{"entry": 0, "sized_field": "tool_nozzleDiameter",
-                                 "reread_expression": "0.1", "diameter_mm": 1.0}]
+                                 "reread_expression": "0.1", "description": None,
+                                 "diameter_mm": 1.0}]
 
     def test_a_mill_is_sized_by_its_cutter_though_it_carries_a_nozzle_column(self, monkeypatch):
         # MEASURED: the ball end mill carries tool_nozzleDiameter (expr '0.0', isEditable FALSE)

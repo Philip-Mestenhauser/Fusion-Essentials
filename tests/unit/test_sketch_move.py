@@ -4,7 +4,8 @@ import math
 import types
 import adsk.core
 import pytest
-from conftest import (FakeBoundingBox3D, FakePoint, assert_no_active_design, assert_unknown_units,
+from conftest import (FakeBoundingBox3D, FakePoint, FakeTimeline, FakeTimelineObject,
+                      assert_no_active_design, assert_unknown_units,
                       error_message, install, load_tool, make_design, make_sketch,
                       make_sketch_curve, payload)
 
@@ -259,7 +260,9 @@ class TestMoveIsJudgedByCoordinates:
         assert out["unverified_entities"] == ["line:1"] and "unmoved_entities" not in out
         assert "could not be re-read" in out["note"]
 
-    def test_a_raising_move_reports_the_api_message(self, mod, sketches):
+    def test_a_raising_move_that_never_moved_reads_as_rolled_back(self, mod, sketches):
+        # THE BITE: the raise path re-reads the coordinates rather than stopping at Fusion's text,
+        # so a caller can tell a rolled-back move from one that landed and broke its dependents.
         plate, _ = sketches
 
         def _raise(collection, matrix):
@@ -267,6 +270,32 @@ class TestMoveIsJudgedByCoordinates:
         plate.move = _raise
         msg = error_message(mod.handler(entities="line:0", dx=10))
         assert "Could not move line:0" in msg and "invalid argument sketchEntities" in msg
+        assert "it rolled back" in msg
+        assert "it landed" not in msg
+
+    def test_a_raising_move_that_landed_counts_the_broken_dependents(self, mod, monkeypatch):
+        # The other outcome: the transform actually relocated the geometry before the call raised
+        # (a downstream dependency failing), so the coordinates changed - and the count of newly
+        # errored/warned timeline features comes from the SAME health helper the success path uses,
+        # not a second walk.
+        feat = FakeTimelineObject(name="Fillet1")
+        plate = make_sketch("Plate", lines=[_boxed("L0", 0.0, 0.0)])
+        design = make_design(sketches=[plate], timeline=FakeTimeline([feat]))
+        install(mod, design)
+        monkeypatch.setattr(adsk.core.Matrix3D, "create", lambda: _matrix())
+        monkeypatch.setattr(adsk.core.Vector3D, "create", lambda x, y, z: FakePoint(x, y, z))
+        monkeypatch.setattr(adsk.core.Point3D, "create", lambda x, y, z: FakePoint(x, y, z))
+
+        def _land_then_raise(collection, matrix):
+            for i in range(collection.count):
+                _place(collection.item(i), matrix)
+            feat.healthState = 2       # a dependent errors out AFTER the transform landed
+            raise RuntimeError("3 : dependent feature failed")
+        plate.move = _land_then_raise
+        msg = error_message(mod.handler(entities="line:0", dx=10))
+        assert "it landed" in msg and "1 dependent feature(s)" in msg
+        assert "rolled back" not in msg
+        assert _corner(_lines(plate).item(0)) == (1.0, 0.0)      # the geometry really moved
 
 
 class TestMoveComponentScope:

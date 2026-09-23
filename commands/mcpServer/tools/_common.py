@@ -477,6 +477,18 @@ def join_new_body_clause(op_key, before_names, result_names):
     return JOIN_NEW_BODY_NOTE.format(name=new[0]) if new else ""
 
 
+def body_split_clause(op_key, result_names, count_before, count_after):
+    """(is_split, warning) for a cut/intersect that RAISED the host's solid count - a cut removes
+    bodies or splits them, never adds one - (False, '') otherwise or with an unreadable count."""
+    if op_key not in ("cut", "intersect") or count_before is None or count_after is None:
+        return False, ""
+    if count_after <= count_before:
+        return False, ""
+    names = ', '.join(n for n in (result_names or []) if n)
+    return True, (f"WARNING: this {op_key} DISCONNECTED the target - {count_after - count_before} "
+                  f"extra body/bodies (it yields {names}); reference each by name.")
+
+
 def most_recent_body(comp):
     """The most recently created body in a component, or None - the blank-input fallback for a tool
     that defaults to 'the body you just made'."""
@@ -1274,11 +1286,27 @@ def build_path(comp, path_raw):
         cn = safe(lambda: curves.count, 0) if curves else 0
         if not cn:
             return None, None, f"Path sketch '{nm}' has no curves to build a path from."
-        seed = safe(lambda: curves.item(0))
-        try:
-            p = comp.features.createPath(seed, True) # isChain=True: chain the connected curves
-        except Exception as e:
-            return None, None, f"Could not build a path from sketch '{nm}': {e}"
+        # Every non-construction curve as ONE unchained collection: separately drawn curves keep
+        # their own SketchPoints (a seed chain stops at the first join) and the static Path.create
+        # raises on native sketch curves in every context (measured); this call takes them all.
+        coll = adsk.core.ObjectCollection.create()
+        for c in iter_collection(curves):
+            if not bool(safe(lambda c=c: c.isConstruction, False)):
+                coll.add(c)
+        p = None
+        if safe(lambda: coll.count, 0):
+            try:
+                built = comp.features.createPath(coll, False)
+            except Exception:
+                built = None
+            if built is not None and (counted(lambda: built.count) or 0) > 0:
+                p = built
+        if p is None:
+            seed = safe(lambda: curves.item(0))
+            try:
+                p = comp.features.createPath(seed, True) # isChain=True: chain the connected curves
+            except Exception as e:
+                return None, None, f"Could not build a path from sketch '{nm}': {e}"
         if not p:
             return None, None, f"createPath returned nothing for sketch '{nm}'."
         return p, f"sketch:{nm}", None
@@ -1315,6 +1343,30 @@ def build_path(comp, path_raw):
     how = ("from 1 seed handle" if len(edges) == 1
            else f"from {len(edges)} handles, used exactly")
     return p, (f"{built} edge(s) {how}" if built else f"{how}; edge count unreadable"), None
+
+
+def path_sketch_curve_count(comp, path_raw):
+    """How many SWEEPABLE (non-construction) curves the sketch a 'sketch:<name>' path names holds -
+    None for any other path form or an unreadable sketch."""
+    if not (isinstance(path_raw, str) and path_raw.strip().lower().startswith("sketch:")):
+        return None
+    sk, _ = target_sketch(comp, path_raw.split(":", 1)[1].strip())
+    if sk is None:
+        return None
+    curves = safe(lambda: sk.sketchCurves)
+    if counted(lambda: curves.count) is None:
+        return None
+    return sum(1 for c in iter_collection(curves) if not bool(safe(lambda c=c: c.isConstruction, False)))
+
+
+def path_chain_warning(path_curves, sketch_curves, action):
+    """The WARNING clause for a path that chained fewer curves than its sketch holds - '' when it
+    covers all of them or either count is unreadable. `action` names the geometric verb (sweep/pipe)."""
+    if path_curves is None or sketch_curves is None or path_curves >= sketch_curves:
+        return ""
+    return (f"WARNING: the path chained {path_curves} of the sketch's {sketch_curves} curves, so "
+           f"the {action} covers only that run - chaining follows tangent continuity and a sharp "
+           f"corner stops it. Make the junction tangent, or {action} each run separately.")
 
 
 def iter_collection(coll):

@@ -1491,6 +1491,36 @@ class TestTreeNameFilter:
         node = out["children"][0]
         assert len(node["bodies"]) == 1 and node["bodies_truncated"] is True
 
+    def test_body_truncation_note_names_the_node_with_counts(self):
+        # F032: an executor read 25 of 59 teeth as the complete list. The top-level note must name
+        # the node, the shown-vs-true count and the remedy BEFORE the tree note's own sentences.
+        design = _tree_design([_tocc("Gear:1", comp="Gear", bodies=30)])
+        out, _ = dg._slice_tree(design, 3, "", with_bodies=True)
+        assert out["note"].startswith("'Gear' bodies: 25 of 30 shown (cap 25).")
+        assert "model_inspect(target='Gear'" in out["note"]
+        assert out["note"].endswith(dg._TREE_NOTE)
+
+    def test_no_body_truncation_leaves_the_note_untouched(self):
+        design = _tree_design([_tocc("Gear:1", comp="Gear", bodies=25)])
+        out, _ = dg._slice_tree(design, 3, "", with_bodies=True)
+        assert out["note"] == dg._TREE_NOTE
+
+    def test_scoped_tree_body_truncation_gets_the_same_note(self, monkeypatch):
+        design = _tree_design([_tocc("Gear:1", comp="Gear", bodies=30)])
+        monkeypatch.setattr(dg._common, "design", lambda: design)
+        out, err = dg._slice_tree(design, 3, "Gear", with_bodies=True)
+        assert err is None
+        assert out["note"].startswith("'Gear' bodies: 25 of 30 shown (cap 25).")
+
+    def test_body_cut_note_composed_stays_in_budget_at_a_measured_name_length(self):
+        # F032's own component name ('COOLING - cockpit side firewall', 32 chars) is the realistic
+        # worst case; the static lint cannot see this f-string's rendered length, so this is that
+        # missing check - composed with the full tree note, it must still ship under 400 chars.
+        name = "COOLING - cockpit side firewall"
+        design = _tree_design([_tocc(f"{name}:1", comp=name, bodies=87)])
+        out, _ = dg._slice_tree(design, 3, "", with_bodies=True)
+        assert len(out["note"]) <= 400, len(out["note"])
+
     def test_body_rows_exactly_at_the_cap_are_not_flagged(self, monkeypatch):
         # the boundary: exactly cap-many bodies is a COMPLETE list - a >= guard would flag a
         # complete list as truncated, claiming bodies were dropped when none were.

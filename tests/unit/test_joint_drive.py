@@ -1166,6 +1166,40 @@ class TestDriveTookGate:
         assert "CANDIDATE cause" in res["message"]
         assert "assembly_ground(ground_to_parent=false)" in res["message"]
 
+    def test_remedy_offers_a_reversed_retry_before_naming_the_ground(self, monkeypatch):
+        # THE BITE: the remedy must not open with the ground clause - a reversed-sign retry lands
+        # clean with no grounding change, so it comes first and the ground trails.
+        j = FakeJoint("J", RevoluteJointMotion(stores=False))
+        design = _install(j)
+        _census(design, [_census_occ("Rotor:1", locked=True)])
+        res = jd.handler(joint_name="J", angle_deg=25)
+        msg = res["message"]
+        retry_at = msg.find("re-drive with angle_deg=-25.0")
+        ground_at = msg.find("assembly_ground(ground_to_parent=false)")
+        assert retry_at != -1 and ground_at != -1 and retry_at < ground_at
+
+    def test_remedy_names_the_loops_other_joints_before_the_ground(self, monkeypatch):
+        # A joint sharing the locked occurrence is named as a suppress candidate before the ground
+        # is named - the loop's other member is a cheaper try than releasing an intended ground.
+        j = FakeJoint("J", RevoluteJointMotion(stores=False))
+        brace = FakeJoint("Brace", RevoluteJointMotion(), occurrence_one=make_occurrence("Rotor:1"))
+        design = _design([j, brace])
+        install(jd, design)
+        _census(design, [_census_occ("Rotor:1", locked=True)])
+        res = jd.handler(joint_name="J", angle_deg=25)
+        msg = res["message"]
+        loop_at = msg.find("try suppressing one of Brace")
+        ground_at = msg.find("assembly_ground(ground_to_parent=false)")
+        assert loop_at != -1 and ground_at != -1 and loop_at < ground_at
+
+    def test_remedy_omits_the_loop_clause_with_no_other_joint_on_the_lock(self, monkeypatch):
+        # The bite the other way: a locked member with no other joint on it must not invent one.
+        j = FakeJoint("J", RevoluteJointMotion(stores=False))
+        design = _install(j)
+        _census(design, [_census_occ("Rotor:1", locked=True)])
+        res = jd.handler(joint_name="J", angle_deg=25)
+        assert "try suppressing" not in res["message"]
+
     def test_a_lock_on_a_NESTED_occurrence_is_seen(self, monkeypatch):
         # ground_to_parent is not a top-level-only property - the lock that froze this chain sits on
         # an instance INSIDE a sub-assembly. A root-collection-only census reports such a design as

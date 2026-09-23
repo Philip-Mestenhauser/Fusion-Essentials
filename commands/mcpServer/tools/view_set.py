@@ -817,10 +817,10 @@ def _do_style(style):
 
 
 def _do_display(design, categories, visible):
-    """Toggle the non-body display FOLDERS (sketches / construction / origins / joints) design-wide
-    via each component's folder bulb - the switch that clears construction clutter from product
-    shots without touching any entity's own bulb. Every write is read back; a component whose bulb
-    does not land is reported stuck, never silently skipped."""
+    """Toggle the non-body display FOLDERS (sketches / construction / origins / joints / joint
+    origins) design-wide via each component's folder bulb - the switch that clears construction
+    clutter from product shots without touching any entity's own bulb. Every write is read back; a
+    component whose bulb does not land is reported stuck, never silently skipped."""
     if visible is None:
         return error("Provide 'visible' - true to show the chosen categories, false to hide them.")
     # A permissive client can deliver the boolean as a STRING ('false' is truthy to bool()) -
@@ -1049,14 +1049,37 @@ def _do_apply_view(design, view_name):
         "section perspective, re-issue view_section(cut, ...) to recut for this angle."})
 
 
+def _camera_row(cam):
+    """(eye_cm, target_cm, up_cm, projection, extents_cm) for a saved view's own camera - reuses
+    _point_values, the same reading _do_orient uses, so no second point formatter exists in this
+    file. The _cm suffix matches this file's own convention (standoff_fallback_cm): Fusion's
+    internal length unit, never a caller-chosen one - each field is independently safe."""
+    def pt(p):
+        v = _point_values(p)
+        return None if v is None else {"x": round(v[0], 6), "y": round(v[1], 6), "z": round(v[2], 6)}
+    ct = safe(lambda: cam.cameraType)
+    ext = safe(lambda: cam.viewExtents)
+    if not isinstance(ext, (int, float)) or isinstance(ext, bool) or not math.isfinite(ext):
+        ext = None
+    return {
+        "eye_cm": pt(safe(lambda: cam.eye)),
+        "target_cm": pt(safe(lambda: cam.target)),
+        "up_cm": pt(safe(lambda: cam.upVector)),
+        "projection": _projection_key(ct) if ct is not None else None,
+        "extents_cm": round(ext, 4) if ext is not None else None,
+    }
+
+
 def _do_list_views(design):
     nvs = _named_views(design)
     if nvs is None:
         return error("This design does not expose Named Views.")
     views = []
     for nv in _common.iter_collection(nvs):
+        cam = safe(lambda nv=nv: nv.camera)
         views.append({"name": safe(lambda nv=nv: nv.name),
-        "built_in": safe(lambda nv=nv: nv.isBuiltIn)})
+        "built_in": safe(lambda nv=nv: nv.isBuiltIn),
+        "camera": _camera_row(cam) if cam is not None else None})
     return ok({"action": "list_views", "count": len(views), "named_views": views})
 
 
@@ -1154,7 +1177,8 @@ tool = (
             description="For 'style'.").as_property())
     .add_input_property("fit", {"type": "boolean"})
     .add_input_property("categories", {"type": "array",
-            "items": {"type": "string", "enum": ["sketches", "construction", "origins", "joints"]},
+            "items": {"type": "string",
+                     "enum": ["sketches", "construction", "origins", "joints", "joint_origins"]},
             "description": "For 'display'; omit = all of them."})
     .add_input_property("visible", {"type": "boolean"})
     .strict_schema()

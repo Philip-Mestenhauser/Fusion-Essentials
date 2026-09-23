@@ -236,6 +236,34 @@ class TestSearchGuards:
         assert "No material named 'Steal'" in res["message"]
         assert "Steel" in res["message"]              # nearest offered, not silence
 
+    def test_nearest_ranks_a_containing_match_before_a_same_prefix_decoy(self, wired):
+        # THE BITE: difflib's edit-distance ranking buried the catalog's actual entry (the longer,
+        # more specific name) under same-prefix decoys - the fix ranks a name CARRYING every query
+        # token first.
+        wired([_Body("B")], libraries=[_Lib("Lib", [
+            _material("Steel AISI 4130 259 QT"), _material("Steel AISI 1060"),
+            _material("Steel AISI 1061"), _material("Steel AISI 1141")])])
+        res = mm.handler(target="", material="Steel AISI 4130")
+        assert res["isError"] is True
+        msg = res["message"]
+        nearest = msg.split("Nearest: ", 1)[1]
+        assert nearest.startswith("'Steel AISI 4130 259 QT'")
+
+    def test_nearest_containment_is_punctuation_insensitive(self, wired):
+        wired([_Body("B")], libraries=[_Lib("Lib", [
+            _material("Rubber, Black"), _material("Rubber, White")])])
+        res = mm.handler(target="", material="Rubber - Black")
+        nearest = res["message"].split("Nearest: ", 1)[1]
+        assert nearest.startswith("'Rubber, Black'")
+
+    def test_a_material_id_miss_says_the_name_exists_under_another_id(self, wired):
+        wired([_Body("B")], libraries=[_Lib("Lib", [_material("Steel", "real-id")])])
+        res = mm.handler(target="", material="Steel", material_id="wrong-id")
+        assert res["isError"] is True
+        assert "exists in the requested catalog scope" in res["message"]
+        assert "'real-id'" in res["message"]
+        assert "No material named" not in res["message"]
+
     def test_ambiguous_across_libraries_is_refused(self, wired):
         wired([_Body("B")],
               libraries=[_Lib("LibA", [_material("Brass")]), _Lib("LibB", [_material("Brass")])])

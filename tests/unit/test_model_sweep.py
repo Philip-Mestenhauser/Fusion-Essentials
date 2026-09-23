@@ -132,12 +132,13 @@ class TestSolid:
         # A closed profile with the default (solid) sets isSolid True on the input.
         assert sf.last.isSolid is True
 
-    def test_path_sketch_seeds_createpath_with_chain(self):
+    def test_path_sketch_hands_createpath_the_whole_collection_unchained(self):
         sf, design = _install()
         _payload(sw.handler(profile={"sketch": "Prof"}, path="sketch:PathSketch"))
         feats = design.rootComponent.features
-        # The path sketch has curves -> createPath is called with (seed, isChain=True).
-        assert len(feats.path_calls) == 1 and feats.path_calls[0][1] is True
+        # The path sketch has curves -> createPath is called ONCE with (collection, isChain=False).
+        assert len(feats.path_calls) == 1 and feats.path_calls[0][1] is False
+        assert hasattr(feats.path_calls[0][0], "add")
 
     def test_multiple_result_bodies_collected(self):
         _install(body_names=("R0", "R1", "R2"))

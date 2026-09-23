@@ -211,6 +211,9 @@ class TestSurfaceExtrude:
         sym, _dist = ef.last_input.distance_extent
         assert sym is True
 
+    def test_symmetric_input_description_states_per_side(self):
+        assert "per side" in sc.tool.input_schema["properties"]["symmetric"]["description"]
+
     def test_sketch_with_no_curves_errors(self, wire):
         # _open_sketch_profile: a sketch present but with zero curves -> honest error, no add()
         wire(_comp(FakeFeatures(ef=FakeExtrudeFeatures()),
