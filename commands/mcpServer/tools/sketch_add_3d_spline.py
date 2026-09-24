@@ -55,13 +55,13 @@ def _finite_points(raw):
 
 
 def _helix_points(axis, center, radius, pitch, turns, points_per_turn, start_angle_deg):
-    """turns*points_per_turn + 1 points (in 'units') along one continuous helix about `axis`."""
+    """Sample one continuous helix, including its exact start and requested end."""
     cx, cy, cz = center
     a0 = math.radians(start_angle_deg)
-    total = int(round(turns * points_per_turn)) + 1
+    segments = max(2, math.ceil(turns * points_per_turn))
     pts = []
-    for i in range(total):
-        frac = i / points_per_turn
+    for i in range(segments + 1):
+        frac = turns * i / segments
         angle = a0 + frac * 2.0 * math.pi
         c, s = radius * math.cos(angle), radius * math.sin(angle)
         rise = pitch * frac

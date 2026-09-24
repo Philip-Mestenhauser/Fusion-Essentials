@@ -22,6 +22,17 @@ from verify_core import (
 from verify_layout import _DRIFT_CHUNKS, drift_row
 
 
+def _subject_visible(name, visible):
+    """Read effective body visibility from the scoped design tree."""
+    def check(p):
+        row = (p.get("tree") or {}).get("tree") or {}
+        bodies = row.get("bodies") or []
+        return _measured(f"{name} body visibility restored to {visible}", {"bodies": bodies},
+                         row.get("name") == name and bool(bodies)
+                         and all(b.get("visible") is visible for b in bodies))
+    return check
+
+
 # --- the SECOND document: what puts doc_activate in the always-on receipt -----------------------
 # doc_new mints an UNSAVED document with a session handle that addresses it exactly.
 
@@ -430,6 +441,24 @@ _SHOWCASE = [
     ("view_set", {"action": "clear_isolation"},
      lambda p: _measured("fit_to left no isolation behind", {"cleared_count": p.get("cleared_count")},
                          p.get("cleared_count") == 0), None),
+    ("view_set", {"action": "isolate", "target": "JawMoving:1"}, "ok", None),
+    ("view_screenshot", {"fit_to": "JawMoving:1", "width": 300, "height": 240}, "ok", None),
+    ("design_get", {"include": ["tree"], "component": "JawMoving:1", "tree_bodies": True},
+     _subject_visible("JawMoving:1", True), None),
+    ("design_get", {"include": ["tree"], "component": "STOCK:1", "tree_bodies": True},
+     _subject_visible("STOCK:1", False), None),
+    ("view_set", {"action": "clear_isolation"},
+     lambda p: _measured("one prior isolation survived capture",
+                         {"cleared_count": p.get("cleared_count")}, p.get("cleared_count") == 1), None),
+    ("view_set", {"action": "isolate", "target": "STOCK:1"}, "ok", None),
+    ("view_screenshot", {"fit_to": "JawMoving:1", "width": 300, "height": 240}, "ok", None),
+    ("design_get", {"include": ["tree"], "component": "JawMoving:1", "tree_bodies": True},
+     _subject_visible("JawMoving:1", False), None),
+    ("design_get", {"include": ["tree"], "component": "STOCK:1", "tree_bodies": True},
+     _subject_visible("STOCK:1", True), None),
+    ("view_set", {"action": "clear_isolation"},
+     lambda p: _measured("one prior isolation survived capture",
+                         {"cleared_count": p.get("cleared_count")}, p.get("cleared_count") == 1), None),
     ("view_set", {"action": "restore"}, "ok", None),
     # one contact sheet, four presets. This tool walks the camera per view and fits each one, so its
     # cost on screen is one zoom-out per view in the list - a seven-view sheet and an 'all' sheet

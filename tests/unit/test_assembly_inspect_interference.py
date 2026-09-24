@@ -1,14 +1,16 @@
 """Unit tests for assembly_inspect_interference - the physical-fit 'check my work' tool.
 
 The live analyzeInterference call needs Fusion, but the logic worth pinning is pure: planning which
-occurrence pairs to run (box-pruned, capped), aggregating overlap volume per pair, the clear=true
+placed-body pairs to run (box-pruned, capped), aggregating overlap volume per pair, the clear=true
 path, and the body-less-occurrence census refusal.
 """
+
+from types import SimpleNamespace
 
 import pytest
 
 from conftest import (BRepBody, FakeBoundingBox3D, FakePoint, _NamedCollection, install, load_tool,
-                      make_occurrence, MakeComp, MakeDesign, payload)
+                      make_occurrence, MakeComp, MakeDesign, payload, body_proxy)
 
 ai = load_tool("assembly_inspect_interference")
 
@@ -53,8 +55,8 @@ class FakeInterfBody:
 
 class FakeResult:
     def __init__(self, b1, b2, volume):
-        self.entityOne = b1
-        self.entityTwo = b2
+        self.entityOne = b1.nativeObject or b1
+        self.entityTwo = b2.nativeObject or b2
         self.interferenceBody = FakeInterfBody(volume)
 
 
@@ -101,11 +103,7 @@ class _PairInterferenceDesign(MakeDesign):
         return FakeInputRejectsCoincident() if self._reject_coincident else FakeInput()
 
     def analyzeInterference(self, inp):
-        # Live returns a result for EVERY overlapping body pair inside the collection, not just the
-        # one pair a caller had in mind - a call whose collection holds 3+ bodies (a self-pair body
-        # riding along a cross pair) can answer several results at once. So a registered pair fires
-        # whenever BOTH its bodies are present in THIS call, not only when the call is exactly that
-        # pair - the shape _run_pair's attribution logic is written to sort back out.
+        # Every overlapping body pair in the input can contribute a result.
         bodies = self.calls[-1]
         body_ids = {id(b) for b in bodies}
         by_id = {id(b): b for b in bodies}
@@ -152,14 +150,44 @@ class TestTouchBoundary:
 
 
 class TestMultiInstanceNaming:
+    @pytest.mark.parametrize("body_count", [1, 2])
+    def test_overlapping_placements_of_the_same_bodies_are_not_deduplicated(self, world, body_count):
+        one, two = _occ("Part:1"), _occ("Part:2")
+        natives = [_solid(f"Body{i}", (i * 5, 0, 0), (i * 5 + 2, 2, 2))
+                   for i in range(body_count)]
+        first = [body_proxy(b, one) for b in natives]
+        second = [body_proxy(b, two) for b in natives]
+        for i, placed in enumerate(second):
+            object.__setattr__(placed, "boundingBox", _boxed((i * 5 + 1, 0, 0), (i * 5 + 3, 2, 2)))
+        one.bRepBodies, two.bRepBodies = _NamedCollection(first), _NamedCollection(second)
+        world([one, two], pair_volumes={
+            frozenset({id(a), id(b)}): 4.0 for a, b in zip(first, second)})
+        out = payload(ai.handler())
+        assert out["passed"] is False
+        assert out["measured"]["interferences"] == [
+            {"occurrence_one": "Part:1", "occurrence_two": "Part:2",
+             "overlap_volume_cm3": 4.0 * body_count}]
+
+    def test_shared_labels_do_not_merge_distinct_placement_pairs(self, world):
+        a, b, c = [_solid(n, (0, 0, 0), (2, 2, 2)) for n in "ABC"]
+        world([_occ("Same:1", bodies=[a]), _occ("Same:1", bodies=[b]),
+               _occ("Other:1", bodies=[c])], pair_volumes={
+                   frozenset({id(a), id(c)}): 1.0,
+                   frozenset({id(b), id(c)}): 2.0})
+        out = payload(ai.handler())
+        assert out["measured"]["interference_count"] == 2
+        assert [r["overlap_volume_cm3"] for r in out["measured"]["interferences"]] == [2.0, 1.0]
+
     def test_two_instances_of_one_component_name_their_own_block_and_volume(self, world):
         # ONE component (Peg) placed twice, each instance overlapping a DIFFERENT block - the exact
         # instance now comes straight off the per-pair analysis, never guessed from candidates.
-        peg1_body = _solid("PegBody", (0, 0, 0), (2, 2, 2))
-        peg2_body = _solid("PegBody", (48, 0, 0), (50, 2, 2))
+        peg1, peg2 = _occ("Peg:1"), _occ("Peg:2")
+        native = _solid("PegBody", (0, 0, 0), (2, 2, 2))
+        peg1_body, peg2_body = body_proxy(native, peg1), body_proxy(native, peg2)
+        object.__setattr__(peg2_body, "boundingBox", _boxed((48, 0, 0), (50, 2, 2)))
+        peg1.bRepBodies, peg2.bRepBodies = _NamedCollection([peg1_body]), _NamedCollection([peg2_body])
         block_a = _solid("BlockABody", (0, 0, 0), (10, 10, 10))
         block_b = _solid("BlockBBody", (48, 0, 0), (58, 10, 10))
-        peg1, peg2 = _occ("Peg:1", bodies=[peg1_body]), _occ("Peg:2", bodies=[peg2_body])
         blk_a, blk_b = _occ("BlockA:1", bodies=[block_a]), _occ("BlockB:1", bodies=[block_b])
         world([peg1, blk_a, peg2, blk_b], pair_volumes={
             frozenset({id(peg1_body), id(block_a)}): 1.0,
@@ -178,17 +206,13 @@ class TestMultiInstanceNaming:
 
 
 class TestSelfOverlapAttribution:
-    """burn94: entity A's OWN two bodies overlapping each other rode along in every cross pair A
-    joined and were reported as A x B interference. _run_pair now attributes each result's two
-    source bodies back to the entity that owns them and drops a cross-pair result whose bodies both
-    belong to the SAME entity - that overlap still stands, but only on A's own self-pair row."""
+    """Internal body overlaps belong only to their occurrence's self-pair."""
 
     def _bodies(self):
-        # A owns two MUTUALLY overlapping bodies; B owns one body whose box touches A's combined
-        # box, so the cross pair is not pruned - but B is given no registered overlap by default.
+        # B touches A2's box but has no registered overlap by default.
         a1 = _solid("A1", (0, 0, 0), (5, 5, 5))
         a2 = _solid("A2", (3, 0, 0), (8, 5, 5))          # overlaps a1
-        b1 = _solid("B1", (6, 0, 0), (11, 5, 5))         # touches A's union box (0-8)
+        b1 = _solid("B1", (6, 0, 0), (11, 5, 5))         # touches A2
         return a1, a2, b1
 
     def _rig(self, world, a1, a2, b1, extra_pairs=None):
@@ -196,6 +220,16 @@ class TestSelfOverlapAttribution:
         pair_volumes.update(extra_pairs or {})
         world([_occ("A:1", bodies=[a1, a2]), _occ("B:1", bodies=[b1])],
              pair_volumes=pair_volumes)
+
+    def test_one_multibody_occurrence_can_be_checked_for_self_overlap(self, world):
+        a1, a2, _ = self._bodies()
+        world([_occ("Solo:1", bodies=[a1, a2])],
+              pair_volumes={frozenset({id(a1), id(a2)}): 4.0})
+        out = payload(ai.handler())
+        assert out["passed"] is False
+        assert out["measured"]["pairs_analyzed"] == 1
+        assert out["measured"]["interferences"] == [
+            {"occurrence_one": "Solo:1", "occurrence_two": "Solo:1", "overlap_volume_cm3": 4.0}]
 
     def test_a_cross_pair_reports_no_interference_when_only_A_overlaps_itself(self, world):
         self._rig(world, *self._bodies())
@@ -209,7 +243,7 @@ class TestSelfOverlapAttribution:
 
     def test_a_cross_pair_reports_only_the_real_shared_volume(self, world):
         a1, a2, b1 = self._bodies()
-        self._rig(world, a1, a2, b1, extra_pairs={frozenset({id(a1), id(b1)}): 1.5})
+        self._rig(world, a1, a2, b1, extra_pairs={frozenset({id(a2), id(b1)}): 1.5})
         out = payload(ai.handler())
         rows = {tuple(sorted([r["occurrence_one"], r["occurrence_two"]])): r
                 for r in out["measured"]["interferences"]}
@@ -217,22 +251,6 @@ class TestSelfOverlapAttribution:
         assert cross["overlap_volume_cm3"] == 1.5                  # NOT 4.0 + 1.5
         assert rows[("A:1", "A:1")]["overlap_volume_cm3"] == 4.0   # the self overlap is unchanged
         assert out["measured"]["interference_count"] == 2
-
-    def test_a_result_whose_bodies_do_not_attribute_still_counts(self, world):
-        # entityOne/entityTwo whose native_identity does not read (a blank token) cannot be mapped
-        # to an owning entity - the safe default is to COUNT the result, never drop it.
-        a1 = _solid("A1", (0, 0, 0), (5, 5, 5))
-        a1.entityToken = ""
-        assert ai._common.native_identity(a1) is None
-        b1 = _solid("B1", (3, 0, 0), (8, 5, 5))
-        world([_occ("A:1", bodies=[a1]), _occ("B:1", bodies=[b1])],
-             pair_volumes={frozenset({id(a1), id(b1)}): 2.2})
-        out = payload(ai.handler())
-        assert out["measured"]["interference_count"] == 1
-        row = out["measured"]["interferences"][0]
-        assert {row["occurrence_one"], row["occurrence_two"]} == {"A:1", "B:1"}
-        assert row["overlap_volume_cm3"] == 2.2
-
 
 class TestPruning:
     def test_a_pair_whose_boxes_cannot_touch_is_pruned_not_analysed(self, world):
@@ -250,6 +268,17 @@ class TestPruning:
 
 
 class TestPairCap:
+    def test_multiple_bodies_do_not_bypass_the_native_call_cap(self, monkeypatch, world):
+        monkeypatch.setattr(ai, "_PAIR_CAP", 3)
+        bodies = [_solid(n, (0, 0, 0), (2, 2, 2)) for n in "ABCD"]
+        des = world([_occ("A:1", bodies=bodies[:2]), _occ("B:1", bodies=bodies[2:])])
+        res = ai.handler()
+        assert res["isError"] is True and "3 placed-body pair analysis cap" in res["message"]
+        assert len(des.calls) == 3 and all(len(call) == 2 for call in des.calls)
+        assert "Interference command in Fusion" in res["message"]
+        assert "model_measure_relation" not in res["message"]
+        assert "Resolve the reference" not in res["message"]
+
     def test_the_cap_stops_analysis_and_names_what_was_skipped(self, monkeypatch, world):
         monkeypatch.setattr(ai, "_PAIR_CAP", 1)
         # three mutually-overlapping occurrences -> C(3,2)=3 touching pairs, over the cap of 1.
@@ -258,7 +287,7 @@ class TestPairCap:
         des = world(occs, pair_volumes={})
         res = ai.handler()
         assert res["isError"] is True
-        assert "1-pair analysis cap" in res["message"]
+        assert "1 placed-body pair analysis cap" in res["message"]
         assert "not analysed" in res["message"]
         assert len(des.calls) == 1                              # the cap actually stopped the loop
 
@@ -272,6 +301,45 @@ class TestPairCap:
         assert out["passed"] is False
         assert out["measured"]["interference_count"] == 1
         assert "cap" in out["note"].lower()
+
+    def test_a_volume_cut_off_mid_occurrence_pair_is_partial(self, monkeypatch, world):
+        monkeypatch.setattr(ai, "_PAIR_CAP", 1)
+        a, b, c = [_solid(n, (0, 0, 0), (2, 2, 2)) for n in "ABC"]
+        world([_occ("A:1", bodies=[a]), _occ("B:1", bodies=[b, c])],
+              pair_volumes={frozenset({id(a), id(b)}): 2.0})
+        out = payload(ai.handler())
+        assert out["measured"]["interferences"][0]["partial"] is True
+        assert out["measured"]["analysis_complete"] is False
+        assert out["measured"]["pairs_omitted"] == 2
+        assert "total overlap volume" not in out["note"]
+
+    def test_time_budget_stops_between_calls_and_marks_partial_volume(self, monkeypatch, world):
+        monkeypatch.setattr(ai, "_TIME_BUDGET_S", 20.0)
+        monkeypatch.setattr(ai, "_PAIR_CAP", 2)
+        ticks = iter([0.0, 0.0, 21.0])
+        monkeypatch.setattr(ai, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+        a, b, c = [_solid(n, (0, 0, 0), (2, 2, 2)) for n in "ABC"]
+        des = world([_occ("A:1", bodies=[a]), _occ("B:1", bodies=[b, c])],
+                    pair_volumes={frozenset({id(a), id(b)}): 2.0})
+        out = payload(ai.handler())
+        measured = out["measured"]
+        assert len(des.calls) == 1
+        assert measured["pairs_analyzed"] == 1 and measured["pairs_omitted"] == 2
+        assert measured["analysis_complete"] is False
+        assert measured["interferences"][0]["partial"] is True
+        assert "20 s analysis budget" in out["note"]
+        assert "analysis cap" not in out["note"]
+
+    def test_time_budget_refuses_a_clean_verdict(self, monkeypatch, world):
+        ticks = iter([0.0, 21.0])
+        monkeypatch.setattr(ai, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+        a, b = [_solid(n, (0, 0, 0), (2, 2, 2)) for n in "AB"]
+        des = world([_occ("A:1", bodies=[a]), _occ("B:1", bodies=[b])])
+        res = ai.handler()
+        assert res["isError"] is True
+        assert "20 s analysis budget" in res["message"]
+        assert "0 placed-body pair(s) WERE analysed" in res["message"]
+        assert des.calls == []
 
     def test_pairs_exactly_at_the_cap_are_all_analysed_not_capped(self, monkeypatch, world):
         # the boundary: total planned == cap must run every pair, not read as "over" it.
@@ -326,6 +394,33 @@ class TestInterferenceHandler:
         out = payload(ai.handler())
         assert out["measured"]["interference_count"] == 1
         assert out["measured"]["interferences"][0]["overlap_volume_cm3"] == 5.0
+
+    def test_zero_volume_result_is_a_coincident_contact(self, world):
+        a, b = [_solid(n, (0, 0, 0), (2, 2, 2)) for n in "AB"]
+        world([_occ("A:1", bodies=[a]), _occ("B:1", bodies=[b])],
+              pair_volumes={frozenset({id(a), id(b)}): 0.0})
+        out = payload(ai.handler(include_coincident_faces=True))
+        assert out["passed"] is False
+        assert out["measured"]["interferences"] == [
+            {"occurrence_one": "A:1", "occurrence_two": "B:1", "overlap_volume_cm3": 0.0}]
+        assert "coincident" in out["note"]
+
+    @pytest.mark.parametrize("bad_volume", [None, float("nan"), float("inf"), -1.0])
+    def test_unreadable_volume_keeps_the_pair_without_inventing_zero(self, world, bad_volume):
+        a, b = [_solid(n, (0, 0, 0), (2, 2, 2)) for n in "AB"]
+        world([_occ("A:1", bodies=[a]), _occ("B:1", bodies=[b])],
+              pair_volumes={frozenset({id(a), id(b)}): [2.0, bad_volume]})
+        out = payload(ai.handler())
+        assert out["passed"] is False
+        assert out["measured"]["interferences"][0]["overlap_volume_cm3"] is None
+
+    def test_unreadable_result_count_refuses(self, monkeypatch, world):
+        a, b = [_solid(n, (0, 0, 0), (2, 2, 2)) for n in "AB"]
+        des = world([_occ("A:1", bodies=[a]), _occ("B:1", bodies=[b])])
+        monkeypatch.setattr(des, "analyzeInterference", lambda _inp: SimpleNamespace(count=None))
+        res = ai.handler()
+        assert res["isError"] is True
+        assert "result count did not read" in res["message"]
 
     def test_clear_when_nothing_registers_a_volume(self, world):
         a, b = _solid("A", (0, 0, 0), (5, 5, 5)), _solid("B", (0, 0, 0), (5, 5, 5))

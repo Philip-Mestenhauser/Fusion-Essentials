@@ -29,10 +29,10 @@ recomputes the hash and fails on any difference, so a green suite cannot ride on
 run that never saw the current code or a weakened predicate. Only a run with zero
 FAIL/blocked/pass* steps rewrites this file.
 
-Stamp: source 071af45f435a2daae9ea3bec6f32e0207f430c99ee4c3b3a30a33fef0100f515 | Fusion 2705.1.25 | verified 2026-09-23
-Loaded: implementation ac21cf2ec7cfecca2ecdc61b9211480a928f40ff3950beb71e2b759c1e4656d8 | schema 0ff4fb85973c5a038aeb65e44f6ce57cb0f0be355b8be1285ec39f813e768240 | load b1fc081046dd4c4988873b63b6bde207 | session 8e3247e8b3fb4dcb84d9c086229c87ea
+Stamp: source 0dae9c862dde23e3024582c40569ad244374e48b6b12235420c8867779f3773a | Fusion 2705.1.25 | verified 2026-09-24
+Loaded: implementation 8bfd82a96a6a48e2c47eeae5a540047ed05dc9d5d8ca668b782049816235ae55 | schema 45d75b81944b0d4197b5f6060dfe04493514e96539581404743f82111ef4a0c5 | load 3834ee60dabf4cb0a287d12c9b8d8b2c | session 51fbbe43640346fda7ec031c0b21a437
 
-182 covered / 0 called / 5 refusals-only / 6 skipped(reason) / 0 pending
+155 covered / 0 called / 6 refusals-only / 32 skipped(reason) / 0 pending
 
 | act | mode |
 |---|---|
@@ -78,11 +78,11 @@ Loaded: implementation ac21cf2ec7cfecca2ecdc61b9211480a928f40ff3950beb71e2b759c1
 | ACT 10d - CAM: THE SECOND SETUP | narrative |
 | ACT 10e - CAM: MULTI-SETUP POST | narrative |
 | ACT 10f - CAM: THE TREE LEFT BEHIND | narrative |
-| ACT 11a - CLOUD: THE DATA MODEL | narrative |
-| ACT 11b - CLOUD: THE SAVED DOCUMENT | narrative |
+| ACT 11a - CLOUD: THE DATA MODEL | skipped(cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder)) |
+| ACT 11b - CLOUD: THE SAVED DOCUMENT | skipped(cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder)) |
 | ACT 11b2 - CLOUD: LINK GUARD REVIEW | skipped(cloud_link_crash_review_authorization not entitled (deferred and unverified; separate owner-approved crash review and code change required)) |
-| ACT 11c - CLOUD: THE DRAWING | narrative |
-| ACT 11d - CLOUD: CAM TEMPLATE PERSISTENCE | narrative |
+| ACT 11c - CLOUD: THE DRAWING | skipped(cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder)) |
+| ACT 11d - CLOUD: CAM TEMPLATE PERSISTENCE | skipped(cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder)) |
 | FINALE | narrative |
 
 | tool | status | step (the demo's shot list) |
@@ -123,16 +123,16 @@ Loaded: implementation ac21cf2ec7cfecca2ecdc61b9211480a928f40ff3950beb71e2b759c1
 | cam_select_geometry | covered | aim every operation at the feature it cuts: the stock-top face, the boss top and the stepped top through the FACE kind (which takes the loops that bound the face), the pocket FLOOR through the POCKET kind made for it, both silhouette branches (setup models and named bodies), a whole scratch sketch, and the holes three ways - the counterbored mounting bores through the diameter filter, the two through bores with no filter at all (the branch that machines exactly what it was given), and those same two faces again to the BORE, where one selection input reaches 'circularFaces' instead of the drill's 'holeFaces'; refusals for a knob on the wrong kind, geometry through the wrong input, and an edge where a face belongs. The pocket-recognition selection is NOT driven unattended (running it coincides with the Fusion process terminating); its 'pocket_filter_applied' publishes the diameter/depth bounds in the CALLER'S own units, with 'pocket_filter_units' naming them beside the numbers. Then the two routes a 'chain' takes on the drafted cameo: a swarf RAIL PAIR (one selection per rail, the open state read off the collection the operation hands back, the drive mode engaged in the same call and the rail order published, with a single contour refused as a pair) and a deburr edge whose payload carries none of those keys; plus the 'surfaces' selection with its face count read back off the named surface set, a role the operation does not carry refused naming the ones it does, and an omitted role refused where there is no drive set to default to. Then the COMPONENT SCOPE, on the scratch job's own silhouette: 'Body1' unscoped refused with the candidates and with the input that narrows them, then scoped to one component, where 'selected' is the qualified name of the body that reached inputGeometry. The sketch kind drives the engraving, and the surfaces kind lands ONE drafted wall on the multi-axis finishing pass's FLOOR set and on the flow's DRIVE set - the same face, two roles, each read back off the parameter it landed on. The PROBE kind lands the stepped top on the probing cycle's own probe_selection input, named in the payload beside the count |
 | cam_set_nc_comment | covered | stamp the NC program comment |
 | cam_show_toolpath | covered | list the job's own bulbs; then ONE choreography, which every CAM act shows its toolpaths with: the subject framed once, every path off, then each operation alone in that standing frame - shown with fit false, the resolved name read back, hidden again - and every path off at the end. No act refits the camera or leaves the paths on. Then ISOLATE, once, on one operation of the finished job: the action that hides every other path and keeps the read-backs, so an operation whose bulb would not go dark is named in hide_failures - asserted absent |
-| data_create_folder | covered | a run-stamped folder under the configured one and a move target inside it, each re-listed under the parent asked for with NOTHING auto-created on the way there - a run that had to invent the operator's folder is addressing a project the config does not describe |
+| data_create_folder | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
 | data_create_project | skipped: mints a real project in the operator's hub - the config names an EXISTING project, and a project is not this tier's to create |  |
-| data_delete_file | covered | take every document this tier made back out by URN with confirm_name matching, each delete read back - the referencing file first, since a referenced one is refused rather than orphaned |
-| data_delete_folder | covered | meet the non-empty refusal naming the subtree a recursive wipe would take, then delete the two folders once emptied, each with the census read before the delete saying it took nothing else with it |
-| data_download_file | covered | bring the same file back to local disk with its bytes stat'd there; and meet the Fusion-native refusal on the saved design, which is what sends a caller to design_export |
-| data_get | covered | the hub this run is signed in to and the configured project listed in it - the row that puts on the ledger WHICH hub the artifacts were made in; then the uploaded file's own record (where it sits, and whether the cloud has finished with it - what the drawing generator needs true of its source); and the two read-backs standing apart from the deletes' own reports: the run folder addressed DIRECTLY, where the project answers that it holds no such subfolder - a refusal a budget cut cannot produce - and the configured folder's own file listing, scoped to that folder and failing on any listing that did not fully read |
-| data_get_upload_status | covered | poll that handle to 'complete': transfer AND cloud processing finished, with the lineage URN every later step addresses the file by. Nothing downstream runs against a file that has not landed |
-| data_move_file | covered | move the landed file into the subfolder, with the parent RE-READ off the re-resolved file - DataFile.move returns a bool, and the bool is not the evidence |
+| data_delete_file | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| data_delete_folder | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| data_download_file | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| data_get | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| data_get_upload_status | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| data_move_file | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
 | data_switch_hub | skipped: closes every open document, the story document among them - the cloud_tier probe refuses a config naming a hub other than the active one instead of switching to it |  |
-| data_upload_file | covered | upload the run's marker PNG into that folder - a non-Fusion file, which is the only kind that can come back down again - and mint the poll handle the status read below asks with |
+| data_upload_file | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
 | design_activate_component | covered | step into each part to build its sketch, and back out to the root once the hub's last feature has landed |
 | design_add_instance | covered | place two more pin-cameo instances and read the landed paths back, the second naming the component while two of it already stand; the self-nesting target refused |
 | design_configure | skipped: configuration table needs a SAVED document (a DataFile to carry it); opt-in tier - the appearance/material columns need that document too, and a body's material reads back only after the geometry catches up with the activation |  |
@@ -149,28 +149,28 @@ Loaded: implementation ac21cf2ec7cfecca2ecdc61b9211480a928f40ff3950beb71e2b759c1
 | design_set_name | covered | rename a cameo component and re-find it by the name that landed, rename a cameo occurrence with its instance name following, give a twin body the name its sibling holds so the deduped '(1)' is what gets published, and rename a MESH body - the kind reads 'mesh' and a fresh read of the component's meshes carries the new name; the empty target and the root component refused |
 | doc_activate | covered | the overture opens a SECOND unsaved scratch document beside the story one and switches both ways between them by the 'open:N' index doc_get published - the address an UNSAVED document has instead of a URN, and the only one that reaches it when two documents share the name 'Untitled'; the cloud tier then switches between the source, the host, the copy and the drawing by lineage URN and comes home the same way |
 | doc_close | covered | discard the document on camera - clean teardown; and, on the cloud tier, close every cloud document this run opened, by lineage URN, before deleting it |
-| doc_copy | covered | copy the source cloud-to-cloud into the same folder under its own name, the copy read back off the created DataFile on a DIFFERENT lineage from its source |
+| doc_copy | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
 | doc_get | covered | read the document identity before discarding; and, on the cloud tier, which document the session is on before each write acts on it, plus the version history the save/milestone/restore beats built |
-| doc_insert_derive | covered |  |
+| doc_insert_derive | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
 | doc_insert_import | covered | re-import that STEP from disk into the live design; then the DXF back onto a plane as sketches, an SVG into a sketch made for it, and IGES / SMT / f3d as solids - each with the format named explicitly, which is what makes the last row (a format contradicting its file's extension) a refusal instead of a silent mis-read |
-| doc_insert_occurrence | covered | insert the saved source into the host as an XREF - 'is_reference' is what gives doc_update_xref something to walk |
+| doc_insert_occurrence | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
 | doc_new | covered | open the one document the whole story lives in |
-| doc_open | covered | open the copy and then the generated drawing by lineage URN, each named back with the URN it resolved; the switch is async, so the doc_get after it is what says the session is on it |
-| doc_restore_version | covered | promote the FIRST version, one the tip has moved past - promoting the latest takes the tool's early return, with no promote call and no tip either side to compare. The open session keeps its parameters through it, and the save after it writes them as the new tip; a pending tip is reported, never called a failure |
-| doc_save | covered | version the source in place, twice: once after the parameter is added, and once for the edit the drawing refresh is read against |
-| doc_save_as | covered | write the plate into the configured folder as this run's source, and the host beside it - each with no name collision, since a second file of one name is a fork this run could not then clean up by name |
-| doc_save_milestone | covered | mark a named milestone on the source - the two INDEPENDENT read-backs kept apart, a fresh fetch showing a NEW version number, and the mark on it, which lags the version by seconds and is reported not asserted |
-| doc_update_xref | covered | walk the host's one reference with only_out_of_date true, THREE times: straight after the insert, where the bucket is reported (measured: a just-inserted xref read out of date, bound a version behind the source's stream); again immediately, where nothing is stale and it is SKIPPED; and once more after the source is edited and saved, where it is UPDATED. A row in each bucket is what makes the partition a measurement - only_out_of_date false can never fill 'skipped' |
-| drawing_add_sketch | covered | draw a line chain, a rectangle and a circle on the sheet - four curves |
-| drawing_create | covered | meet every guard the drawing generator sits behind, each settled before the tool reaches for a cloud source: the shaded style with no member to set, the two centre annotations with no enum family on this build, a tangent-edge value outside the Choice, manual creation with no template, and a sheet size from the other standard - none of them creating anything, and the session healthy afterwards. Then the CREATION path, on the cloud tier: an A3 ISO drawing generated from the saved source, its own name and lineage URN read off the DataFile that landed |
-| drawing_delete_sketch | covered |  |
-| drawing_dimension | covered | dimension the generated view with the baseline strategy |
-| drawing_edit_sheet | covered | add a named sheet with the count read either side; it comes after every beat needing the generated views, since an add makes the NEW sheet active |
-| drawing_export | covered | write the drawing to PDF and to DXF, each measured by its bytes on disk |
-| drawing_get | covered | the complete native sheet collection read every write and both exports are taken behind: collection_index is 1-based and contiguous, export order remains unknown, and exactly one row agrees with active_sheet |
-| drawing_get_status | covered |  |
-| drawing_insert_image | covered | place the run's marker PNG on the sheet, with 'position_bounds_checked' saying the anchor was compared against the sheet BEFORE anything was placed - an image cannot be read back or moved afterwards, so the check having run is the read-back |
-| drawing_update | covered | a drawing generated moments ago reports itself already up to date; then, after the source is edited and saved, the refresh that ran with the count of references stale before it - the number separating it from a no-op |
+| doc_open | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| doc_restore_version | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| doc_save | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| doc_save_as | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| doc_save_milestone | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| doc_update_xref | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| drawing_add_sketch | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| drawing_create | refusals-only: every step is a guard refusal - no effect was produced or read back this run | meet every guard the drawing generator sits behind, each settled before the tool reaches for a cloud source: the shaded style with no member to set, the two centre annotations with no enum family on this build, a tangent-edge value outside the Choice, manual creation with no template, and a sheet size from the other standard - none of them creating anything, and the session healthy afterwards. Then the CREATION path, on the cloud tier: an A3 ISO drawing generated from the saved source, its own name and lineage URN read off the DataFile that landed |
+| drawing_delete_sketch | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| drawing_dimension | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| drawing_edit_sheet | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| drawing_export | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| drawing_get | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| drawing_get_status | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| drawing_insert_image | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
+| drawing_update | skipped: cloud_tier not entitled (opt-in: cloud_config.local.json names hub, project, folder) |  |
 | find_geometry | covered | acquire the face/edge/body handles the build consumes |
 | joint_at_geometry | covered | joint a pin in its bore via cylinder faces; then the motion vocabulary on its own cameo tree - a BALL on a real sphere face (the centre key point named in the payload, no axis and no axis sentence), a revolute on an explicit axis whose note says frame, NOT world, and points at the tool that sets a true world axis, and a rigid pair with the same axis-free report; an axis outside the Choice refused. A TORUS face joints at its own centre on a PARAMETRIC body, which is the case the keypoint guard must let through. SKIPPED(rig): the two base-feature halves of that guard (a torus inside a base feature hands back its component origin with no error) need a torus built INSIDE a base feature, and no tool on this surface builds one unattended |
 | joint_create | covered | slide the moving jaw on the vise base and turn the lead screw on it; then a station joint per bench motion, and the link's own fresh revolute |

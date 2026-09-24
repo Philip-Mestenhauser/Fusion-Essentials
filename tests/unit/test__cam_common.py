@@ -4672,14 +4672,14 @@ class TestNcProgramPostedOperations:
         empty.hasToolpath = False
         install(SimpleNamespace(ncPrograms=_NamedCollection([self._program([empty])])))
         note = _payload(cr.get_nc_programs_handler())["note"]
-        assert "cam_generate(target=<op>)" in note
+        assert cc.EMPTY_TOOLPATH_REMEDY in note
         assert len(note) <= 400, len(note)
 
     def test_no_empty_toolpath_carries_no_relaunch_remedy(self, install,
                                                           operation_cast_passthrough):
         install(SimpleNamespace(ncPrograms=_NamedCollection([self._program([_row_op("Cut")])])))
         note = _payload(cr.get_nc_programs_handler())["note"]
-        assert "cam_generate(target=<op>)" not in note
+        assert cc.EMPTY_TOOLPATH_REMEDY not in note
 
     def _empty(self, name):
         op = _row_op(name)

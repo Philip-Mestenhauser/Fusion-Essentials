@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 193  |  **description breadcrumbs:** 296  |  **note/error breadcrumbs:** 623
+**Tools:** 193  |  **description breadcrumbs:** 296  |  **note/error breadcrumbs:** 622
   |  **guidance smells flagged:** 8
 ## Blindspots to engineer
 
@@ -317,19 +317,19 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 
 ### `assembly_inspect_interference`
 - No interference - every part fits.
-- interfering pair(s) - parts overlap in space. Each lists the two occurrences and their total overlap volume; fix positioning/sizing/joints. (A self-pair means two bodies of the same occurrence over...
+- interfering occurrence pair(s) - bodies overlap or meet at coincident faces. Each lists the two occurrences and readable overlap volume from analysed body pairs; fix positioning/sizing/joints. (A s...
 - No active design to analyze.
 - Cannot check interference: this design exposes
 - comparable solid entit
 - occurrence(s) at any depth,
 - root-level solid body(ies)
-- ), and interference needs at least two. No verdict was formed - this is NOT a pass.
+- ), and interference needs at least two solid bodies. No verdict was formed - this is NOT a pass.
 - Cannot certify interference-free:
-- pair(s) WERE analysed and none interfere, but that is not a verdict over the whole assembly - no pass was formed. Resolve the reference (see workspace_orient health.unresolved_references) and re-run.
+- placed-body pair(s) WERE analysed and none interfere; no pass was formed over the whole assembly.
 - Interference analysis failed:
-- Cannot check interference: this design exposes  comparable solid entit ( occurrence(s) at any depth,  root-level solid body(ies)), and interference needs at least two. No verdict was formed - this ...
+- Cannot check interference: this design exposes  comparable solid entit ( occurrence(s) at any depth,  root-level solid body(ies)), and interference needs at least two solid bodies. No verdict was f...
 - occurrence(s) hold an unresolved external reference () - their component could not be read, so they carry no geometry this analysis could compare
-- Cannot certify interference-free: .  pair(s) WERE analysed and none interfere, but that is not a verdict over the whole assembly - no pass was formed. Resolve the reference (see workspace_orient he...
+- Cannot certify interference-free: .  placed-body pair(s) WERE analysed and none interfere; no pass was formed over the whole assembly.
 - occurrence(s) with an unresolved external reference were NOT compared - their component could not be read, so they carry no geometry for this analysis; measured.unresolved_references names them.
 
 ### `assembly_move`

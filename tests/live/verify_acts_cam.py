@@ -57,6 +57,7 @@ _CHAMFER_OP = "EdgeChamfer"    # the 2D chamfer that breaks the stepped top's ed
 _BOSS_OP = "BossFinish"        # the base-licence finishing pass round the boss
 _BOSS3D_OP = "BossSteep"       # the Machining Extension's own 3D finish on the same feature
 _FLIP_FACE_OP = "FlipFace"     # the second setup: facing the underside
+_EMPTY_REMEDY_OP = "EmptyPocketRemedy"
 _FLIP_BACK_OP = "FlipCbores"   # and the contour round the counterbore backsides
 _FLIP_NOTE_OP = "FlipNote"     # the operator note the cross-setup name dance renames: manual NC
                                # generates nothing, so a rename on it cannot cancel a path in flight
@@ -241,6 +242,37 @@ def _launched_on(setup, skip_valid=False):
                          p.get("launched") is True and p.get("target") == f"setup '{setup}'"
                          and p.get("skip_valid") is skip_valid and bool(p.get("handle")))
     return check
+
+
+def _empty_pocket_settled(p, handle_key):
+    """Poll the pocket until its valid-empty state and forced-generation remedy are readable."""
+    handle = _RECALL[handle_key]
+    for attempt in range(40):
+        if p.get("completed") is True:
+            break
+        time.sleep(1)
+        failed, p = facade("call")("cam_get_status", {"handle": handle})
+        if failed:
+            raise AssertionError(f"cam_get_status(handle={handle!r}) failed: {p}")
+    return _measured("oversized stock allowance leaves a valid-empty pocket and names forced regeneration",
+                     {"handle": p.get("handle"), "completed": p.get("completed"),
+                      "states": p.get("live_states"), "empty": p.get("empty_toolpaths"),
+                      "triage": p.get("empty_triage")},
+                     p.get("handle") == handle and p.get("completed") is True
+                     and (p.get("live_states") or {}).get("valid") == 1
+                     and p.get("empty_toolpaths") == [_EMPTY_REMEDY_OP]
+                     and "cam_generate(target=<op>, skip_valid=false)" in (p.get("empty_triage") or ""))
+
+
+def _empty_pocket_raw(p):
+    """Require the named pocket's raw empty-path flags and warning in the setup read."""
+    row = _operation_row(p, FLIP_SETUP, _EMPTY_REMEDY_OP)
+    return _measured("empty pocket has no toolpath, remains valid, and reports its warning",
+                     {"row": row},
+                     bool(row) and row.get("has_toolpath") is False
+                     # cam_get omits toolpath_valid only when its native read is True.
+                     and row.get("toolpath_valid", True) is True
+                     and "Generated toolpath is empty" in (row.get("warning") or ""))
 
 
 def _settled(scope):
@@ -4305,9 +4337,42 @@ _CAM_SECOND_SETUP = [
     ("cam_select_geometry", {"operation": _FLIP_BACK_OP, "selection": "silhouette",
                              "generate": False},
      lambda p: p["setup_models_selected"] is True, None),
-    # The silhouette runs along the clamped sides, and with the default lead-in/out one of its
-    # contours is skipped with the warning "A contour was not machined because the given lead
-    # parameters would cause a collision!" - the leads come off so the path carries no warning.
+    # Stock allowance wider than the part leaves no pocket region the cutter can enter.
+    ("cam_create_operation", {"setup": FLIP_SETUP, "strategy": "pocket2d", "name": _EMPTY_REMEDY_OP,
+                              "tool_scope": "document", "tool_index": _FLAT_MILL, "generate": False},
+     _op_named(FLIP_SETUP, "pocket2d", _EMPTY_REMEDY_OP), None),
+    ("cam_select_geometry", lambda c: {"operation": _EMPTY_REMEDY_OP, "selection": "pocket",
+                                       "handles": [_ctx_get(c, "part_bottom", "the part's underside")],
+                                       "generate": False}, _selected(1), None),
+    ("cam_edit_operation", {"operation": _EMPTY_REMEDY_OP,
+                            "parameters": {"useStockToLeave": "true", "stockToLeave": "1000 mm"}},
+     lambda p: p.get("updated_count") == 2, None),
+    ("cam_generate", {"target": _EMPTY_REMEDY_OP, "skip_valid": False},
+     lambda p: p.get("launched") is True and p.get("operations_to_generate") == 1,
+     ("empty_pocket_first", _recall("empty_pocket_first", lambda p: p["handle"]))),
+    ("cam_get_status", lambda c: {"handle": _ctx_get(
+         c, "empty_pocket_first", "the first empty-pocket generation")},
+     lambda p: _empty_pocket_settled(p, "empty_pocket_first"), None),
+    ("cam_get", {"include": ["operations"], "setup": FLIP_SETUP}, _empty_pocket_raw, None),
+    ("cam_inspect_toolpaths", {"scope": _EMPTY_REMEDY_OP},
+     lambda p: _measured("empty-path inspection overlay",
+                         {"measured": p.get("measured")},
+                         (p.get("measured") or {}).get("empty_toolpaths") == [_EMPTY_REMEDY_OP]
+                         and (p.get("measured") or {}).get("empty_toolpath_count") == 1), None),
+    ("cam_generate", {"target": _EMPTY_REMEDY_OP, "skip_valid": False},
+     lambda p: _measured("the empty-path remedy launches a new generation",
+                         {"launched": p.get("launched"), "handle": p.get("handle")},
+                         p.get("launched") is True and p.get("skip_valid") is False
+                         and p.get("operations_to_generate") == 1 and bool(p.get("handle"))
+                         and p.get("launch_reasons") == {"valid_forced": 1}
+                         and p.get("handle") != _RECALL.get("empty_pocket_first")),
+     ("empty_pocket_retry", _recall("empty_pocket_retry", lambda p: p["handle"]))),
+    ("cam_get_status", lambda c: {"handle": _ctx_get(
+         c, "empty_pocket_retry", "the forced empty-pocket generation")},
+     lambda p: _empty_pocket_settled(p, "empty_pocket_retry"), None),
+    ("cam_delete", {"entity": _EMPTY_REMEDY_OP},
+     lambda p: p.get("deleted") is True and p.get("entity") == _EMPTY_REMEDY_OP
+     and p.get("remaining_with_name") == 0, None),
     ("cam_edit_operation", {"operation": _FLIP_BACK_OP,
                             "parameters": {"doLeadIn": "false", "doLeadOut": "false"}},
      lambda p: p.get("updated_count") == 2, None),

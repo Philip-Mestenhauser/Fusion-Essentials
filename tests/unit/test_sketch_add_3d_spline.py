@@ -2,6 +2,7 @@
 and the guards around 'points'/'helix'/'degree'."""
 
 import math
+import pytest
 
 from conftest import _FakeObjectCollection, load_tool
 from _sketch_fakes import FakeSketch, _payload, _Spline, _SplinePoint, draw_installer
@@ -133,6 +134,18 @@ class TestGuards:
 
 
 class TestHelix:
+
+    @pytest.mark.parametrize("turns,ppt", [(1.1, 24), (0.1, 6), (0.01, 6)])
+    def test_fractional_turns_reach_the_requested_height_and_angle(self, monkeypatch, turns, ppt):
+        s = _spline_sketch(); _install_draw(monkeypatch, s)
+        calls = []
+        _wire_fitted(s, calls)
+        out = _payload(sk.handler(units="mm", helix={
+            "axis": "z", "radius": 10, "pitch": 10, "turns": turns, "points_per_turn": ppt}))
+        last = calls[0].item(calls[0].count - 1)
+        assert out["point_count"] >= 3
+        assert (last.x, last.y, last.z) == pytest.approx(
+            (math.cos(2 * math.pi * turns), math.sin(2 * math.pi * turns), turns))
 
     def test_helix_generates_turns_times_points_per_turn_plus_one_points_with_right_radius_and_pitch(
             self, monkeypatch):

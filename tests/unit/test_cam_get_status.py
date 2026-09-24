@@ -251,7 +251,7 @@ class TestEmptyTriageRidesTheEmptyToolpathDisclosure:
     def test_a_non_rail_empty_toolpath_gets_the_general_triage(self, monkeypatch):
         payload, note = self._attach(monkeypatch, ["Contour1"], [])
         assert "empty_triage" in note
-        assert "cam_generate(target=<op>)" in payload["empty_triage"]
+        assert "cam_generate(target=<op>, skip_valid=false)" in payload["empty_triage"]
 
     def test_an_empty_toolpath_fully_covered_by_rail_triage_gets_no_second_pointer(self, monkeypatch):
         payload, note = self._attach(monkeypatch, ["Swarf1"], ["Swarf1"])

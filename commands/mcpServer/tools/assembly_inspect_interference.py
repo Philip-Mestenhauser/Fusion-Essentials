@@ -1,11 +1,10 @@
 # Copyright (c) Fusion-Essentials contributors
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
-"""Analyzes the active assembly's occurrences for solid overlap (interference) ONE PAIR AT A TIME,
-reporting each interfering pair by its EXACT occurrence and overlap volume. World-box pruning skips
-a pair that cannot touch; an occurrence owning no solid body is excluded from the count rather than
-silently passed. Coincident/flush faces are excluded by default. Read-only.
-"""
+"""Read solid overlap per placed body pair, aggregating volume by occurrence pair."""
+
+import math
+import time
 
 import adsk.core
 import adsk.fusion
@@ -23,10 +22,10 @@ app = adsk.core.Application.get()
 # What this tool RETURNS: the verdict contract - relation/passed/measured/tolerance_used, enforced.
 RETURNS = [_outputs.ReturnsVerdict(relations=("interference_free",))]
 
-# How many occurrence pairs one call runs analyzeInterference on, after box-pruning - MEASURED at
-# 1-4 ms per pair, so this stays well inside the 30 s tool deadline with wide margin; a cap hit is
-# disclosed, never silently reported as a clean pass.
-_PAIR_CAP = 500
+# Native FSAE: 1,903 pairs take about 23 s. Stop between calls after 20 s;
+# a single native call can overrun this soft budget.
+_PAIR_CAP = 5000
+_TIME_BUDGET_S = 20.0
 
 
 def _own_solid_bodies(entity):
@@ -56,10 +55,7 @@ def _touch(box_a, box_b):
 
 
 def _comparable_entities(walk, root):
-    """(occ_entities, root_entities, bodyless_labels) - one {label, bodies, box} per occurrence or
-    root body OWNING at least one solid body of its own; an occurrence with none is named in
-    bodyless_labels instead and never counted comparable - two body-less occurrences alone give
-    nothing to compare."""
+    """Return solid-owning occurrences, root bodies and excluded occurrence labels."""
     occ_entities, bodyless = [], []
     for occ in walk.occurrences:
         bodies = _own_solid_bodies(occ)
@@ -67,23 +63,21 @@ def _comparable_entities(walk, root):
             bodyless.append(_geom.address(occ))
             continue
         occ_entities.append(
-            {"label": _geom.address(occ), "bodies": bodies, "box": _entity_box(bodies)})
+            {"label": _geom.address(occ), "bodies": bodies})
     root_entities = []
     for b in _own_solid_bodies(root):
         label = safe(lambda b=b: b.name) or "(unnamed body)"
-        root_entities.append({"label": label, "bodies": [b], "box": _entity_box([b])})
+        root_entities.append({"label": label, "bodies": [b]})
     return occ_entities, root_entities, bodyless
 
 
 def _plan_pairs(entities):
-    """(pairs, pruned_count) - a SELF-pair for an entity owning more than one body of its own (they
-    can interfere with EACH OTHER), a CROSS-pair for every two entities whose world boxes touch. A
-    cross-pair whose boxes cannot touch is PRUNED, never analysed."""
-    pairs = [(e, e) for e in entities if len(e["bodies"]) > 1]
-    pruned = 0
-    for i in range(len(entities)):
-        for j in range(i + 1, len(entities)):
-            a, b = entities[i], entities[j]
+    """Return touching placed-body pairs and the number pruned by their world boxes."""
+    bodies = [{"entity_index": i, "label": e["label"], "body": b, "box": _entity_box([b])}
+              for i, e in enumerate(entities) for b in e["bodies"]]
+    pairs, pruned = [], 0
+    for i, a in enumerate(bodies):
+        for b in bodies[i + 1:]:
             if _touch(a["box"], b["box"]):
                 pairs.append((a, b))
             else:
@@ -92,38 +86,35 @@ def _plan_pairs(entities):
 
 
 def _run_pair(design, include_coincident_faces, ent_a, ent_b):
-    """One analyzeInterference call scoped to `ent_a`'s and `ent_b`'s OWN bodies - the overlap
-    volume summed over the results whose two source bodies sit in DIFFERENT entities for a cross
-    pair, or in the one entity for a self pair; a result whose sources cannot be attributed counts."""
-    # An entity's own internal overlaps (a cameo of features on one part) come back in every cross
-    # pair it joins; attributing each result's two bodies keeps them out of the pair's volume.
+    """Return result count and readable volume between two placed bodies."""
+    # Results can return native bodies without placement context; two inputs make ownership exact.
     coll = adsk.core.ObjectCollection.create()
-    owner = {}
     for ent in (ent_a, ent_b):
-        for b in ent["bodies"]:
-            key = _common.native_identity(b) or id(b)
-            if key not in owner:
-                owner[key] = ent["label"]
-                coll.add(b)
+        if not coll.add(ent["body"]):
+            raise RuntimeError(f"Could not collect a body of '{ent['label']}' for interference.")
     inp = design.createInterferenceInput(coll)
     inp.areCoincidentFacesIncluded = bool(include_coincident_faces)
     results = design.analyzeInterference(inp)
-    self_pair = ent_a is ent_b
+    count = _common.counted(lambda: results.count)
+    if count is None or count < 0:
+        raise RuntimeError("Interference result count did not read.")
     vol = 0.0
-    for r in _common.iter_collection(results):
-        one = owner.get(_common.native_identity(safe(lambda r=r: r.entityOne)))
-        two = owner.get(_common.native_identity(safe(lambda r=r: r.entityTwo)))
-        if one is not None and two is not None and (one == two) != self_pair:
-            continue
+    for i in range(count):
+        r = results.item(i)
+        if r is None:
+            raise RuntimeError(f"Interference result {i} did not read.")
         ib = safe(lambda r=r: r.interferenceBody)
         v = safe(lambda ib=ib: ib.volume) if ib else None
-        if v:
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+            vol = None
+        elif vol is not None:
             vol += float(v)
-    return vol
+    return count, vol
 
 
 def handler(include_coincident_faces: bool = False) -> dict:
     """See TOOL_DESCRIPTION."""
+    started = time.monotonic()
     design = _common.design()
     if not design:
         return error("No active design to analyze.")
@@ -136,7 +127,7 @@ def handler(include_coincident_faces: bool = False) -> dict:
     entities = occ_entities + root_entities
     n_occ, n_root_bodies = len(walk.occurrences), len(root_entities)
 
-    if len(entities) < 2:
+    if sum(len(e["bodies"]) for e in entities) < 2:
         # A body-less occurrence (a container, or one whose component holds no solid) is not a
         # comparable solid - two of them alone give nothing to compare, never a clean pass.
         bodyless_note = (f", {len(bodyless)} body-less occurrence(s) excluded "
@@ -146,7 +137,7 @@ def handler(include_coincident_faces: bool = False) -> dict:
             f"Cannot check interference: this design exposes {len(entities)} comparable solid "
             f"entit{'y' if len(entities) == 1 else 'ies'} ({n_occ} occurrence(s) at any depth, "
             f"{n_root_bodies} root-level solid body(ies){bodyless_note}), and interference needs "
-            "at least two. No verdict was formed - this is NOT a pass.")
+            "at least two solid bodies. No verdict was formed - this is NOT a pass.")
 
     to_analyze, pairs_pruned = _plan_pairs(entities)
     total_planned = len(to_analyze)
@@ -155,22 +146,45 @@ def handler(include_coincident_faces: bool = False) -> dict:
     if cap_hit:
         to_analyze = to_analyze[:_PAIR_CAP]
 
-    items = []
+    volumes = {}
+    analyzed = 0
     try:
         for ent_a, ent_b in to_analyze:
-            vol = _run_pair(design, include_coincident_faces, ent_a, ent_b)
-            if vol:
-                items.append({"occurrence_one": ent_a["label"], "occurrence_two": ent_b["label"],
-                              "overlap_volume_cm3": round(vol, 4)})
+            if time.monotonic() - started >= _TIME_BUDGET_S:
+                break
+            count, vol = _run_pair(design, include_coincident_faces, ent_a, ent_b)
+            analyzed += 1
+            if count:
+                key = (ent_a["entity_index"], ent_b["entity_index"])
+                prior = volumes.get(key, 0.0)
+                volumes[key] = None if prior is None or vol is None else prior + vol
     except Exception as e:
         return error(f"Interference analysis failed: {e}")
-    items.sort(key=lambda it: -it["overlap_volume_cm3"])
+    time_hit = analyzed < len(to_analyze)
+    cap_hit = cap_hit and not time_hit
+    omitted = to_analyze[analyzed:] + omitted
+    limits = []
+    if cap_hit:
+        limits.append(f"{_PAIR_CAP} placed-body pair analysis cap")
+    if time_hit:
+        limits.append(f"{_TIME_BUDGET_S:g} s analysis budget")
+    incomplete_pairs = {(a["entity_index"], b["entity_index"]) for a, b in omitted}
+    items = []
+    for (a, b), vol in volumes.items():
+        row = {"occurrence_one": entities[a]["label"], "occurrence_two": entities[b]["label"],
+               "overlap_volume_cm3": round(vol, 4) if vol is not None else None}
+        if (a, b) in incomplete_pairs:
+            row["partial"] = True
+        items.append(row)
+    items.sort(key=lambda it: (it["overlap_volume_cm3"] is None,
+                               -(it["overlap_volume_cm3"] or 0)))
+    unreadable_volumes = sum(r["overlap_volume_cm3"] is None for r in items)
 
     clear = len(items) == 0
     # A CLEAN verdict is a claim about everything; a positive finding is not. So an incomplete
     # analysis set (an unresolved reference, or the pair cap) refuses only when it would otherwise
     # report a pass - one interfering pair that WAS found stays true whatever else was skipped.
-    if clear and (walk.broken or not walk.complete or cap_hit):
+    if clear and (walk.broken or not walk.complete or cap_hit or time_hit):
         reasons = []
         if walk.broken:
             reasons.append(f"{len(walk.broken)} occurrence(s) hold an unresolved external "
@@ -180,25 +194,37 @@ def handler(include_coincident_faces: bool = False) -> dict:
         elif not walk.complete:
             reasons.append("the design-wide occurrence walk did not complete, so the analysis set "
                            "is a subset of the assembly")
-        if cap_hit:
-            sample = "; ".join(f"{a['label']} / {b['label']}" for a, b in omitted[:4])
-            reasons.append(f"the {_PAIR_CAP}-pair analysis cap was reached - {len(omitted)} "
-                           f"pair(s) beyond it were not analysed ({sample})")
+        if cap_hit or time_hit:
+            sample = "; ".join(dict.fromkeys(
+                f"{a['label']}/{safe(lambda a=a: a['body'].name) or '(unnamed body)'} / "
+                f"{b['label']}/{safe(lambda b=b: b['body'].name) or '(unnamed body)'}"
+                for a, b in omitted[:4]))
+            reasons.append(f"the {' and '.join(limits)} was reached - "
+                           f"{len(omitted)} placed-body pair(s) "
+                           f"were not analysed ({sample})")
+        remedies = []
+        if walk.broken or not walk.complete:
+            remedies.append("Inspect workspace_orient health.unresolved_references and repair "
+                            "the unreadable references before re-running.")
+        if cap_hit or time_hit:
+            remedies.append("Check omitted body pairs with the Interference command in Fusion.")
         return error(
-            f"Cannot certify interference-free: {'; '.join(reasons)}. {len(to_analyze)} pair(s) "
-            "WERE analysed and none interfere, but that is not a verdict over the whole assembly - "
-            "no pass was formed. Resolve the reference (see workspace_orient "
-            "health.unresolved_references) and re-run.")
+            f"Cannot certify interference-free: {'; '.join(reasons)}. "
+            f"{analyzed} placed-body pair(s) WERE analysed and none interfere; "
+            f"no pass was formed over the whole assembly. {' '.join(remedies)}")
     note = ("No interference - every part fits." if clear else
-            f"{len(items)} interfering pair(s) - parts overlap in space. Each lists the two "
-            "occurrences and their total overlap volume; fix positioning/sizing/joints. (A "
-            "self-pair means two bodies of the same occurrence overlap.)")
+            f"{len(items)} interfering occurrence pair(s) - bodies overlap or meet at coincident "
+            "faces. Each lists the two occurrences and readable overlap volume from analysed body "
+            "pairs; fix positioning/sizing/joints. (A "
+            "self-pair compares bodies in one occurrence.)")
     if pairs_pruned:
-        note += (f" {pairs_pruned} pair(s) were pruned - their world boxes cannot touch, so they "
+        note += (f" {pairs_pruned} placed-body pair(s) were pruned - their world boxes cannot touch, so they "
                  "were not analysed.")
-    if cap_hit:
-        note += (f" The {_PAIR_CAP}-pair analysis cap was reached; {len(omitted)} pair(s) beyond "
-                 "it were not analysed.")
+    if cap_hit or time_hit:
+        note += (f" The {' and '.join(limits)} was reached; {len(omitted)} placed-body pair(s) "
+                 "were not analysed. Rows marked partial have incomplete volumes.")
+    if unreadable_volumes:
+        note += f" {unreadable_volumes} pair(s) have unreadable overlap volume (null)."
     if walk.broken:
         note += (f" {len(walk.broken)} occurrence(s) with an unresolved external reference were NOT "
                  "compared - their component could not be read, so they carry no geometry for this "
@@ -212,7 +238,11 @@ def handler(include_coincident_faces: bool = False) -> dict:
                      # comparison from one rebuilt around an unreadable allOccurrences.
                      "occurrences_walk": walk.method,
                      "unresolved_references": walk.names(),
-                     "pairs_analyzed": len(to_analyze), "pairs_pruned": pairs_pruned,
+                     "pair_unit": "placed_body",
+                     "pairs_analyzed": analyzed, "pairs_pruned": pairs_pruned,
+                     "pairs_omitted": len(omitted),
+                     "analysis_complete": walk.complete and not walk.broken
+                     and not cap_hit and not time_hit,
                      "interferences": items},
         "tolerance_used": {"coincident_faces_included": bool(include_coincident_faces)},
         "note": note,
@@ -220,8 +250,8 @@ def handler(include_coincident_faces: bool = False) -> dict:
 
 
 TOOL_DESCRIPTION = (
-    "Check the active assembly for solid overlap - each interfering pair with its overlap volume "
-    "(cm^3). passed=true when nothing interferes.\n"
+    "Check solid overlap or coincident contact; list pairs and readable "
+    "volume (cm^3). passed=true only if all pairs are clear.\n"
     + _outputs.produces_block(RETURNS)
 )
 

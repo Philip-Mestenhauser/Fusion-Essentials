@@ -797,8 +797,8 @@ class TestIsolateForFit:
                 object.__setattr__(self, key, value)
 
         comp = Comp()
-        occ = SimpleNamespace(fullPathName="Part:1", name="Part:1", isLightBulbOn=True)
-        design = SimpleNamespace(rootComponent=comp, allComponents=[comp])
+        occ = make_occurrence(path="Part:1", component=comp)
+        design = SimpleNamespace(rootComponent=MakeComp(occurrences=[occ]), allComponents=[comp])
         monkeypatch.setattr(vc._common, "design", lambda: design)
         monkeypatch.setattr(vc._common, "all_occurrences", lambda d: [occ])
         ref = SimpleNamespace(name="fit_to", resolve=lambda raw: ((occ, "occurrence"), None))
@@ -806,7 +806,7 @@ class TestIsolateForFit:
         assert err is None and target is occ
         assert comp.isSketchFolderLightBulbOn is False    # the fit really did clear the clutter
         # the folder stays dark, and the caller is told WHICH one - not left with a silent change
-        assert restore() == ["Blocky:isSketchFolderLightBulbOn"]
+        assert restore() == ["Blocky:isSketchFolderLightBulbOn (relight this folder in the Fusion browser)"]
 
 
 class TestRestoreMessage:

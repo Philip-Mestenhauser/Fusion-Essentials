@@ -7,8 +7,11 @@ entitlement pre-flight that launches around an operation reading isGenerationAll
 status read this launch hands completion to is pinned in test_cam_get_status.py.
 """
 
+import ast
 import json
 from types import SimpleNamespace
+
+import pytest
 
 
 from conftest import FakeApplication, FakeFusionDocument, FakeProducts, load_tool, make_cam
@@ -53,6 +56,24 @@ def _setup(name, ops=()):
     """A setup as the launch walks it. No machine member is set: cam_generate's blocked list is the
     entitlement one (isGenerationAllowed), and it never reads Setup.machine."""
     return SharedSetup(name, ops=ops)
+
+
+@pytest.fixture
+def empty_path_cam(monkeypatch):
+    op = SharedOp("EmptyContour", has_toolpath=False, valid=True, operation_state=0)
+    cam = _FakeCAM([_setup("EmptySetup", [op])])
+    monkeypatch.setattr(gen._cam_common, "get_cam", lambda **_: (cam, None))
+    return cam, op
+
+
+def test_the_empty_path_remedy_actually_launches_generation(empty_path_cam):
+    cam, op = empty_path_cam
+    assert gen._cam_common.is_empty_toolpath(gen._cam_common.op_state_facts(op, cam))
+    remedy = gen._cam_common.EMPTY_TOOLPATH_REMEDY.split(")", 1)[0] + ")"
+    call = ast.parse(remedy.replace("<op>", repr(op.name)).replace("false", "False"), mode="eval").body
+    args = {kw.arg: ast.literal_eval(kw.value) for kw in call.keywords}
+    out = _payload(gen.handler(**args))
+    assert out["launched"] is True and cam.generate_calls == [("target", op)]
 
 
 class TestTargetResolution:

@@ -195,7 +195,7 @@ Produces: passed. |
 | ⚠ | `assembly_edit_relations` | Edit or remove an existing assembly relation; create one with assembly_rigid_group / joint_motion_link / assembly_constrain. |
 | · | `assembly_get` | Read the active assembly's kinematic state: per top-level occurrence, identity, ground flags, body count and joints, plus the design's joint list |
 | ✎ | `assembly_ground` | Lock an occurrence to its parent (isGroundToParent): true re-locks it at its TIMELINE placement, DISCARDING any free move; false frees it to move or joint. |
-| · | `assembly_inspect_interference` | Check the active assembly for solid overlap - each interfering pair with its overlap volume (cm^3) |
+| · | `assembly_inspect_interference` | Check solid overlap or coincident contact; list pairs and readable volume (cm^3) |
 | ✎ | `assembly_move` | Move an occurrence by editing its transform - a free reposition, no joint |
 | ✎ | `assembly_rigid_group` | Lock two or more component occurrences together as a single rigid unit (Rigid Group). |
 

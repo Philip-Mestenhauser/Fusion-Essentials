@@ -1250,8 +1250,8 @@ def errored_verdict(setups: int, programs: int, operations: int) -> str:
 NONFINITE_POST = "The post failed 'Number to be formatted is not a number (NaN)' on such a path."
 
 # The one home of the empty-toolpath remedy - every surface naming an empty toolpath ends on this.
-EMPTY_TOOLPATH_REMEDY = ("cam_generate(target=<op>) relaunches it; if it is still empty, check "
-                         "the heights and the selection.")
+EMPTY_TOOLPATH_REMEDY = ("cam_generate(target=<op>, skip_valid=false) relaunches it; if still "
+                         "empty, check heights and selection.")
 
 
 def nonfinite_verdict(measure: str, names) -> str:

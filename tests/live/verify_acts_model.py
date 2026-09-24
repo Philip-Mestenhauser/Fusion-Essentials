@@ -374,6 +374,93 @@ def _interference_pair_named(p):
         and isinstance(b.get("overlap_volume_cm3"), (int, float)) and b["overlap_volume_cm3"] > 0)
 
 
+def _shared_cube_overlap(volume, analyzed, pruned):
+    """Require the reused two-placement part's independently sized overlap."""
+    def check(p):
+        rows = (p.get("measured") or {}).get("interferences") or []
+        pair = [r for r in rows if {r.get("occurrence_one"), r.get("occurrence_two")}
+                == {"OverlapPart:1", "OverlapPart:2"}]
+        measured = p.get("measured") or {}
+        return _measured("repeated component overlap volume and placed-body pair counts", measured,
+                         p.get("passed") is False and len(pair) == 1
+                         and measured.get("pair_unit") == "placed_body"
+                         and measured.get("pairs_analyzed") == analyzed
+                         and measured.get("pairs_pruned") == pruned
+                         and measured.get("analysis_complete") is True
+                         and measured.get("pairs_omitted") == 0
+                         and _near(pair[0].get("overlap_volume_cm3"), volume, 0.001))
+    return check
+
+
+def _shared_cube_poses(body_count):
+    """Read the body envelopes and 10 mm placement offset independently of interference."""
+    def check(p):
+        rows = {r.get("name"): r for r in p.get("occurrences", [])}
+        a, b = rows.get("OverlapPart:1", {}), rows.get("OverlapPart:2", {})
+        ca, cb = a.get("bbox_center", []), b.get("bbox_center", [])
+        size = [20 if body_count == 1 else 70, 20, 20]
+        return _measured("two shared parts overlap by 10 mm along X", {"first": a, "second": b},
+                         a.get("component") == b.get("component") == "OverlapPart"
+                         and a.get("body_count") == b.get("body_count") == body_count
+                         and a.get("bbox_size") == b.get("bbox_size") == size
+                         and len(ca) == len(cb) == 3
+                         and all(_near(y - x, d, 0.001) for x, y, d in zip(ca, cb, [10, 0, 0])))
+    return check
+
+
+def _contact_part_poses(count):
+    """Read the contact fixture's placed body count and independent envelope."""
+    def check(p):
+        rows = [r for r in p.get("occurrences", []) if r.get("name") == "ContactPart:1"]
+        return _measured("contact bodies span 40 x 20 x 20 mm", {"rows": rows},
+                         len(rows) == 1 and rows[0].get("body_count") == count
+                         and all(_near(x, y, 0.001) for x, y in
+                                 zip(rows[0].get("bbox_size", []), [40, 20, 20]))
+                         and len(rows[0].get("bbox_size", [])) == 3)
+    return check
+
+
+def _contact_overlap(volumes):
+    """Require separate rows for the contact fixture, including a colliding root-body label."""
+    def check(p):
+        measured = p.get("measured") or {}
+        rows = [r for r in measured.get("interferences", [])
+                if r.get("occurrence_one") == r.get("occurrence_two") == "ContactPart:1"]
+        got = sorted((r.get("overlap_volume_cm3") for r in rows),
+                     key=lambda v: v if isinstance(v, (int, float)) else math.inf)
+        return _measured("contact and overlap results preserve physical pairs", {"rows": rows},
+                         measured.get("analysis_complete") is True
+                         and len(got) == len(volumes)
+                         and (not volumes or p.get("passed") is False)
+                         and all(_near(a, b, 0.001) for a, b in zip(got, volumes)))
+    return check
+
+
+def _interference_budget(p):
+    """Require a partial self-volume when the dense body's pair count exceeds the limit."""
+    m = p.get("measured") or {}
+    rows = [r for r in m.get("interferences", [])
+            if r.get("occurrence_one") == r.get("occurrence_two") == "BudgetPart:1"]
+    return _measured("dense overlap stops with disclosed omitted pairs and partial volume", m,
+                     p.get("passed") is False and m.get("analysis_complete") is False
+                     and 0 < m.get("pairs_analyzed", 0) <= 5000
+                     and m.get("pairs_omitted", 0) > 0
+                     and len(rows) == 1 and rows[0].get("partial") is True
+                     and isinstance(rows[0].get("overlap_volume_cm3"), (int, float))
+                     and 0 < rows[0]["overlap_volume_cm3"] < 34133.96)
+
+
+def _fractional_helix_cap(p, turns=1.1, start_z=100):
+    """Read the piped spline's end cap at the requested fractional-turn endpoint."""
+    wanted = [10 * math.cos(2 * turns * math.pi), 10 * math.sin(2 * turns * math.pi),
+              start_z + 10 * turns]
+    positions = [r.get("position", []) for r in p.get("matches", [])]
+    return _measured(f"{turns:g}-turn helix end cap at {360 * turns:g} degrees",
+                     {"positions": positions, "expected": wanted},
+                     any(len(at) == 3 and all(_near(a, b, 0.002) for a, b in zip(at, wanted))
+                         for at in positions))
+
+
 def _combine_story_address(p):
     """Return the story handle while recording the open-document baseline."""
     _RECALL["combine_open_before"] = p.get("open_count")
@@ -3170,6 +3257,152 @@ _RESIZE = [
      lambda c: _interference_pin(c, {"component": "Peg", "x": 50}),
      lambda p: p.get("created") is True, None),
     ("assembly_inspect_interference", {}, _interference_pair_named, None),
+    ("model_create_component",
+     lambda c: _interference_pin(c, {"name": "OverlapPart", "activate": True, "x": 200}),
+     _made_component, None),
+    ("sketch_create",
+     lambda c: _interference_pin(c, {"plane": "xy", "name": "OverlapCubeA"}), "ok", None),
+    ("sketch_add_geometry",
+     lambda c: _interference_pin(c, {"sketch_name": "OverlapCubeA", "geometry": [
+         {"kind": "rectangle", "x1": 0, "y1": 0, "x2": 20, "y2": 20}]}), "ok", None),
+    ("model_extrude",
+     lambda c: _interference_pin(c, {"sketch_name": "OverlapCubeA", "profile_index": 0,
+                                     "distance": 20}), _extruded, None),
+    ("design_activate_component",
+     lambda c: _interference_pin(c, {"occurrence": "root"}), "ok", None),
+    ("design_add_instance",
+     lambda c: _interference_pin(c, {"component": "OverlapPart", "x": 210}),
+     lambda p: p.get("created") is True, None),
+    ("assembly_get", {"include": ["poses"]}, _shared_cube_poses(1), None),
+    ("assembly_inspect_interference", {}, _shared_cube_overlap(4.0, 3, 12), None),
+    ("design_activate_component",
+     lambda c: _interference_pin(c, {"occurrence": "OverlapPart:1"}), "ok", None),
+    ("sketch_create",
+     lambda c: _interference_pin(c, {"plane": "xy", "name": "OverlapCubeB"}), "ok", None),
+    ("sketch_add_geometry",
+     lambda c: _interference_pin(c, {"sketch_name": "OverlapCubeB", "geometry": [
+         {"kind": "rectangle", "x1": 50, "y1": 0, "x2": 70, "y2": 20}]}), "ok", None),
+    ("model_extrude",
+     lambda c: _interference_pin(c, {"sketch_name": "OverlapCubeB", "profile_index": 0,
+                                     "distance": 20}), _extruded, None),
+    ("design_activate_component",
+     lambda c: _interference_pin(c, {"occurrence": "root"}), "ok", None),
+    ("assembly_get", {"include": ["poses"]}, _shared_cube_poses(2), None),
+    ("assembly_inspect_interference", {}, _shared_cube_overlap(8.0, 4, 24), None),
+    ("model_create_component",
+     lambda c: _interference_pin(c, {"name": "ContactPart", "activate": True, "x": 400}),
+     _made_component, None),
+    ("sketch_create",
+     lambda c: _interference_pin(c, {"plane": "xy", "name": "ContactLeft"}), "ok", None),
+    ("sketch_add_geometry",
+     lambda c: _interference_pin(c, {"sketch_name": "ContactLeft", "geometry": [
+         {"kind": "rectangle", "x1": 0, "y1": 0, "x2": 20, "y2": 20}]}), "ok", None),
+    ("model_extrude",
+     lambda c: _interference_pin(c, {"sketch_name": "ContactLeft", "distance": 20,
+                                     "operation": "new"}), _extruded, None),
+    ("sketch_create",
+     lambda c: _interference_pin(c, {"plane": "xy", "name": "ContactRight"}), "ok", None),
+    ("sketch_add_geometry",
+     lambda c: _interference_pin(c, {"sketch_name": "ContactRight", "geometry": [
+         {"kind": "rectangle", "x1": 20, "y1": 0, "x2": 40, "y2": 20}]}), "ok", None),
+    ("model_extrude",
+     lambda c: _interference_pin(c, {"sketch_name": "ContactRight", "distance": 20,
+                                     "operation": "new"}), _extruded, None),
+    ("design_activate_component",
+     lambda c: _interference_pin(c, {"occurrence": "root"}), "ok", None),
+    ("assembly_get", {"include": ["poses"]}, _contact_part_poses(2), None),
+    ("assembly_inspect_interference", {}, _contact_overlap([]), None),
+    ("assembly_inspect_interference", {"include_coincident_faces": True}, _contact_overlap([0.0]), None),
+    ("design_activate_component",
+     lambda c: _interference_pin(c, {"occurrence": "ContactPart:1"}), "ok", None),
+    ("sketch_create",
+     lambda c: _interference_pin(c, {"plane": "xy", "name": "ContactMiddle"}), "ok", None),
+    ("sketch_add_geometry",
+     lambda c: _interference_pin(c, {"sketch_name": "ContactMiddle", "geometry": [
+         {"kind": "rectangle", "x1": 10, "y1": 0, "x2": 30, "y2": 20}]}), "ok", None),
+    ("model_extrude",
+     lambda c: _interference_pin(c, {"sketch_name": "ContactMiddle", "distance": 20,
+                                     "operation": "new"}), _extruded, None),
+    ("design_activate_component",
+     lambda c: _interference_pin(c, {"occurrence": "root"}), "ok", None),
+    ("assembly_get", {"include": ["poses"]}, _contact_part_poses(3), None),
+    ("assembly_inspect_interference", {}, _contact_overlap([8.0]), None),
+    ("sketch_create",
+     lambda c: _interference_pin(c, {"plane": "xy", "name": "ContactAlias"}), "ok", None),
+    ("sketch_add_geometry",
+     lambda c: _interference_pin(c, {"sketch_name": "ContactAlias", "geometry": [
+         {"kind": "rectangle", "x1": 400, "y1": 0, "x2": 420, "y2": 20}]}), "ok", None),
+    ("model_extrude",
+     lambda c: _interference_pin(c, {"sketch_name": "ContactAlias", "distance": 20,
+                                     "operation": "new"}), _extruded, None),
+    ("design_get", {"include": ["tree"], "max_depth": 1, "tree_bodies": True, "tree_handles": True},
+     lambda p: len(p["tree"]["root_bodies"]) == 1
+     and bool(p["tree"]["root_bodies"][0].get("handle")),
+     ("contact_alias", _recall("contact_alias", lambda p: p["tree"]["root_bodies"][0]["handle"]))),
+    ("design_set_name",
+     lambda c: _interference_pin(c, {"target": _ctx_get(c, "contact_alias", "the sole root body"),
+                                     "new_name": "ContactPart:1"}),
+     lambda p: p.get("name") == "ContactPart:1" and p.get("kind") == "body", None),
+    ("model_inspect", lambda c: {"target": _ctx_get(c, "contact_alias", "the colliding-label body")},
+     lambda p: _near(p.get("x"), 20, 0.001) and _near(p.get("y"), 20, 0.001)
+     and _near(p.get("z"), 20, 0.001), None),
+    ("assembly_inspect_interference", {}, _contact_overlap([8.0, 12.0]), None),
+    ("model_create_component",
+     lambda c: _interference_pin(c, {"name": "BudgetPart", "activate": True, "x": 600}),
+     _made_component, None),
+    ("sketch_create",
+     lambda c: _interference_pin(c, {"plane": "xy", "name": "BudgetCube"}), "ok", None),
+    ("sketch_add_geometry",
+     lambda c: _interference_pin(c, {"sketch_name": "BudgetCube", "geometry": [
+         {"kind": "rectangle", "x1": 0, "y1": 0, "x2": 20, "y2": 20}]}), "ok", None),
+    ("model_extrude",
+     lambda c: _interference_pin(c, {"sketch_name": "BudgetCube", "distance": 20}),
+     _extruded, None),
+    ("model_pattern_rectangular",
+     lambda c: _interference_pin(c, {"bodies": ["BudgetPart"], "direction_one": "x",
+                                     "quantity_one": 102, "spacing_one": 0.1}),
+     _patterned("total_instances", 102), None),
+    ("design_activate_component",
+     lambda c: _interference_pin(c, {"occurrence": "root"}), "ok", None),
+    ("assembly_get", {"include": ["poses"]},
+     lambda p: _measured("102 overlapping cubes, each shifted 0.1 mm",
+                         {"rows": [r for r in p.get("occurrences", [])
+                                   if r.get("name") == "BudgetPart:1"]},
+                         any(r.get("name") == "BudgetPart:1" and r.get("body_count") == 102
+                             and len(r.get("bbox_size", [])) == 3
+                             and all(_near(a, b, 0.005) for a, b in
+                                     zip(r["bbox_size"], [30.1, 20, 20]))
+                             for r in p.get("occurrences", []))), None),
+    ("assembly_inspect_interference", {}, _interference_budget, None),
+    ("model_create_component",
+     lambda c: _interference_pin(c, {"name": "HelixCheck", "activate": True}),
+     _made_component, None),
+    ("sketch_create",
+     lambda c: _interference_pin(c, {"plane": "xy", "name": "FractionalHelix"}), "ok", None),
+    ("sketch_add_3d_spline",
+     lambda c: _interference_pin(c, {"sketch_name": "FractionalHelix", "helix": {
+         "axis": "z", "center": [0, 0, 100], "radius": 10, "pitch": 10,
+         "turns": 1.1, "points_per_turn": 24}}),
+     lambda p: p.get("kind") == "fitted" and p.get("is_valid") is True, None),
+    ("model_pipe",
+     lambda c: _interference_pin(c, {"path": "sketch:FractionalHelix", "section_size": 1}),
+     lambda p: p.get("path_curves") == 1, None),
+    ("find_geometry", {"target": "HelixCheck:1", "kind": "planar_face", "max_results": 2},
+     _fractional_helix_cap, None),
+    ("sketch_create",
+     lambda c: _interference_pin(c, {"plane": "xy", "name": "ShortHelix"}), "ok", None),
+    ("sketch_add_3d_spline",
+     lambda c: _interference_pin(c, {"sketch_name": "ShortHelix", "helix": {
+         "axis": "z", "center": [0, 0, 120], "radius": 10, "pitch": 10,
+         "turns": 0.1, "points_per_turn": 6}}),
+     lambda p: p.get("kind") == "fitted" and p.get("is_valid") is True
+     and p.get("point_count") == 3, None),
+    ("model_pipe",
+     lambda c: _interference_pin(c, {"path": "sketch:ShortHelix", "section_size": 1}),
+     lambda p: p.get("path_curves") == 1, None),
+    ("find_geometry", {"target": "HelixCheck:1", "kind": "planar_face",
+                       "nearest_to": [8.09017, 5.87785, 121], "max_results": 1},
+     lambda p: _fractional_helix_cap(p, turns=0.1, start_z=120), None),
     ("doc_activate",
      lambda c: {"name": _ctx_get(c, "interference_story", "the story document"),
                 "expect_document": _ctx_get(c, "interference_scratch",

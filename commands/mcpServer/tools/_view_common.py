@@ -163,6 +163,34 @@ def _relight(entities):
     return stuck
 
 
+def _restore_isolation(state):
+    """Restore captured isolation flags and name any state that did not return."""
+    for expected in (False, True):
+        for occ, before in state:
+            if before is not expected or _common.read_flag(lambda occ=occ: occ.isIsolated) is before:
+                continue
+            try:
+                occ.isIsolated = before
+            except Exception:
+                pass
+    stuck = []
+    for occ, before in state:
+        got = _common.read_flag(lambda occ=occ: occ.isIsolated)
+        if got is before:
+            continue
+        path = _common.safe(lambda occ=occ: occ.fullPathName)
+        label = path or _common.safe(lambda occ=occ: occ.name) or "(unreadable occurrence)"
+        if got is None:
+            stuck.append(f"{label} (isolation unreadable; inspect the Fusion browser)")
+        elif before:
+            remedy = (f"view_set(action='isolate', target={[path]!r})" if path
+                      else "re-isolate it in the Fusion browser")
+            stuck.append(f"{label} (restore with {remedy})")
+        else:
+            stuck.append(f"{label} (still isolated; view_set(action='clear_isolation'))")
+    return stuck
+
+
 def isolate_for_fit(name, ref):
     """Hide everything outside the named subject so a fit frames it; 'ref' is the caller's
     TargetRef, resolving an occurrence (its own subtree stays lit) or a single BODY. Returns
@@ -208,22 +236,46 @@ def isolate_for_fit(name, ref):
                         "hidden; view_set(action='show', target=...) restores them.")
             return None, None, msg
     isolated = None
+    isolation_before = []
     comps = all_display_components(design)
     if kind not in ("body", "mesh"):
-        # Fusion's own isolate (Occurrence.isIsolated, what view_set(isolate) sets) hides every
-        # occurrence outside this one's lineage in ONE write; the bulb walk it replaces ran past
-        # the 30 s handler deadline on a 185-occurrence assembly.
-        _common.safe(lambda: setattr(target, "isIsolated", True))
+        walk = _common.occurrence_walk(design)
+        if not walk.complete:
+            return None, None, (f"{ref.name}: cannot capture prior isolation; occurrence walk "
+                                "incomplete. Use fit_to with a body handle instead.")
+        if walk.broken:
+            return None, None, (f"{ref.name}: cannot capture prior isolation for unresolved "
+                                f"references {walk.names()!r}. Use fit_to with a body handle instead.")
+        isolation_before = [(o, _common.read_flag(lambda o=o: o.isIsolated))
+                            for o in walk.occurrences]
+        unread = [_common.safe(lambda o=o: o.fullPathName)
+                  or _common.safe(lambda o=o: o.name) or "(unreadable occurrence)"
+                  for o, before in isolation_before if before is None]
+        if unread:
+            return None, None, (f"{ref.name}: prior isolation did not read for {unread[:5]!r}; "
+                                "nothing captured. Use fit_to with a body handle instead.")
+        # Fusion holds one isolation: isolating the subject clears a different prior isolation.
+        set_error = None
+        try:
+            if _common.read_flag(lambda: target.isIsolated) is not True:
+                target.isIsolated = True
+        except Exception as e:
+            set_error = str(e)
         got = _common.read_flag(lambda: target.isIsolated)
-        if got is not True:
-            return None, None, (f"{ref.name}: Fusion did not isolate '{_common.short_ref(name)}' "
-                                f"(isIsolated read back {got!r}), so nothing was hidden or "
-                                "captured. view_set(action='isolate') shows what it answers.")
+        if set_error or got is not True:
+            stuck = _restore_isolation(isolation_before)
+            reason = f"isolate raised: {set_error}" if set_error else "Fusion did not isolate"
+            msg = (f"{ref.name}: {reason} for '{_common.short_ref(name)}' "
+                   f"(isIsolated read back {got!r}); nothing captured. "
+                   "Use fit_to with a body handle instead.")
+            if stuck:
+                msg += f" The view was not put back: {', '.join(stuck[:5])}."
+            return None, None, msg
         isolated = target
         # Only the isolated lineage stays on screen, so its components' folders are the clutter.
         target_path = _common.safe(lambda: target.fullPathName)
         lineage = {id(root)}
-        for o in _common.all_occurrences(design):
+        for o in walk.occurrences:
             if keep_visible(_common.safe(lambda o=o: o.fullPathName), target_path):
                 c = _common.safe(lambda o=o: o.component)
                 if c is not None:
@@ -243,13 +295,12 @@ def isolate_for_fit(name, ref):
     def restore():
         stuck = _relight(prev)
         if isolated is not None:
-            _common.safe(lambda: setattr(isolated, "isIsolated", False))
-            if _common.read_flag(lambda: isolated.isIsolated) is not False:
-                stuck.append(f"{_common.safe(lambda: isolated.fullPathName) or '?'} (still isolated)")
+            stuck.extend(_restore_isolation(isolation_before))
         for comp, attr in folder_prev:
             _common.safe(lambda comp=comp, attr=attr: setattr(comp, attr, True))
             if _common.read_flag(lambda comp=comp, attr=attr: getattr(comp, attr)) is not True:
-                stuck.append(f"{_common.safe(lambda comp=comp: comp.name) or '?'}:{attr}")
+                stuck.append(f"{_common.safe(lambda comp=comp: comp.name) or '?'}:{attr} "
+                             "(relight this folder in the Fusion browser)")
         return stuck
     # What the isolate actually changed, so the restore's message names bodies on a body subject
     # and the isolation on an occurrence one rather than one word for both.
@@ -273,9 +324,7 @@ def restore_message(restore, label, purpose):
     named = ", ".join(str(s) for s in stuck[:5])
     if getattr(restore, "isolated", False):
         return (f"{label} isolated the subject {purpose} and could NOT put {len(stuck)} thing(s) "
-                f"back: {named}. The document is left changed - view_set(action="
-                "'clear_isolation') clears the isolation and view_set(action='display') relights a "
-                "folder.")
+                f"back: {named}. The document is left changed.")
     return (f"{label} hid the other {hidden} {purpose} and could NOT turn "
             f"{len(stuck)} of them back on: {named}. "
             f"The document is left with those {hidden} hidden - view_set(action='show', "

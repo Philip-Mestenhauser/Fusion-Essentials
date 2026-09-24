@@ -39,7 +39,85 @@ def _install(occs):
     return design
 
 
+@pytest.fixture
+def isolated_pair(monkeypatch):
+    occs = [FakeOcc("A:1"), FakeOcc("B:1")]
+    getter = FakeOccurrence.isIsolated.fget
+
+    def set_isolated(occ, value):
+        if value:
+            for peer in occs:
+                peer._isolated = False
+        occ._isolated = value
+
+    monkeypatch.setattr(FakeOccurrence, "isIsolated", property(getter, set_isolated))
+    install(gs, MakeDesign(comp=MakeComp(name="Root", all_occurrences=occs)))
+    return occs
+
+
 class TestIsolateForFit:
+    @pytest.mark.parametrize("previous", [0, 1])
+    def test_restores_the_same_or_a_different_preexisting_isolation(self, isolated_pair, previous):
+        a, b = isolated_pair
+        isolated_pair[previous].isIsolated = True
+        restore, _target, err = gs._isolate_for_fit("B:1")
+        assert err is None and b.isIsolated is True and a.isIsolated is False
+        assert restore() == []
+        assert [o.isIsolated for o in isolated_pair] == [previous == 0, previous == 1]
+
+    def test_unreadable_prior_isolation_refuses_without_changing_the_view(self, isolated_pair):
+        a, b = isolated_pair
+        a.isIsolated = True
+        a._raises_on["isIsolated"] = "isolation unavailable"
+        restore, _target, err = gs._isolate_for_fit("B:1")
+        assert restore is None and "prior isolation did not read" in err
+        assert "A:1" in err and "body handle" in err
+        assert a._isolated is True and b.isIsolated is False
+
+    def test_a_failed_capture_restores_the_displaced_isolation(self, isolated_pair, monkeypatch):
+        a, b = isolated_pair
+        a.isIsolated = True
+        prop = FakeOccurrence.isIsolated
+
+        def set_then_raise(occ, value):
+            prop.fset(occ, value)
+            if occ is b and value:
+                raise RuntimeError("capture isolation failed")
+
+        monkeypatch.setattr(FakeOccurrence, "isIsolated", property(prop.fget, set_then_raise))
+        restore, _target, err = gs._isolate_for_fit("B:1")
+        assert restore is None and "capture isolation failed" in err
+        assert "did not isolate" not in err and "isIsolated read back True" in err
+        assert a.isIsolated is True and b.isIsolated is False
+
+    def test_a_failed_prior_isolation_restore_names_its_remedy(self, isolated_pair, monkeypatch):
+        a, b = isolated_pair
+        a.isIsolated = True
+        restore, _target, err = gs._isolate_for_fit("B:1")
+        assert err is None and b.isIsolated is True
+        prop = FakeOccurrence.isIsolated
+
+        def refuse_prior(occ, value):
+            if occ is not a or not value:
+                prop.fset(occ, value)
+
+        monkeypatch.setattr(FakeOccurrence, "isIsolated", property(prop.fget, refuse_prior))
+        message = gs._restore_message(restore)
+        assert "view_set(action='isolate', target=['A:1'])" in message
+        assert "clear_isolation" not in message
+        assert a.isIsolated is False
+
+    def test_unreadable_restore_does_not_claim_the_occurrence_is_still_isolated(self, isolated_pair):
+        a, b = isolated_pair
+        a.isIsolated = True
+        restore, _target, err = gs._isolate_for_fit("B:1")
+        assert err is None
+        a._raises_on["isIsolated"] = "isolation unavailable"
+        a._raises_on["fullPathName"] = "path unavailable"
+        message = gs._restore_message(restore)
+        assert "A:1" in message and "isolation unreadable" in message
+        assert "still isolated" not in message and "target=['?']" not in message
+
     def test_isolates_the_subject_in_one_write_and_clears_it(self):
         # Fusion's own isolate lock, not a bulb walk: 184 bulb writes ran past the 30 s handler
         # deadline on a 185-occurrence assembly, and the siblings' bulbs are never touched.
@@ -167,7 +245,7 @@ class TestIsolateForFit:
         _install([FakeOcc("A:1"), stuck])
         restore, _target, _err = gs._isolate_for_fit("Sub:1+B:1")
         assert stuck.isIsolated is True               # the isolate DID take
-        assert restore() == ["Sub:1+B:1 (still isolated)"]
+        assert restore() == ["Sub:1+B:1 (still isolated; view_set(action='clear_isolation'))"]
         msg = gs._restore_message(restore)
         assert "clear_isolation" in msg and "Sub:1+B:1" in msg
 
