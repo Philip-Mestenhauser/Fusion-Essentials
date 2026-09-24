@@ -3,12 +3,13 @@
 Includes the subtle carve-out that an expression of ``"0"`` is NOT treated as "empty".
 """
 
+import math
 from types import SimpleNamespace
 
 import adsk.core
 
-from conftest import (FakeUserParameter, FakeUserParameters, MakeDesign, load_tool, make_timeline,
-                      payload as _payload)
+from conftest import (FakeUserParameter, FakeUserParameters, MakeComp, MakeDesign, load_tool,
+                      make_joint, make_timeline, payload as _payload)
 
 params = load_tool("param_set")
 
@@ -135,3 +136,47 @@ class TestSetCreateOrUpdate:
         assert out["set"] is True and out["created"] is True
         assert out["before"] is None
         assert up.itemByName("NewP") is not None        # it was created
+
+
+class _JointResettingParam(FakeUserParameter):
+    """A user parameter whose expression write recomputes, resetting its assigned joint's value."""
+    _reset_joint = None
+
+    @property
+    def expression(self):
+        return self._expression
+
+    @expression.setter
+    def expression(self, value):
+        self._expression = value
+        if self._reset_joint is not None:
+            self._reset_joint.jointMotion.rotationValue = 0.0
+
+
+class TestDrivenJointsReset:
+    def test_a_reset_driven_joint_is_named_with_before_and_after(self, monkeypatch):
+        joint = make_joint(name="Elbow", kind="revolute", rotation=math.radians(30))
+        param = _JointResettingParam(name="PartX", expression="10 mm")
+        param._reset_joint = joint
+        design = MakeDesign(user_parameters=FakeUserParameters([param]), timeline=make_timeline(),
+                            comp=MakeComp(joints=[joint]))
+        _stub_design(monkeypatch, design)
+        out = _payload(params.handler(name="PartX", expression="20 mm"))
+        assert out["driven_joints_reset"] == [
+            {"name": "Elbow", "before": {"angle_deg": 30.0}, "after": {"angle_deg": 0.0}}]
+        assert "1 driven joint(s) reset" in out["note"]
+
+    def test_a_joint_holding_its_value_is_not_reported(self, monkeypatch):
+        joint = make_joint(name="Elbow", kind="revolute", rotation=math.radians(30))
+        up = FakeUserParameters([FakeUserParameter(name="PartX", expression="10 mm")])
+        design = MakeDesign(user_parameters=up, timeline=make_timeline(),
+                            comp=MakeComp(joints=[joint]))
+        _stub_design(monkeypatch, design)
+        out = _payload(params.handler(name="PartX", expression="20 mm"))
+        assert "driven_joints_reset" not in out
+
+    def test_no_joints_publishes_no_reset_key(self, monkeypatch):
+        up = FakeUserParameters([FakeUserParameter(name="PartX", expression="10 mm")])
+        _stub_design(monkeypatch, _design(up, make_timeline()))
+        out = _payload(params.handler(name="PartX", expression="20 mm"))
+        assert "driven_joints_reset" not in out

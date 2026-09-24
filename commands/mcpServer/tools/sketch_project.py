@@ -62,8 +62,9 @@ _SHORTFALL_NOTE = (" Some created curves have no '<type>:<index>' ref - list the
 _ACTION_ONLY = (
     ("link", ("into_sketch",)),
     ("entities", ("into_sketch", "intersect")),
+    ("curves", ("into_sketch",)),
     ("target_faces", ("to_surface",)),
-    ("source_sketch", ("to_surface",)),
+    ("source_sketch", ("into_sketch", "to_surface")),
     ("source_component", ("to_surface",)),
     ("curve_refs", ("to_surface",)),
     ("curve_handles", ("to_surface",)),
@@ -390,17 +391,61 @@ def _source_curves(design, sketch, source_sketch, curve_refs, curve_handles, sou
     return curves, None
 
 
-def _into_sketch(sketch, entities, link) -> dict:
+def _source_sketch_curves(design, sketch, source_sketch, curves):
+    """(curves resolved against 'source_sketch', error_or_None) for into_sketch's SECOND entity
+    route: '<type>:<index>' refs read against a DIFFERENT sketch than the one being projected into.
+    An empty 'curves' is not an error here - the caller may use 'entities' alone."""
+    refs = _ref_list(curves)
+    if not refs:
+        return [], None
+    name = (source_sketch or "").strip()
+    if not name:
+        return None, "'curves' needs 'source_sketch' - the sketch those ids are read against."
+    src, refusal = _common.find_sketch(design, name)
+    if refusal:
+        return None, refusal
+    if src is None:
+        return None, (f"No sketch named '{name}'. Available: "
+                      + (", ".join(n for n in all_sketch_names(design) if n) or "(none)"))
+    if _same_sketch(src, sketch) is True:
+        return None, (f"'source_sketch' is '{name}', the sketch being projected into. Project "
+                      "curves from a DIFFERENT sketch, or draw them directly in "
+                      f"'{safe(lambda: sketch.name)}' instead of projecting.")
+    out = []
+    for ref in refs:
+        ent, rerr = _resolve_curve(src, ref, "curves")
+        if rerr:
+            return None, rerr
+        out.append(ent)
+    return out, None
+
+
+def _into_sketch(design, sketch, entities, link, source_sketch, curves) -> dict:
     """project2(entities, isLinked) - the modern Project (project is deprecated and has no link
-    control). Pass the resolved live entities as a list."""
-    ents, eerr = _ENTITIES.resolve(entities)
-    if eerr:
-        return error(eerr)
+    control). 'entities' (find_geometry handles) and 'curves' (another sketch's own refs, named by
+    'source_sketch') combine into ONE project2 list - either alone, or both together."""
+    resolved = []
+    if entities not in (None, "", []):
+        ents, eerr = _ENTITIES.resolve(entities)
+        if eerr:
+            return error(eerr)
+        resolved.extend(ents)
+
+    src_curves, cerr = _source_sketch_curves(design, sketch, source_sketch, curves)
+    if cerr:
+        return error(cerr)
+    resolved.extend(src_curves)
+
+    if not resolved:
+        return error("action='into_sketch' needs geometry to project: 'entities' (find_geometry "
+                     "handles) and/or 'source_sketch' + 'curves' ('<type>:<index>' ids read "
+                     "against it).")
+
     requested = True if link is None else bool(link)
 
     before = _addressable_counts(sketch)
     try:
-        created = sketch.project2(ents, requested)
+        created = sketch.project2(resolved, requested)
     except Exception as e:
         return error(f"Projection failed in sketch '{safe(lambda: sketch.name)}': {e}")
 
@@ -609,7 +654,7 @@ def _intersect(sketch, entities, bodies) -> dict:
 def handler(entities="", sketch_name: str = "", link: bool = None, action: str = "into_sketch",
             target_faces="", source_sketch: str = "", curve_refs="", curve_handles="",
             project_type: str = "", direction: str = "", bodies="", component: str = "",
-            source_component: str = "") -> dict:
+            source_component: str = "", curves="") -> dict:
     """See TOOL_DESCRIPTION."""
     act, aerr = _ACTION.resolve(action)
     if aerr:
@@ -617,7 +662,7 @@ def handler(entities="", sketch_name: str = "", link: bool = None, action: str =
     ferr = _refuse_foreign_inputs(act, {
         "link": link, "entities": entities, "target_faces": target_faces,
         "source_sketch": source_sketch, "source_component": source_component,
-        "curve_refs": curve_refs, "curve_handles": curve_handles,
+        "curve_refs": curve_refs, "curve_handles": curve_handles, "curves": curves,
         "project_type": project_type, "direction": direction, "bodies": bodies})
     if ferr:
         return error(ferr)
@@ -642,7 +687,7 @@ def handler(entities="", sketch_name: str = "", link: bool = None, action: str =
                            project_type, direction, source_component)
     if act == "intersect":
         return _intersect(sk, entities, bodies)
-    return _into_sketch(sk, entities, link)
+    return _into_sketch(design, sk, entities, link, source_sketch, curves)
 
 
 TOOL_DESCRIPTION = (
@@ -657,6 +702,7 @@ tool = (
     .add_input_property("sketch_name", {"type": "string"})
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("link", {"type": "boolean"})
+    .add_input_property("curves", {"type": "array", "items": {"type": "string"}})
     .add_input_property(*_TARGET_FACES.as_property())
     .add_input_property("source_sketch", {"type": "string"})
     .add_input_property("source_component", {"type": "string"})

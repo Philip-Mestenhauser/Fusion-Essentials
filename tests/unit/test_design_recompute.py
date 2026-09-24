@@ -2,9 +2,11 @@
 failure) and the timeline health rollup design_get's health slice reads (feature healthState into
 errors/warnings + a healthy flag). Pure logic over a faked timeline; no live Fusion."""
 
+import math
+
 import live_api_facts as _api_facts
-from conftest import (FakeTimeline, FakeTimelineObject, MakeDesign, error_message, install,
-                      load_tool, make_design, payload)
+from conftest import (FakeTimeline, FakeTimelineObject, MakeComp, MakeDesign, error_message,
+                      install, load_tool, make_design, make_joint, payload)
 
 dops = load_tool("design_recompute")
 dm = load_tool("_design_common")
@@ -84,3 +86,34 @@ class TestRecomputeHandler:
     def test_no_active_design_errors(self):
         install(dops, None)
         assert "No active design" in error_message(dops.handler())
+
+
+class _JointResettingDesign(MakeDesign):
+    """A recompute that reverts every joint's driven value to 0, as an uncaptured pose reset does."""
+    def computeAll(self):
+        super().computeAll()
+        for j in self.rootComponent.joints:
+            j.jointMotion.rotationValue = 0.0
+
+
+class TestDrivenJointsReset:
+    def test_a_reset_driven_joint_is_named_with_before_and_after(self):
+        joint = make_joint(name="Elbow", kind="revolute", rotation=math.radians(30))
+        design = _JointResettingDesign(comp=MakeComp(joints=[joint]),
+                                       timeline=_timeline(("A", _HEALTHY)))
+        install(dops, design)
+        out = payload(dops.handler())
+        assert out["driven_joints_reset"] == [
+            {"name": "Elbow", "before": {"angle_deg": 30.0}, "after": {"angle_deg": 0.0}}]
+        assert "1 driven joint(s) reset" in out["note"]
+
+    def test_a_joint_holding_its_value_is_not_reported(self):
+        joint = make_joint(name="Elbow", kind="revolute", rotation=math.radians(30))
+        install(dops, make_design(timeline=_timeline(("A", _HEALTHY)), joints=[joint]))
+        out = payload(dops.handler())
+        assert "driven_joints_reset" not in out
+
+    def test_no_joints_publishes_no_reset_key(self):
+        install(dops, make_design(timeline=_timeline(("A", _HEALTHY))))
+        out = payload(dops.handler())
+        assert "driven_joints_reset" not in out

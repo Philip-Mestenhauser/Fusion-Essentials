@@ -2730,6 +2730,31 @@ _DETAILS = [
                          {"body_split": p.get("body_split"), "note": (p.get("note") or "")[:200]},
                          isinstance(p.get("body_split"), list) and len(p["body_split"]) == 2
                          and "DISCONNECTED" in (p.get("note") or "")), None),
+    # sketch_add_3d_spline: a 2-turn helix (r20 mm, pitch30 mm) as a FITTED spline pipes at d4 to
+    # the analytic tube volume (pi*r_section^2*helix_length = 3.2477 cm3, measured within 0.04%);
+    # the SAME helix as a CONTROL-POINT spline mints construction lines beside it (one per
+    # control-polygon segment) and still pipes as ONE path curve - a pipe ignores construction geometry.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "PipeSpline", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "PipeSplineFitted"}, "ok", None),
+    ("sketch_add_3d_spline", {"sketch_name": "PipeSplineFitted", "kind": "fitted",
+                              "helix": {"axis": "z", "center": [2800, 0, 0], "radius": 20,
+                                        "pitch": 30, "turns": 2}},
+     lambda p: p.get("kind") == "fitted" and p.get("point_count") == 49
+     and p.get("off_plane") is True, None),
+    ("model_pipe", {"path": "sketch:PipeSplineFitted", "section_size": 4},
+     lambda p: _measured("a 2-turn r20/pitch30 helix pipes at d4 to the analytic tube volume",
+                         {"path_curves": p.get("path_curves"), "volume_cm3": p.get("volume_cm3")},
+                         p.get("path_curves") == 1 and _near(p.get("volume_cm3"), 3.2477, 0.033)),
+     None),
+    ("sketch_create", {"plane": "xy", "name": "PipeSplineControl"}, "ok", None),
+    ("sketch_add_3d_spline", {"sketch_name": "PipeSplineControl", "kind": "control", "degree": "3",
+                              "helix": {"axis": "z", "center": [2900, 0, 0], "radius": 20,
+                                        "pitch": 30, "turns": 2}},
+     lambda p: p.get("kind") == "control"
+     and (p.get("construction_lines_added") or 0) > 0, None),
+    ("model_pipe", {"path": "sketch:PipeSplineControl", "section_size": 4},
+     lambda p: p.get("path_curves") == 1, None),
     # BUILD_PATH's measured chaining rule, on two fixtures of its own. ONE seed handle is not one
     # edge: chaining follows TANGENT CONTINUITY and stops where that continuity breaks - a sharp
     # corner ends an open run, while a genuinely tangent loop chains the whole way round ([F52a],

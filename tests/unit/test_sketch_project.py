@@ -390,6 +390,87 @@ class TestHonesty:
         assert "no sketch entities" in out["message"].lower()
 
 
+# ── into_sketch's SECOND entity route: 'source_sketch' + 'curves' ─────────────
+# '<type>:<index>' refs read against a DIFFERENT sketch, feeding the SAME project2 call 'entities'
+# does - the route a sketch curve takes when there is no find_geometry handle for it.
+
+@pytest.fixture
+def source_call(monkeypatch):
+    """Return a caller wiring a target sketch (project2's receiver) and a source sketch ('line:0'
+    resolves against it) with no design-wide walk - the resolver seam is exercised elsewhere."""
+    def _run(target=None, src=None, **kw):
+        target = target or FakeSketch(name="Target", token="tok-tgt", creates={"line": 1})
+        src = src if src is not None else FakeSketch(name="Source", token="tok-src")
+        install(sp, make_design())
+        monkeypatch.setattr(sp._common, "find_or_recent_sketch",
+                            lambda d, n, remedy=None: (target, n or None, None))
+        monkeypatch.setattr(sp._common, "find_sketch", lambda d, n, remedy=None: (src, None))
+        curve = object()
+        monkeypatch.setattr(sp._common, "resolve_entity_ref",
+                            lambda s, r: curve if (s is src and r == "line:0") else None)
+        res = sp.handler(sketch_name="Target", **kw)
+        return res, target, src, curve
+    return _run
+
+
+class TestSourceSketchCurves:
+    def test_linked_call_reaches_project2_with_the_resolved_curve_and_link(self, source_call):
+        res, target, src, curve = source_call(source_sketch="Source", curves=["line:0"], link=True)
+        assert target.projected_with == ([curve], True)
+        assert _payload(res)["entity_refs"] == ["line:0"]
+
+    def test_link_false_reaches_project2_with_false(self, source_call):
+        res, target, src, curve = source_call(source_sketch="Source", curves=["line:0"], link=False)
+        assert target.projected_with[1] is False
+
+    def test_an_unresolved_ref_is_refused_by_name(self, source_call):
+        res, target, src, curve = source_call(source_sketch="Source", curves=["arc:9"])
+        assert res["isError"] is True and "arc:9" in res["message"]
+        assert target.projected_with is None
+
+    def test_refs_published_are_the_targets_own_tail_not_the_sources(self, source_call):
+        # the target already holds 3 lines, so its new one is line:3 - proving the ref is read off
+        # the TARGET's collections, not echoed from the source ref ('line:0') that was passed in.
+        res, target, src, curve = source_call(
+            target=FakeSketch(name="Target", token="tok-tgt", base={"line": 3}, creates={"line": 1}),
+            source_sketch="Source", curves=["line:0"])
+        assert _payload(res)["entity_refs"] == ["line:3"]
+
+    def test_curves_without_source_sketch_is_refused(self, source_call):
+        res, target, src, curve = source_call(curves=["line:0"])
+        assert res["isError"] is True and "'source_sketch'" in res["message"]
+        assert target.projected_with is None
+
+    def test_source_sketch_same_as_target_is_refused(self, source_call):
+        same = FakeSketch(name="Target", token="tok-tgt")
+        res, target, src, curve = source_call(target=same, src=same,
+                                              source_sketch="Target", curves=["line:0"])
+        assert res["isError"] is True
+        assert "being projected into" in res["message"]
+        assert target.projected_with is None
+
+    def test_no_entities_and_no_curves_is_refused(self, source_call):
+        res, target, src, curve = source_call(entities="")
+        assert res["isError"] is True
+        assert "needs geometry to project" in res["message"]
+        assert target.projected_with is None
+
+    def test_entities_and_curves_together_reach_one_project2_call(self, call, monkeypatch):
+        # the two routes are not exclusive: a caller mixing a find_geometry handle with a
+        # cross-sketch ref gets ONE project2 list, not a silently dropped half.
+        src = FakeSketch(name="Source", token="tok-src")
+        curve = object()
+        monkeypatch.setattr(sp._common, "find_sketch", lambda d, n, remedy=None: (src, None))
+        monkeypatch.setattr(sp._common, "resolve_entity_ref",
+                            lambda s, r: curve if (s is src and r == "line:0") else None)
+        out, sk = call(entities="E1", source_sketch="Source", curves=["line:0"])
+        # the 'call' fixture's own _ENTITIES stub resolves to two handle objects; the source curve
+        # is appended after them, so the tail proves the routes combined rather than one replacing
+        # the other.
+        assert len(sk.projected_with[0]) == 3
+        assert sk.projected_with[0][-1] is curve
+
+
 # ── guards ────────────────────────────────────────────────────────────────────
 
 class TestGuards:
@@ -430,6 +511,11 @@ class TestForeignInputs:
         out, sk = run("into_sketch", raw=True, bodies="Body1")
         assert out["isError"] is True
         assert "'bodies' applies only to action='intersect'" in out["message"]
+
+    def test_curves_refused_on_to_surface(self, run):
+        out, sk = run("to_surface", raw=True, curves=["line:0"], curve_handles=["h1"])
+        assert out["isError"] is True
+        assert "'curves' applies only to action='into_sketch'" in out["message"]
 
     def test_target_faces_refused_on_intersect(self, run):
         out, sk = run("intersect", raw=True, target_faces=["h1"])

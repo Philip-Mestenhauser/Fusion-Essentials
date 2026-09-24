@@ -203,6 +203,44 @@ def component_world_matrix(design, comp, context_occ=None):
     return None
 
 
+def driven_joint_snapshot(design):
+    """[(key, name, value_now)] for every joint carrying a driven value, over all_joints - key is
+    the entityToken (falling back to the name) so two joints sharing a name are matched correctly."""
+    from ._assembly_detail import _value_now
+    out = []
+    for j in all_joints(design):
+        v = _value_now(j)
+        if v is None:
+            continue
+        nm = safe(lambda j=j: j.name)
+        tok = safe(lambda j=j: j.entityToken)
+        out.append((tok or ("name", nm), nm, v))
+    return out
+
+
+def driven_joints_reset(before, after):
+    """[{name, before, after}] for every joint present in both snapshots (matched by key) whose
+    driven value CHANGED - the rows an uncaptured recompute's pose reset publishes."""
+    after_by_key = {key: (nm, v) for key, nm, v in after}
+    rows = []
+    for key, nm, v in before:
+        match = after_by_key.get(key)
+        if match is not None and match[1] != v:
+            rows.append({"name": nm, "before": v, "after": match[1]})
+    return rows
+
+
+# The one sentence a driven-joint reset publishes, for every tool whose write recomputes.
+DRIVEN_RESET_NOTE = ("{n} driven joint(s) reset ({names}) - assembly_capture_position("
+                     "action='capture') before a recompute keeps a driven pose.")
+
+
+def driven_reset_note(reset):
+    """DRIVEN_RESET_NOTE for the rows driven_joints_reset answered, naming up to six joints."""
+    names = ", ".join(r["name"] or "?" for r in reset[:6]) + (", ..." if len(reset) > 6 else "")
+    return DRIVEN_RESET_NOTE.format(n=len(reset), names=names)
+
+
 def _world_placement(entity):
     """The Matrix3D taking `entity`'s owning component's frame into WORLD, over
     component_world_matrix and the occurrence the entity was reached through; None when no single

@@ -99,9 +99,9 @@ _MINIMUM_RUNG = {
                  "joint_drive", "assembly_move", "design_move_occurrence"),
     "value": ("cam_", "data_", "doc_", "design_", "drawing_", "joint_", "param_", "pmi_",
               "appearance_", "assembly_", "save_", "sketch_create", "sketch_add_3d_line",
-              "sketch_constrain", "sketch_set_text", "sketch_delete", "model_set_material",
-              "model_create_component", "model_construction", "mesh_delete", "mesh_insert",
-              "mesh_export"),
+              "sketch_add_3d_spline", "sketch_constrain", "sketch_set_text", "sketch_delete",
+              "model_set_material", "model_create_component", "model_construction",
+              "mesh_delete", "mesh_insert", "mesh_export"),
     "exists": ("view_", "sys_", "model_base_feature", "cam_show_toolpath", "cam_generate",
                "cam_activate_setup", "design_activate_component"),
 }

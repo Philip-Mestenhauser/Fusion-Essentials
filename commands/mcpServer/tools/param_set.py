@@ -11,6 +11,18 @@ from ..mcp_primitives.registry import register
 from ._common import ok, error
 from . import _common
 from ._param_common import _find_parameter, _normalized_expression, _param_summary
+from ._joints import (driven_joint_snapshot as _driven_joint_snapshot,
+                      driven_joints_reset as _driven_joints_reset, driven_reset_note)
+
+
+def _with_reset(out, joints_before, design):
+    """`out`, plus driven_joints_reset + a note when the parameter write's own recompute reverted
+    an uncaptured joint pose - the read-after every param_set return path applies before ok()."""
+    reset = _driven_joints_reset(joints_before, _driven_joint_snapshot(design))
+    if reset:
+        out["driven_joints_reset"] = reset
+        out["note"] = driven_reset_note(reset)
+    return out
 
 
 def handler(name: str = "", expression: str = "", create: bool = False,
@@ -32,6 +44,7 @@ def handler(name: str = "", expression: str = "", create: bool = False,
             return error(f"Parameter not found: '{name}'. Use param_get to list them, or pass "
                           "create=true to make it a new user parameter.")
         # create-or-update: make a new user parameter with the given expression + unit.
+        joints_before = _driven_joint_snapshot(design)
         try:
             vi = adsk.core.ValueInput.createByString(expression)
             param = design.userParameters.add(name, vi, unit or "", "")
@@ -40,10 +53,11 @@ def handler(name: str = "", expression: str = "", create: bool = False,
                           f"(unit '{unit}'): {e}.")
         if not param:
             return error(f"Creating user parameter '{name}' returned nothing.")
-        return ok({"set": True, "created": True, "name": name,
-        "before": None, "after": _param_summary(param)})
+        return ok(_with_reset({"set": True, "created": True, "name": name,
+        "before": None, "after": _param_summary(param)}, joints_before, design))
 
     before = _param_summary(param)
+    joints_before = _driven_joint_snapshot(design)
     try:
         param.expression = expression
     except Exception as e:
@@ -54,15 +68,18 @@ def handler(name: str = "", expression: str = "", create: bool = False,
     after = _param_summary(param)
     if after == before:
         if _normalized_expression(expression) == _normalized_expression(before.get("expression")):
-            return ok({"set": True, "created": False, "name": name, "already_current": True,
-                       "before": before, "after": after})
+            return ok(_with_reset({"set": True, "created": False, "name": name,
+                       "already_current": True, "before": before, "after": after},
+                       joints_before, design))
         return error(f"Assignment raised no error but '{name}' still reads expression "
                      f"'{before.get('expression')}' - setting '{expression}' did not take.")
-    return ok({"set": True, "created": False, "name": name, "before": before, "after": after})
+    return ok(_with_reset({"set": True, "created": False, "name": name, "before": before,
+              "after": after}, joints_before, design))
 
 
 TOOL_DESCRIPTION = (
-"Set a design parameter's expression, returning the before/after. Discover names with param_get."
+"Set a design parameter's expression, returning the before/after and driven_joints_reset. "
+"Discover names with param_get."
 )
 
 tool = (

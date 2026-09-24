@@ -10,11 +10,12 @@ that gives every other joint motion and assembly verb a rig of its own.
 
 from verify_core import (
     _RECALL, _as_built, _axis_kept, _axis_landed, _box, _captured, _constrained, _ctx_get,
-    _datum_plane, _driven_angle, _driven_slide, _dwell, _extruded, _fg, _grounded,
-    _interference_measured, _joint_axis_vs, _joint_bench, _joint_heading, _joint_is, _joint_limits,
-    _jointed, _jointed_at_geometry, _joints_listed, _limits_survived, _link_healthy,
-    _made_component, _measured, _mod360, _motion_linked, _moved_occurrence, _near, _num, _recall,
-    _refused, _revolved, _rigid_grouped, _watch)
+    _datum_plane, _document_closed, _driven_angle, _driven_slide, _dwell, _extruded, _fg,
+    _grounded, _home_address, _home_document, _interference_measured, _joint_axis_vs,
+    _joint_bench, _joint_heading, _joint_is, _joint_limits, _jointed, _jointed_at_geometry,
+    _joints_listed, _limits_survived, _link_healthy, _made_component, _measured, _mod360,
+    _motion_linked, _moved_occurrence, _near, _new_document, _num, _recall, _refused, _revolved,
+    _rigid_grouped, _watch)
 
 
 # --- ACT 7b: THE MOTION BENCH - every joint and assembly verb on rigs of its own ---------------
@@ -542,6 +543,46 @@ _MOTION += _box("ConA", ox=360, tint="#E5533C") + _box("ConB", ox=360, tint="#1E
      "ok", None),
     ("design_delete_occurrence", lambda c: {"occurrence": _ctx_get(c, "pin_c", "the third pin")},
      "ok", None),
+]
+
+# FSAE-0922-MULTI-DRIVE-1: a design_recompute silently reverts an UNCAPTURED driven joint's pose,
+# proven on its own scratch document - a bare recompute run against the bench above would also
+# reset JRev and JSld, rippling into every later beat that reads them.
+_MOTION += [
+    ("doc_get", {}, _home_document, ("reset_story", _recall("reset_story", _home_address))),
+    ("doc_new", lambda c: {"expect_document": _ctx_get(c, "reset_story", "the story document")},
+     _new_document,
+     ("reset_scratch", _recall("reset_scratch", lambda p: p["document_handle"]))),
+] + [
+    # the draw rows take CALLABLE args so the layout pass does not hoist these sketches into the
+    # story document's sketch phase - this rig lives on the scratch document doc_new just opened
+    (t, (lambda a: (lambda c: a))(args) if t == "sketch_add_geometry" else args, e, s)
+    for t, args, e, s in _box("RstBase") + _box("RstArm", ox=60)
+] + [
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("joint_create", {"occurrence_one": "RstArm:1:top", "occurrence_two": "RstBase:1:top",
+                      "joint_type": "revolute", "axis": "z", "name": "RstRev"},
+     _jointed("RstRev"), None),
+    ("joint_drive", {"joint_name": "RstRev", "angle_deg": 30}, _driven_angle(30), None),
+    # UNCAPTURED: the bare recompute reads the pose right back off the joint at 0, naming RstRev.
+    ("design_recompute", {},
+     lambda p: p.get("driven_joints_reset") == [
+         {"name": "RstRev", "before": {"angle_deg": 30.0}, "after": {"angle_deg": 0.0}}]
+     and "RstRev" in (p.get("note") or ""), None),
+    ("joint_drive", {"joint_name": "RstRev", "angle_deg": 30}, _driven_angle(30), None),
+    ("assembly_capture_position", {"action": "capture"}, _captured, None),
+    # CAPTURED: the same recompute now leaves the pose alone, and the design's own joint walk
+    # agrees - an independent witness beside the tool's own driven_joints_reset omission.
+    ("design_recompute", {}, lambda p: p.get("driven_joints_reset") is None, None),
+    ("assembly_get", {}, _joints_listed(1, {"RstRev": 30}), None),
+    ("doc_activate", lambda c: {"name": _ctx_get(c, "reset_story", "the story document"),
+                                "expect_document": _ctx_get(c, "reset_scratch",
+                                                            "the driven-reset scratch")},
+     "ok", None),
+    ("doc_close", lambda c: {"name": _ctx_get(c, "reset_scratch", "the driven-reset scratch"),
+                             "save_changes": False,
+                             "expect_document": _ctx_get(c, "reset_story", "the story document")},
+     _document_closed, None),
 ]
 
 # ACT 7: THE VISE - the billet the bracket is cut from, and the machine vise that holds it.

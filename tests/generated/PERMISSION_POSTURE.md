@@ -4,7 +4,7 @@ _Auto-generated from the live registry by `tests/gen_posture.py`. Do not edit by
 
 Every tool declares a write= kind (read / write / destructive); the MCP readOnlyHint / destructiveHint annotations derive from it. That machine-checked fact decides which tools are safe to auto-run under Claude Code. This file maps every tool to a posture bucket and emits ready-to-paste `settings.json` presets. Rules target the MCP wire name `mcp__fusion-essentials__<tool>`.
 
-**Tools:** 192  |  read: 32  |  write: 140  |  destructive: 19  |  script-hatch: 1
+**Tools:** 193  |  read: 32  |  write: 141  |  destructive: 19  |  script-hatch: 1
 
 ## Posture buckets
 
@@ -72,7 +72,7 @@ A write= kind says the model changes; it does not say WHERE the change lands. Th
 - `mcp__fusion-essentials__view_screenshot_multi`
 - `mcp__fusion-essentials__workspace_orient`
 
-### write - ask (140)
+### write - ask (141)
 
 - `mcp__fusion-essentials__appearance_set`
 - `mcp__fusion-essentials__assembly_capture_position`
@@ -186,6 +186,7 @@ A write= kind says the model changes; it does not say WHERE the change lands. Th
 - `mcp__fusion-essentials__pmi_edit`
 - `mcp__fusion-essentials__save_as_mesh`
 - `mcp__fusion-essentials__sketch_add_3d_line`
+- `mcp__fusion-essentials__sketch_add_3d_spline`
 - `mcp__fusion-essentials__sketch_add_geometry`
 - `mcp__fusion-essentials__sketch_constrain`
 - `mcp__fusion-essentials__sketch_copy`
@@ -395,6 +396,7 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__pmi_edit",
       "mcp__fusion-essentials__save_as_mesh",
       "mcp__fusion-essentials__sketch_add_3d_line",
+      "mcp__fusion-essentials__sketch_add_3d_spline",
       "mcp__fusion-essentials__sketch_add_geometry",
       "mcp__fusion-essentials__sketch_constrain",
       "mcp__fusion-essentials__sketch_copy",
@@ -576,6 +578,7 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__pmi_edit",
       "mcp__fusion-essentials__save_as_mesh",
       "mcp__fusion-essentials__sketch_add_3d_line",
+      "mcp__fusion-essentials__sketch_add_3d_spline",
       "mcp__fusion-essentials__sketch_add_geometry",
       "mcp__fusion-essentials__sketch_constrain",
       "mcp__fusion-essentials__sketch_copy",

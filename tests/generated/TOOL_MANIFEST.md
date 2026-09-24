@@ -2,7 +2,7 @@
 
 _Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails the suite if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
-**Tools:** 192  |  **Input-kinds:** 22  |  write-status: `·` read · `✎` write · `⚠` destructive
+**Tools:** 193  |  **Input-kinds:** 22  |  write-status: `·` read · `✎` write · `⚠` destructive
 
 ## Input kinds — reference EXISTING geometry/structure with these (don't hand-roll a name/index)
 
@@ -133,6 +133,7 @@ Produces: feature, area_after. |
 | | Tool | Summary |
 |---|---|---|
 | ✎ | `sketch_add_3d_line` | Draw a sketch line whose end may sit OFF the sketch plane: x/y/z are in 'units', z along the sketch's own normal |
+| ✎ | `sketch_add_3d_spline` | Draw a fitted or control-point 3D spline from 'points' or a 'helix'; model_pipe/model_sweep take path='sketch:<name>'. |
 | ✎ | `sketch_add_geometry` | Draw entities on a sketch; coords in 'units', angles in degrees. |
 | ✎ | `sketch_constrain` | Apply geometric constraints to one sketch, entities '<type>:<index>'. |
 | ✎ | `sketch_copy` | COPY sketch entities, transformed. |
@@ -296,7 +297,7 @@ Produces: document_modified. |
 | ✎ | `param_add` | Add ONE user parameter (name + expression), or MANY with 'params' |
 | ⚠ | `param_delete` | Delete a USER parameter |
 | · | `param_get` | Read the active design's parameters - name, expression, value, unit, comment |
-| ✎ | `param_set` | Set a design parameter's expression, returning the before/after |
+| ✎ | `param_set` | Set a design parameter's expression, returning the before/after and driven_joints_reset |
 | ✎ | `param_set_favorite` | Toggle a user parameter's 'favorite' flag (whether it appears in the favorites list). |
 
 ### pmi

@@ -13,6 +13,8 @@ from ..mcp_primitives.registry import register
 from ._common import ok, error
 from . import _common
 from ._common import timeline_health as _timeline_health
+from ._joints import (driven_joint_snapshot as _driven_joint_snapshot,
+                      driven_joints_reset as _driven_joints_reset, driven_reset_note)
 
 app = adsk.core.Application.get()
 
@@ -23,25 +25,30 @@ def handler() -> dict:
     if not design:
         return error("No active design.")
     errors_before, _wb, _ = _timeline_health(design)
+    joints_before = _driven_joint_snapshot(design)
     try:
         design.computeAll()
     except Exception as e:
         return error(f"computeAll failed: {e}")
     errors, warnings, _ = _timeline_health(design)
     new_errors = [n for n in errors if n not in errors_before]
-    out = {"recomputed": True, "error_count": len(errors),
-        "warnings": warnings, "errors": errors,
-        "note": "Full recompute done; downstream features rebuilt."}
+    reset = _driven_joints_reset(joints_before, _driven_joint_snapshot(design))
+    out = {"recomputed": True, "error_count": len(errors), "warnings": warnings, "errors": errors}
+    note = "Full recompute done; downstream features rebuilt."
     if new_errors:
         out["new_errors"] = new_errors
-        out["note"] = (f"Recompute ran and surfaced {len(new_errors)} feature error(s) not present "
-                       "when it started: " + ", ".join(new_errors) + ". Inspect with design_get.")
+        note = (f"Recompute ran and surfaced {len(new_errors)} feature error(s) not present "
+               "when it started: " + ", ".join(new_errors) + ". Inspect with design_get.")
+    if reset:
+        out["driven_joints_reset"] = reset
+        note += " " + driven_reset_note(reset)
+    out["note"] = note
     return ok(out)
 
 
 TOOL_DESCRIPTION = (
-    "Force a full recompute so downstream features rebuild against current values. "
-    "Reports timeline health afterwards.")
+    "Force a full recompute so downstream features rebuild against current values. Reports "
+    "timeline health and driven_joints_reset (uncaptured poses it reverted).")
 
 tool = Tool.create_simple(name="design_recompute", description=TOOL_DESCRIPTION).strict_schema()
 item = Item.create_tool_item(

@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 192  |  **description breadcrumbs:** 294  |  **note/error breadcrumbs:** 618
+**Tools:** 193  |  **description breadcrumbs:** 296  |  **note/error breadcrumbs:** 623
   |  **guidance smells flagged:** 8
 ## Blindspots to engineer
 
@@ -17,17 +17,18 @@ close orphans, factor duplicated guards into shared helpers.
 **Read/Acquire (8)** - higher concern, a check-your-work tool nothing points to:
   `cam_compare_operations`, `cam_find_holes`, `cam_find_pockets`, `cam_inspect_toolpaths`, `drawing_get_status`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`
 
-**Edit (49)** - usually leaf actions, scan for genuine gaps:
-  `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `data_move_file`, `design_remove_feature`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_delete_sketch`, `drawing_dimension`, `drawing_insert_image`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_plane_cut`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_pipe`, `model_replace_face`, `model_scale`, `model_set_material`, `model_sweep`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
+**Edit (48)** - usually leaf actions, scan for genuine gaps:
+  `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `data_move_file`, `design_remove_feature`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_delete_sketch`, `drawing_dimension`, `drawing_insert_image`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_plane_cut`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_add_3d_spline`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
-- **51x** across 50 module(s): "No active design. Create or open a document first (see doc_new)."
+- **52x** across 51 module(s): "No active design. Create or open a document first (see doc_new)."
 - **23x** across 23 module(s): "No active design. Open or create a document first (see doc_new)."
 - **9x** across 3 module(s): "' with design_delete_feature."
 - **8x** across 8 module(s): "No active design with components."
 - **6x** across 3 module(s): "Could not create output directory '"
 - **5x** across 5 module(s): "'. Use: new, join, cut, intersect."
 - **5x** across 5 module(s): "Fusion declined to delete '"
+- **4x** across 4 module(s): "'. Use sketch_get or sketch_create."
 - **4x** across 1 module(s): "Edits already applied before the failure:"
 - **4x** across 4 module(s): "No active design (open a document with design geometry)."
 - **4x** across 4 module(s): "deleteMe() reported success for '"
@@ -35,7 +36,7 @@ close orphans, factor duplicated guards into shared helpers.
 - **4x** across 1 module(s): "setMotionData reported success on '"
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
-- `doc_new`  <- 83  (desc 0, note 83)
+- `doc_new`  <- 84  (desc 0, note 84)
 - `find_geometry`  <- 50  (desc 14, note 36)
 - `design_get`  <- 49  (desc 10, note 39)
 - `design_delete_feature`  <- 40  (desc 16, note 24)
@@ -43,9 +44,9 @@ close orphans, factor duplicated guards into shared helpers.
 - `cam_get`  <- 32  (desc 15, note 17)
 - `data_get`  <- 25  (desc 10, note 15)
 - `model_inspect`  <- 24  (desc 3, note 21)
+- `sketch_create`  <- 24  (desc 7, note 17)
 - `doc_open`  <- 23  (desc 5, note 18)
-- `sketch_create`  <- 23  (desc 7, note 16)
-- `sketch_get`  <- 22  (desc 5, note 17)
+- `sketch_get`  <- 23  (desc 5, note 18)
 - `assembly_get`  <- 21  (desc 4, note 17)
 
 ## The detected guidance surface
@@ -3553,6 +3554,22 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Failed to draw 3D line:
 - Line was drawn but could not be marked construction:
 
+### `sketch_add_3d_spline`
+- Spline drawn on the sketch. model_pipe / model_sweep take it via path='sketch:<name>'.
+- '. Valid: mm, cm, in.
+- Give either 'points' or 'helix', not both.
+- Provide 'points' (a list of [x, y, z] in 'units') or 'helix' (a computed helix path).
+- No active design. Create or open a document first (see doc_new).
+- No sketch to draw on. Create one first with sketch_create.
+- -spline creation returned no entity.
+- 'degree' only applies to kind='control' - a fitted spline takes no degree, got degree=
+- . Drop it, or set kind='control'.
+- 'points' needs at least 2 points to draw a spline, got
+- '. Use sketch_get or sketch_create.
+- was refused by the collection to draw the spline.
+- Failed to draw the fitted spline:
+- Failed to draw the control-point spline:
+
 ### `sketch_add_geometry`
 - '. Valid: mm, cm, in.
 - No active design. Create or open a document first (see doc_new).
@@ -3747,6 +3764,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - No sketch to project into. Create one first with sketch_create.
 - . Create one with sketch_create.
 - Extrude a resulting profile via sketch_get -> model_extrude.
+- action='into_sketch' needs geometry to project: 'entities' (find_geometry handles) and/or 'source_sketch' + 'curves' ('<type>:<index>' ids read against it).
 - Projection created no sketch entities in '
 - '. The geometry may already be projected, or lies out of the sketch plane's projectable set. Nothing was added.
 - - delete them with sketch_delete_entity if that linkage is wrong for the job.
@@ -3777,6 +3795,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - 'curve_refs' needs 'source_sketch' - the sketch those ids are read against, which must not be the sketch being projected into.
 - 'source_sketch' is '', the sketch being projected into. Fusion refuses that: 'Not support projecting sketch geometry into same sketch, please change the target sketch or geometry.' Draw the curves ...
 - action='to_surface' needs the curves to project: 'curve_refs' ('<type>:<index>' ids in 'source_sketch') and/or 'curve_handles' (find_geometry handles at model edges).
+- 'source_sketch' is '', the sketch being projected into. Project curves from a DIFFERENT sketch, or draw them directly in '' instead of projecting.
 - Projection created no sketch entities in ''. The geometry may already be projected, or lies out of the sketch plane's projectable set. Nothing was added.
 - link= was requested, but all  curve(s) project2 created in sketch '' read back as . The curves WERE created and remain in the sketch - delete them with sketch_delete_entity if that linkage is wrong...
 - Nothing you passed crosses the plane of sketch '' (), so no sketch geometry was created: . Move the sketch plane through the geometry, or pass geometry that spans it. An occurrence proxy is also ig...

@@ -1213,4 +1213,35 @@ _SKETCHWORK = [
                                            "radius": 20, "sides": 6}],
                              "sketch_name": "PolyHex"},
      lambda p: p["results"][0].get("curves_added") == 6, None),
+    # sketch_project(into_sketch)'s SECOND entity route: 'source_sketch' + 'curves' read a NAMED
+    # curve out of a DIFFERENT sketch by its '<type>:<index>' ref, rather than a find_geometry
+    # handle. Proven into a sketch at ROOT and into one owned by a SEPARATE component, then a
+    # linked copy tracking its source after the source moves and the design recomputes.
+    ("sketch_create", {"plane": "xy", "name": "ProjMaster"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "line", "x1": 1900, "y1": 0, "x2": 1950, "y2": 0}],
+                             "sketch_name": "ProjMaster"}, "ok", None),
+    ("sketch_create", {"plane": "xy", "name": "ProjTargetRoot"}, "ok", None),
+    # the projected line arrives with its two endpoints ('point:N' refs beside 'line:0' - measured)
+    ("sketch_project", {"action": "into_sketch", "sketch_name": "ProjTargetRoot",
+                        "source_sketch": "ProjMaster", "curves": ["line:0"], "link": True},
+     lambda p: "line:0" in (p.get("entity_refs") or []) and p.get("linked") is True, None),
+    ("model_create_component", {"name": "ProjComp", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "ProjTargetComp"}, "ok", None),
+    ("sketch_project", {"action": "into_sketch", "sketch_name": "ProjTargetComp",
+                        "source_sketch": "ProjMaster", "curves": ["line:0"], "link": True},
+     lambda p: "line:0" in (p.get("entity_refs") or []) and p.get("linked") is True, None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("sketch_move", {"sketch_name": "ProjMaster", "entities": "line:0", "dx": 10},
+     lambda p: p.get("moved_entities") == ["line:0"], None),
+    ("design_recompute", {}, "ok", None),
+    ("sketch_get", {"sketch_name": "ProjTargetRoot", "include_entities": True},
+     lambda p: any(e.get("type") == "line"
+                   and abs((e.get("start") or {}).get("x", 0) - _px("ProjMaster", 1910)) < 0.01
+                   and abs((e.get("end") or {}).get("x", 0) - _px("ProjMaster", 1960)) < 0.01
+                   for e in (p.get("entities") or [])), None),
+    ("sketch_get", {"sketch_name": "ProjTargetComp", "include_entities": True},
+     lambda p: any(e.get("type") == "line"
+                   and abs((e.get("start") or {}).get("x", 0) - _px("ProjMaster", 1910)) < 0.01
+                   and abs((e.get("end") or {}).get("x", 0) - _px("ProjMaster", 1960)) < 0.01
+                   for e in (p.get("entities") or [])), None),
 ]

@@ -29,10 +29,10 @@ recomputes the hash and fails on any difference, so a green suite cannot ride on
 run that never saw the current code or a weakened predicate. Only a run with zero
 FAIL/blocked/pass* steps rewrites this file.
 
-Stamp: source b710fd0dc237a85a3af94868bebaf398e21f925b61f7e1d5774cd00bf1e4adf4 | Fusion 2705.1.25 | verified 2026-09-23
-Loaded: implementation 5354d15ccad8c5b6c580e27c6e96ae476d85472c16d3b29f8025d8b50f893688 | schema c2233b716d8ae3a963513bda3e59bed7ec4cdac92ac78ed1891cccc47e5d031f | load df532cd9e1794c5da69e6a67db7e6ca2 | session 96d332ec4aaa42a38937eead79092f78
+Stamp: source 071af45f435a2daae9ea3bec6f32e0207f430c99ee4c3b3a30a33fef0100f515 | Fusion 2705.1.25 | verified 2026-09-23
+Loaded: implementation ac21cf2ec7cfecca2ecdc61b9211480a928f40ff3950beb71e2b759c1e4656d8 | schema 0ff4fb85973c5a038aeb65e44f6ce57cb0f0be355b8be1285ec39f813e768240 | load b1fc081046dd4c4988873b63b6bde207 | session 8e3247e8b3fb4dcb84d9c086229c87ea
 
-181 covered / 0 called / 5 refusals-only / 6 skipped(reason) / 0 pending
+182 covered / 0 called / 5 refusals-only / 6 skipped(reason) / 0 pending
 
 | act | mode |
 |---|---|
@@ -238,6 +238,7 @@ Loaded: implementation 5354d15ccad8c5b6c580e27c6e96ae476d85472c16d3b29f8025d8b50
 | pmi_get | covered | read the PMI back with segments and detail, and again with an over-cap max_results - pmi_get's own contract CLAMPS it rather than refusing, since every record it returns crosses the wire whole. SKIPPED(rig): the imported-row beats (no 'text' key on an imported annotation, no 'is_hole' when isHoleAnnotation will not read) need a PMI-BEARING import; the STEP this sweep round-trips carries none |
 | save_as_mesh | covered | mesh a scratch solid (one per destructive op); then the same solid reached through the qualified '<occurrence>:<body>' address, with the bare 'Body1' refused as ambiguous and the refusal offering that very spelling |
 | sketch_add_3d_line | covered | draw the vertical axis as the skeleton's 3D line |
+| sketch_add_3d_spline | covered |  |
 | sketch_add_geometry | covered | draw the part's footprint, its step, its pocket and its boss; then the SLOT family, one scratch sketch per shape - a three-point arc slot with its five arcs and its profile, the centre-point arc slot in both its short and its full ladder with each dimension flag gated independently, an overall slot whose cap centres prove the tip-to-tip measure, the length/angle tail that adds the fourth line and its own dimensions, the centre-point slot's HALF length landing a cap on its second point, and the legacy centre-to-centre form; the angle with no length, the angle FLAG on a straight slot, each cross-kind input pointed at the kind that carries it, and a tail on the legacy form all refused - the legacy form's own census read twice over (its note names the 2 solid lines, the 1 construction line and the 2 arc caps behind a 'curves_added' of 3, and sketch_get finds exactly that); plus the line/rectangle/polygon floors the composite counts are read against |
 | sketch_constrain | covered | constrain the skeleton's X axis horizontal; then autoConstrain a loose rectangle to fully constrained and re-run it as a no-op, lay a rectangular pattern by total EXTENT with the landed centre measured, suppress two instances of a 3x2 pattern with the landed flags and the curve count both read back; the N-1 flag length, a knob on the wrong constraint, and the dimensioning strategies this build does not carry all refused. Then the second bench, carrying the kinds the first has no geometry for: vertical, collinear and concentric; a spline made curvature-continuous with the line it continues; the two point-pair kinds; a square told it is a polygon; fix and unfix on one curve; and the three CREATOR kinds - one-sided and two-sided offset, and a six-around circular pattern - each in a sketch of its own with the curves it drew counted |
 | sketch_copy | covered | copy a two-line chain to an offset position, its new refs and the endpoints in the returned collection both accounted for, then across into a second sketch, and again inside a COMPONENT sketch where the refs cross the occurrence-proxy seam |

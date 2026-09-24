@@ -21,6 +21,25 @@ class _Curve:
         self.endSketchPoint = type("SP", (), {})()
 
 
+class _SplinePoint:
+    """One entry of a spline's fitPoints/controlPoints vector - its .geometry is what a read-back
+    counts and checks for an off-plane z."""
+    def __init__(self, x, y, z):
+        self.geometry = type("G", (), {"x": x, "y": y, "z": z})()
+
+
+class _Spline(_Curve):
+    """A landed sketchFittedSplines/sketchControlPointSplines curve. No live shape dump exists for
+    either type, so this is a local double, not one from tests/fakes."""
+    def __init__(self, fit_points=None, control_points=None, degree=None, is_valid=True):
+        super().__init__()
+        self.isValid = is_valid
+        self.fitPoints = fit_points
+        self.controlPoints = control_points
+        if degree is not None:
+            self.degree = degree
+
+
 class _SketchPoint(FakeSketchPoint):
     """A SketchPoint the sketch owns - the 'point:<index>' address space sketchPoints indexes."""
 

@@ -459,6 +459,11 @@ def _framed(steps):
     out, frame, built = [], None, []
     for i, step in enumerate(steps):
         out.append(step)
+        # A scratch document opened mid-act holds none of the story's parts: nothing built before
+        # it is a neighbour there, and the standing frame belongs to the other document.
+        if step[0] in ("doc_new", "doc_activate"):
+            built, frame = [], None
+            continue
         if step[0] == "view_set" and isinstance(step[1], dict) and step[1].get("focus"):
             f = step[1]["focus"]
             # An act module writes its camera rows as it imports, before any sketch plane is known,
@@ -763,6 +768,7 @@ _JOINT_GROUPS = (
     ("ConA", "ConB"),            # the single-relationship constrain pair
     ("MateSeat", "MateArm"),     # the multi-relationship one - a seat AND a turn in one feature
     ("LnkA", "LnkB"),            # the motion link's fresh revolute pair
+    ("RstBase", "RstArm"),       # the recompute-reset pair, on its own scratch document
     # the joint bench: the base and every indicator arm its stations carry into place
     ("JointBase",) + tuple("Ind" + s[0] for s in _JOINT_STATIONS),
 )
