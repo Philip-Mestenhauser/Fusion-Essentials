@@ -1,0 +1,395 @@
+# Copyright (c) Fusion-Essentials contributors
+# Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
+
+"""Control which CAM toolpaths are displayed (show/hide/isolate one operation's path, or a whole
+folder), so an agent can study one at a time. Toggles Operation.isLightBulbOn - a plain data
+property, unlike the modal simulation/in-process-stock UI commands, which this does not touch.
+Toolpaths only render in the Manufacture workspace."""
+
+import math
+
+import adsk.core
+
+from ..mcp_primitives.tool import Tool
+from ..mcp_primitives.item import Item, Verification
+from ..mcp_primitives.registry import register
+from ._common import ok, error, read_flag, safe
+from ._cam_common import (get_cam, resolve_cam_node, operation_nodes, operations_under, find_setup,
+                          is_additive_setup, owning_setup, setup_model_box, setup_stock_box)
+from . import _geom
+from . import _view_common
+
+app = adsk.core.Application.get()
+
+_ACTIONS = ("show", "hide", "isolate", "show_folder", "hide_all", "list")
+
+_NO_TOOLPATH_WARNING = ("This operation has no generated toolpath yet - nothing to display. "
+                        "Generate it first (cam_generate).")
+
+# An additive build op never has a toolpath to generate - nothing here regenerates it.
+_ADDITIVE_NO_TOOLPATH = ("This operation carries no toolpath by construction - "
+                         "cam_get(include=['parameters'], operation=...) reads what it carries.")
+
+
+def _set_bulb(o, on):
+    """(took, read_back) - set the lightbulb and confirm it took; a bulb whose isLightBulbOn does
+    not read answers None, which is unconfirmed rather than done."""
+    o.isLightBulbOn = bool(on)
+    now = read_flag(lambda: o.isLightBulbOn)
+    return (now is not None and now == bool(on)), now
+
+
+def _settle_display(ops):
+    """ONE selection cycle over `ops` (add each, clear, refresh) - True when the selection read
+    empty after, never raising on a UI refusal. isLightBulbOn alone leaves a hidden toolpath drawn
+    (measured live); one cycle per ACTION, since one per operation ran a job of sixty past 30 s."""
+    if not ops:
+        return True
+    try:
+        sel = app.userInterface.activeSelections
+        for op in ops:
+            sel.add(op)
+        sel.clear()
+        app.activeViewport.refresh()
+        return safe(lambda: sel.count) == 0
+    except Exception:
+        return False
+
+
+def _was_drawn(o):
+    """Whether an operation's toolpath is on screen BEFORE its bulb goes off - the only ones whose
+    graphics linger and need the settle cycle."""
+    return safe(lambda: o.isVisible) is True
+
+
+def _op_identity(o):
+    """An operation's operationId - two walks of the CAM tree hand back DIFFERENT Python objects
+    for one operation, so id() matches nothing across them."""
+    return safe(lambda: o.operationId)
+
+
+def _bulb_word(now):
+    """What a bulb read ANSWERED, for a wire sentence: 'shown' / 'hidden' / 'unreadable' - never a
+    bare None, which reads as a state the property held rather than a read that did not answer."""
+    return "unreadable" if now is None else ("shown" if now else "hidden")
+
+
+def _activate_owning_setup(cam, setup_name):
+    """(activated_name_or_None, warning_or_None) - make the shown toolpath's OWN setup active, since
+    the Manufacture workspace renders only the ACTIVE setup's models; already-active is (None, None)."""
+    if not setup_name:
+        return None, None
+    s, _names, serr = find_setup(cam, setup_name)
+    if not s:
+        return None, f"Could not resolve this operation's setup '{setup_name}': {serr}"
+    if safe(lambda: s.isActive) is True:
+        return None, None
+    try:
+        s.activate()
+    except Exception as e:
+        return None, (f"Setup '{setup_name}' could not be activated ({e}) - the viewport still "
+                      "shows the ACTIVE setup's models, not this operation's part.")
+    state = safe(lambda: s.isActive)
+    if state is False:
+        return None, (f"activate() ran but setup '{setup_name}' still reads isActive=false - the "
+                      "viewport still shows another setup's models, not this operation's part.")
+    if state is not True:
+        return None, (f"activate() ran but isActive cannot be read on setup '{setup_name}', so the "
+                      "activation is UNCONFIRMED - the viewport may still show another setup's "
+                      "models rather than this operation's part.")
+    return setup_name, None
+
+
+# A plain fit excludes stock (measured: a facing op's toolpath overhanging a 220x180mm stock was
+# cropped against a 100x60mm model-only fit), so a stock box that reads widens the frame past it.
+_FIT_WIDEN_NO_MODEL = ("The setup's stock box read, but its model bodies did not, so the frame "
+                      "stayed on the plain fit (fitted_to='model').")
+_FIT_WIDEN_UNMEASURABLE = ("The stock box could not be measured against the model's, so the frame "
+                          "stayed on the plain fit (fitted_to='model').")
+
+
+def _box_center_diagonal(box):
+    """(center xyz, 3D diagonal) of a box - (None, None) when a corner will not read."""
+    lo, hi = safe(lambda: box.minPoint), safe(lambda: box.maxPoint)
+    if lo is None or hi is None:
+        return None, None
+    cx, cy, cz = (lo.x + hi.x) / 2, (lo.y + hi.y) / 2, (lo.z + hi.z) / 2
+    dx, dy, dz = hi.x - lo.x, hi.y - lo.y, hi.z - lo.z
+    return (cx, cy, cz), math.sqrt(dx * dx + dy * dy + dz * dz)
+
+
+def _fit_operation(setup):
+    """Fit onto the setup's models (isFitView), then widen to the union with its stock box.
+    Returns (fitted_to, union box or None, note or None, isSmoothTransition error or None); any
+    API refusal to assign the camera raises into the handler's error path."""
+    vp = app.activeViewport
+    _, smooth_error = _view_common.apply_camera(vp, vp.camera, fit=True)
+    stock_box = setup_stock_box(setup) if setup is not None else None
+    if stock_box is None:
+        return "model", None, None, smooth_error
+    model_box = setup_model_box(setup)
+    if model_box is None:
+        return "model", None, _FIT_WIDEN_NO_MODEL, smooth_error
+    box = _geom.union_box([model_box, stock_box])
+    center, diag = _box_center_diagonal(box)
+    _, model_diag = _box_center_diagonal(model_box)
+    cam = vp.camera
+    eye, target = safe(lambda: cam.eye), safe(lambda: cam.target)
+    extents = safe(lambda: cam.viewExtents)
+    if (center is None or not diag or not model_diag
+            or eye is None or target is None or extents is None):
+        return "model", None, _FIT_WIDEN_UNMEASURABLE, smooth_error
+    cam.eye = adsk.core.Point3D.create(eye.x + (center[0] - target.x),
+                                       eye.y + (center[1] - target.y),
+                                       eye.z + (center[2] - target.z))
+    cam.target = adsk.core.Point3D.create(*center)
+    cam.viewExtents = extents * (diag / model_diag)
+    _, widen_error = _view_common.apply_camera(vp, cam, fit=False)
+    return "model+stock", box, None, (smooth_error or widen_error)
+
+
+def handler(action: str = "", operation: str = "", folder: str = "", fit: bool = False) -> dict:
+    """See TOOL_DESCRIPTION."""
+    action = (action or "").strip().lower()
+    if action not in _ACTIONS:
+        return error(f"Unknown action '{action}'. Valid: {', '.join(_ACTIONS)}.")
+    cam, err = get_cam(sync=True)
+    if err:
+        return error(err)
+
+    if action == "list":
+        rows = []
+        for node in operation_nodes(cam):
+            o = node.obj
+            rows.append({"setup": node.setup, "op": node.name,
+        "has_toolpath": safe(lambda o=o: o.hasToolpath),
+        "valid": safe(lambda o=o: o.isToolpathValid),
+        "suppressed": safe(lambda o=o: o.isSuppressed),
+        "shown": safe(lambda o=o: o.isLightBulbOn),
+        "visible": safe(lambda o=o: o.isVisible)})
+        note = "shown is the lightbulb; visible is the actual on-screen state (parents included)."
+        return ok({"action": "list", "operation_count": len(rows), "operations": rows,
+                  "note": note})
+
+    if action == "hide_all":
+        n = 0
+        failed = 0
+        drawn = []
+        for node in operation_nodes(cam):
+            o = node.obj
+            if safe(lambda o=o: o.hasToolpath):
+                was_drawn = _was_drawn(o)
+                took, _now = _set_bulb(o, False)
+                if took:
+                    n += 1
+                    if was_drawn:
+                        drawn.append(o)
+                else:
+                    failed += 1
+        settled = _settle_display(drawn)
+        if not drawn:
+            app.activeViewport.refresh()
+        out = {"action": "hide_all", "hidden_count": n, "display_settled": settled}
+        if failed:
+            out["toggle_failures"] = failed
+            # Worded on the read, not on a state: a bulb that reads back true and one that does not
+            # read at all both FAIL to read back false, and this count cannot tell them apart.
+            out["note"] = (f"{failed} operation(s) did not read back isLightBulbOn=false after the "
+                           "hide.")
+        return ok(out)
+
+    if action == "show_folder":
+        if not folder.strip():
+            return error("Provide 'folder' - the folder or setup name to show.")
+        fnode, ferr = resolve_cam_node(cam, folder, kinds=("setup", "folder"), label="folder/setup")
+        if ferr:
+            return error(ferr + " Use cam_show_toolpath(list) or cam_get(include=['operations']).")
+        ops, matched = operations_under(fnode.obj), fnode.name
+        # hide everything, then show this folder's generated ops. The mass-hide's own read-backs are
+        # KEPT: an op that would not go dark is still on screen, which is the opposite of what
+        # 'show only this folder' promised.
+        hide_failed = []
+        for node in operation_nodes(cam):
+            took, _now = _set_bulb(node.obj, False)
+            if not took:
+                hide_failed.append((_op_identity(node.obj), node.name))
+        shown = []
+        failed = []
+        shown_ids = set()
+        for o in ops:
+            if safe(lambda o=o: o.hasToolpath):
+                took, _now = _set_bulb(o, True)
+                if took:
+                    shown.append(safe(lambda o=o: o.name))
+                    oid = _op_identity(o)
+                    if oid is not None:
+                        shown_ids.add(oid)
+                else:
+                    failed.append(safe(lambda o=o: o.name))
+        # A hide that did not take on an op this call then SHOWED ends lit as asked, so it drops -
+        # matched by operationId, the identity two walks share. An id that did not read matches
+        # nothing and its read-back is reported instead.
+        still_lit = [nm for oid, nm in hide_failed if oid is None or oid not in shown_ids]
+        activated, setup_warning = _activate_owning_setup(cam, fnode.setup)
+        app.activeViewport.refresh()
+        out = {"action": "show_folder", "folder": matched, "shown": shown,
+        "shown_count": len(shown),
+        "note": "Only this folder's generated toolpaths are shown."}
+        if activated:
+            out["setup_activated"] = activated
+            out["note"] += (f" Activated setup '{activated}' so the viewport renders THIS folder's "
+                            "part - only the active setup's models are displayed.")
+        if setup_warning:
+            out["setup_activation_warning"] = setup_warning
+            out["note"] += " " + setup_warning
+        if failed:
+            out["toggle_failures"] = failed
+            out["note"] = (f"{len(failed)} operation(s) did not read back isLightBulbOn=true after "
+                           "the show - see toggle_failures. " + out["note"])
+        if still_lit:
+            out["hide_failures"] = still_lit
+            out["note"] = (f"{len(still_lit)} operation(s) did not read back isLightBulbOn=false "
+                           "after the hide - see hide_failures; their toolpaths may still be "
+                           "drawn. " + out["note"])
+        return ok(out)
+
+    # show / hide / isolate a single operation - the shared resolver REFUSES a duplicated name
+    # (naming each candidate's setup path) instead of silently toggling the wrong toolpath.
+    if not operation.strip():
+        return error(f"Provide 'operation' - the operation name to {action}.")
+    onode, oerr = resolve_cam_node(cam, operation, kinds=("operation",), label="operation")
+    if oerr:
+        return error(oerr + " Use cam_show_toolpath(list) to see every operation.")
+    o = onode.obj
+    name = onode.name
+
+    if action == "hide":
+        took, now = _set_bulb(o, False)
+        if not took:
+            return error(f"isLightBulbOn did not take for '{name}' - it reads back "
+                         f"{_bulb_word(now)}.")
+        settled = _settle_display([o])
+        visible = safe(lambda: o.isVisible)
+        if visible is True:
+            return error(f"'{name}' still reads isVisible=true after hide - the write did not "
+                         "take.")
+        note = ("The viewport selection was cycled (add, then clear) to drop the toolpath's "
+                "drawn path - display_settled says whether it completed.")
+        return ok({"action": "hide", "operation": name, "visible": visible,
+                  "display_settled": settled, "note": note})
+
+    still_lit = []
+    if action == "isolate":
+        # The mass-hide's read-backs are KEPT: an op that would not go dark is still drawn, and
+        # 'isolate' is the one action that promised nothing else would be.
+        target_id = _op_identity(o)
+        hide_failed = []
+        drawn = []
+        for node in operation_nodes(cam):
+            was_drawn = _was_drawn(node.obj)
+            hid, _now = _set_bulb(node.obj, False)
+            if hid:
+                if was_drawn:
+                    drawn.append(node.obj)
+            else:
+                hide_failed.append((_op_identity(node.obj), node.name))
+        _settle_display(drawn)
+        # The target is shown immediately below, so its own refused hide ends lit as asked and is
+        # dropped - matched by operationId, since this walk and the resolver that produced `o` hold
+        # different objects for one operation. An id that did not read matches nothing.
+        still_lit = [nm for oid, nm in hide_failed
+                     if target_id is None or oid is None or oid != target_id]
+    took, now = _set_bulb(o, True)
+
+    # The toggle is judged BEFORE the toolpath branch: a bulb that did not take is an error whether
+    # or not the operation has a path to draw, so the pathless warning cannot carry a failed toggle.
+    if not took:
+        return error(f"isLightBulbOn did not take for '{name}' - it reads back {_bulb_word(now)}.")
+    if not safe(lambda: o.hasToolpath):
+        app.activeViewport.refresh()
+        owner = owning_setup(onode)
+        additive = owner is not None and is_additive_setup(owner)
+        out = {"action": action, "operation": name,
+        "warning": _ADDITIVE_NO_TOOLPATH if additive else _NO_TOOLPATH_WARNING,
+        "has_toolpath": False}
+        # an isolate that reached here still ran its mass-hide, so its read-backs are disclosed on
+        # this arm too rather than dropped with the early return
+        if still_lit:
+            out["hide_failures"] = still_lit
+        return ok(out)
+
+    # BEFORE the fit: the displayed model is the active setup's, so the operation's own setup has to
+    # be active or the fit frames another setup's part.
+    activated, setup_warning = _activate_owning_setup(cam, onode.setup)
+
+    fitted = False
+    fitted_to = None
+    fit_box = None
+    fit_note = None
+    smooth_error = None
+    if fit:
+        # raises on an API refusal to assign the camera
+        fitted_to, fit_box, fit_note, smooth_error = _fit_operation(owning_setup(onode))
+        fitted = True
+    app.activeViewport.refresh()
+    note = ("Toolpath shown. Toolpaths render in the Manufacture workspace; pair with "
+            "view_screenshot.")
+    out = {"action": action, "operation": name, "fit": fitted, "setup": onode.setup}
+    if fitted_to:
+        out["fitted_to"] = fitted_to
+        if fit_box is not None:
+            lo, hi = fit_box.minPoint, fit_box.maxPoint
+            out["fit_box_cm"] = {"min": [round(lo.x, 3), round(lo.y, 3), round(lo.z, 3)],
+                                 "max": [round(hi.x, 3), round(hi.y, 3), round(hi.z, 3)]}
+        if fit_note:
+            note += " " + fit_note
+    if activated:
+        out["setup_activated"] = activated
+        note += (f" Activated setup '{activated}' (the operation's own): the viewport renders only "
+                 "the ACTIVE setup's models, so the toolpath would otherwise sit beside another "
+                 "setup's part.")
+    if setup_warning:
+        out["setup_activation_warning"] = setup_warning
+        note += " " + setup_warning
+    if still_lit:
+        out["hide_failures"] = still_lit
+        note += (f" {len(still_lit)} operation(s) did not read back isLightBulbOn=false during the "
+                 "hide - see hide_failures; their toolpaths may still be drawn.")
+    if smooth_error:
+        note += f" isSmoothTransition could not be set: {smooth_error}."
+    out["note"] = note
+    return ok(out)
+
+
+TOOL_DESCRIPTION = (
+    "Show or hide CAM toolpaths to inspect one operation's path at a time. They render only in the "
+    "MANUFACTURE workspace; pair with view_screenshot."
+)
+
+tool = (
+    Tool.create_simple(name="cam_show_toolpath", description=TOOL_DESCRIPTION)
+    .add_input_property("action", {"type": "string", "enum": list(_ACTIONS)})
+    .add_required_input("action")
+    .add_input_property("operation", {"type": "string",
+            "description": "Operation name (show/hide/isolate)."})
+    .add_input_property("folder", {"type": "string",
+            "description": "Folder or setup name (show_folder)."})
+    .add_input_property("fit", {"type": "boolean",
+            "description": "Fit the camera after showing."})
+    .strict_schema()
+)
+
+item = Item.create_tool_item(
+    tool=tool, write="write", handler=handler, run_on_main_thread=True,
+    # show / hide / isolate error on a bulb that does not read back the value set - an unreadable
+    # isLightBulbOn included, since an unconfirmed toggle is not a done one. The bulk arms publish
+    # the ops whose toggle did not take (toggle_failures / hide_failures) instead of erroring.
+    verification=Verification(
+        kind="inline",
+        evidence_test="tests/unit/test_cam_show_toolpath.py::TestBulbReadBack"
+                      "::test_hide_of_a_stuck_bulb_is_an_error",
+        rung="value"))
+
+
+def register_tool():
+    register(item)
