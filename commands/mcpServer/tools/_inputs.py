@@ -14,6 +14,7 @@ from . import _common
 from . import _geom     # owning_bodies - the ONE identity-keyed owning-body walk
 from . import _joints   # the JointOrigin walk (all_joint_origins / find_joint_origins_by_name / proxy)
 from ._export import find_component as _find_component   # the one design-wide by-name component resolve
+from ._export import pump_until as _pump_until
 
 MAP_BLURB = (
     "the typed reference kinds (table above); resolve_inputs/apply_to_tool (wire and resolve "
@@ -190,11 +191,62 @@ class GeometryHandleList(GeometryHandle):
 
 # ── edge-loop / boundary reference (a SET of edge/curve handles treated as a boundary) ──────────
 
+def _in_loop_order(ends):
+    """Do the (start, end) vertex pairs, as listed, run end to end and close, either way round?"""
+    for start, at in (ends[0], ends[0][::-1]):
+        for a, b in ends[1:]:
+            if a == at:
+                at = b
+            elif b == at:
+                at = a
+            else:
+                break
+        else:
+            if at == start:
+                return True
+    return False
+
+
+def _loop_order(name, ents):
+    """(the edges in loop order, error): as given when they already chain and close, else walked
+    from edge [0] through shared end vertices, refusing a set that branches, breaks or does not
+    close. Vertices compare with ==, never `is`."""
+    ends = []
+    for i, e in enumerate(ents):
+        pair = (_common.safe(lambda e=e: e.startVertex), _common.safe(lambda e=e: e.endVertex))
+        if pair[0] is None or pair[1] is None:
+            return None, (f"'{name}'[{i}]: the edge's end vertices did not read, so the loop order "
+                          "cannot be checked. Pass one edge of the loop for Fusion to complete.")
+        ends.append(pair)
+    # The walk leaves edge [0] by its end vertex, so it would reverse a list already in loop order
+    # that runs the other way round; that list goes on as given.
+    if _in_loop_order(ends):
+        return list(ents), None
+    order, at, rest = [0], ends[0][1], list(range(1, len(ents)))
+    while rest:
+        nxt = [j for j in rest if ends[j][0] == at or ends[j][1] == at]
+        if len(nxt) != 1:
+            why = ("no other edge continues from its free end" if not nxt else
+                   f"edges {nxt} all continue from its free end")
+            return None, (f"'{name}': these edges are not one closed loop - the chain {order} "
+                          f"breaks at edge [{order[-1]}]: {why}. Pass the edges of ONE opening, or "
+                          "one edge for Fusion to complete.")
+        j = nxt[0]
+        order.append(j)
+        rest.remove(j)
+        at = ends[j][1] if ends[j][0] == at else ends[j][0]
+    if not (at == ends[0][0]):
+        return None, (f"'{name}': the {len(ents)} edges chain end to end but do not close - edge "
+                      f"[{order[-1]}] does not meet edge [0]. Add the missing edge(s), or pass one "
+                      "edge for Fusion to complete.")
+    return [ents[i] for i in order], None
+
+
 class EdgeLoopRef(GeometryHandleList):
-    """A boundary defined by edge handles from find_geometry.
-    closed=True is a CLOSED loop, closed=False an OPEN chain of OUTER edges from ONE body (a
-    multi-body chain is rejected before any mutation). Resolves to (ObjectCollection, {entities,
-    body_count}); a single edge is allowed, Fusion auto-finding the connected loop."""
+    """A boundary of find_geometry edge handles: closed=True a CLOSED loop, a one-body set checked
+    and handed on in loop order; closed=False an OPEN chain of outer edges from ONE body (refused
+    otherwise). Resolves to (ObjectCollection, {entities, body_count, loop_checked}); a single edge
+    is allowed, Fusion auto-finding the connected loop."""
 
     MAP_HINT = "a closed/open edge-loop boundary from edge handles"
 
@@ -214,17 +266,29 @@ class EdgeLoopRef(GeometryHandleList):
         if not ents:
             if self.required:
                 return None, f"'{self.name}' needs at least one edge handle from find_geometry."
-            return (None, {"entities": [], "body_count": 0}), None
+            return (None, {"entities": [], "body_count": 0, "loop_checked": False}), None
         # Through the ONE shared walk: edge.body hands back a FRESH PROXY per read (measured), so
         # an id()-keyed set counts one body once PER EDGE, refusing a legal single-body chain.
         body_count = len(_geom.owning_bodies(ents))
         if not self.closed and body_count > 1:
             return None, (f"'{self.name}': the edges to extend must all come from ONE surface body, "
                           "but they span more than one. Pass only the outer edges of a single body.")
+        # Fusion fails a patch whose rim edges arrive out of loop order (PATCH_NO_TOOLBODY) and
+        # builds them in order. A set spanning bodies or placements (assemblyContext) shares no
+        # vertex, so it - and a set whose bodies do not all read - goes on as given.
+        ctx = [_common.safe(lambda e=e: e.assemblyContext) for e in ents]
+        checked = (self.closed and len(ents) > 1 and body_count == 1
+                   and all(c is None if ctx[0] is None else _common.safe(lambda c=c: c == ctx[0])
+                           is True for c in ctx)
+                   and all(_common.safe(lambda e=e: e.body) is not None for e in ents))
+        if checked:
+            ents, oerr = _loop_order(self.name, ents)
+            if oerr:
+                return None, oerr
         coll = adsk.core.ObjectCollection.create()
         for e in ents:
             coll.add(e)
-        return (coll, {"entities": ents, "body_count": body_count}), None
+        return (coll, {"entities": ents, "body_count": body_count, "loop_checked": checked}), None
 
 
 # ── body reference (name OR handle - bodies have auto-names, so a handle is the precise path) ───
@@ -321,6 +385,16 @@ def make_handle(entity, kind, position_cm):
     if rev:
         handle += f";rv={rev}"
     return handle
+
+
+def edge_kind(curve):
+    """find_geometry's edge kind for an edge's curve geometry, by its curveType; 'edge' otherwise."""
+    types = adsk.core.Curve3DTypes
+    return {types.Circle3DCurveType: "circular_edge", types.Line3DCurveType: "line_edge",
+            types.Arc3DCurveType: "arc_edge", types.Ellipse3DCurveType: "ellipse_edge",
+            types.EllipticalArc3DCurveType: "elliptical_arc_edge",
+            types.NurbsCurve3DCurveType: "spline_edge"}.get(
+                _common.safe(lambda: curve.curveType), "edge")
 
 
 def is_handle(v) -> bool:
@@ -1318,8 +1392,11 @@ class FeatureRef(InputKind):
             return None, "No active design to resolve the feature name against."
         timeline = _common.safe(lambda: des.timeline)
         if timeline is None:
-            return None, ("This design has no timeline, so it has no features to name. Act on the "
-                          "bodies instead.")
+            # _design_common imports this module, so its refusal is bound at call time.
+            from . import _design_common
+            return None, _design_common.no_timeline_reason(
+                des, "This design has no timeline, so it has no features to name. Act on the "
+                     "bodies instead.")
         return _timeline_objects(timeline), None
 
     def _find_one(self, objs, want, label):
@@ -1508,6 +1585,28 @@ def _in_base_feature_scope(design) -> bool:
     return False
 
 
+_FORM_WORKSPACE = "TSplineEnvironment"
+_FORM_SWITCH_S = 0.25
+_FORM_SWITCH_PUMPS = 10
+_FORM_PUMP_SLEEP_S = 0.002
+
+
+def in_form_edit(design) -> bool:
+    """Is a Form edit open? True when designType reads direct AND the Form workspace is active."""
+    # MEASURED: an opened edit reads designType direct at once, the Form workspace ~3 pumps (~15 ms)
+    # later, and the workspace read lags an exit; an open base-feature scope also reads direct. So
+    # designType gates, a scope is excluded, and a direct read pumps a bounded few times.
+    if current_design_type(design) != MODE_DIRECT or _in_base_feature_scope(design):
+        return False
+    probes = []
+
+    def probe():
+        on = _common.safe(lambda: _common.app.userInterface.activeWorkspace.id) == _FORM_WORKSPACE
+        probes.append(on)
+        return on or len(probes) > _FORM_SWITCH_PUMPS, on
+    return bool(_pump_until(probe, _FORM_SWITCH_S, _FORM_PUMP_SLEEP_S)[1])
+
+
 class ModeGuard:
     """A declarative precondition - not an InputKind: 'this op needs <mode>'. check(design) runs
     BEFORE mutating and returns (ok, error_result_or_None), the error DERIVED from self.requires so
@@ -1528,13 +1627,16 @@ class ModeGuard:
         actual = current_design_type(design)
         if actual == self.requires:
             return True, None
-        return False, self._err(actual)
+        return False, self._err(actual, design)
 
-    def _err(self, actual):
+    def _err(self, actual, design=None):
         # Text DERIVED from self.requires -> structurally cannot point the wrong way.
         if self.requires == MODE_BASE_FEATURE:
             head = ("This needs a BASE-FEATURE edit scope (the mesh/base-feature insert must run "
                     "inside BaseFeature.startEdit()/finishEdit()), but none is open.")
+        elif design is not None and in_form_edit(design):
+            return _common.error(f"This needs {self.requires} mode. A Form edit is open - ask the "
+                                 "user to click Finish Form, then retry.")
         else:
             head = f"This needs {self.requires} mode but the design is in {actual} mode."
         return _common.error(f"{head} {self.why} {self.fix_hint}".strip())
@@ -3056,6 +3158,155 @@ class ProfileRefList(ProfileRef):
         if not out:
             return None, f"'{self.name}': no valid profiles resolved."
         return out, None
+
+
+# ── loft sections and loft end conditions ───────────────────────────────────
+
+def sketch_entity_ref(raw):
+    """('<sketch>', '<type>:<index>') for a '<sketch>/<type>:<index>' sketch-entity ref, else None."""
+    # An entityToken is base64 with no ':', so a '/<type>:<int>' tail is never a token, at any length.
+    if not isinstance(raw, str) or "/" not in raw or _HANDLE_SEP in raw:
+        return None
+    name, _, ref = raw.strip().rpartition("/")
+    kind, _, idx = ref.rpartition(":")
+    good = kind.strip().lower() in _common.ENTITY_REF_KINDS and idx.strip().isdigit()
+    return (name.strip(), ref.strip()) if name.strip() and good else None
+
+
+def resolve_sketch_entity(design, raw, component="", scope_input="component"):
+    """(entity, error naming the ref) for a '<sketch>/<type>:<index>' ref inside `component`."""
+    from . import _sketch_detail          # it imports this module
+    name, ref = sketch_entity_ref(raw)
+    sketch, ambiguous = _sketch_detail.scoped_sketch(design, name, component,
+                                                     input_name=scope_input)
+    if ambiguous:
+        return None, f"'{raw}': {ambiguous}"
+    if sketch is None:
+        return None, (f"'{raw}' names no sketch '{name}'. Available: "
+                      f"{_available_sketch_names(design)}.")
+    ent = _common.resolve_entity_ref(sketch, ref)
+    if ent is None:
+        return None, (f"'{raw}': sketch '{name}' has no '{ref}'. "
+                      "sketch_get(include_entities=true) lists its entity ids.")
+    return ent, None
+
+
+def _single_path(ent):
+    """(a Path over `ent` alone, its isClosed read - None unless it holds exactly one curve)."""
+    # MEASURED: Path.create raises InternalValidationError on a native sketch curve of a non-root
+    # component; its owning component's features.createPath builds the one-curve path.
+    owner = _common.safe(lambda: ent.parentSketch.parentComponent)
+    path = _common.safe(
+        (lambda: owner.features.createPath(ent, False)) if owner is not None else
+        (lambda: adsk.fusion.Path.create(ent, adsk.fusion.ChainedCurveOptions.noChainedCurves)))
+    if path is None or _common.counted(lambda: path.count) != 1:
+        return path, None
+    return path, _common.read_flag(lambda: path.isClosed)
+
+
+# The section kinds, as a refusal names them.
+LOFT_SECTION_KINDS = {"profile": "a profile", "edge": "a closed edge", "point": "a sketch point",
+                      "curve": "an open sketch curve"}
+
+
+class LoftSectionList(ProfileRefList):
+    """ORDERED loft sections, each as (what LoftSections.add takes, its kind, the entity named)."""
+
+    MAP_HINT = ("an ORDERED list of loft sections: profile, one closed edge, an end sketch point, "
+                "an open sketch curve")
+
+    def contract_note(self) -> str:
+        return ("Profile/closed-edge 'handle's, {sketch, profile_index}, '<sketch>/<type>:<i>' "
+                "open curves or end points, in order.")
+
+    def resolve(self, raw, component=""):
+        if raw in (None, "", []):
+            if self.required:
+                return None, f"'{self.name}' needs at least one section."
+            return [], None
+        items = raw if isinstance(raw, (list, tuple)) else [s.strip() for s in str(raw).split(",") if s.strip()]
+        scope = component if self.scope_input else ""
+        out = []
+        for i, item in enumerate(items):
+            section, err = self._section(item, scope)
+            if err:
+                return None, f"'{self.name}'[{i}]: {err}"
+            out.append(section)
+        inner = [i for i, (_e, kind, _src) in enumerate(out)
+                 if kind == "point" and 0 < i < len(out) - 1]
+        if inner:
+            return None, (f"'{self.name}'[{inner[0]}]: a sketch point is a loft's first or last "
+                          "section, never one between.")
+        return (out, None) if out else (None, f"'{self.name}': no valid sections resolved.")
+
+    def _section(self, item, scope):
+        """((entity, kind, the entity named), error) for one section."""
+        des = _common.design()
+        ref = sketch_entity_ref(item)
+        if ref is not None:
+            if not des:
+                return None, "No active design to resolve the section against."
+            ent, err = resolve_sketch_entity(des, item.strip(), scope,
+                                             self.scope_input or "component")
+            if err:
+                return None, err
+            if ref[1].lower().startswith("point:"):
+                return (ent, "point", ent), None
+            path, closed = _single_path(ent)
+            if closed is None:
+                return None, f"'{item}': a path over it did not read as one curve."
+            if closed:
+                return None, f"'{item}' is a closed curve - loft its region as a profile."
+            return (path, "curve", ent), None
+        s = item.strip() if isinstance(item, str) else ""
+        ent = _resolve_token_entity(des, s) if des and s else None
+        if des and s and ent is None and _split_text_ref(s) is None:
+            why = _LAST_REFIND_REFUSAL or "no entity answers that token"
+            return None, (f"'{s}' did not resolve - {why}. For an edge rim re-run find_geometry "
+                          "for a fresh 'handle'; for a profile pass its 'handle' or "
+                          "{sketch, profile_index}.")
+        if _isinstance(ent, adsk.fusion.BRepEdge):
+            path, closed = _single_path(ent)
+            if closed is None:
+                return None, "a path over this edge did not read as one curve."
+            if not closed:
+                return None, ("an edge section is ONE closed edge, such as a tube's rim, and this "
+                              "edge is open. For an opening bounded by several edges, project it "
+                              "into a sketch (sketch_project) and loft its profile.")
+            return (path, "edge", ent), None
+        prof, err = _resolve_one_profile(self.name, item, False, scope, self.scope_input)
+        return (None, err) if err else ((prof, "profile", prof), None)
+
+
+# condition -> the section kinds it is offered on. Measured: a tangent end on a section that is not
+# an edge raises; point ends build on sketch points and the direction end on open curves and profiles.
+LOFT_END_CONDITIONS = {
+    "free": ("profile", "edge", "curve"),
+    "tangent": ("edge",),
+    "smooth": ("edge",),
+    "direction": ("profile", "curve"),
+    "point_sharp": ("point",),
+    "point_tangent": ("point",),
+}
+
+
+class LoftEndCondition(Choice):
+    """One loft end's condition; legal_on() refuses one its section cannot take, before Fusion."""
+
+    MAP_HINT = "a loft end's condition, refused where the section at that end cannot take it"
+
+    def __init__(self, name, **kw):
+        super().__init__(name, list(LOFT_END_CONDITIONS), **kw)
+
+    def legal_on(self, condition, kind, index):
+        """The refusal for `condition` at section `index` of `kind`, or '' where that kind takes it."""
+        kinds = LOFT_END_CONDITIONS[condition]
+        if kind in kinds:
+            return ""
+        want = " or ".join(LOFT_SECTION_KINDS[k] for k in kinds)
+        tail = " - pass the edge's find_geometry 'handle' as that section." if kinds == ("edge",) else "."
+        return (f"'{self.name}': a {condition} end needs {want} section, but section {index} is "
+                f"{LOFT_SECTION_KINDS[kind]}{tail}")
 
 
 # ── sketch reference (a SKETCH by name, design-wide - the non-unique name space) ─────────────────

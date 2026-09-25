@@ -4,8 +4,11 @@
 """Deletes ONE timeline object (a feature/sketch/pattern/mirror/joint/etc.) by name, deleting its
 associated entity - the way to undo a botched pattern/mirror without rebuilding the document. An
 ambiguous name or a timeline GROUP is refused; timeline health is reported before/after so a delete
-that breaks a downstream feature is surfaced. WRITES (destructive).
+that breaks a downstream feature is surfaced, and every other item that left with it is named.
+WRITES (destructive).
 """
+
+import collections
 
 import adsk.fusion
 
@@ -14,6 +17,7 @@ from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
 from . import _common
+from . import _design_common
 from . import _inputs
 
 
@@ -54,6 +58,37 @@ def _remove_features_named(design, name):
     return hits
 
 
+def _vanished(before, after, target_key):
+    """(names of keyed items gone from the timeline, count of unkeyed ones gone), the target left
+    out - None when a census did not read, or the keys, unkeyed counts and names do not add up."""
+    if before is None or after is None:
+        return None
+    left = collections.Counter(it["key"] for it in after["items"] if it["key"])
+    gone, target_seen, dropped = [], False, collections.Counter()
+    for it in before["items"]:
+        key = it["key"]
+        if not key:
+            continue
+        if left[key] > 0:
+            left[key] -= 1
+            continue
+        dropped[it["name"]] += 1
+        if key == target_key and not target_seen:
+            target_seen = True
+        else:
+            gone.append(it["name"] or "?")
+    unkeyed = [sum(1 for it in c["items"] if not it["key"]) for c in (before, after)]
+    unnamed = unkeyed[0] - unkeyed[1] - (0 if target_key else 1)
+    names = [collections.Counter(it["name"] for it in c["items"]) for c in (before, after)]
+    # A survivor whose token reads otherwise (or not at all) after the call would be named in place
+    # of an item that left: then a key only the after-census holds, more unkeyed items after than
+    # before, or a name reported gone that reads as often after as before, gives it away.
+    if (unnamed < 0 or +left
+            or any(names[0][n] - names[1][n] < k for n, k in dropped.items())):
+        return None
+    return gone, unnamed
+
+
 def _occurrence_present(design, path):
     """Is an occurrence with `path` as its fullPathName in the design right now? Reads the shared
     assembly-context path census, so a collection that cannot be read answers False (not confirmed)
@@ -74,8 +109,9 @@ def handler(feature: str = "") -> dict:
 
     timeline = _timeline(design)
     if timeline is None:
-        return error("This design has no timeline (a direct-modelling design has no deletable timeline "
-                     "features). Delete bodies/occurrences directly instead.")
+        return error(_design_common.no_timeline_reason(
+            design, "This design has no timeline (a direct-modelling design has no deletable "
+                    "timeline features). Delete bodies/occurrences directly instead."))
 
     obj, rerr = _find_object(timeline, want)
     if rerr:
@@ -122,6 +158,8 @@ def handler(feature: str = "") -> dict:
     # already fails to see this object (an unreadable name, a timeline the walk cannot read) proves
     # nothing by not seeing it afterwards either.
     hits_before = _name_hits(timeline, name)
+    census_before = _design_common.timeline_census(design)
+    target_key = _design_common.timeline_item_key(obj)
     try:
         did = entity.deleteMe()
     except Exception as e:
@@ -174,6 +212,25 @@ def handler(feature: str = "") -> dict:
             "verified (null = it was not). Undo in Fusion if this was not wanted.")
     elif warn_after:
         out["timeline_warnings"] = warn_after
+    vanished = _vanished(census_before, _design_common.timeline_census(design), target_key)
+    if vanished is None:
+        out["also_deleted"] = None
+        out["note"] += " " + _design_common.CENSUS_UNREAD
+    else:
+        taken, unnamed = vanished
+        out["also_deleted"] = taken[:_common._MAX_NAMED_CANDIDATES]
+        if len(taken) > len(out["also_deleted"]):
+            out["also_deleted_count"] = len(taken)
+        lead = [_common.named_with_remainder(taken)] if taken else []
+        if unnamed:
+            out["also_deleted_unnamed"] = unnamed
+            lead.append(f"{unnamed} item(s) whose identity does not read")
+        if lead:
+            out["note"] = ("Also left the timeline with it: " + ", plus ".join(lead) + ". "
+                           + out["note"])
+    caveat = _design_common.census_caveat(census_before)
+    if caveat:
+        out["census_caveat"] = caveat
     return ok(out)
 
 

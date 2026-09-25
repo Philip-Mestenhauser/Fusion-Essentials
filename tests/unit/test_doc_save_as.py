@@ -526,8 +526,8 @@ class TestSameNameFilesInOneFolder:
     name is not an identity there - the resolver must REFUSE and name the candidates by the lineage
     URN, the one thing that tells them apart, never hand back the first sibling."""
 
-    _URN_A = "urn:adsk.wipprod:dm.lineage:hW1WC_3CRkurSsn8eRCmaQ"
-    _URN_B = "urn:adsk.wipprod:dm.lineage:zTj_JYIcRyqZ35BGQj6N1Q"
+    _URN_A = "urn:adsk.wipprod:dm.lineage:FixtureLineageD000000D"
+    _URN_B = "urn:adsk.wipprod:dm.lineage:FixtureLineageE000000E"
 
     def _twins(self):
         proj = FakeProject("CAM")

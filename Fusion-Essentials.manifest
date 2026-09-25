@@ -4,9 +4,9 @@
 	"id":	"b64a1444-afa0-430e-b921-ecef87550bdc",
 	"author":	"EppicJR",
 	"description":	{
-		"":	"A small set of QoL improvements for your Fusion workflow"
+		"":	"A small set of QoL improvements for your Fusion workflow, plus an optional MCP server that lets AI agents drive Fusion"
 	},
-	"version":	"",
+	"version":	"0.2.0",
 	"runOnStartup":	true,
 	"supportedOS":	"windows|mac",
 	"editEnabled":	true

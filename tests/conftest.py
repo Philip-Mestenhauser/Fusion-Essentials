@@ -135,6 +135,8 @@ from tests.fakes.design import FakeUserParameter, FakeUserParameters  # noqa: E4
 from tests.fakes.design import MakeComp, MakeDesign, body_proxy, make_occurrence  # noqa: E402
 from tests.fakes.design import make_placed_occurrence, make_source_document  # noqa: E402
 from tests.fakes.design import make_timeline  # noqa: E402
+from tests.fakes.form import FakeFormFeature, FakeFormFeatures  # noqa: E402
+from tests.fakes.form import FakeTSplineBodies, FakeTSplineBody  # noqa: E402
 from tests.fakes.sketch import FakeSketchPoint, Profile, Sketch, SketchCurves  # noqa: E402
 from tests.fakes.sketch import make_sketch, make_sketch_curve, sketch_curves_edit  # noqa: E402
 from tests.fakes.cam import FakeCAMFolder, FakeCAMParameter, FakeCAMParameters  # noqa: E402

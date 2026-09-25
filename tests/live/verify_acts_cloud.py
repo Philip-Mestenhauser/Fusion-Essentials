@@ -477,8 +477,18 @@ def _known_file_listing(path, file_path, recursive):
     return check
 
 
-def _known_child_excluded(p):
-    """The parent folder's immediate listing is empty while its known child holds the upload."""
+def _known_child_excluded(p, polls=12):
+    """The parent folder's immediate listing, re-read until the moved file has left it (the cloud
+    listing lags the move by seconds, measured), is empty while its known child holds the upload."""
+    call = facade("call")
+    for i in range(polls):
+        if not (p.get("files") or []) or i == polls - 1:
+            break
+        time.sleep(_SETTLE_GAP_S)
+        is_error, again = call("data_get", {"project": PROJECT, "folder": RUN_PATH,
+                                            "recursive": False})
+        if not is_error and isinstance(again, dict):
+            p = again
     rows = p.get("files") or []
     return _measured(
         "the run folder excludes the file moved into its child",

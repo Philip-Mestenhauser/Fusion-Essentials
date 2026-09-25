@@ -563,14 +563,18 @@ _GROUP_MEMBER_NOTE = "index is null on these rows - address them by name."
 _NESTED_GROUP_NOTE = "This listing holds group row(s); group='{0}' lists what one stands for."
 
 
-def _slice_timeline(design, include_suppressed, group, with_params=False, max_rows=0):
+def _slice_timeline(design, include_suppressed, group, with_params=False, max_rows=0,
+                    form_edit=None):
     """The ordered parametric timeline, with healthy-row noise dropped (a normal row is
     {index,name,type}; a suppressed/errored row keeps its flags and stands out). with_params adds
     each row's own model parameters; max_rows pages it (0 = the default cap)."""
     try:
         timeline = design.timeline
     except Exception as e:
-        return None, error(f"This design has no timeline (direct-modeling, or no history): {e}")
+        from . import _design_common
+        return None, error(_design_common.no_timeline_reason(
+            design, f"This design has no timeline (direct-modeling, or no history): {e}",
+            form_edit))
     try:
         cap = max(1, int(max_rows)) if max_rows else _TIMELINE_MAX_ITEMS
     except Exception:
@@ -840,9 +844,11 @@ def _fingerprint(design):
         # asBuiltJoints is a separate collection from joints; count both or as-built joints read as 0
         "joints": safe(lambda: root.joints.count, 0) + safe(lambda: root.asBuiltJoints.count, 0),
         # userParameters = the ones an agent can drive; modelParameters includes internal ones it can't.
-        "parameters": safe(lambda: design.userParameters.count, 0),
+        "parameters": _common.counted(lambda: design.userParameters.count),
     }
     out = {k: v for k, v in fp.items() if v}   # omit zero counts (single-component, no joints, ...)
+    if fp["parameters"] is None:
+        out["parameters"] = None                # the read raised (an open Form edit does): unknown
     # The truthy filter drops 'occurrences' both for a design holding no instance (0) and for one
     # whose census could not be taken (None), so the walk that answered is published beside them:
     # 'unreadable' means neither walk enumerated, and the count is UNKNOWN rather than zero.
@@ -926,6 +932,10 @@ def handler(include=None, max_depth: int = 3, component: str = "", tree_bodies: 
             out["pointers"] = ptrs
         if mode_full.get("in_base_feature_edit"):
             out["in_base_feature_edit"] = True
+        if mode_full.get("in_form_edit"):
+            # The open edit hides the timeline, so no health was read from it.
+            out["in_form_edit"] = True
+            out["timeline_healthy"] = None
         # surface health DETAIL only when there's something wrong (else 'healthy' above says it all).
         if health and (health.get("error_count") or health.get("warning_count")):
             out["health"] = {k: v for k, v in health.items()
@@ -941,7 +951,8 @@ def handler(include=None, max_depth: int = 3, component: str = "", tree_bodies: 
             return terr
     if "timeline" in inc:
         out["timeline"], tlerr = _slice_timeline(design, include_suppressed, group,
-                                                 bool(timeline_params), max_results)
+                                                 bool(timeline_params), max_results,
+                                                 (mode_full or {}).get("in_form_edit"))
         if tlerr:
             return tlerr
     if "configurations" in inc:

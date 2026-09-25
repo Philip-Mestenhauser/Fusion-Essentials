@@ -4,7 +4,7 @@ _Auto-generated from the live registry by `tests/gen_posture.py`. Do not edit by
 
 Every tool declares a write= kind (read / write / destructive); the MCP readOnlyHint / destructiveHint annotations derive from it. That machine-checked fact decides which tools are safe to auto-run under Claude Code. This file maps every tool to a posture bucket and emits ready-to-paste `settings.json` presets. Rules target the MCP wire name `mcp__fusion-essentials__<tool>`.
 
-**Tools:** 193  |  read: 32  |  write: 141  |  destructive: 19  |  script-hatch: 1
+**Tools:** 196  |  read: 34  |  write: 142  |  destructive: 19  |  script-hatch: 1
 
 ## Posture buckets
 
@@ -37,7 +37,7 @@ A write= kind says the model changes; it does not say WHERE the change lands. Th
 
 ## Every tool by bucket
 
-### read - safe to auto-allow (32)
+### read - safe to auto-allow (34)
 
 - `mcp__fusion-essentials__assembly_get`
 - `mcp__fusion-essentials__assembly_inspect_interference`
@@ -54,10 +54,12 @@ A write= kind says the model changes; it does not say WHERE the change lands. Th
 - `mcp__fusion-essentials__drawing_get`
 - `mcp__fusion-essentials__drawing_get_status`
 - `mcp__fusion-essentials__find_geometry`
+- `mcp__fusion-essentials__form_get`
 - `mcp__fusion-essentials__mesh_get`
 - `mcp__fusion-essentials__model_compute_holder`
 - `mcp__fusion-essentials__model_inspect`
 - `mcp__fusion-essentials__model_measure_between`
+- `mcp__fusion-essentials__model_measure_continuity`
 - `mcp__fusion-essentials__model_measure_relation`
 - `mcp__fusion-essentials__param_get`
 - `mcp__fusion-essentials__pmi_get`
@@ -72,7 +74,7 @@ A write= kind says the model changes; it does not say WHERE the change lands. Th
 - `mcp__fusion-essentials__view_screenshot_multi`
 - `mcp__fusion-essentials__workspace_orient`
 
-### write - ask (141)
+### write - ask (142)
 
 - `mcp__fusion-essentials__appearance_set`
 - `mcp__fusion-essentials__assembly_capture_position`
@@ -130,6 +132,7 @@ A write= kind says the model changes; it does not say WHERE the change lands. Th
 - `mcp__fusion-essentials__drawing_export`
 - `mcp__fusion-essentials__drawing_insert_image`
 - `mcp__fusion-essentials__drawing_update`
+- `mcp__fusion-essentials__form_create`
 - `mcp__fusion-essentials__joint_at_geometry`
 - `mcp__fusion-essentials__joint_create`
 - `mcp__fusion-essentials__joint_create_as_built`
@@ -265,10 +268,12 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__drawing_get",
       "mcp__fusion-essentials__drawing_get_status",
       "mcp__fusion-essentials__find_geometry",
+      "mcp__fusion-essentials__form_get",
       "mcp__fusion-essentials__mesh_get",
       "mcp__fusion-essentials__model_compute_holder",
       "mcp__fusion-essentials__model_inspect",
       "mcp__fusion-essentials__model_measure_between",
+      "mcp__fusion-essentials__model_measure_continuity",
       "mcp__fusion-essentials__model_measure_relation",
       "mcp__fusion-essentials__param_get",
       "mcp__fusion-essentials__pmi_get",
@@ -340,6 +345,7 @@ Auto-allow reads only. Every write asks; destructive writes and the arbitrary-co
       "mcp__fusion-essentials__drawing_export",
       "mcp__fusion-essentials__drawing_insert_image",
       "mcp__fusion-essentials__drawing_update",
+      "mcp__fusion-essentials__form_create",
       "mcp__fusion-essentials__joint_at_geometry",
       "mcp__fusion-essentials__joint_create",
       "mcp__fusion-essentials__joint_create_as_built",
@@ -475,10 +481,12 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__drawing_get",
       "mcp__fusion-essentials__drawing_get_status",
       "mcp__fusion-essentials__find_geometry",
+      "mcp__fusion-essentials__form_get",
       "mcp__fusion-essentials__mesh_get",
       "mcp__fusion-essentials__model_compute_holder",
       "mcp__fusion-essentials__model_inspect",
       "mcp__fusion-essentials__model_measure_between",
+      "mcp__fusion-essentials__model_measure_continuity",
       "mcp__fusion-essentials__model_measure_relation",
       "mcp__fusion-essentials__param_get",
       "mcp__fusion-essentials__pmi_get",
@@ -523,6 +531,7 @@ Auto-allow reads and LOCAL model writes (extrude, joint, sketch, ...). Cloud/doc
       "mcp__fusion-essentials__drawing_dimension",
       "mcp__fusion-essentials__drawing_insert_image",
       "mcp__fusion-essentials__drawing_update",
+      "mcp__fusion-essentials__form_create",
       "mcp__fusion-essentials__joint_at_geometry",
       "mcp__fusion-essentials__joint_create",
       "mcp__fusion-essentials__joint_create_as_built",

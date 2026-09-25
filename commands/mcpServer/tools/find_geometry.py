@@ -184,13 +184,7 @@ def _face_record(face, inv_k):
 
 def _edge_record(edge, inv_k):
     g = safe(lambda: edge.geometry)
-    ct = safe(lambda: g.curveType)
-    kind = {adsk.core.Curve3DTypes.Circle3DCurveType: "circular_edge",
-            adsk.core.Curve3DTypes.Line3DCurveType: "line_edge",
-            adsk.core.Curve3DTypes.Arc3DCurveType: "arc_edge",
-            adsk.core.Curve3DTypes.Ellipse3DCurveType: "ellipse_edge",
-            adsk.core.Curve3DTypes.EllipticalArc3DCurveType: "elliptical_arc_edge",
-            adsk.core.Curve3DTypes.NurbsCurve3DCurveType: "spline_edge"}.get(ct, "edge")
+    kind = _inputs.edge_kind(g)
     pt = safe(lambda: edge.pointOnEdge)
     # Keyed to pointOnEdge - what _refind_by_locator compares an edge against, not the circle center
     # the display 'position' may carry below.

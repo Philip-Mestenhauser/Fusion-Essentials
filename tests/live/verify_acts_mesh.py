@@ -12,9 +12,9 @@ from verify_core import (
     EXPORT_DIR, _RECALL, _activated, _arranged, _base_feature_open, _box, _captured, _ctx_get,
     _datum_plane, _document_closed, _document_read, _drilled, _dwell, _extent_measured, _extruded,
     _fg, _fgn, _holder_computed, _made_component, _matched, _measured, _mesh_round_trip,
-    _needs, _new_document, _num, _packed, _rebuilt, _recall, _refused, _repair_no_op,
-    _same_face_area, _split_bodies, _stitched, _trim_scoped_to_target, _unless, _unstitched,
-    _watch)
+    _needs, _new_document, _num, _packed, _prof, _rebuilt, _recall, _refused, _repair_no_op,
+    _same_face_area, _shelled, _split_bodies, _stitched, _trim_scoped_to_target, _unless,
+    _unstitched, _watch)
 from verify_acts_cam import MACHINING_EXTENSION
 from verify_layout import _px, _py
 
@@ -102,6 +102,420 @@ def _base_feature_added(before_key, name_key):
             {"before_count": before["timeline_count"], "after": after,
              "added_rows": remaining, "expected_name": expected_name},
             valid)
+    return check
+
+
+def _opposite_rim_first(p):
+    """The rim's four handles with the two edges running along x first - two edges sharing no
+    vertex, so the list as handed over does not chain end to end."""
+    ms = p["matches"]
+    along_x = [m["handle"] for m in ms if abs((m.get("direction") or [0.0])[0]) > 0.5]
+    if len(along_x) != 2:
+        raise ValueError(f"expected 2 of the {len(ms)} rim edges along x, read {len(along_x)}")
+    return along_x + [m["handle"] for m in ms if m["handle"] not in along_x]
+
+
+def _domed_patch(flat_mm2):
+    """find_geometry on the tangent patch body: its faces read, none is planar, and their area
+    sum is over the flat patch the opening would take by 1 % - the patch that ignores its
+    continuity is one flat face, the group-tangent one a dome."""
+    def check(p):
+        faces = [m for m in p.get("matches") or [] if str(m.get("kind")).endswith("face")]
+        areas = [m.get("area") for m in faces]
+        good = (bool(faces) and all(m.get("kind") != "planar_face" for m in faces)
+                and all(_num(a) for a in areas) and sum(areas) > 1.01 * flat_mm2)
+        return _measured(f"a domed patch over the flat {flat_mm2} mm2",
+                         {"kinds": [m.get("kind") for m in faces], "areas": areas}, good)
+    return check
+
+
+def _seams_read(label, test, jumps=lambda js: True):
+    """model_measure_continuity: every edge's normal angle passes `test`, the jump list `jumps`."""
+    def check(p):
+        rows = p.get("edges") or []
+        got = {"angles": [r.get("max_normal_angle_deg") for r in rows],
+               "modes": [r.get("mode") for r in rows],
+               "jumps": [r.get("max_curvature_jump") for r in rows]}
+        return _measured(label, got, bool(rows) and all(_num(a) and test(a)
+                                                        for a in got["angles"])
+                         and jumps(got["jumps"]))
+    return check
+
+
+def _g2_start_g1_end(js):
+    """[smooth rim, tangent rim] jumps: the tangent seam's is non-zero and 10x the smooth one's."""
+    return len(js) == 2 and all(_num(j) for j in js) and js[1] > 0 and js[0] * 10 < js[1]
+
+
+def _edges_of(p):
+    """find_geometry: the handles of every edge match - the faces the same query lists left out."""
+    return [m["handle"] for m in p.get("matches") or [] if "edge" in str(m.get("kind"))]
+
+
+def _blend_lofted(start, end):
+    """model_loft between two rims: ends read back as asked, edge sections, a weight per end."""
+    def check(p):
+        params = p.get("model_parameters") or {}
+        weighted = [side for side, cond in (("start", start), ("end", end)) if cond != "free"]
+        got = {"ends": p.get("ends"), "kinds": p.get("section_kinds"), "weights": params,
+               "is_solid": p.get("is_solid")}
+        return _measured(f"a {start}-to-{end} edge loft", got,
+                         p.get("ends") == {"start": start, "end": end}
+                         and p.get("section_kinds") == ["edge", "edge"]
+                         and set(params) == {f"{s}_weight" for s in weighted}
+                         and p.get("is_solid") is False)
+    return check
+
+
+def _blend_lofts_healthy(count):
+    """design_get(include=['timeline']): the Blend component's `count` loft rows all read healthy."""
+    def check(p):
+        rows = [r for r in (p.get("timeline") or {}).get("timeline") or []
+                if r.get("component") == "Blend" and r.get("type") == "LoftFeature"]
+        got = {r.get("name"): r.get("health", "healthy") for r in rows}
+        return _measured(f"{count} healthy Blend loft(s)", got,
+                         len(rows) == count and all(h == "healthy" for h in got.values()))
+    return check
+
+
+def _lofted_as(ends, kinds, params, **more):
+    """model_loft: the ends, section kinds and parameter names read off the feature, and `more`."""
+    def check(p):
+        got = {"ends": p.get("ends"), "kinds": p.get("section_kinds"),
+               "params": sorted(p.get("model_parameters") or {}),
+               **{k: p.get(k) for k in more}}
+        return _measured(f"a {kinds} loft ending {ends}", got,
+                         got["ends"] == ends and got["kinds"] == kinds
+                         and got["params"] == sorted(params) and "unverified" not in p
+                         and all(got[k] == v for k, v in more.items()))
+    return check
+
+
+def _seam_jump_past(key, factor):
+    """model_measure_continuity: a seam under 0.01 deg, its curvature jump past factor x the twin's."""
+    def check(p):
+        row = (p.get("edges") or [{}])[0]
+        got = {"angle": row.get("max_normal_angle_deg"), "jump": row.get("max_curvature_jump"),
+               "twin_jump": _RECALL.get(key)}
+        return _measured(f"a seam bending over {factor}x its twin's", got,
+                         _num(got["angle"]) and got["angle"] < 0.01 and _num(got["jump"])
+                         and _num(got["twin_jump"]) and got["jump"] > factor * got["twin_jump"])
+    return check
+
+
+def _box_x(lo, hi):
+    """model_inspect: the body's x extent lies in [lo, hi] mm."""
+    return lambda p: _measured(f"an x extent in [{lo}, {hi}] mm", p.get("x"),
+                               _num(p.get("x")) and lo <= p["x"] <= hi)
+
+
+def _timeline_rows_suppressed(*keys):
+    """design_get(include=['timeline']): the rows the recalled Cascade features name all read
+    is_suppressed true - read off the timeline, not off the suppress reply."""
+    def check(p):
+        rows = (p.get("timeline") or {}).get("timeline") or []
+        want = [_RECALL[k] for k in keys]
+        got = {r.get("name"): r.get("is_suppressed") for r in rows
+               if r.get("component") == "Cascade" and r.get("name") in want}
+        return _measured("cascade rows suppressed on the timeline", got,
+                         all(got.get(n) is True for n in want))
+    return check
+
+
+def _also_named(key, *keys):
+    """The suppress/unsuppress reply names every recalled Cascade dependent under `key`."""
+    def check(p):
+        also = p.get(key)
+        want = [_RECALL[k] for k in keys]
+        return _measured(f"{key} names the dependents", {key: also, "want": want},
+                         isinstance(also, list) and all(n in also for n in want))
+    return check
+
+
+def _same_volume(key):
+    """model_inspect: the volume reads what it read before the suppress/unsuppress pair."""
+    def check(p):
+        got = (p.get("mass") or {}).get("volume")
+        return _measured("volume restored", {"volume": got, "before": _RECALL.get(key)},
+                         _num(got) and abs(got - _RECALL[key]) < 0.01)
+    return check
+
+
+# Pinned at the cameo's own sizes, not scaled from the 200 mm probes; measure_api's
+# form-crease-fillet-two-sizes re-measures the fillet figure by raw-API script at both sizes.
+_FORM_BOX_CM3 = 7.225184674         # the 3x3x3 box cage, 20 mm
+_FORM_CREASE_CM3 = 7.465881190      # the same cage, its top rim creased
+_FORM_FILLET_CM3 = -0.018444933     # the four creased edges filleted at 1 mm
+
+
+def _near_rel(got, want, rel=1e-4):
+    return _num(got) and abs(got - want) <= rel * abs(want)
+
+
+def _inspected_mm3(label, want_cm3):
+    """model_inspect in mm: the body's own volume within 1e-4 of the measured one."""
+    def check(p):
+        got = (p.get("mass") or {}).get("volume")
+        return _measured(label, {"volume_mm3": got, "want_mm3": round(want_cm3 * 1000, 6)},
+                         _near_rel(got, want_cm3 * 1000))
+    return check
+
+
+def _form_made(volume_cm3, sharp):
+    """form_create: a solid six-face Form whose own read-back verified, at the measured volume, with
+    `sharp` sharp edges read off its seams."""
+    def check(p):
+        facts = {k: p.get(k) for k in ("created", "is_solid", "brep_faces", "readback",
+                                       "volume_cm3")}
+        facts["sharp_edges"] = len(p.get("sharp_edges") or [])
+        return _measured(f"a verified Form at {volume_cm3} cm3", facts,
+                         p.get("created") is True and p.get("is_solid") is True
+                         and p.get("brep_faces") == 6 and p.get("readback") == "exact"
+                         and facts["sharp_edges"] == sharp
+                         and _near_rel(p.get("volume_cm3"), volume_cm3))
+    return check
+
+
+def _form_row_added(p):
+    """design_get after the create: the timeline is one row longer and that row is a FormFeature
+    in FormDemo carrying the Form's name - read off the timeline, not off the create's reply."""
+    tl = p.get("timeline") or {}
+    name = _RECALL["form_box"].split("/", 1)[1]
+    hits = [r for r in tl.get("timeline") or [] if r.get("name") == name
+            and r.get("type") == "FormFeature" and r.get("component") == "FormDemo"]
+    return _measured("one FormFeature row added", {"count": tl.get("count"),
+                                                   "before": _RECALL["form_tl0"], "rows": hits},
+                     tl.get("count") == _RECALL["form_tl0"] + 1 and len(hits) == 1)
+
+
+def _form_cage_read(p):
+    """form_get(include=['cage']): the census Fusion's own read-back gives - 54 quads, 56 points,
+    closed, the eight valence-3 corners - and the stored record still matching it."""
+    census = p.get("census") or {}
+    got = {k: census.get(k) for k in ("faces", "vertices", "closed", "stars")}
+    got["record_matches_cage"] = p.get("record_matches_cage")
+    return _measured("the box Form's cage read back", got,
+                     got["faces"] == 54 and got["vertices"] == 56 and got["closed"] is True
+                     and got["stars"] == {"3": 8} and got["record_matches_cage"] is True
+                     and isinstance(p.get("cage"), dict))
+
+
+def _creased_rim_cage(ctx):
+    """form_create args: the box's own cage moved 30 mm along x, its 12 top-rim edges creased -
+    every cage edge whose two ends sit at the top and on one outer side."""
+    cage = _ctx_get(ctx, "form_box_cage", "the box Form's cage")
+    verts = cage["vertices"]
+    top = max(v[2] for v in verts)
+    sides = [(axis, pick(v[axis] for v in verts)) for axis in (0, 1) for pick in (min, max)]
+
+    def at(v, axis, value):
+        return abs(verts[v][axis] - value) < 1e-6
+    rim = set()
+    for f in cage["faces"]:
+        for k in range(4):
+            a, b = f[k], f[(k + 1) % 4]
+            if at(a, 2, top) and at(b, 2, top) and any(at(a, ax, val) and at(b, ax, val)
+                                                       for ax, val in sides):
+                rim.add(tuple(sorted((a, b))))
+    return {"cage": {"vertices": [[v[0] + 30.0, v[1], v[2]] for v in verts],
+                     "faces": cage["faces"], "creases": [list(e) for e in sorted(rim)]},
+            "name": "FormCrease", "component": "FormDemo:1"}
+
+
+def _crease_made(p):
+    """The creased Form's address, saved and recalled; its sharp-edge handles parked for the
+    fillet that takes them."""
+    _RECALL["form_crease_edges"] = [row["edge"] for row in p["sharp_edges"]]
+    _RECALL["form_crease"] = p["form"]
+    return p["form"]
+
+
+def _forms_modified(p):
+    """form_get: the filleted Form reads modified downstream and the untouched box does not."""
+    rows = {r.get("form"): r.get("modified_downstream") for r in p.get("forms") or []}
+    got = {"box": rows.get(_RECALL["form_box"]), "crease": rows.get(_RECALL["form_crease"])}
+    return _measured("modified_downstream off the creation record", got,
+                     got["crease"] is True and got["box"] is False)
+
+
+def _named_exactly(key, recall_key):
+    """The suppress/delete reply names exactly the recalled fillet under `key`."""
+    def check(p):
+        want = [_RECALL[recall_key]]
+        return _measured(f"{key} names the fillet alone", {key: p.get(key), "want": want},
+                         p.get(key) == want)
+    return check
+
+
+def _form_pair_suppressed(p):
+    """design_get: the Form and its fillet both read suppressed on the timeline itself."""
+    names = [_RECALL["form_crease"].split("/", 1)[1], _RECALL["form_fillet"]]
+    got = {r.get("name"): r.get("is_suppressed")
+           for r in (p.get("timeline") or {}).get("timeline") or []
+           if r.get("component") == "FormDemo" and r.get("name") in names}
+    return _measured("the Form and its fillet suppressed", got,
+                     len(got) == 2 and all(v is True for v in got.values()))
+
+
+def _form_count_is(key, delta):
+    """design_get: the timeline count reads the recalled count plus `delta`."""
+    def check(p):
+        count = (p.get("timeline") or {}).get("count")
+        return _measured(f"timeline count {delta:+d}", {"count": count, "before": _RECALL[key]},
+                         _num(count) and count == _RECALL[key] + delta)
+    return check
+
+
+def _crease_handles_found(p):
+    """find_geometry on the creased Form: every sharp-edge handle form_create returned is one of its
+    own edge handles - the same occurrence proxy at the same world point."""
+    def key(h):
+        return str(h).split(";rv=")[0]
+    got = {key(h) for h in _edges_of(p)}
+    want = [key(h) for h in _RECALL["form_crease_edges"]]
+    return _measured("the crease handles are find_geometry's", {"want": want, "found": sorted(got)},
+                     len(want) == 4 and all(h in got for h in want))
+
+
+def _form_name(key):
+    """The Form name of a recalled '<component>/<name>' label."""
+    label = _RECALL[key] if isinstance(_RECALL[key], str) else _RECALL[key]["form"]
+    return label.split("/", 1)[1]
+
+
+def _cyl_made(p):
+    """form_create behind the marker: a solid six-face capped cylinder, read back exactly, with no
+    sharp edge, naming the rolled-back box Form as the item after it."""
+    facts = {k: p.get(k) for k in ("created", "is_solid", "brep_faces", "readback", "volume_cm3",
+                                   "inserted_before", "timeline_index")}
+    facts["sharp_edges"] = p.get("sharp_edges")
+    return _measured("a capped cylinder Form before the box", facts,
+                     p.get("created") is True and p.get("is_solid") is True
+                     and p.get("brep_faces") == 6 and p.get("readback") == "exact"
+                     and p.get("sharp_edges") == [] and _num(p.get("volume_cm3"))
+                     and p.get("inserted_before") == _form_name("form_box"))
+
+
+def _cyl_before_box(p):
+    """design_get: the cylinder Form's row is followed by the box Form's - the order form_create's
+    inserted_before named, read off the timeline."""
+    rows = {r.get("index"): r for r in (p.get("timeline") or {}).get("timeline") or []}
+    at = [i for i, r in rows.items() if r.get("name") == _form_name("form_cyl")
+          and r.get("component") == "FormDemo" and r.get("type") == "FormFeature"]
+    after = rows.get(at[0] + 1, {}).get("name") if len(at) == 1 else None
+    return _measured("the box Form follows the cylinder", {"cylinder_at": at, "next": after},
+                     after == _RECALL["form_cyl"]["inserted_before"])
+
+
+def _cyl_inspected(p):
+    """model_inspect: the cylinder's own volume is form_create's, inside its 20 x 20 x 40 mm cage."""
+    got = {"volume_mm3": (p.get("mass") or {}).get("volume"), "extent": [p.get(a) for a in "xyz"]}
+    want = _RECALL["form_cyl"]["volume_cm3"] * 1000
+    return _measured(f"the cylinder at {want} mm3", got,
+                     _near_rel(got["volume_mm3"], want)
+                     and all(_num(e) and 0 < e <= c + 1e-3
+                             for e, c in zip(got["extent"], (20, 20, 40))))
+
+
+def _group_collapsed(name):
+    """design_get: the named timeline group reads collapsed with its two Forms in it."""
+    def check(p):
+        rows = [r for r in (p.get("timeline") or {}).get("timeline") or []
+                if r.get("name") == name and r.get("is_group") is True]
+        got = [(r.get("is_collapsed"), r.get("member_count")) for r in rows]
+        return _measured(f"group {name} collapsed", got, got == [(True, 2)])
+    return check
+
+
+def _cyl_cage_read(p):
+    """form_get(include=['cage']) on the grouped cylinder: its own 40-quad, 42-point cage."""
+    census = p.get("census") or {}
+    got = {k: census.get(k) for k in ("faces", "vertices", "closed", "stars")}
+    got["record_matches_cage"] = p.get("record_matches_cage")
+    return _measured("the grouped cylinder's cage read back", got,
+                     got["faces"] == 40 and got["vertices"] == 42 and got["closed"] is True
+                     and got["stars"] == {"3": 8} and got["record_matches_cage"] is True)
+
+
+def _tube_made(p):
+    """form_create on an uncapped cylinder: an open surface Form read back exactly, its area
+    published in place of a volume, no seam read sharp or unread."""
+    facts = {k: p.get(k) for k in ("created", "is_solid", "readback", "area_cm2", "volume_cm3",
+                                   "seams_unread")}
+    facts["sharp_edges"] = p.get("sharp_edges")
+    return _measured("an open tube Form", facts,
+                     p.get("created") is True and p.get("is_solid") is False
+                     and p.get("readback") == "exact" and _num(p.get("area_cm2"))
+                     and "volume_cm3" not in p and p.get("sharp_edges") == [])
+
+
+def _tube_area(p):
+    """find_geometry on the tube: its faces' areas sum to the area form_create published."""
+    areas = [m.get("area") for m in p.get("matches") or [] if str(m.get("kind")).endswith("face")]
+    want = _RECALL["form_tube"]["area_cm2"] * 100
+    return _measured(f"the tube's faces at {want} mm2", {"areas": areas},
+                     bool(areas) and all(_num(a) for a in areas) and _near_rel(sum(areas), want))
+
+
+def _form_bodies_solid(p):
+    """model_inspect per_body on FormDemo: the cylinder reads solid and the tube open."""
+    rows = {r.get("body"): r.get("is_solid") for r in (p.get("mass") or {}).get("per_body") or []}
+    got = {k: rows.get(k) for k in ("FormCyl", "FormTube")}
+    return _measured("the cylinder solid and the tube open", got,
+                     got == {"FormCyl": True, "FormTube": False})
+
+
+def _tube_raised(p):
+    """model_inspect: the tube's lowest point sits 10 mm above where it was before the move."""
+    z = (p.get("min_point") or {}).get("z")
+    return _measured("the tube raised 10 mm", {"z": z, "before": _RECALL["form_tube_z"]},
+                     _num(z) and abs(z - (_RECALL["form_tube_z"] + 10.0)) < 1e-3)
+
+
+def _moved_form_modified(p):
+    """form_get: the moved tube reads modified downstream; the cylinder and the box do not."""
+    rows = {r.get("form"): r.get("modified_downstream") for r in p.get("forms") or []}
+    got = {k: rows.get(_RECALL[k] if isinstance(_RECALL[k], str) else _RECALL[k]["form"])
+           for k in ("form_tube", "form_cyl", "form_box")}
+    return _measured("modified_downstream after a move", got,
+                     got == {"form_tube": True, "form_cyl": False, "form_box": False})
+
+
+def _cascade_counted(p):
+    """design_get after the delete: what the reply named, plus its unnamed count, is exactly what
+    left the timeline besides the target - both counts read off the timeline itself."""
+    reply = _RECALL["cascade_delete"]
+    also = reply.get("also_deleted")
+    before, after = _RECALL["cascade_count"], (p.get("timeline") or {}).get("count")
+    named = (reply.get("also_deleted_count", len(also)) + reply.get("also_deleted_unnamed", 0)
+             if isinstance(also, list) else None)
+    return _measured("the delete names every item that left with it",
+                     {"also_deleted": also, "unnamed": reply.get("also_deleted_unnamed"),
+                      "count_before": before, "count_after": after},
+                     named is not None and _num(after) and named == before - after - 1)
+
+
+def _cascade_group_collapsed(p):
+    """design_get(include=['timeline']): one CascadeG row, collapsed, standing for 2 members that
+    are not listed beside it - the state the census caveat reports on."""
+    rows = (p.get("timeline") or {}).get("timeline") or []
+    group = [r for r in rows if r.get("name") == "CascadeG"]
+    members = [r.get("name") for r in rows if r.get("component") == "Cascade"
+               and r.get("name") in (_RECALL["cascade_extrude"], _RECALL["cascade_shell"])]
+    return _measured("CascadeG reads collapsed over 2 unlisted members",
+                     {"group_rows": group, "members_listed": members},
+                     len(group) == 1 and group[0].get("is_collapsed") is True
+                     and group[0].get("member_count") == 2 and not members)
+
+
+def _caveat_names_groups(n):
+    """The suppress reply's census_caveat counts `n` collapsed group(s); also_suppressed rides along."""
+    def check(p):
+        caveat = p.get("census_caveat")
+        return _measured(f"census_caveat names {n} group(s)",
+                         {"census_caveat": caveat, "also_suppressed": p.get("also_suppressed")},
+                         isinstance(caveat, str)
+                         and caveat.startswith(f"{n} collapsed timeline group(s)"))
     return check
 
 
@@ -223,13 +637,36 @@ _MACHINING = [
     ("surface_delete_face", lambda c: {"faces": [_ctx_get(c, "sdel_top", "top face")], "heal": False},
      lambda p: p["faces_delta"] == -1 and p["bodies_consumed"] == 0, None),
     ("find_geometry", {"target": "SDel", "kind": "line_edge", "nearest_to": [310, 210, 10], "max_results": 4}, "ok", _fgn("sdel_rim")),
-    ("surface_patch", lambda c: {"boundary": _ctx_get(c, "sdel_rim", "rim edges")}, "ok", None),
-    # a patch with operation 'new' leaves the opened body untouched, so the SAME rim carries the two
-    # option beats below. 'continuity' is written through set_verified, so a value the platform
-    # dropped is an error - the payload cannot echo a continuity the patch is not running.
-    ("surface_patch", lambda c: {"boundary": _ctx_get(c, "sdel_rim", "rim edges"),
+    # read while the open box's rim is the only line edges near that point: a patch body's own
+    # boundary edges sit on the rim and would tie them in the nearest_to sort.
+    ("find_geometry", {"target": "SDel", "kind": "line_edge", "nearest_to": [310, 210, 10],
+                       "max_results": 4}, _matched(4, "line_edge"),
+     ("sdel_rim_scrambled", _opposite_rim_first)),
+    ("surface_patch", lambda c: {"boundary": _ctx_get(c, "sdel_rim", "rim edges")}, "ok",
+     ("sdel_flat_body", lambda p: "SDel:1:" + p["result_body"])),
+    # a patch with operation 'new' leaves the opened body untouched, so the SAME rim carries the
+    # option beats below. The tangent beat hands the rim over with its two opposite edges first, an
+    # order that does not chain, and 'continuity' is the FEATURE's groupContinuity read back.
+    ("surface_patch", lambda c: {"boundary": _ctx_get(c, "sdel_rim_scrambled",
+                                                      "the rim, opposite edges first"),
                                  "continuity": "tangent"},
-     lambda p: p.get("continuity") == "tangent", None),
+     lambda p: p.get("continuity") == "tangent" and "unverified" not in p,
+     ("sdel_tangent_body", lambda p: "SDel:1:" + p["result_body"])),
+    # the body itself, apart from the reply: a patch that ignores its continuity is ONE flat face
+    # over the 20 x 20 mm opening, and a tangent one bulges into a dome with more area than that.
+    ("find_geometry", lambda c: {"target": _ctx_get(c, "sdel_tangent_body", "the tangent patch")},
+     _domed_patch(400.0), None),
+    # the seam itself, read edge by edge between the walls and each patch: the tangent patch meets
+    # them within half a degree, the connected one (a flat lid on vertical walls) far from it - so a
+    # read that always answers 0 fails the second row.
+    ("model_measure_continuity",
+     lambda c: {"edges": _ctx_get(c, "sdel_rim", "rim edges"),
+                "against": _ctx_get(c, "sdel_tangent_body", "the tangent patch")},
+     _seams_read("the tangent patch meets the walls within 0.5 deg", lambda a: a < 0.5), None),
+    ("model_measure_continuity",
+     lambda c: {"edges": _ctx_get(c, "sdel_rim", "rim edges"),
+                "against": _ctx_get(c, "sdel_flat_body", "the connected patch")},
+     _seams_read("the connected patch creases the walls past 45 deg", lambda a: a > 45.0), None),
     # an interior RAIL the patch surface must pass through: a sheet standing in the opening, whose
     # top edge crosses it end to end with both ends landing on the rim. 'interior_rail_count' is the
     # count PatchFeatureInput.interiorRailsAndPoints reads back, not the number of handles passed.
@@ -246,11 +683,376 @@ _MACHINING = [
     ("surface_patch", lambda c: {"boundary": _ctx_get(c, "sdel_rim", "rim edges"),
                                  "interior_rails": [_ctx_get(c, "patch_rail", "the interior rail")]},
      lambda p: p.get("interior_rail_count") == 1, None),
+    # three of the four rim edges are no closed loop: refused by the vertex walk before Fusion
+    # sees them, the timeline unchanged.
+    ("design_get", {"include": ["timeline"], "max_results": 2000}, "ok",
+     ("sdel_tl", _recall("sdel_tl", lambda p: p["timeline"]["count"]))),
+    ("surface_patch", lambda c: {"boundary": _ctx_get(c, "sdel_rim", "rim edges")[:3]},
+     _refused("'boundary'", "not one closed loop"), None),
+    ("design_get", {"include": ["timeline"], "max_results": 2000}, _form_count_is("sdel_tl", 0),
+     None),
     # rails fit ONE patch surface, so pairing them with the multi-loop 'boundaries' is refused
     # BEFORE any patch runs - every loop would otherwise be handed the same rails.
     ("surface_patch", lambda c: {"boundaries": [_ctx_get(c, "sdel_rim", "rim edges")],
                                  "interior_rails": [_ctx_get(c, "patch_rail", "the interior rail")]},
      "refused", None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    # THE CASCADE, in a scratch document of its own: a sketch, an extrude on it and a shell on the
+    # extrude. Suppressing the sketch switches the other two off, and deleting the extrude takes
+    # what depends on it - each reply names what else it changed, checked against separate reads.
+    ("doc_get", {}, _document_read,
+     ("cascade_home", _recall("cascade_home", lambda p: p["active"]["document_handle"]))),
+    ("doc_new", lambda c: {"expect_document": _ctx_get(c, "cascade_home", "the sweep document")},
+     _new_document, ("cascade_doc", _recall("cascade_doc", lambda p: p["document_handle"]))),
+    ("model_create_component", {"name": "Cascade", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "CascadeS"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 1100, "y1": 200,
+                                           "x2": 1130, "y2": 230}],
+                             "sketch_name": "CascadeS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "CascadeS", "profile_index": 0, "distance": 20}, _extruded,
+     ("cascade_extrude", _recall("cascade_extrude", lambda p: p["feature"]))),
+    ("find_geometry", {"target": "Cascade", "kind": "planar_face", "nearest_to": [1115, 215, 20],
+                       "max_results": 1}, "ok", _fg("cascade_top")),
+    ("model_shell", lambda c: {"body_name": "Cascade", "thickness": 2,
+                               "remove_faces": [_ctx_get(c, "cascade_top", "the cascade top")]},
+     _shelled, ("cascade_shell", _recall("cascade_shell", lambda p: p["feature"]))),
+    ("model_inspect", {"target": "Cascade:1", "include": ["default", "mass"], "units": "mm"},
+     lambda p: _num((p.get("mass") or {}).get("volume")),
+     ("cascade_volume", _recall("cascade_volume", lambda p: p["mass"]["volume"]))),
+    ("design_edit_timeline", {"action": "suppress", "feature": "CascadeS"},
+     _also_named("also_suppressed", "cascade_extrude", "cascade_shell"), None),
+    ("design_get", {"include": ["timeline"], "max_results": 2000},
+     _timeline_rows_suppressed("cascade_extrude", "cascade_shell"), None),
+    ("design_edit_timeline", {"action": "suppress", "feature": "CascadeS", "suppressed": False},
+     _also_named("also_unsuppressed", "cascade_extrude", "cascade_shell"), None),
+    ("model_inspect", {"target": "Cascade:1", "include": ["default", "mass"], "units": "mm"},
+     _same_volume("cascade_volume"), None),
+    # A collapsed group hides the extrude and shell from the suppress census: the reply says so in
+    # census_caveat, and the group= listing shows the hidden members did switch off.
+    ("design_edit_timeline",
+     lambda c: {"action": "group", "name": "CascadeG",
+                "feature": "Cascade/" + _ctx_get(c, "cascade_extrude", "the cascade extrude"),
+                "end_feature": "Cascade/" + _ctx_get(c, "cascade_shell", "the cascade shell")},
+     lambda p: p.get("grouped") is True and p.get("group") == "CascadeG", None),
+    ("design_get", {"include": ["timeline"], "max_results": 2000}, _cascade_group_collapsed, None),
+    ("design_edit_timeline", {"action": "suppress", "feature": "CascadeS"},
+     _caveat_names_groups(1), None),
+    ("design_get", {"include": ["timeline"], "group": "CascadeG", "max_results": 2000},
+     _timeline_rows_suppressed("cascade_extrude", "cascade_shell"), None),
+    ("design_edit_timeline", {"action": "suppress", "feature": "CascadeS", "suppressed": False},
+     lambda p: p.get("is_suppressed") is False, None),
+    ("model_inspect", {"target": "Cascade:1", "include": ["default", "mass"], "units": "mm"},
+     _same_volume("cascade_volume"), None),
+    ("design_edit_timeline", {"action": "ungroup", "feature": "CascadeG"},
+     lambda p: p.get("ungrouped") is True, None),
+    ("design_get", {"include": ["timeline"], "max_results": 2000}, "ok",
+     ("cascade_count", _recall("cascade_count", lambda p: p["timeline"]["count"]))),
+    ("design_delete_feature",
+     lambda c: {"feature": "Cascade/" + _ctx_get(c, "cascade_extrude", "the cascade extrude")},
+     lambda p: p.get("deleted") is True and isinstance(p.get("also_deleted"), list),
+     ("cascade_delete", _recall("cascade_delete", lambda p: p))),
+    ("design_get", {"include": ["timeline"], "max_results": 2000}, _cascade_counted, None),
+    ("doc_activate",
+     lambda c: {"name": _ctx_get(c, "cascade_home", "the sweep document"),
+                "expect_document": _ctx_get(c, "cascade_doc", "the cascade document")},
+     _activated(), None),
+    ("doc_close",
+     lambda c: {"name": _ctx_get(c, "cascade_doc", "the cascade document"),
+                "save_changes": False,
+                "expect_document": _ctx_get(c, "cascade_home", "the sweep document")},
+     _document_closed, None),
+    # THE FORM: a T-spline box built from a cage, its cage read back and re-created with the top
+    # rim creased, the four sharp edges that makes filleted, then the rebuild loop's suppress and
+    # delete naming the fillet they take - each against a separate read.
+    ("model_create_component", {"name": "FormDemo", "activate": True}, _made_component, None),
+    ("design_get", {"include": ["timeline"], "max_results": 2000}, "ok",
+     ("form_tl0", _recall("form_tl0", lambda p: p["timeline"]["count"]))),
+    ("form_create", {"primitive": {"shape": "box", "size": [20, 20, 20], "spans": [3, 3, 3]},
+                     "name": "FormBox", "component": "FormDemo:1", "origin": [1300, 200, 10]},
+     _form_made(_FORM_BOX_CM3, 0), ("form_box", _recall("form_box", lambda p: p["form"]))),
+    _watch("FormDemo:1"),
+    ("model_inspect", {"target": "FormBox", "include": ["default", "mass"], "units": "mm"},
+     _inspected_mm3("FormBox volume", _FORM_BOX_CM3), None),
+    ("design_get", {"include": ["timeline"], "max_results": 2000}, _form_row_added, None),
+    # every seam of the uncreased box reads smooth, measured apart from form_create's own gate.
+    ("find_geometry", {"target": "FormBox", "max_results": 50},
+     lambda p: _measured("the box Form's edges", {"edges": len(_edges_of(p))},
+                         0 < len(_edges_of(p)) <= 20),
+     ("form_box_edges", _edges_of)),
+    ("model_measure_continuity",
+     lambda c: {"edges": _ctx_get(c, "form_box_edges", "the box Form's edges")},
+     _seams_read("the uncreased box Form's seams read smooth", lambda a: a < 0.01), None),
+    ("workspace_orient", {}, lambda p: _measured("the workspace after form_create",
+                                                 p.get("workspace"), p.get("workspace") == "Design"),
+     None),
+    ("form_get", lambda c: {"form": _ctx_get(c, "form_box", "the box Form"), "include": ["cage"]},
+     _form_cage_read, ("form_box_cage", lambda p: p["cage"])),
+    ("form_create", _creased_rim_cage, _form_made(_FORM_CREASE_CM3, 4),
+     ("form_crease", _crease_made)),
+    ("find_geometry", {"target": "FormCrease", "max_results": 50}, _crease_handles_found, None),
+    # the four sharp edges form_create returned read as the right-angle crease they are, before
+    # the fillet below rounds them away.
+    ("model_measure_continuity", lambda c: {"edges": _RECALL["form_crease_edges"]},
+     _seams_read("the creased rim reads 90 deg", lambda a: abs(a - 90.0) < 0.1), None),
+    ("model_inspect", {"target": "FormCrease", "include": ["default", "mass"], "units": "mm"},
+     _inspected_mm3("FormCrease volume", _FORM_CREASE_CM3), None),
+    ("model_fillet", lambda c: {"edges": _RECALL["form_crease_edges"], "radius": 1},
+     lambda p: _measured("the creased rim filleted", {k: p.get(k) for k in
+                                                      ("edges_cut", "volume_delta_cm3")},
+                         p.get("edges_cut") == 4
+                         and _near_rel(p.get("volume_delta_cm3"), _FORM_FILLET_CM3)),
+     ("form_fillet", _recall("form_fillet", lambda p: p["feature"]))),
+    ("model_inspect", {"target": "FormCrease", "include": ["default", "mass"], "units": "mm"},
+     _inspected_mm3("the filleted FormCrease volume", _FORM_CREASE_CM3 + _FORM_FILLET_CM3),
+     ("form_crease_volume", _recall("form_crease_volume", lambda p: p["mass"]["volume"]))),
+    ("form_get", {}, _forms_modified, None),
+    ("design_edit_timeline", lambda c: {"action": "suppress",
+                                        "feature": _ctx_get(c, "form_crease", "the creased Form")},
+     _named_exactly("also_suppressed", "form_fillet"), None),
+    ("design_get", {"include": ["timeline"], "max_results": 2000}, _form_pair_suppressed, None),
+    ("design_edit_timeline", lambda c: {"action": "suppress", "suppressed": False,
+                                        "feature": _ctx_get(c, "form_crease", "the creased Form")},
+     _named_exactly("also_unsuppressed", "form_fillet"), None),
+    ("model_inspect", {"target": "FormCrease", "include": ["default", "mass"], "units": "mm"},
+     _same_volume("form_crease_volume"), None),
+    ("design_get", {"include": ["timeline"], "max_results": 2000}, "ok",
+     ("form_tl_pre", _recall("form_tl_pre", lambda p: p["timeline"]["count"]))),
+    ("design_delete_feature", lambda c: {"feature": _ctx_get(c, "form_crease", "the creased Form")},
+     _named_exactly("also_deleted", "form_fillet"), None),
+    ("design_get", {"include": ["timeline"], "max_results": 2000}, _form_count_is("form_tl_pre", -2),
+     ("form_tl_post", _recall("form_tl_post", lambda p: p["timeline"]["count"]))),
+    # an index past the eight vertices - a face naming a grip that does not exist is refused
+    # before Fusion sees it, and the timeline reads unchanged.
+    ("form_create", {"cage": {"vertices": [[0, 0, 0], [10, 0, 0], [10, 10, 0], [0, 10, 0],
+                                           [0, 0, 10], [10, 0, 10], [10, 10, 10], [0, 10, 10]],
+                              "faces": [[0, 1, 2, 99]]}, "component": "FormDemo:1"},
+     _refused("face 0", "99"), None),
+    ("form_create", {"primitive": {"shape": "box", "size": [10, 10, 10], "spans": [1, 1, 1]},
+                     "cage": {"vertices": [], "faces": []}, "component": "FormDemo:1"},
+     _refused("primitive", "cage"), None),
+    # A cage whose surface passes through itself passes the cage check, finishEdit raises, and the
+    # Form edit stays OPEN for the user to close (measured: measure_api's last row), so that refusal
+    # runs there, never in this story document.
+    ("design_get", {"include": ["timeline"], "max_results": 2000}, _form_count_is("form_tl_post", 0),
+     None),
+    # A capped cylinder built with the marker rolled back before the box Form: it lands before the
+    # box, names it, and its grouped cage still reads by the Form's own address.
+    ("design_edit_timeline", lambda c: {"action": "roll", "to": "before",
+                                        "feature": _ctx_get(c, "form_box", "the box Form")},
+     lambda p: p.get("rolled") is True, None),
+    ("form_create", {"primitive": {"shape": "cylinder", "size": [20, 40], "spans": [4]},
+                     "name": "FormCyl", "component": "FormDemo:1", "origin": [1270, 200, 20]},
+     _cyl_made, ("form_cyl", _recall("form_cyl", lambda p: p))),
+    ("design_get", {"include": ["timeline"], "max_results": 2000}, _cyl_before_box, None),
+    ("design_edit_timeline", {"action": "roll", "to": "end"},
+     lambda p: p.get("rolled") is True and p.get("rolled_back") == 0, None),
+    ("model_inspect", {"target": "FormCyl", "include": ["default", "mass"], "units": "mm"},
+     _cyl_inspected, None),
+    ("design_edit_timeline", lambda c: {"action": "group", "name": "FormPair",
+                                        "feature": _RECALL["form_cyl"]["form"],
+                                        "end_feature": _ctx_get(c, "form_box", "the box Form")},
+     lambda p: p.get("grouped") is True and p.get("group") == "FormPair", None),
+    ("design_get", {"include": ["timeline"], "max_results": 2000}, _group_collapsed("FormPair"),
+     None),
+    ("form_get", lambda c: {"form": _RECALL["form_cyl"]["form"], "include": ["cage"]},
+     _cyl_cage_read, None),
+    ("design_edit_timeline", {"action": "ungroup", "feature": "FormPair"},
+     lambda p: p.get("ungrouped") is True, None),
+    # An uncapped cylinder is an open surface Form: its area stands in for a volume, and a
+    # downstream move is what its record's corners catch.
+    ("form_create", {"primitive": {"shape": "cylinder", "size": [20, 40], "spans": [4],
+                                   "capped": False},
+                     "name": "FormTube", "component": "FormDemo:1", "origin": [1360, 200, 20]},
+     _tube_made, ("form_tube", _recall("form_tube", lambda p: p))),
+    _watch("FormDemo:1"),
+    ("find_geometry", {"target": "FormTube", "max_results": 20}, _tube_area, None),
+    ("model_inspect", {"target": "FormDemo:1", "include": ["mass"], "per_body": True},
+     _form_bodies_solid, None),
+    ("model_inspect", {"target": "FormTube", "units": "mm"}, "ok",
+     ("form_tube_z", _recall("form_tube_z", lambda p: p["min_point"]["z"]))),
+    ("model_move", {"bodies": ["FormTube"], "dz": 10}, "ok", None),
+    ("model_inspect", {"target": "FormTube", "units": "mm"}, _tube_raised, None),
+    ("form_get", {}, _moved_form_modified, None),
+    # THE BLEND: an edge loft with smooth and tangent ends; a free-ended loft over the same rims
+    # is the crease an always-0 seam read fails.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "Blend", "activate": True}, _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "BlendA"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "circle", "cx": 1500, "cy": 200, "radius": 14}],
+                             "sketch_name": "BlendA"}, "ok", None),
+    ("surface_extrude", {"sketch_name": "BlendA", "distance": 50}, "ok", None),
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": 90, "name": "BlendTopPlane"},
+     _datum_plane("xy"), None),
+    ("sketch_create", {"plane": "BlendTopPlane", "name": "BlendB"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "circle", "cx": 1508, "cy": 200, "radius": 10}],
+                             "sketch_name": "BlendB"}, "ok", None),
+    ("surface_extrude", {"sketch_name": "BlendB", "distance": 50}, "ok", None),
+    ("find_geometry", {"target": "Blend", "kind": "circular_edge", "radius": 14,
+                       "nearest_to": [1500, 200, 50], "max_results": 1},
+     _matched(1, "circular_edge"), _fg("blend_rim_a")),
+    ("find_geometry", {"target": "Blend", "kind": "circular_edge", "radius": 10,
+                       "nearest_to": [1508, 200, 90], "max_results": 1},
+     _matched(1, "circular_edge"), _fg("blend_rim_b")),
+    ("model_loft", lambda c: {"profiles": [_ctx_get(c, "blend_rim_a", "tube A's rim"),
+                                           _ctx_get(c, "blend_rim_b", "tube B's rim")],
+                              "as_surface": True, "start": "smooth", "end": "tangent"},
+     _blend_lofted("smooth", "tangent"),
+     ("blend_smooth", _recall("blend_smooth", lambda p: {
+         "body": "Blend:1:" + p["result_bodies"][0],
+         "start_weight": p["model_parameters"]["start_weight"]}))),
+    ("model_measure_continuity",
+     lambda c: {"edges": [_ctx_get(c, "blend_rim_a", "tube A's rim"),
+                          _ctx_get(c, "blend_rim_b", "tube B's rim")],
+                "against": _RECALL["blend_smooth"]["body"]},
+     _seams_read("both seams under 0.01 deg, the tangent one's curvature jump 10x the smooth one's",
+                 lambda a: a < 0.01, _g2_start_g1_end), None),
+    ("param_set", lambda c: {"name": _RECALL["blend_smooth"]["start_weight"], "expression": "1.5"},
+     lambda p: _measured("the start weight moved to 1.5",
+                         {"set": p.get("set"), "after": (p.get("after") or {}).get("expression")},
+                         p.get("set") is True and (p.get("after") or {}).get("expression") == "1.5"),
+     None),
+    ("design_recompute", {},
+     lambda p: p.get("recomputed") is True and _num(p.get("error_count")), None),
+    ("design_get", {"include": ["timeline"], "max_results": 2000}, _blend_lofts_healthy(1), None),
+    ("model_measure_continuity",
+     lambda c: {"edges": [_ctx_get(c, "blend_rim_a", "tube A's rim")],
+                "against": _RECALL["blend_smooth"]["body"]},
+     _seams_read("the reweighted smooth seam still reads under 0.01 deg", lambda a: a < 0.01),
+     None),
+    ("model_loft", lambda c: {"profiles": [_ctx_get(c, "blend_rim_a", "tube A's rim"),
+                                           _ctx_get(c, "blend_rim_b", "tube B's rim")],
+                              "as_surface": True},
+     _blend_lofted("free", "free"),
+     ("blend_free", _recall("blend_free", lambda p: "Blend:1:" + p["result_bodies"][0]))),
+    ("model_measure_continuity",
+     lambda c: {"edges": [_ctx_get(c, "blend_rim_a", "tube A's rim")],
+                "against": _RECALL["blend_free"]},
+     _seams_read("the free end creases the seam past 2 deg", lambda a: a > 2.0), None),
+    # a tangent end on a PROFILE section: refused before Fusion sees it, the timeline unchanged.
+    ("sketch_get", {"sketch_name": "BlendA"}, "ok", _prof("blend_a_profile")),
+    ("design_get", {"include": ["timeline"], "max_results": 2000}, "ok",
+     ("blend_tl", _recall("blend_tl", lambda p: p["timeline"]["count"]))),
+    ("model_loft", lambda c: {"profiles": [_ctx_get(c, "blend_a_profile", "tube A's profile"),
+                                           _ctx_get(c, "blend_rim_b", "tube B's rim")],
+                              "as_surface": True, "start": "tangent"},
+     _refused("tangent", "edge"), None),
+    ("design_get", {"include": ["timeline"], "max_results": 2000}, _form_count_is("blend_tl", 0),
+     None),
+    # a NOSE from tube B's free rim to a sketch point: the point_tangent tip is a dome, so the
+    # rim seam bends harder than under the point_sharp twin's cone - both seams stay tangent.
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": 160,
+                            "name": "BlendNosePlane"}, _datum_plane("xy"), None),
+    ("sketch_create", {"plane": "BlendNosePlane", "name": "BlendNose"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "point", "cx": 1508, "cy": 200}],
+                             "sketch_name": "BlendNose"}, "ok", None),
+    ("find_geometry", {"target": "Blend", "kind": "circular_edge", "radius": 10,
+                       "nearest_to": [1508, 200, 140], "max_results": 1},
+     _matched(1, "circular_edge"), _fg("blend_rim_top")),
+    ("model_loft", lambda c: {"profiles": [_ctx_get(c, "blend_rim_top", "tube B's free rim"),
+                                           "BlendNose/point:1"],
+                              "as_surface": True, "start": "tangent", "end": "point_sharp"},
+     _lofted_as({"start": "tangent", "end": "point_sharp"}, ["edge", "point"], ["start_weight"]),
+     ("blend_cone", _recall("blend_cone", lambda p: "Blend:1:" + p["result_bodies"][0]))),
+    ("model_loft", lambda c: {"profiles": [_ctx_get(c, "blend_rim_top", "tube B's free rim"),
+                                           "BlendNose/point:1"],
+                              "as_surface": True, "start": "tangent", "end": "point_tangent"},
+     _lofted_as({"start": "tangent", "end": "point_tangent"}, ["edge", "point"],
+                ["start_weight", "end_weight"]),
+     ("blend_dome", _recall("blend_dome", lambda p: "Blend:1:" + p["result_bodies"][0]))),
+    ("model_measure_continuity",
+     lambda c: {"edges": [_ctx_get(c, "blend_rim_top", "tube B's free rim")],
+                "against": _RECALL["blend_cone"]},
+     _seams_read("the cone's rim seam under 0.01 deg", lambda a: a < 0.01),
+     ("blend_cone_jump", _recall("blend_cone_jump",
+                                 lambda p: p["edges"][0]["max_curvature_jump"]))),
+    ("model_measure_continuity",
+     lambda c: {"edges": [_ctx_get(c, "blend_rim_top", "tube B's free rim")],
+                "against": _RECALL["blend_dome"]},
+     _seam_jump_past("blend_cone_jump", 1.5), None),
+    # OPEN sketch curves with a direction start: at the 0 deg default the surface stays over the
+    # 100 mm-wide sections, and the start_angle parameter at 30 deg pushes its box past them.
+    ("sketch_create", {"plane": "xy", "name": "BlendOpenA"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "spline",
+                                           "points": [[1600, 200], [1650, 220], [1700, 200]]}],
+                             "sketch_name": "BlendOpenA"}, "ok", None),
+    ("sketch_create", {"plane": "BlendTopPlane", "name": "BlendOpenB"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "spline",
+                                           "points": [[1600, 200], [1650, 190], [1700, 205]]}],
+                             "sketch_name": "BlendOpenB"}, "ok", None),
+    ("model_loft", {"profiles": ["BlendOpenA/spline:0", "BlendOpenB/spline:0"],
+                    "as_surface": True, "start": "direction"},
+     _lofted_as({"start": "direction", "end": "free"}, ["curve", "curve"],
+                ["start_weight", "start_angle"]),
+     ("blend_open", _recall("blend_open", lambda p: {
+         "body": "Blend:1:" + p["result_bodies"][0],
+         "angle": p["model_parameters"]["start_angle"]}))),
+    ("model_inspect", lambda c: {"target": _RECALL["blend_open"]["body"]},
+     _box_x(99.99, 100.01), None),
+    ("param_set", lambda c: {"name": _RECALL["blend_open"]["angle"], "expression": "30 deg"},
+     lambda p: p.get("set") is True, None),
+    ("model_inspect", lambda c: {"target": _RECALL["blend_open"]["body"]},
+     _box_x(105.0, 130.0), None),
+    # the same direction start on two PROFILES: 32 x 28 mm over the rims at 0 deg, wider at 30.
+    ("model_loft", {"profiles": [{"sketch": "BlendA", "profile_index": 0},
+                                 {"sketch": "BlendB", "profile_index": 0}],
+                    "as_surface": True, "start": "direction"},
+     _lofted_as({"start": "direction", "end": "free"}, ["profile", "profile"],
+                ["start_weight", "start_angle"]),
+     ("blend_prof_dir", _recall("blend_prof_dir", lambda p: {
+         "body": "Blend:1:" + p["result_bodies"][0],
+         "angle": p["model_parameters"]["start_angle"]}))),
+    ("model_inspect", lambda c: {"target": _RECALL["blend_prof_dir"]["body"]},
+     _box_x(31.99, 32.01), None),
+    ("param_set", lambda c: {"name": _RECALL["blend_prof_dir"]["angle"], "expression": "30 deg"},
+     lambda p: p.get("set") is True, None),
+    ("model_inspect", lambda c: {"target": _RECALL["blend_prof_dir"]["body"]},
+     _box_x(35.0, 60.0), None),
+    # RAILS: two strips' inner edges guide a loft between open splines. rail_continuity g1 meets
+    # the strip tangent along the rail; the g0 twin creases it.
+    ("sketch_create", {"plane": "xy", "name": "BlendStripL"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "line", "x1": 1800, "y1": 200,
+                                           "x2": 1760, "y2": 180}],
+                             "sketch_name": "BlendStripL"}, "ok", None),
+    ("surface_extrude", {"sketch_name": "BlendStripL", "distance": 90}, "ok", None),
+    ("sketch_create", {"plane": "xy", "name": "BlendStripR"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "line", "x1": 1840, "y1": 200,
+                                           "x2": 1880, "y2": 180}],
+                             "sketch_name": "BlendStripR"}, "ok", None),
+    ("surface_extrude", {"sketch_name": "BlendStripR", "distance": 90}, "ok", None),
+    ("sketch_create", {"plane": "xy", "name": "BlendRailA"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "spline",
+                                           "points": [[1800, 200], [1820, 202], [1840, 200]]}],
+                             "sketch_name": "BlendRailA"}, "ok", None),
+    ("sketch_create", {"plane": "BlendTopPlane", "name": "BlendRailB"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "spline",
+                                           "points": [[1800, 200], [1820, 202], [1840, 200]]}],
+                             "sketch_name": "BlendRailB"}, "ok", None),
+    ("find_geometry", {"target": "Blend", "kind": "line_edge", "nearest_to": [1800, 200, 45],
+                       "max_results": 1}, _matched(1, "line_edge"), _fg("blend_rail_l")),
+    ("find_geometry", {"target": "Blend", "kind": "line_edge", "nearest_to": [1840, 200, 45],
+                       "max_results": 1}, _matched(1, "line_edge"), _fg("blend_rail_r")),
+    ("model_loft", lambda c: {"profiles": ["BlendRailA/spline:0", "BlendRailB/spline:0"],
+                              "rails": [_ctx_get(c, "blend_rail_l", "the left strip's edge"),
+                                        _ctx_get(c, "blend_rail_r", "the right strip's edge")],
+                              "as_surface": True, "rail_continuity": "g1"},
+     _lofted_as({"start": "free", "end": "free"}, ["curve", "curve"], [],
+                rail_continuity="g1", rails_count=2),
+     ("blend_rail_g1", _recall("blend_rail_g1", lambda p: "Blend:1:" + p["result_bodies"][0]))),
+    ("model_loft", lambda c: {"profiles": ["BlendRailA/spline:0", "BlendRailB/spline:0"],
+                              "rails": [_ctx_get(c, "blend_rail_l", "the left strip's edge"),
+                                        _ctx_get(c, "blend_rail_r", "the right strip's edge")],
+                              "as_surface": True, "rail_continuity": "g0"},
+     _lofted_as({"start": "free", "end": "free"}, ["curve", "curve"], [],
+                rail_continuity="g0", rails_count=2),
+     ("blend_rail_g0", _recall("blend_rail_g0", lambda p: "Blend:1:" + p["result_bodies"][0]))),
+    ("model_measure_continuity",
+     lambda c: {"edges": [_ctx_get(c, "blend_rail_l", "the left strip's edge")],
+                "against": _RECALL["blend_rail_g1"]},
+     _seams_read("the g1 rail seam under 0.01 deg", lambda a: a < 0.01), None),
+    ("model_measure_continuity",
+     lambda c: {"edges": [_ctx_get(c, "blend_rail_l", "the left strip's edge")],
+                "against": _RECALL["blend_rail_g0"]},
+     _seams_read("the g0 twin creases the rail seam past 10 deg", lambda a: a > 10.0), None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
     ("sketch_create", {"plane": "xy", "name": "Proj"}, "ok", None),
     ("find_geometry", {"target": "SDel", "kind": "planar_face", "nearest_to": [310, 210, 0], "max_results": 1}, "ok", _fg("proj_face")),

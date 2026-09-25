@@ -15,8 +15,8 @@ import pytest
 
 from conftest import (load_tool, make_design, make_occurrence, _make_object_collection,
                       _MeshBodies, _NamedCollection, BRepBody, BRepEdge, BRepFace, Circle3D,
-                      Cylinder, FakeBaseFeature, FakeOccurrence, FakePoint, FakeTimelineObject,
-                      FakeVector3D, Line3D, MakeComp,
+                      Cylinder, FakeApplication, FakeBaseFeature, FakeOccurrence, FakePoint,
+                      FakeTimelineObject, FakeUserInterface, FakeVector3D, Line3D, MakeComp,
                       MakeDesign, MeshBody, Plane, Profile, Sketch, body_proxy, entity_proxy,
                       make_source_document)
 
@@ -463,14 +463,84 @@ class TestEdgeLoopRef:
         (coll, meta), err = inp.EdgeLoopRef("edges", closed=False).resolve(["E1", "E2", "E3"])
         assert err is None and meta["body_count"] == 1 and coll.count == 3
 
-    def test_closed_loop_may_span_bodies_and_reports_body_count(self):
-        # the single-body rule gates OPEN chains only; a closed boundary resolves, and meta
-        # reports how many bodies the edges touch.
+    @pytest.mark.parametrize("second_body, body_count", [("BodyB", 2), (None, 1)])
+    def test_closed_loop_off_one_body_goes_on_unchecked_in_the_callers_order(self, second_body,
+                                                                             body_count):
+        # the single-body rule gates OPEN chains only. Two bodies own separate vertices, so a
+        # closed set across them (or one whose bodies do not all read) is never walked or refused.
         e1, = _edges_on_one_body(1, token="BodyA")
-        e2, = _edges_on_one_body(1, token="BodyB")
+        e2, = _edges_on_one_body(1, token=second_body) if second_body else (FakeEdge(),)
+        e1.startVertex, e1.endVertex = object(), object()
+        e2.startVertex, e2.endVertex = object(), object()
         _install_loop({"E1": e1, "E2": e2})
-        (coll, meta), err = inp.EdgeLoopRef("boundary", closed=True).resolve(["E1", "E2"])
-        assert err is None and meta["body_count"] == 2
+        (coll, meta), err = inp.EdgeLoopRef("boundary", closed=True).resolve(["E2", "E1"])
+        assert err is None and meta["body_count"] == body_count
+        assert [coll.item(i) for i in range(coll.count)] == [e2, e1]
+        assert meta["loop_checked"] is False
+
+    @pytest.mark.parametrize("ends, passed", [
+        # a->b, c->b, c->d, a->d listed out of order: the walk follows c->b and a->d backwards
+        (("ab", "cb", "cd", "ad"), [0, 2, 1, 3]),
+        # listed in loop order with the closing edge a->d running backwards: closed as given
+        (("ab", "bc", "cd", "ad"), [0, 1, 2, 3]),
+    ])
+    def test_edges_running_against_the_loop_still_close_in_loop_order(self, ends, passed):
+        edges = _edges_on_one_body(len(ends))
+        verts = {}
+        for e, pair in zip(edges, ends):
+            e.startVertex, e.endVertex = (verts.setdefault(c, object()) for c in pair)
+        _install_loop({f"E{i}": e for i, e in enumerate(edges)})
+        (coll, meta), err = inp.EdgeLoopRef("boundary", closed=True).resolve(
+            [f"E{i}" for i in passed])
+        assert err is None and meta["loop_checked"] is True
+        assert meta["entities"] == edges
+
+    @pytest.mark.parametrize("ends, fragments", [
+        # a-b, b-c, then a stray x-y: the chain [0, 1] stops at edge [1]
+        ("ab bc xy", ("the chain [0, 1] breaks at edge [1]", "no other edge continues")),
+        # a-b, then b-c AND b-d both continue from b: not one simple loop
+        ("ab bc bd", ("breaks at edge [0]", "edges [1, 2] all continue")),
+        # a-b, b-c, c-d chain end to end and never come back to a
+        ("ab bc cd", ("do not close", "edge [2] does not meet edge [0]")),
+    ])
+    def test_a_closed_boundary_that_is_not_one_loop_is_refused_naming_the_edge(self, ends,
+                                                                                fragments):
+        verts = {}
+        edges = _edges_on_one_body(len(ends.split()))
+        for e, pair in zip(edges, ends.split()):
+            e.startVertex, e.endVertex = (verts.setdefault(c, object()) for c in pair)
+        _install_loop({f"E{i}": e for i, e in enumerate(edges)})
+        val, err = inp.EdgeLoopRef("boundary", closed=True).resolve(
+            [f"E{i}" for i in range(len(edges))])
+        assert val is None
+        for fragment in fragments:
+            assert fragment in err
+
+    @pytest.mark.parametrize("paths, checked", [(("Rim:1", "Rim:2"), False),
+                                                (("Rim:1", "Rim:1"), True),
+                                                ((None, "Rim:1"), False)])
+    def test_edges_of_two_placements_of_one_body_go_on_unwalked(self, paths, checked):
+        # a fresh wrapper per read that compares == on its occurrence, never by `is`
+        class _Ctx:
+            def __init__(self, path):
+                self.path = path
+
+            def __eq__(self, other):
+                return isinstance(other, _Ctx) and other.path == self.path
+        edges = _edges_on_one_body(2)
+        verts = {}
+        for e, path, pair in zip(edges, paths, ("ab", "ba")):
+            e.assemblyContext = None if path is None else _Ctx(path)
+            e.startVertex, e.endVertex = (verts.setdefault(f"{path}{c}", object()) for c in pair)
+        _install_loop({"E0": edges[0], "E1": edges[1]})
+        val, err = inp.EdgeLoopRef("boundary", closed=True).resolve(["E0", "E1"])
+        assert err is None and val[1]["loop_checked"] is checked and val[1]["body_count"] == 1
+
+    def test_a_closed_boundary_edge_without_vertices_is_refused_not_passed_unordered(self):
+        e1, e2 = _edges_on_one_body(2)
+        _install_loop({"E1": e1, "E2": e2})
+        val, err = inp.EdgeLoopRef("boundary", closed=True).resolve(["E1", "E2"])
+        assert val is None and "'boundary'[0]" in err and "end vertices did not read" in err
 
     def test_contract_note_states_closed_vs_open(self):
         closed = inp.EdgeLoopRef("boundary", closed=True).contract_note()
@@ -2037,8 +2107,8 @@ def _install_native_and_proxy(comp_bodies=(), occ_bodies=(), comp_name="Probe"):
 
 # The x-ref shape, measured on a host holding two x-refs of one design: the two documents' 'Frame'
 # bodies answer ONE document-local entityToken while their source documents' lineage ids differ.
-_URN_A = "urn:adsk.wipprod:dm.lineage:K3I2nkywRlaWPHJexysOdA"
-_URN_B = "urn:adsk.wipprod:dm.lineage:N_QoPrrrSJmF__f9BZV86A"
+_URN_A = "urn:adsk.wipprod:dm.lineage:FixtureLineageA000000A"
+_URN_B = "urn:adsk.wipprod:dm.lineage:FixtureLineageB000000B"
 _XREF_TOKEN = "/vB+AAEAAwAAAAAAAAAAAAAA"
 
 
@@ -2450,6 +2520,70 @@ class TestModeGuard:
         _install_mode()
         assert inp.ModeGuard(inp.MODE_DIRECT).contract_note() == "Requires direct mode."
         assert "base-feature" in inp.ModeGuard(inp.MODE_BASE_FEATURE).contract_note()
+
+
+def _app_in(workspace_id):
+    """The session with `workspace_id` the active workspace (Workspace has no shape dump)."""
+    return FakeApplication(user_interface=FakeUserInterface(
+        active_workspace=types.SimpleNamespace(id=workspace_id)))
+
+
+class TestInFormEdit:
+    """An open Form edit reads designType direct AND the Form workspace active - either alone is
+    not one (a direct design, or the workspace read lagging a closed edit)."""
+
+    @pytest.mark.parametrize("design_type,workspace,want", [
+        (0, "TSplineEnvironment", True), (1, "TSplineEnvironment", False),
+        (0, "FusionSolidEnvironment", False)])
+    def test_both_halves_are_needed(self, monkeypatch, design_type, workspace, want):
+        monkeypatch.setattr(inp._common, "app", _app_in(workspace))
+        assert inp.in_form_edit(MakeDesign(design_type=design_type)) is want
+
+    @staticmethod
+    def _switch_on_pump(monkeypatch, n):
+        """Count doEvents pumps; the Form workspace arrives on pump `n`."""
+        app = _app_in("FusionSolidEnvironment")
+        monkeypatch.setattr(inp._common, "app", app)
+        pumps = []
+
+        def pump():
+            pumps.append(1)
+            if len(pumps) == n:
+                app.userInterface.activeWorkspace = types.SimpleNamespace(id="TSplineEnvironment")
+        monkeypatch.setattr(inp._pump_until.__globals__["adsk"], "doEvents", pump, raising=False)
+        return pumps
+
+    def test_an_edit_opened_just_before_the_read_is_found_after_the_workspace_switch(
+            self, monkeypatch):
+        pumps = self._switch_on_pump(monkeypatch, 3)
+        assert inp.in_form_edit(MakeDesign(design_type=0)) is True
+        assert len(pumps) == 3
+
+    @pytest.mark.parametrize("extra,want", [(0, True), (1, False)])
+    def test_the_wait_is_bounded_by_the_pump_count(self, monkeypatch, extra, want):
+        pumps = self._switch_on_pump(monkeypatch, inp._FORM_SWITCH_PUMPS + extra)
+        assert inp.in_form_edit(MakeDesign(design_type=0)) is want
+        assert len(pumps) == inp._FORM_SWITCH_PUMPS
+
+    def test_an_open_base_feature_scope_is_not_a_form_edit_and_pumps_nothing(self, monkeypatch):
+        _install_mode()
+        pumps = self._switch_on_pump(monkeypatch, 1)
+        monkeypatch.setattr(inp._common, "app", _app_in("TSplineEnvironment"))
+        design = _FakeModeDesign(design_type=0, edit_object=FakeBaseFeature())
+        assert inp.in_form_edit(design) is False and pumps == []
+
+    def test_the_parametric_guard_names_the_open_edit(self, monkeypatch):
+        monkeypatch.setattr(inp._common, "app", _app_in("TSplineEnvironment"))
+        ok, err = inp.ModeGuard(inp.MODE_PARAMETRIC).check(MakeDesign(design_type=0))
+        assert ok is False and "A Form edit is open" in err["message"]
+        assert "Finish Form" in err["message"] and "direct mode" not in err["message"]
+
+    def test_a_feature_name_in_an_open_form_edit_names_the_edit(self, monkeypatch):
+        design = MakeDesign(design_type=0)
+        monkeypatch.setattr(inp._common, "app", _app_in("TSplineEnvironment"))
+        monkeypatch.setattr(inp._common, "design", lambda: design)
+        _val, err = inp.FeatureRef("feature").resolve("Fillet2")
+        assert "A Form edit is open" in err and "Act on the bodies" not in err
 
 
 # ── ProfileRef / ProfileRefList: stable handle first, legacy {sketch, index} fallback, ORDER-keeping ─

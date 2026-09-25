@@ -2046,8 +2046,8 @@ def _lit_root(design, token="root-tok"):
 # document's ROOT component reads the SAME byte-identical entityToken while the documents' lineage
 # ids differ. So a component's document is the half that tells two of them apart.
 _SHARED_ROOT_TOKEN = "/v4BAAEAAwAAAAAAAAAAAAAA"
-_URN_ONE = "urn:adsk.wipprod:dm.lineage:K3I2nkywRlaWPHJexysOdA"
-_URN_TWO = "urn:adsk.wipprod:dm.lineage:N_QoPrrrSJmF__f9BZV86A"
+_URN_ONE = "urn:adsk.wipprod:dm.lineage:FixtureLineageA000000A"
+_URN_TWO = "urn:adsk.wipprod:dm.lineage:FixtureLineageB000000B"
 
 
 def _doc_comp(name, urn, sketches=True):

@@ -10,7 +10,7 @@ code is the source of truth — match the nearest existing tool when in doubt.
 
 ## Planning files
 
-Keep `plans` sparse. `plans/backlog.md` is the single ledger for actionable work; ready handoffs for native testing or acceptance belong in `plans/<BACKLOG-ROW-ID>.md`, update an existing row instead of creating a competing plan or status report, and delete the matching plan when its backlog row is removed.
+Keep `plans` sparse (it is private and absent from a clone). `plans/backlog.md` is the single ledger for actionable work; ready handoffs for native testing or acceptance belong in `plans/<BACKLOG-ROW-ID>.md`, update an existing row instead of creating a competing plan or status report, and delete the matching plan when its backlog row is removed.
 Put agent scratch files, reports, evidence, exports and worker handoffs in the gitignored `outputs/` directory. Reserve `tests/live/evals/results/` for actual eval runs and `.cache` for tooling caches and isolated worktrees. Remove disposable scaffolding when a task finishes.
 
 ## Read vs Edit — the two kinds (and the read shapes)
@@ -78,7 +78,7 @@ every kind, plus the shared helpers to reuse — is the generated map in
 [commands/mcpServer/tools/CLAUDE.md](commands/mcpServer/tools/CLAUDE.md), loaded when you author a tool.
 
 <!-- BEGIN GENERATED FAMILIES (py -3 tests/gen_manifest.py) -->
-**Tool families** (193 tools — `sys_find_tool <kw>` to search, `TOOL_MANIFEST.md` for the full list): `model`(33) `surface`(12) `mesh`(15) `sketch`(14) `cam`(26) `assembly`(9) `joint`(7) `design`(14) `doc`(14) `data`(10) `drawing`(10) `param`(5) `pmi`(4) `view`(6) `find`(1) `workspace`(1) `appearance`(1) `save`(1) `sys`(10)
+**Tool families** (196 tools — `sys_find_tool <kw>` to search, `TOOL_MANIFEST.md` for the full list): `model`(34) `surface`(12) `form`(2) `mesh`(15) `sketch`(14) `cam`(26) `assembly`(9) `joint`(7) `design`(14) `doc`(14) `data`(10) `drawing`(10) `param`(5) `pmi`(4) `view`(6) `find`(1) `workspace`(1) `appearance`(1) `save`(1) `sys`(10)
 <!-- END GENERATED FAMILIES -->
 
 ## Tool descriptions and agent-facing strings — pure ASCII, verified claims, budgeted
@@ -115,7 +115,7 @@ appended, so the wire alone is what gets graded.
 
 ## Enforcement is a closed list
 
-The files in `tests/lints/` ARE the closed list (36 on 2026-09-02): the wire contract (naming + verb/`write=`
+The files in `tests/lints/` ARE the closed list: the wire contract (naming + verb/`write=`
 agreement, write-status, strict schema, input names, output contracts, ASCII, wire budget and shape, prose
 budget), the honesty contract (no fabricated fallbacks, bool returns checked, no first-match resolvers,
 postconditions declared, units, native identity keys, export knob pre-read, frame disclosure, material

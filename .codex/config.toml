@@ -244,6 +244,12 @@ approval_mode = "approve"
 [mcp_servers.fusion-essentials.tools.find_geometry]
 approval_mode = "approve"
 
+[mcp_servers.fusion-essentials.tools.form_create]
+approval_mode = "approve"
+
+[mcp_servers.fusion-essentials.tools.form_get]
+approval_mode = "approve"
+
 [mcp_servers.fusion-essentials.tools.joint_at_geometry]
 approval_mode = "approve"
 
@@ -353,6 +359,9 @@ approval_mode = "approve"
 approval_mode = "approve"
 
 [mcp_servers.fusion-essentials.tools.model_measure_between]
+approval_mode = "approve"
+
+[mcp_servers.fusion-essentials.tools.model_measure_continuity]
 approval_mode = "approve"
 
 [mcp_servers.fusion-essentials.tools.model_measure_relation]

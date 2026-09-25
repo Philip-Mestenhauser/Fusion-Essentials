@@ -11,7 +11,7 @@ re-driven so every feature follows it.
 import math
 
 from verify_core import (
-    _RECALL, _axis_aligned_face_at, _box, _chamfered, _component_metadata, _ctx_get, _cut_a_chain,
+    EXPORT_DIR, _RECALL, _axis_aligned_face_at, _box, _chamfered, _component_metadata, _ctx_get, _cut_a_chain,
     _cut_exactly, _cut_on_its_pivot, _marker_parked_after, _datum, _datum_plane,
     _document_closed, _drafted, _drafted_on_its_pivot, _drafted_symmetric, _drilled,
     _extent_measured, _extruded, _face_up_at, _fg, _fgn,
@@ -30,6 +30,7 @@ from verify_layout import _px, _py
 
 
 _RADIUS_DIAMETER_TOL_MM = 0.0005
+_SHOT_PATH = EXPORT_DIR + "/w4_shot"
 
 _HOLE_HOST = "HoleHostB"
 _HOLE_ACTIVE = "ActiveA"
@@ -3028,15 +3029,15 @@ _DETAILS = [
     # appended, the landed file is verified non-zero, and path + size are published beside the
     # inline image. The fleet's only raster writer, which is what feeds drawing_insert_image.
     ("view_screenshot", {"width": 400, "height": 300,
-                         "file_path": r"C:\Users\phili\AppData\Local\Temp\eval_sweep_exports\w4_shot"},
+                         "file_path": _SHOT_PATH},
      lambda p: "w4_shot.png" in str(p) and "size_bytes=" in str(p), None),
     # a second write to the SAME path lands without a refusal - the overwrite behaviour that makes
     # this tool write-kind (and puts it behind the write guard below).
     ("view_screenshot", {"width": 200, "height": 150,
-                         "file_path": r"C:\Users\phili\AppData\Local\Temp\eval_sweep_exports\w4_shot"},
+                         "file_path": _SHOT_PATH},
      lambda p: "w4_shot.png" in str(p) and "size_bytes=" in str(p), None),
     ("view_screenshot", {"width": 200, "height": 150,
-                         "file_path": r"C:\Users\phili\AppData\Local\Temp\eval_sweep_exports\w4_shot",
+                         "file_path": _SHOT_PATH,
                          "expect_document": "ZzNoSuchDocument"},
      _refused("active_document_changed"), None),
     # The dimension/constraint beats that measure TO a model face sit at the end of the act,

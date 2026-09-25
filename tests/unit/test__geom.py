@@ -299,8 +299,8 @@ class TestOwningBodies:
 
 # The two x-ref'd documents whose bodies answer ONE document-local entityToken (measured; see
 # _common.native_identity), and the lineage ids that separate them.
-_URN_A = "urn:adsk.wipprod:dm.lineage:K3I2nkywRlaWPHJexysOdA"
-_URN_B = "urn:adsk.wipprod:dm.lineage:N_QoPrrrSJmF__f9BZV86A"
+_URN_A = "urn:adsk.wipprod:dm.lineage:FixtureLineageA000000A"
+_URN_B = "urn:adsk.wipprod:dm.lineage:FixtureLineageB000000B"
 _XREF_TOKEN = "/vB+AAEAAwAAAAAAAAAAAAAA"
 
 

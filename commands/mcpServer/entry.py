@@ -88,6 +88,11 @@ DEFAULT_SETTINGS = {
         "label": "Enable drawing MCP tools",
         "default": True,
     },
+    "family_enabled_form": {
+        "type": "checkbox",
+        "label": "Enable form MCP tools",
+        "default": True,
+    },
     "family_enabled_mesh": {
         "type": "checkbox",
         "label": "Enable mesh MCP tools",

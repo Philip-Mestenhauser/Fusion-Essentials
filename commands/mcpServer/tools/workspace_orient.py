@@ -593,7 +593,9 @@ def handler() -> dict:
     # Design-wide, not root-only: a doc whose only sketches live in sub-components reads
     # sketches:0 from a root-only count.
     body_total, sketch_total = _common.design_wide_counts(design)
-    param_total = safe(lambda: design.userParameters.count, 0) or 0
+    # null, never 0, when the read raises - it does inside an open Form edit.
+    param_total = _common.counted(lambda: design.userParameters.count)
+    form_edit = _inputs.in_form_edit(design)
 
     errors, warnings, suppressed, markers, tl_total = _timeline_rollup(design)
     marker_pos, marker_count = _common.timeline_marker(design)
@@ -642,6 +644,15 @@ def handler() -> dict:
         "is_healthy": (errors == 0 and not broken_joints and not broken_relations
                        and not out_of_date and not rolled_back and not unresolved),
     }
+    if form_edit:
+        # The open edit hides the timeline, so none of its counts and no verdict over them read;
+        # the workspace is re-read because in_form_edit pumped until the Form workspace arrived.
+        out["workspace"] = safe(lambda: app.userInterface.activeWorkspace.name)
+        out["design"]["in_form_edit"] = True
+        out["health"].update({k: None for k in ("timeline_features", "timeline_errors",
+                                                "timeline_warnings", "timeline_suppressed",
+                                                "timeline_markers", "timeline_rolled_back",
+                                                "is_healthy")})
     # Present only when a compute state did NOT read, so the two lists above are never taken for a
     # complete census - is_healthy is a verdict over the entities that HAVE a state.
     if joints_unknown:
@@ -730,8 +741,14 @@ def handler() -> dict:
         verdict = (f"Attention ({', '.join(bits)}) - see health + the fix_* pointer(s). These CAN be "
                    "intentional on a fixture/CAM template (parked alternates, pinned refs) or a "
                    "deliberate mid-history roll; confirm before treating as broken. ")
+    elif form_edit:
+        verdict = ""
     else:
         verdict = "No compute errors, failed joints, or stale references. "
+    if form_edit:
+        verdict = ("A Form edit is open: it hides the timeline and the user parameters until the "
+                   "user clicks Finish Form, so their counts, timeline_rolled_back and is_healthy "
+                   "read null. " + verdict)
     # A timeline warning is stated distinctly, never folded into a clean bill and never counted as
     # unhealthy.
     if warnings:

@@ -299,6 +299,32 @@ _DENYLIST = {
     "scope_components": ("_sketch_detail", "def"),
     "scope_component": ("_sketch_detail", "def"),
     "timeline_health": ("_common", "def"),
+    # The ONE token-keyed timeline census a delete or a suppress diffs before and after; a second
+    # copy can key on names and lose a namesake, or skip the collapsed groups the caveat names.
+    "timeline_census": ("_design_common", "def"),
+    "timeline_item_key": ("_design_common", "def"),
+    # The ONE open-Form-edit read and the no-timeline refusal worded off it: a second copy is how
+    # one read goes back to calling an open Form edit a healthy direct design.
+    "in_form_edit": ("_inputs", "def"),
+    "no_timeline_reason": ("_design_common", "def"),
+    # The ONE seam read - a second copy is how two tools call the same seam smooth and sharp.
+    "edge_angles": ("_continuity", "def"),
+    "body_seams": ("_continuity", "def"),
+    "seam": ("_continuity", "def"),
+    "partner_face": ("_continuity", "def"),
+    # The ONE '<sketch>/<type>:<index>' parse and resolve: loft sections and loft guides share it, so
+    # the two inputs cannot come to accept different spellings of one sketch entity.
+    "sketch_entity_ref": ("_inputs", "def"),
+    "resolve_sketch_entity": ("_inputs", "def"),
+    # The Form walk, the create lifecycle (always finish, delete on failure) and the creation
+    # record: one home, so the rollback rule and the record's shape cannot drift between tools.
+    "all_forms": ("_form_common", "def"),
+    "create_form": ("_form_common", "def"),
+    "finish_edit": ("_form_common", "def"),
+    "read_record": ("_form_common", "def"),
+    "store_record": ("_form_common", "def"),
+    "body_box_cm": ("_form_common", "def"),
+    "canonical_hash": ("_tsm", "def"),
     "result_bodies": ("_common", "def"),
     "body_facts": ("_common", "def"),
     # The ONE abort for a partial-computing createInput transaction (trim, boundary fill): a
@@ -416,6 +442,9 @@ _DENYLIST = {
     # the other.
     "resolve_surface": ("_inputs", "def"),
     "surface_ref_label": ("_inputs", "def"),
+    # The ONE curveType -> edge-kind map a find_geometry-style handle's locator carries: a second
+    # copy is how two tools hand back different kinds for one edge.
+    "edge_kind": ("_inputs", "def"),
     "unit_vector": ("_geom", "def"),
     "unit_vector_between": ("_geom", "def"),
     "evaluator_normal_at": ("_geom", "def"),

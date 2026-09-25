@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 193  |  **description breadcrumbs:** 296  |  **note/error breadcrumbs:** 622
+**Tools:** 196  |  **description breadcrumbs:** 300  |  **note/error breadcrumbs:** 628
   |  **guidance smells flagged:** 8
 ## Blindspots to engineer
 
@@ -14,15 +14,15 @@ close orphans, factor duplicated guards into shared helpers.
 - none detected in the scanned literals.
 
 ### Orphans (no incoming breadcrumb detected in this map)
-**Read/Acquire (8)** - higher concern, a check-your-work tool nothing points to:
-  `cam_compare_operations`, `cam_find_holes`, `cam_find_pockets`, `cam_inspect_toolpaths`, `drawing_get_status`, `model_compute_holder`, `model_measure_relation`, `sys_get_api_doc`
+**Read/Acquire (9)** - higher concern, a check-your-work tool nothing points to:
+  `cam_compare_operations`, `cam_find_holes`, `cam_find_pockets`, `cam_inspect_toolpaths`, `drawing_get_status`, `model_compute_holder`, `model_measure_continuity`, `model_measure_relation`, `sys_get_api_doc`
 
 **Edit (48)** - usually leaf actions, scan for genuine gaps:
   `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `data_move_file`, `design_remove_feature`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_delete_sketch`, `drawing_dimension`, `drawing_insert_image`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_plane_cut`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_add_3d_spline`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
-- **52x** across 51 module(s): "No active design. Create or open a document first (see doc_new)."
-- **23x** across 23 module(s): "No active design. Open or create a document first (see doc_new)."
+- **54x** across 53 module(s): "No active design. Create or open a document first (see doc_new)."
+- **24x** across 24 module(s): "No active design. Open or create a document first (see doc_new)."
 - **9x** across 3 module(s): "' with design_delete_feature."
 - **8x** across 8 module(s): "No active design with components."
 - **6x** across 3 module(s): "Could not create output directory '"
@@ -36,8 +36,8 @@ close orphans, factor duplicated guards into shared helpers.
 - **4x** across 1 module(s): "setMotionData reported success on '"
 
 ### Hubs (most breadcrumbs lead here - the connective tissue)
-- `doc_new`  <- 84  (desc 0, note 84)
-- `find_geometry`  <- 50  (desc 14, note 36)
+- `doc_new`  <- 87  (desc 0, note 87)
+- `find_geometry`  <- 52  (desc 14, note 38)
 - `design_get`  <- 49  (desc 10, note 39)
 - `design_delete_feature`  <- 40  (desc 16, note 24)
 - `view_screenshot`  <- 34  (desc 5, note 29)
@@ -1369,6 +1369,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - deleteMe() reported success but the timeline still carries
 - ' - as many as before the delete (
 - ), so it was NOT removed. Nothing was rolled back; re-read design_get(include=['timeline']) to see what is actually there.
+- Also left the timeline with it:
 - ' names a RemoveFeature in
 - ) - refusing to guess which one this timeline object belongs to.
 - deleteMe() reported success but the timeline still carries  object(s) named '' - as many as before the delete (), so it was NOT removed. Nothing was rolled back; re-read design_get(include=['timeli...
@@ -1426,6 +1427,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - action='suppress' needs 'feature' - the timeline object to suppress or unsuppress (from design_get(include=['timeline'])).
 - Setting isSuppressed=
 - ' did not take - it reads
+- ; suppressed=false on '
 - Could not set isSuppressed on '
 - Remove the group with action='ungroup' - its items are kept.
 - action='group' needs 'feature' (the first item) and 'end_feature' (the last item) - the range to group, from design_get(include=['timeline']).
@@ -2152,6 +2154,21 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - The occurrence walk did not run to the end (a collection would not enumerate, or a depth/node cap was hit), so part of the design was not scanned.
 - occurrence(s) hold an unresolved external reference () - reading their component raises, so they carry no geometry to scan and were skipped.
 - Could not resolve target ''. Use an occurrence/component name, a body name (bare, or '<occurrence-or-component>:<body>' when several components hold that name), or '' for the whole design (see asse...
+
+### `form_create`
+- '. Use mm, cm, or in.
+- 'origin' is three numbers [x, y, z] - got
+- The cage was refused before Fusion saw it:
+- No active design. Create or open a document first (see doc_new).
+- A Form has no parameters. To change it: form_get(include=['cage']), edit the cage, form_create it, then delete the Form it replaces.
+- No two-faced B-Rep edge reads sharper than  deg, though the crease records read back exactly; find_geometry lists the edges.
+
+### `form_get`
+- '. Use mm, cm, or in.
+- No active design. Open or create a document first (see doc_new).
+- A Form edit is open, which hides that Form and the timeline - ask the user to click Finish Form, then read again.
+- include=['cage'] reads one Form and the design holds
+- - name it with 'form'.
 
 ### `joint_at_geometry`
 - Verify with assembly_get (is_healthy + positions).
@@ -3010,21 +3027,21 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - per_body carries one row per BREP body - its name, the occurrence it was reached through (null for the target's own), is_solid, mass, volume and lump_count. An open SURFACE body is a row with is_so...
 
 ### `model_loft`
-- Lofted through %d profiles in order.
+- Lofted through %d sections in order.
 - '. Use: new, join, cut, intersect.
 - No active design. Create or open a document first (see doc_new).
-- Loft needs at least 2 profiles (got
+- Loft needs at least 2 sections (got
 - centerLineOrRails takes a centerline OR rails, not both.
 - Loft reported success but the feature owns no result body - nothing was built.
 - Could not start loft:
 - Could not add loft sections:
 - Could not set loft centerline/rails:
-- . Common causes: a cut/intersect with no body in the loft's path (the API says 'No target body' for that), or incompatible profiles (a mix of open/closed, or a self-intersecting path - profiles mus...
+- . The API answers 'No target body' for a cut/intersect whose path meets no body.
 - Loft reported success but this
 - changed nothing - every solid body in '
 - ' measures the volume it had before and none was consumed, so the lofted shape does not overlap any of them. Check the profiles bracket the target body (an 'intersect' whose target lies entirely IN...
 - Could not set loft solid/surface mode:
-- Loft failed: . Common causes: a cut/intersect with no body in the loft's path (the API says 'No target body' for that), or incompatible profiles (a mix of open/closed, or a self-intersecting path -...
+- 'rail_continuity' is set on B-Rep edge rails, and rails[] is a  - pass find_geometry edge handles, or drop 'rail_continuity'.
 - Loft reported success but this  changed nothing - every solid body in '' measures the volume it had before and none was consumed, so the lofted shape does not overlap any of them. Check the profile...
 
 ### `model_measure_between`
@@ -3045,6 +3062,14 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - measureMinimumDistance returned a result whose value read as , not a number, so the distance is UNKNOWN - reporting it as 0 would read as touching. Re-run find_geometry for fresh handles and retry.
 - Angle measurement failed: . (Angle needs two entities with a defined direction - two planar faces, or a face and an edge; a whole occurrence may be rejected. Use find_geometry face/edge handles.)
 - measureAngle returned a result whose value read as , not a number, so the angle is UNKNOWN - reporting it as 0 would read as parallel.
+
+### `model_measure_continuity`
+- max_curvature_jump is per
+- '. Use mm, cm, or in.
+- 'samples' is a whole number from 1 to
+- No active design. Create or open a document first (see doc_new).
+- 'edges' takes at most
+- . Measure them in batches.
 
 ### `model_measure_relation`
 - No active design. Open or create a document first (see doc_new).
@@ -3970,9 +3995,8 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Pass 'boundary' (one loop) or 'boundaries' (a list of loops, each an edge handle Fusion auto-completes - the way to patch every hole in one call).
 - interior_rails did not take - PatchFeatureInput.interiorRailsAndPoints reads back  entity(ies) after assigning , so the patch would run without them.
 - Closed boundary filled, but no result body's isSolid flag could be read back - whether the patch is an open surface is UNVERIFIED.
-- Patch failed:  - two known causes: (1) a degenerate TANGENT saddle opening whose rim is two half-edges - pass both as the boundary list; (2) an edge loop SPLIT by a later feature (a fillet, say) in...
+- Patch failed: .  Candidate causes, not a complete list: (1) a degenerate TANGENT saddle opening whose rim is two half-edges - pass both as the boundary list; (2) an edge loop SPLIT by a later featu...
 - Patch failed: . With interior_rails there are two candidate causes and this message asserts neither: the boundary does not form a CLOSED loop, or a rail edge does not lie on the surface the boundar...
-- Patch failed: . (The boundary must form a CLOSED loop - pass the loop's edges, or a single edge Fusion can auto-complete.)
 
 ### `surface_reverse_normal`
 - Normals flipped - isParamReversed toggled on all %d face(s), read back off the feature.
@@ -4335,6 +4359,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - design_get(include=['tree']) -  occurrence(s) () reference a component that could not be loaded; the tree marks each row unresolved:true. Their source file is not readable through the API - open th...
 - doc_update_xref() -  external reference(s) are OUT OF DATE (). Stale references show the wrong geometry (and miss newer features); refresh before relying on, machining, or inserting this part.
 - Attention () - see health + the fix_* pointer(s). These CAN be intentional on a fixture/CAM template (parked alternates, pinned refs) or a deliberate mid-history roll; confirm before treating as br...
+- A Form edit is open: it hides the timeline and the user parameters until the user clicks Finish Form, so their counts, timeline_rolled_back and is_healthy read null.
 - published NO compute state - neither the entity nor its timeline item answered one - so they are counted neither broken nor healthy and is_healthy makes no claim about them.
 - An UNRESOLVED reference means reading that occurrence's component RAISES: the source component is not loaded, and its file, project and hub are NOT readable through the API - open the browser tree ...
 - total_occurrences is null: NEITHER occurrence walk enumerated, so the design's occurrence count is unknown rather than zero.

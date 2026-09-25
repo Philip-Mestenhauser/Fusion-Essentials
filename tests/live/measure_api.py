@@ -32,6 +32,7 @@ run. Extend coverage by adding rows, not code.
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -145,6 +146,202 @@ def _all_enums_body():
                  " + ('; no int member (factory class): ' + ','.join(not_enum) if not_enum else '')"
                  " + ('; UNRESOLVED: ' + ','.join(missing) if missing else ''))")
     return "\n".join(lines) + "\n"
+
+
+def _tsm_codec():
+    """The Form tools' own pure-Python TSM codec, loaded by path - the cages a Form row loads are
+    written by the same emitter form_create uses."""
+    spec = importlib.util.spec_from_file_location("_fe_measure_tsm",
+                                                  os.path.join(TOOLS_DIR, "_tsm.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _form_script(tsm_text, body):
+    """A Form row's script: TSM bound to the cage text, then `body` - which refuses to add a Form
+    unless the design it is given reads parametric."""
+    lines = "".join("        " + repr(ln) + "\n" for ln in tsm_text.splitlines(keepends=True))
+    return ("    TSM = (\n" + lines + "    )\n"
+            "    def parametric(d):\n"
+            "        return d.designType == adsk.fusion.DesignTypes.ParametricDesignType\n"
+            "    def load(comp):\n"
+            "        ff = comp.features.formFeatures.add()\n"
+            "        started = ff.startEdit()\n"
+            "        try:\n"
+            "            ff.tSplineBodies.addByTSMDescription(TSM)\n"
+            "        finally:\n"
+            "            finished = ff.finishEdit()\n"
+            "        return ff, bool(started) and bool(finished)\n" + body)
+
+
+def _box_tsm(spans=(1, 1, 1), crease_top_centre=False):
+    """TSM text of a 2 cm box cage; crease_top_centre creases the loop round the top face's centre
+    quad, a loop inside the region between the box's star corners."""
+    codec = _tsm_codec()
+    cage = codec.box([2.0, 2.0, 2.0], list(spans))
+    if crease_top_centre:
+        verts = cage["vertices"]
+        top = [f for f in cage["faces"] if all(abs(verts[v][2] - 1.0) < 1e-9 for v in f)]
+        centre = min(top, key=lambda f: sum(abs(verts[v][0]) + abs(verts[v][1]) for v in f))
+        cage["creases"] = [[centre[k], centre[(k + 1) % 4]] for k in range(4)]
+    return codec.emit(cage)
+
+
+def _rim_creased_tsm(size_cm, offset=(0.0, 0.0, 0.0)):
+    """TSM text of the 3x3x3 box cage `size_cm` across with its 12 top-rim edges creased - the
+    sweep's creased Form cage - moved by `offset`."""
+    codec = _tsm_codec()
+    cage = codec.box([size_cm] * 3, [3, 3, 3])
+    v, half = cage["vertices"], size_cm / 2.0
+    rim = set()
+    for f in cage["faces"]:
+        for k in range(4):
+            a, b = f[k], f[(k + 1) % 4]
+            if v[a][2] == v[b][2] == half and any(
+                    abs(v[a][ax]) == abs(v[b][ax]) == half and v[a][ax] == v[b][ax]
+                    for ax in (0, 1)):
+                rim.add(tuple(sorted((a, b))))
+    cage["creases"] = [list(e) for e in sorted(rim)]
+    return codec.emit(codec.translated(cage, 1.0, list(offset)))
+
+
+def _tsm_literal(name, text):
+    """`name = (...)` binding TSM text in a row script, one short line per record."""
+    lines = "".join("        " + repr(ln) + "\n" for ln in text.splitlines(keepends=True))
+    return "    " + name + " = (\n" + lines + "    )\n"
+
+
+def _grid_tsm():
+    """TSM text of the 3x3 open grid cage, 30 cm square with its four inner grips raised 5 cm."""
+    verts = [[10.0 * i, 10.0 * j, 5.0 if 0 < i < 3 and 0 < j < 3 else 0.0]
+             for j in range(4) for i in range(4)]
+    faces = [[4 * j + i, 4 * j + i + 1, 4 * j + i + 5, 4 * j + i + 4]
+             for j in range(3) for i in range(3)]
+    return _tsm_codec().emit({"vertices": verts, "faces": faces, "creases": []})
+
+
+_FORM_STATE = re.compile(r"^FORMSTATE (.+)$", re.M)
+
+
+def _form_state(payload):
+    """The FORMSTATE record a Form row's first script printed, or {}."""
+    m = _FORM_STATE.search(payload if isinstance(payload, str) else "")
+    try:
+        return json.loads(m.group(1)) if m else {}
+    except ValueError:
+        return {}
+
+
+def _form_edit_close_body(payload):
+    """The closing script of the open-Form-edit row: finish the edit on the Form the first script
+    opened, by its token, and read that the timeline is back at its count before."""
+    state = _form_state(payload)
+    return ("    STATE = " + repr(state) + "\n"
+            "    hits = des.findEntityByToken(STATE.get('token', ''))\n"
+            "    ff = hits[0] if len(hits) == 1 else None\n"
+            "    closed = ff is not None and bool(ff.finishEdit())\n"
+            "    if not closed:\n"
+            "        app.userInterface.commandDefinitions.itemById(\n"
+            "            'TSplineBaseFeatureStop').execute()\n"
+            "        emit(False, 'form-edit-typed-reads: the edit did not close by token; Finish '\n"
+            "             'Form was run')\n"
+            "    else:\n"
+            "        n = des.timeline.count\n"
+            "        emit(des.designType == adsk.fusion.DesignTypes.ParametricDesignType\n"
+            "             and n == STATE.get('count'),\n"
+            "             'form-edit-typed-reads: closed by token, timeline ' + str(n)\n"
+            "             + ' (before the typed calls: ' + str(STATE.get('count')) + ')')\n")
+
+
+def _delete_suppressed_close_body(payload):
+    """The closing script of the suppressed-tail row: deleteMe on the suppressed Form, one call
+    after its suppress, and the removed set read against the set suppressed with it."""
+    state = _form_state(payload)
+    return ("    STATE = " + repr(state) + "\n"
+            "    hits = des.findEntityByToken(STATE['token']) if STATE.get('token') else []\n"
+            "    ff = hits[0] if len(hits) == 1 else None\n"
+            "    tl = des.timeline\n"
+            "    before = [tl.item(i).name for i in range(tl.count)]\n"
+            "    deleted = ff.deleteMe() if ff is not None else None\n"
+            "    removed = sorted(set(before) - set(tl.item(i).name for i in range(tl.count)))\n"
+            "    emit(deleted is True and removed == STATE.get('suppressed'),\n"
+            "         'form-delete-suppressed-tail: deleteMe ' + str(deleted) + ' removed '\n"
+            "         + str(removed) + ', suppressed with it ' + str(STATE.get('suppressed')))\n")
+
+
+def _workspace_next_script(row_id, want):
+    """The second script of a workspace row: the active workspace, read one call later, is `want`."""
+    def body(_payload):
+        return ("    ws = app.userInterface.activeWorkspace.id\n"
+                "    emit(ws == " + repr(want) + ",\n"
+                "         '" + row_id + ": the next script reads workspace ' + ws)\n")
+    return body
+
+
+def _self_intersecting_cage():
+    """form_create's cage (cm) for the cage R2 measured finishEdit raising on - the 3x3x3 box with
+    its four inner top grips pushed through the bottom face."""
+    path = os.path.join(REPO_ROOT, "tests", "fixtures", "tsm", "r2_box3_self_intersecting.tsm")
+    with open(path, encoding="utf-8") as fh:
+        return _tsm_codec().parse(fh.read())[0]
+
+
+# What the self-intersecting row's form_create reply said the call left behind, for the check after.
+_SELF_INTERSECT_SAID = {}
+
+
+def _self_intersect_refused(is_error, payload):
+    """form_create refused naming the self-intersection; which state its reply claims is kept."""
+    text = str(payload)
+    said = ("open" if "still open" in text else "removed" if "The Form was removed" in text
+            else "other")
+    _SELF_INTERSECT_SAID["state"] = said
+    hit = is_error and "SELF_INTERSECTS" in text
+    return hit, ("form_create refused naming SELF_INTERSECTS, its reply saying " + said
+                 + ": " + text[:240]) if hit else ("form_create not refused as expected: "
+                                                   + text[:240])
+
+
+def _self_intersect_edit(is_error, payload):
+    """workspace_orient's in_form_edit agrees with the state form_create's reply claimed."""
+    design = (payload.get("design") or {}) if not is_error and isinstance(payload, dict) else {}
+    edit, said = design.get("in_form_edit") is True, _SELF_INTERSECT_SAID.get("state")
+    agrees = (said == "open" and edit) or (said == "removed" and not edit)
+    return agrees, ("workspace_orient in_form_edit " + str(edit) + " after a reply saying "
+                    + str(said))
+
+
+def _self_intersect_close_body(payload):
+    """The closing script of the self-intersecting row: the design type, then - only when it reads
+    parametric, since the timeline read raises inside an edit - the timeline count."""
+    state = _form_state(payload)
+    return ("    STATE = " + repr(state) + "\n"
+            "    if des.designType != adsk.fusion.DesignTypes.ParametricDesignType:\n"
+            "        emit(True, 'form-create-self-intersecting-cage: the design reads direct - the '\n"
+            "             'Form edit is open, for the owner to close')\n"
+            "    else:\n"
+            "        n = des.timeline.count\n"
+            "        emit(n == STATE.get('count'),\n"
+            "             'form-create-self-intersecting-cage: parametric, timeline ' + str(n)\n"
+            "             + ' (before the create: ' + str(STATE.get('count')) + ')')\n")
+
+
+def _payload_check(label, pick):
+    """A wire check passing when the call answered and pick(payload) is True."""
+    def check(is_error, payload):
+        got = pick(payload) if not is_error and isinstance(payload, dict) else None
+        return got is True, label + (" read" if got is True else " did not read: "
+                                     + str(payload)[:160])
+    return check
+
+
+def _refusal_check(label, fragment):
+    """A wire check passing when the call was refused with `fragment` in its text."""
+    def check(is_error, payload):
+        hit = is_error and fragment in str(payload)
+        return hit, label + (" refused" if hit else " not refused as expected: " + str(payload)[:160])
+    return check
 
 # Each row script is self-contained: emit() prints one verdict line per check, and make_box()
 # builds a 10 mm cube (1.0 in Fusion's internal cm) for rows that need real geometry. Rows that set
@@ -2133,6 +2330,340 @@ ROWS = [
     finally:
         tmp.close(False)
 """,
+    },
+    {
+        "id": "shape-dump-form-world",
+        "claim": ("In a scratch parametric design a Form made by formFeatures.add, startEdit, "
+                  "addByTSMDescription and finishEdit yields FormFeatures, FormFeature, "
+                  "TSplineBodies and TSplineBody, each answering the type its label names and "
+                  "dumping a non-empty member list. No Form is added unless the design reads "
+                  "parametric: the add in a direct design crashed Fusion"),
+        "encoded_in": ("tests/fakes/form.py - the Form fakes; tests/lints/test_fake_shapes_exist.py "
+                       "sweeps them against these dumps"),
+        "body_fn": lambda: _form_script(_box_tsm(), """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        if not parametric(d):
+            emit(False, "shape-dump-form-world: the scratch design is not parametric - no Form added")
+        else:
+            ff, took = load(d.rootComponent)
+            ffs = d.rootComponent.features.formFeatures
+            tbs = ff.tSplineBodies
+            live = [("FormFeatures", ffs), ("FormFeature", ff), ("TSplineBodies", tbs),
+                    ("TSplineBody", tbs.item(0))]
+            wrong = [lbl + "=" + type(o).__name__ for lbl, o in live if type(o).__name__ != lbl]
+            counts = [dump_shape(lbl, o) for lbl, o in live]
+            emit(took and not wrong and all(c > 0 for c in counts),
+                 "shape-dump-form-world: edit opened and finished " + str(took) + ", member counts "
+                 + str(counts) + ", mislabelled " + (", ".join(wrong) or "none"))
+    finally:
+        tmp.close(False)
+"""),
+    },
+    {
+        "id": "form-edit-typed-reads",
+        "claim": ("With a Form edit left open by script, the typed reads say so instead of calling "
+                  "the design a healthy direct one: workspace_orient reads design.in_form_edit true, "
+                  "parameters null and is_healthy null; design_get reads in_form_edit true and "
+                  "timeline_healthy null; form_get reads complete false; design_delete_feature and "
+                  "form_create refuse naming the open edit; workspace_orient's timeline_rolled_back "
+                  "is null and its workspace is not Design; design_get's mode slice publishes every "
+                  "can value null; design_set_mode refuses naming Finish Form. The edit then "
+                  "finishes on the Form's token and the timeline reads its count from before the "
+                  "typed calls - so form_create's refusal came before any FormFeatures.add()"),
+        "encoded_in": ("_inputs.py in_form_edit and ModeGuard; _design_common.py no_timeline_reason "
+                       "and get_mode_handler; workspace_orient.py, design_get.py, design_set_mode.py, "
+                       "form_get.py, form_create.py"),
+        "body_fn": lambda: _form_script(_box_tsm(), """
+    import json
+    if not parametric(des):
+        emit(False, "form-edit-typed-reads: the run scratch is not parametric - no Form added")
+    else:
+        ff, took = load(des.rootComponent)
+        count = des.timeline.count
+        print("FORMSTATE " + json.dumps({"token": ff.entityToken, "count": count}))
+        # Nothing design-wide is read after this: inside a Form edit such a read ends the script.
+        reopened = bool(ff.startEdit())
+        emit(took and reopened, "form-edit-typed-reads: the Form loaded " + str(took)
+             + " and its edit was left open " + str(reopened))
+"""),
+        "wire_checks": [
+            ("workspace_orient", {}, _payload_check(
+                "workspace_orient in_form_edit, null parameters and is_healthy",
+                lambda p: (p.get("design") or {}).get("in_form_edit") is True
+                and "parameters" in (p.get("design") or {})
+                and (p.get("design") or {}).get("parameters") is None
+                and (p.get("health") or {}).get("is_healthy") is None
+                and "timeline_rolled_back" in (p.get("health") or {})
+                and (p.get("health") or {}).get("timeline_rolled_back") is None
+                and isinstance(p.get("workspace"), str) and p.get("workspace") != "Design")),
+            ("design_get", {}, _payload_check(
+                "design_get in_form_edit and null timeline_healthy",
+                lambda p: p.get("in_form_edit") is True and p.get("timeline_healthy") is None)),
+            ("design_get", {"include": ["mode"]}, _payload_check(
+                "design_get mode_detail.can values all null",
+                lambda p: isinstance((p.get("mode_detail") or {}).get("can"), dict)
+                and bool(p["mode_detail"]["can"])
+                and all(v is None for v in p["mode_detail"]["can"].values()))),
+            ("design_set_mode", {"target": "direct", "confirm_history_loss": True},
+             _refusal_check("design_set_mode", "Finish Form")),
+            ("form_get", {}, _payload_check(
+                "form_get complete false",
+                lambda p: p.get("in_form_edit") is True and p.get("complete") is False)),
+            ("design_delete_feature", {"feature": "Form1"}, _refusal_check(
+                "design_delete_feature", "Finish Form")),
+            ("form_create", {"primitive": {"shape": "box", "size": [10, 10, 10],
+                                           "spans": [1, 1, 1]}},
+             _refusal_check("form_create", "A Form edit is open")),
+        ],
+        "script_after_fn": _form_edit_close_body,
+    },
+    {
+        "id": "form-delete-in-create-script",
+        "claim": ("With the marker rolled back before a Form, a second Form created and finished "
+                  "sits at the index one below the later Form's - timeline.item(index + 1) is the "
+                  "later Form, the item form_create's inserted_before names - and deleting it with "
+                  "FormFeature.deleteMe() inside ONE script leaves the timeline at its count before "
+                  "it, and the LATER Form still holds its one B-Rep body, healthy, at its volume - "
+                  "the rollback form_create runs within one call on a Form it inserted before "
+                  "others"),
+        "encoded_in": ("_form_common.py retire; form_create.py inserted_before; "
+                       "tests/unit/test_form_create.py"),
+        "body_fn": lambda: _form_script(_box_tsm(), """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        if not parametric(d):
+            emit(False, "form-delete-in-create-script: the scratch design is not parametric")
+        else:
+            later, took_a = load(d.rootComponent)
+            token, volume = later.entityToken, later.bodies.item(0).volume
+            rolled = later.timelineObject.rollTo(True)
+            n0 = d.timeline.count
+            inserted, took_b = load(d.rootComponent)
+            n_in = d.timeline.count
+            before_later = d.timeline.item(inserted.timelineObject.index + 1).name == later.name
+            deleted = inserted.deleteMe()
+            n = d.timeline.count
+            d.timeline.moveToEnd()
+            hits = d.findEntityByToken(token)
+            kept_ff = hits[0] if len(hits) == 1 else None
+            kept = kept_ff.bodies.count if kept_ff is not None else None
+            health = kept_ff.healthState if kept_ff is not None else None
+            now = kept_ff.bodies.item(0).volume if kept == 1 else None
+            same = now is not None and abs(now - volume) <= 1e-6 * volume
+            emit(took_a and took_b and rolled is True and deleted is True and n_in == n0 + 1
+                 and before_later and n == n0 and kept == 1 and health == 0 and same,
+                 "form-delete-in-create-script: rolled before the later Form " + str(rolled)
+                 + ", the item after the new Form is the later one " + str(before_later)
+                 + ", timeline " + str(n0) + " -> " + str(n_in) + " -> " + str(n)
+                 + " after deleteMe " + str(deleted) + "; the later Form holds " + str(kept)
+                 + " body, health " + str(health) + ", volume " + str(now) + " (before "
+                 + str(volume) + ")")
+    finally:
+        tmp.close(False)
+"""),
+    },
+    {
+        "id": "form-create-keeps-form-workspace",
+        "claim": ("With the Form workspace left active and no edit open (a Form edit pumped into it, "
+                  "then finished through the API), a Form made and finished through the API leaves "
+                  "it: the NEXT script reads TSplineEnvironment - a create keeps the workspace it "
+                  "began in"),
+        "encoded_in": "form_create.py (no workspace restore)",
+        "body_fn": lambda: _form_script(_box_tsm(), """
+    if not parametric(des):
+        emit(False, "form-create-keeps-form-workspace: the run scratch is not parametric")
+    else:
+        ui = app.userInterface
+        first, took = load(des.rootComponent)
+        reopened = bool(first.startEdit())
+        for _ in range(30):
+            adsk.doEvents()
+            if ui.activeWorkspace.id == "TSplineEnvironment":
+                break
+        closed = bool(first.finishEdit())
+        start = ui.activeWorkspace.id
+        ff, took_b = load(des.rootComponent)
+        emit(took and reopened and closed and took_b and start == "TSplineEnvironment",
+             "form-create-keeps-form-workspace: edit reopened " + str(reopened) + " and finished "
+             + str(closed) + ", workspace at the create " + start + ", the Form loaded and "
+             + "finished " + str(took_b))
+"""),
+        "script_after_fn": _workspace_next_script("form-create-keeps-form-workspace",
+                                                  "TSplineEnvironment"),
+    },
+    {
+        "id": "form-finish-workspace-next-script",
+        "claim": ("Started from the Design workspace, a Form made and its edit finished through the "
+                  "API leaves Design: the NEXT script reads FusionSolidEnvironment - a create keeps "
+                  "the workspace it began in, which is why form_create does not switch it back"),
+        "encoded_in": "form_create.py (no workspace restore)",
+        "body_fn": lambda: _form_script(_box_tsm(), """
+    if not parametric(des):
+        emit(False, "form-finish-workspace-next-script: the run scratch is not parametric")
+    else:
+        ui = app.userInterface
+        before = ui.activeWorkspace.id
+        if before != "FusionSolidEnvironment":
+            ui.workspaces.itemById("FusionSolidEnvironment").activate()
+            for _ in range(10):
+                adsk.doEvents()
+        start = ui.activeWorkspace.id
+        ff, took = load(des.rootComponent)
+        emit(took and start == "FusionSolidEnvironment",
+             "form-finish-workspace-next-script: the Form loaded and finished " + str(took)
+             + ", workspace before it " + before + ", at the create " + start)
+"""),
+        "script_after_fn": _workspace_next_script("form-finish-workspace-next-script",
+                                                  "FusionSolidEnvironment"),
+    },
+    {
+        "id": "form-delete-suppressed-tail",
+        "claim": ("deleteMe on a SUPPRESSED Form, run one call after its suppress, removes exactly "
+                  "the items suppressed with it: a Shell on the Form's body goes off with the "
+                  "Form's suppress, and the Form's delete takes the Form and that Shell and nothing "
+                  "else"),
+        "encoded_in": ("design_edit_timeline.py also_suppressed and design_delete_feature.py "
+                       "also_deleted - the two lists the Form rebuild loop compares"),
+        "body_fn": lambda: _form_script(_box_tsm(), """
+    import json
+    if not parametric(des):
+        emit(False, "form-delete-suppressed-tail: the run scratch is not parametric")
+    else:
+        root = des.rootComponent
+        ff, took = load(root)
+        body = ff.bodies.item(0)
+        top = max((body.faces.item(i) for i in range(body.faces.count)),
+                  key=lambda f: f.centroid.z)
+        coll = adsk.core.ObjectCollection.create()
+        coll.add(top)
+        sh_in = root.features.shellFeatures.createInput(coll, False)
+        sh_in.insideThickness = adsk.core.ValueInput.createByReal(0.1)
+        root.features.shellFeatures.add(sh_in)
+        tl = des.timeline
+        was = set(tl.item(i).name for i in range(tl.count) if tl.item(i).isSuppressed)
+        ff.isSuppressed = True
+        off = sorted(tl.item(i).name for i in range(tl.count)
+                     if tl.item(i).isSuppressed and tl.item(i).name not in was)
+        print("FORMSTATE " + json.dumps({"token": ff.entityToken, "suppressed": off}))
+        emit(took and len(off) == 2, "form-delete-suppressed-tail: suppressed " + str(off))
+"""),
+        "script_after_fn": _delete_suppressed_close_body,
+    },
+    {
+        "id": "form-interior-crease-edge",
+        "claim": ("A closed crease loop round the centre quad of a 3x3x3 box cage's top face - a "
+                  "loop inside the region between star corners - makes B-Rep edges: the body reads "
+                  "more than the 6 faces the uncreased box reads"),
+        "encoded_in": "form_create.py sharp_edges and its no-sharp-edge note",
+        "body_fn": lambda: _form_script(_box_tsm((3, 3, 3), crease_top_centre=True), """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        if not parametric(d):
+            emit(False, "form-interior-crease-edge: the scratch design is not parametric")
+        else:
+            ff, took = load(d.rootComponent)
+            faces = ff.bodies.item(0).faces.count if ff.bodies.count else None
+            emit(took and faces is not None and faces > 6,
+                 "form-interior-crease-edge: the creased box reads " + str(faces) + " B-Rep faces")
+    finally:
+        tmp.close(False)
+"""),
+    },
+    {
+        "id": "form-disc-default-seeds",
+        "claim": ("A 3x3 open grid cage written by _tsm.emit - every vertex seeded EAST on its first "
+                  "face link, not the per-column EAST/WEST seeds the measured grid load carried - "
+                  "loads as one open surface whose f/e/v/l/ec records and grips read back as sent, "
+                  "with area 950.67178 cm2, a 0..30 cm footprint and the raised grips smoothing to "
+                  "4.592 cm: the surface those per-column seeds gave"),
+        "encoded_in": "_tsm.py emit (an open disc's v seeds) and validate (the disc class)",
+        "body_fn": lambda: _form_script(_grid_tsm(), """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        if not parametric(d):
+            emit(False, "form-disc-default-seeds: the scratch design is not parametric")
+        else:
+            ff, took = load(d.rootComponent)
+            back = ff.tSplineBodies.item(0).getTSMDescription()
+            keys = (["f"], ["e"], ["v"], ["l"], ["ec"])
+            table = lambda t: [ln.split() for ln in t.splitlines() if ln.split()[:1] in keys]
+            grips = lambda t: [[float(x) for x in ln.split()[1:5]] for ln in t.splitlines()
+                               if ln.startswith("0g ")]
+            same = table(back) == table(TSM) and grips(back) == grips(TSM) and "106ek" not in back
+            body = ff.bodies.item(0) if ff.bodies.count == 1 else None
+            area = body.area if body is not None else None
+            bb = body.boundingBox if body is not None else None
+            box = ([bb.minPoint.x, bb.minPoint.y, bb.maxPoint.x, bb.maxPoint.y, bb.maxPoint.z]
+                   if bb is not None else None)
+            flat = box is not None and all(abs(a - b) <= 1e-4
+                                           for a, b in zip(box[:4], (0.0, 0.0, 30.0, 30.0)))
+            emit(took and same and body is not None and body.isSolid is False
+                 and area is not None and abs(area - 950.67178) <= 1e-4
+                 and flat and abs(box[4] - 4.592) <= 5e-4,
+                 "form-disc-default-seeds: read back as sent " + str(same) + ", area "
+                 + str(area) + " cm2, box " + str(box))
+    finally:
+        tmp.close(False)
+"""),
+    },
+    {
+        "id": "form-crease-fillet-two-sizes",
+        "claim": ("The sweep's creased Form cage - the 3x3x3 box with its 12 top-rim edges creased "
+                  "- filleted along its four sharp rim edges at a tenth of the cage's size removes "
+                  "0.018433175 cm3 at 20 mm (radius 1 mm) and 14.890493 cm3 at 200 mm (radius "
+                  "10 mm) - the 20 mm removal times 1000 is 1.24 times the 200 mm one - while the "
+                  "rim edges' length scales by exactly 10: the T-spline conversion's tolerance is "
+                  "absolute, so a fillet's removal does not scale with the cage. The detail reports "
+                  "both removals, the rim lengths and the faces each fillet added"),
+        "encoded_in": ("tests/live/verify_acts_mesh.py _FORM_FILLET_CM3, the 20 mm figure the "
+                       "sweep's fillet row is judged against"),
+        "body_fn": lambda: (_tsm_literal("SMALL", _rim_creased_tsm(2.0, (50.0, 0.0, 0.0)))
+                            + _tsm_literal("LARGE", _rim_creased_tsm(20.0)) + """
+    tmp = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+    try:
+        d = adsk.fusion.Design.cast(tmp.products.itemByProductType("DesignProductType"))
+        if d.designType != adsk.fusion.DesignTypes.ParametricDesignType:
+            emit(False, "form-crease-fillet-two-sizes: the scratch design is not parametric")
+        else:
+            root = d.rootComponent
+            got = {}
+            for label, text, radius in (("20mm", SMALL, 0.1), ("200mm", LARGE, 1.0)):
+                ff = root.features.formFeatures.add()
+                ff.startEdit()
+                try:
+                    ff.tSplineBodies.addByTSMDescription(text)
+                finally:
+                    ff.finishEdit()
+                body = ff.bodies.item(0)
+                top = body.boundingBox.maxPoint.z
+                edges = [body.edges.item(i) for i in range(body.edges.count)]
+                rim = [e for e in edges if abs(e.boundingBox.minPoint.z - top) < 1e-4]
+                coll = adsk.core.ObjectCollection.create()
+                for e in rim:
+                    coll.add(e)
+                fi = root.features.filletFeatures.createInput()
+                fi.addConstantRadiusEdgeSet(coll, adsk.core.ValueInput.createByReal(radius), False)
+                # The rim edges are consumed by the fillet: their length raises afterwards (measured).
+                rim_cm, vol, faces = sum(e.length for e in rim), body.volume, body.faces.count
+                done = root.features.filletFeatures.add(fi).bodies.item(0)
+                got[label] = (len(rim), rim_cm, done.volume - vol, done.faces.count - faces)
+            small, large = got["20mm"], got["200mm"]
+            emit(small[0] == 4 and large[0] == 4
+                 and abs(small[2] + 0.018433175) <= 1e-3 * 0.018433175
+                 and abs(large[2] + 14.890493) <= 1e-3 * 14.890493
+                 and abs(large[1] / small[1] - 10.0) <= 1e-3
+                 and 1.2 <= small[2] * 1000.0 / large[2] <= 1.28,
+                 "form-crease-fillet-two-sizes: (rim edges, rim cm, removed cm3, faces added) "
+                 + "20 mm " + str(small) + ", 200 mm " + str(large) + "; the 20 mm removal x1000 "
+                 + "over the 200 mm one " + str(small[2] * 1000.0 / large[2]))
+    finally:
+        tmp.close(False)
+"""),
     },
     {
         "id": "shape-dump-joint-motion-planar-pinslot",
@@ -7241,6 +7772,35 @@ ROWS = [
          + " outer points at bottom=" + str(outer_ok))
 """,
     },
+    # Last: a reply saying the Form edit is still open leaves it open on the run scratch, where
+    # every design-wide read after it raises.
+    {
+        "id": "form-create-self-intersecting-cage",
+        "claim": ("form_create, handed the cage R2 measured finishEdit raising "
+                  "ASM_TSP_BFTS_OUTPUT_BODY_SELF_INTERSECTS on (it passes the cage check), refuses "
+                  "naming that message, and its reply matches what the call left: 'The Form was "
+                  "removed' with workspace_orient reading no open Form edit and the design "
+                  "parametric at its timeline count from before the create, or 'still open' with "
+                  "in_form_edit true and the design reading direct. The detail records which; an "
+                  "open edit is left for the owner to close"),
+        "encoded_in": ("_form_common.py finish_edit and create_form's open branch; "
+                       "tests/unit/test_form_create.py"),
+        "body": """
+    import json
+    if des.designType != adsk.fusion.DesignTypes.ParametricDesignType:
+        emit(False, "form-create-self-intersecting-cage: the run scratch is not parametric")
+    else:
+        print("FORMSTATE " + json.dumps({"count": des.timeline.count}))
+        emit(True, "form-create-self-intersecting-cage: the run scratch is parametric, timeline "
+             + str(des.timeline.count))
+""",
+        "wire_checks": [
+            ("form_create", {"cage": _self_intersecting_cage(), "units": "cm"},
+             _self_intersect_refused),
+            ("workspace_orient", {}, _self_intersect_edit),
+        ],
+        "script_after_fn": _self_intersect_close_body,
+    },
 ]
 
 
@@ -7331,6 +7891,46 @@ def _wire_calls(scratch_handle, calls):
         if is_error:
             return tool + ": " + str(payload)[:160]
     return None
+
+
+def _closing_row(row, payload):
+    """The row a closing script runs as: the same row, its body built from the first script's
+    printed output."""
+    after = {k: v for k, v in row.items() if k != "body_fn"}
+    after["body"] = row["script_after_fn"](payload)
+    return after
+
+
+def _pinned_tools():
+    """The registered tools whose schema takes expect_document - the ones a scratch pin binds."""
+    _names, rows = registered_tools(include_rows=True)
+    return {r["name"] for r in rows
+            if "expect_document" in ((r.get("inputSchema") or {}).get("properties") or {})}
+
+
+def _run_followups(row, scratch, status, detail, payload):
+    """(status, detail) after a row's wire checks and its closing script, both run after its first
+    script. The closing script runs whatever came before it, since it undoes the first one's state."""
+    if status == "PASS" and row.get("wire_checks"):
+        # A strict read refuses an unknown argument, so only a tool that takes the pin gets it.
+        pinned = _pinned_tools()
+        for tool, arguments, check in row["wire_checks"]:
+            is_error, got = (_scratch_call(scratch, tool, arguments) if tool in pinned
+                             else call(tool, dict(arguments)))
+            passed, why = check(is_error, got)
+            detail += " | " + why
+            if not passed:
+                status = "FAIL"
+                break
+    if row.get("script_after_fn"):
+        after = _closing_row(row, payload)
+        is_error, got = call("sys_execute_script", {"script": _compose(after),
+                                                    "expect_document": scratch})
+        after_status, after_detail = _judge(after, is_error, got)
+        detail += " | then: " + after_detail
+        if status == "PASS" and after_status != "PASS":
+            status = after_status
+    return status, detail
 
 
 def _compose(row):
@@ -7873,6 +8473,8 @@ def run_measurements(write_json, only=None):
                         script_args["read_only"] = True
                     is_error, payload = call("sys_execute_script", script_args)
                     status, detail = _judge(row, is_error, payload)
+                    if row.get("wire_checks") or row.get("script_after_fn"):
+                        status, detail = _run_followups(row, scratch, status, detail, payload)
                 after_err = _wire_calls(scratch, row.get("wire_after"))
                 if after_err:
                     status, detail = "ERROR", detail + " | wire_after " + after_err

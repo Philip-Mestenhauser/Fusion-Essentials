@@ -38,7 +38,8 @@ _INLINE_CODE = re.compile(r"`([^`]+)`")
 
 # Log files the RUNNING add-in writes (they exist at runtime, never in the repo) - citing one is
 # a pointer to live output, not to committed evidence.
-_RUNTIME_LOGS = {"futil.log", "app.log"}
+# backlog.md: plans/ is a private, untracked ledger, absent from a clone.
+_RUNTIME_LOGS = {"futil.log", "app.log", "backlog.md"}
 
 
 @lru_cache(maxsize=None)

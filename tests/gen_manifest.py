@@ -43,7 +43,8 @@ MANIFEST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "genera
 # the FIRST prefix it matches (so 'design_get' -> design, 'sys_find_tool' -> sys). A tool matching
 # none lands in "other" — which the family test asserts stays empty-or-accounted-for by total count.
 _FAMILY_PREFIXES = [
-    ("model_", "model"), ("surface_", "surface"), ("mesh_", "mesh"), ("sketch_", "sketch"),
+    ("model_", "model"), ("surface_", "surface"), ("form_", "form"), ("mesh_", "mesh"),
+    ("sketch_", "sketch"),
     ("cam_", "cam"), ("assembly_", "assembly"), ("joint_", "joint"), ("design_", "design"),
     ("doc_", "doc"), ("data_", "data"), ("drawing_", "drawing"), ("param_", "param"), ("pmi_", "pmi"),
     ("view_", "view"), ("find_", "find"), ("workspace_", "workspace"), ("appearance_", "appearance"),

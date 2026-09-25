@@ -95,10 +95,10 @@ class FakeThickenFeatures:
 
 # The x-ref shape, measured on a host holding two x-refs of one design: two DISTINCT bodies read one
 # byte-identical entityToken while their source documents' lineage ids differ.
-_URN_XREF = "urn:adsk.wipprod:dm.lineage:K3I2nkywRlaWPHJexysOdA"
+_URN_XREF = "urn:adsk.wipprod:dm.lineage:FixtureLineageA000000A"
 
 
-_URN_HOST = "urn:adsk.wipprod:dm.lineage:N_QoPrrrSJmF__f9BZV86A"
+_URN_HOST = "urn:adsk.wipprod:dm.lineage:FixtureLineageB000000B"
 
 
 _SHARED_TOKEN = "/vB+AAEAAwAAAAAAAAAAAAAA"

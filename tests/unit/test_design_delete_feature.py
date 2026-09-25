@@ -10,13 +10,15 @@ Remove feature's timeline entity is the removed OCCURRENCE, so the delete goes t
 resolved by the same name).
 """
 
+import types
+
 import adsk.fusion
 import pytest
 
 import live_api_facts as _api_facts
-from conftest import (FakeFeature, FakeFeatures, FakeOccurrence, FakeTimeline, FakeTimelineObject,
-                      MakeComp, _NamedCollection, error_message, install, load_tool, make_design,
-                      payload)
+from conftest import (FakeApplication, FakeFeature, FakeFeatures, FakeOccurrence, FakeTimeline,
+                      FakeTimelineObject, FakeUserInterface, MakeComp, _NamedCollection,
+                      error_message, install, load_tool, make_design, payload)
 
 df = load_tool("design_delete_feature")
 
@@ -232,6 +234,9 @@ class TestDelete:
         assert out["entity_type"] == "RectangularPatternFeature"
         assert obj.entity._deletes == 1                    # deleteMe actually called
         assert tl._items == []                             # and the object left the timeline
+        # the target itself carries no token here, and it is not counted as something else
+        assert out["also_deleted"] == [] and "also_deleted_unnamed" not in out
+        assert "census_caveat" not in out
 
     def test_a_name_matches_case_insensitively(self):
         obj = _tl("Mirror1", 3, entity_type="MirrorFeature")
@@ -246,6 +251,98 @@ class TestDelete:
         tl = _install([_tl("Mirror1", 3, entity_type="MirrorFeature")])
         assert "Mirror1" in error_message(df.handler(feature="mirror"))
         assert tl._items[0].entity._deletes == 0
+
+
+# ── the cascade: every other item that left the timeline with the target ─────
+
+def _keyed(obj, token):
+    """The timeline object with the entityToken the census keys it on."""
+    obj.entity.entityToken = token
+    return obj
+
+
+def _takes_with_it(tl, obj, *dependents):
+    """Deleting `obj` also takes `dependents` out of the timeline - a Form's Shell goes this way."""
+    inner = obj.entity.deleteMe
+
+    def wrapped():
+        did = inner()
+        if did:
+            for d in dependents:
+                if d in tl._items:
+                    tl._items.remove(d)
+        return did
+
+    obj.entity.deleteMe = wrapped
+
+
+class TestCascade:
+    def test_a_dependent_that_left_with_it_is_named_and_an_unkeyed_one_counted(self):
+        x = _keyed(_tl("Form4", 0, entity_type="FormFeature"), "tok-x")
+        y = _keyed(_tl("Shell1", 1, entity_type="ShellFeature"), "tok-y")
+        z = _tl("Mystery1", 2)                          # its entity answers no entityToken
+        tl = _install([x, y, z])
+        _takes_with_it(tl, x, y, z)
+        out = payload(df.handler(feature="Form4"))
+        assert out["also_deleted"] == ["Shell1"] and out["also_deleted_unnamed"] == 1
+        assert out["note"].startswith("Also left the timeline with it: Shell1, plus 1 item")
+
+    def test_a_namesake_that_stayed_does_not_hide_the_one_that_left(self):
+        # keyed on the token, not the name: 'Fillet1' still reads in the timeline afterwards,
+        # because CompB's namesake stayed, and CompA's left with the target all the same.
+        x = _keyed(_tl("Extrude1", 0), "tok-x")
+        gone = _keyed(_tl("Fillet1", 1, comp="CompA"), "tok-a")
+        stays = _keyed(_tl("Fillet1", 2, comp="CompB"), "tok-b")
+        tl = _install([x, gone, stays])
+        _takes_with_it(tl, x, gone)
+        assert payload(df.handler(feature="Extrude1"))["also_deleted"] == ["Fillet1"]
+
+    def test_a_collapsed_group_adds_the_caveat(self):
+        group = _tl("Group1", 1, is_group=True)
+        group.isCollapsed = True
+        _install([_tl("Extrude1", 0), group])
+        out = payload(df.handler(feature="Extrude1"))
+        assert out["census_caveat"].startswith("1 collapsed timeline group(s)")
+
+    @pytest.mark.parametrize("reissued, unkeyed_leaves", [
+        ("tok-y-again", False), (None, False),
+        # the unkeyed counts come out even (Mystery1 left, Shell1 lost its token), so only the
+        # names give it away: 'Shell1' reads as often after the delete as before it.
+        (None, True)])
+    def test_a_survivor_whose_token_does_not_read_alike_is_never_named(self, reissued,
+                                                                       unkeyed_leaves):
+        # a survivor whose token reads differently (or not at all) after the delete would diff as
+        # 'gone' - the census does not add up, so nothing is named and the note says so.
+        x, y = _keyed(_tl("Extrude1", 0), "tok-x"), _keyed(_tl("Shell1", 1), "tok-y")
+        z = _tl("Mystery1", 2)                          # its entity answers no entityToken
+        tl = _install([x, y, z] if unkeyed_leaves else [x, y])
+        inner = x.entity.deleteMe
+
+        def reissuing():
+            did = inner()
+            if unkeyed_leaves:
+                tl._items.remove(z)
+            if reissued:
+                y.entity.entityToken = reissued
+            else:
+                del y.entity.entityToken
+            return did
+
+        x.entity.deleteMe = reissuing
+        out = payload(df.handler(feature="Extrude1"))
+        assert out["also_deleted"] is None
+        assert "could not be listed the same way before and after" in out["note"]
+
+    @pytest.mark.parametrize("over", [0, 1])
+    def test_the_named_list_stops_at_the_cap_and_counts_the_rest(self, over):
+        cap = df._common._MAX_NAMED_CANDIDATES
+        x = _keyed(_tl("Extrude1", 0), "tok-x")
+        deps = [_keyed(_tl(f"Fillet{i}", i + 1), f"tok-{i}") for i in range(cap + over)]
+        tl = _install([x] + deps)
+        _takes_with_it(tl, x, *deps)
+        out = payload(df.handler(feature="Extrude1"))
+        assert out["also_deleted"] == [f"Fillet{i}" for i in range(cap)]
+        assert out.get("also_deleted_count") == (cap + 1 if over else None)
 
 
 # ── absence is proved, never assumed ─────────────────────────────────────────
@@ -306,6 +403,16 @@ class TestGuards:
     def test_direct_design_no_timeline_errors(self):
         _install([], has_timeline=False)
         assert "no timeline" in error_message(df.handler(feature="X")).lower()
+
+    def test_an_open_form_edit_is_named_and_warns_off_deleting_bodies(self, monkeypatch):
+        # Deleting a Form's body while its edit is open takes the whole Form, so the direct-design
+        # remedy ("delete bodies directly") must not be what this refusal says.
+        install(df, make_design(design_type=0))
+        monkeypatch.setattr(df._common, "app", FakeApplication(user_interface=FakeUserInterface(
+            active_workspace=types.SimpleNamespace(id="TSplineEnvironment"))))
+        msg = error_message(df.handler(feature="Fillet2"))
+        assert "A Form edit is open" in msg and "Do not delete bodies" in msg
+        assert "directly instead" not in msg
 
     def test_missing_feature_errors(self):
         _install([_tl("Extrude1", 0)])

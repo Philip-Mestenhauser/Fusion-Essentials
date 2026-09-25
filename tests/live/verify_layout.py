@@ -38,7 +38,7 @@ _SKETCH_MAKERS = ("sketch_add_geometry", "sketch_add_3d_line", "sketch_set_text"
 
 _BODY_MAKERS = ("model_extrude", "model_revolve", "model_loft", "model_sweep", "model_pipe",
                 "model_base_feature", "surface_extrude", "surface_revolve", "surface_patch",
-                "mesh_insert")
+                "mesh_insert", "form_create")
 
 # view_set frames a subject at this multiple of its own size - the tool's own view_set._FRAME_MARGIN.
 # Modelled here so the sweep can tell what the standing frame already shows and leave the camera
@@ -303,7 +303,7 @@ _MEASURED_BOX = {
     "LnkA": [924.0, 944.0, 1779.0, 1799.0],
     "LnkB": [924.0, 944.0, 1779.0, 1799.0],
     "LoftCameo": [300.0, 332.0, 1344.0, 1376.0],
-    "MateArm": [15.264361, 49.709224, -2211.098902, -2185.438648],
+    "MateArm": [498.260402, 532.705266, -2099.672586, -2074.012332],
     "MateSeat": [520.0, 540.0, 1934.0, 1954.0],
     "Msh": [803.8, 879.0, 1343.7, 1419.0],
     "PatchRail": [600.0, 620.0, 2042.0, 2042.0],
@@ -723,7 +723,7 @@ _PLACE_PAIRS = (("x", "y"), ("x1", "y1"), ("x2", "y2"), ("x3", "y3"), ("cx", "cy
 # instance a whole field away from the original it is meant to sit beside.
 _PLACE_DELTA_TOOLS = ("design_add_instance",)
 
-_PLACE_XYZ = ("nearest_to", "point")        # one [x, y, z]
+_PLACE_XYZ = ("nearest_to", "point", "origin")   # one [x, y, z]
 _PLACE_POINTS = ("points",)                 # a list of [x, y] or [x, y, z]
 
 # Keys holding a LIST of entry objects. A sketch write tool takes one per call and its entries carry

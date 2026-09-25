@@ -39,6 +39,15 @@ class TestRowRegistry:
             "measurement row bodies that do not compile - they would reach live Fusion as ERROR "
             "rows:\n  " + "\n  ".join(broken))
 
+    def test_every_closing_script_composes_into_compilable_python(self):
+        # a closing script is built from the first script's output, so it never meets the check
+        # above - and the one that ends an open Form edit is what the rows after it depend on.
+        printed = 'FORMSTATE {"token": "t", "count": 1}\nPASS opened'
+        closing = [row for row in measure_api.ROWS if row.get("script_after_fn")]
+        assert closing
+        for row in closing:
+            compile(measure_api._compose(measure_api._closing_row(row, printed)), row["id"], "exec")
+
     def test_row_ids_are_unique(self):
         seen, dupes = set(), []
         for row in measure_api.ROWS:
@@ -53,6 +62,25 @@ class TestRowRegistry:
                 if not str(row.get("claim", "")).strip()
                 or not str(row.get("encoded_in", "")).strip()]
         assert not thin, "rows with an empty claim or encoded_in: " + ", ".join(thin)
+
+
+class TestWireChecksPinTheScratch:
+    def test_a_write_check_carries_the_scratch_pin_and_a_strict_read_does_not(self, monkeypatch):
+        rows = ({"name": "design_delete_feature",
+                 "inputSchema": {"properties": {"feature": {}, "expect_document": {}}}},
+                {"name": "workspace_orient", "inputSchema": {"properties": {}}})
+        monkeypatch.setattr(measure_api, "registered_tools",
+                            lambda include_rows=False: ([r["name"] for r in rows], rows))
+        sent = []
+        monkeypatch.setattr(measure_api, "call",
+                            lambda tool, args: sent.append((tool, args)) or (True, "refused"))
+        row = {"wire_checks": [("workspace_orient", {}, lambda e, p: (True, "read")),
+                               ("design_delete_feature", {"feature": "Form1"},
+                                lambda e, p: (True, "refused"))]}
+        measure_api._run_followups(row, "SCRATCH", "PASS", "", "")
+        assert sent == [("workspace_orient", {}),
+                        ("design_delete_feature", {"feature": "Form1",
+                                                   "expect_document": "SCRATCH"})]
 
 
 class TestTheDrawingRowDeletesOnlyWhatItSaved:

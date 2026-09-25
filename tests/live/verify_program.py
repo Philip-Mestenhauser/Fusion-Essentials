@@ -467,7 +467,15 @@ STORY = {
                       "the axis refused. Then the HUB itself: its thirteen-segment outline turned "
                       "360 deg about the construction line the outline closes on, off a profile "
                       "handle rather than a guessed index"),
-    "model_loft": "loft a base-to-post cameo between two profiles on stacked planes",
+    "model_loft": ("loft a base-to-post cameo between two profiles on stacked planes; then the "
+                   "BLEND - two open tubes' facing rims lofted with a smooth start and a tangent "
+                   "end read back off the feature with both weight parameters named, the start "
+                   "weight changed through param_set with the loft still healthy, a free-ended "
+                   "loft over the same rims, and a tangent end on a profile refused with the "
+                   "timeline unchanged; a nose from the free rim to a sketch point, point_sharp "
+                   "and point_tangent read back; a direction start on open sketch curves and on "
+                   "profiles, each start_angle set to 30 deg widening the body's box; and a loft "
+                   "on two strip-edge rails at rail_continuity g1 and a g0 twin, read back"),
     "model_sweep": "sweep a round section along its own path",
     "model_draft": "draft a cameo face",
     "model_mirror": ("mirror a cameo body, then the emboss block's own timeline FEATURE with the "
@@ -530,6 +538,14 @@ STORY = {
                          "selected and deleted again"),
     "model_measure_between": ("measure the boss wall to the bore inside it; then each jaw's grip "
                               "face to the billet, which is what says the vise is closed"),
+    "model_measure_continuity": ("read the opened box's rim against its tangent patch within half "
+                                 "a degree and against its connected patch past 45; the uncreased "
+                                 "box Form's seams smooth and the creased Form's rim at 90 deg; and "
+                                 "the blend's smooth and tangent seams under 0.01 deg, the smooth "
+                                 "one again after the weight change, against the free-ended "
+                                 "loft's crease past 2; the nose rim tangent with the domed tip's "
+                                 "curvature jump past 1.5x the cone's; and a strip edge along the "
+                                 "g1 rail loft under 0.01 deg against the g0 twin's past 10"),
     "model_measure_relation": ("read the boss and its own bore coaxial; then the rest of the vocabulary on "
                                "the datum bench, each reporting its OWN measurement - the top face "
                                "perpendicular to a wall it meets and touching it along that edge, "
@@ -655,7 +671,11 @@ STORY = {
                    "the count and both paths (each instance holds that body somewhere else, and no "
                    "read-back tells a right instance from a wrong one); a face as the axis and any "
                    "faces selection refused"),
-    "design_delete_feature": "add a wart feature then delete it; health diff",
+    "design_delete_feature": ("add a wart feature then delete it; health diff. In the Cascade "
+                              "document, deleting the extrude names everything that left with it "
+                              "(also_deleted plus any unnamed count), matched against the timeline "
+                              "count read before and after; deleting the creased Form names exactly "
+                              "its fillet, and the timeline reads two rows shorter"),
     "design_remove_feature": "remove a scratch body and its occurrence; deleting each Remove brings them back",
     "design_delete_occurrence": "delete a scratch occurrence",
     "view_section": "section cut along the part's bore axis",
@@ -682,8 +702,11 @@ STORY = {
     "surface_reverse_normal": "flip a sheet normal",
     "surface_delete_face": "open a bore by deleting a face",
     "surface_patch": ("close the opened bore with a patch, then the same rim at 'tangent' "
-                      "continuity and again through one interior RAIL whose landed count is read "
-                      "off the input; rails paired with the multi-loop form refused"),
+                      "continuity handed over SCRAMBLED (its two opposite edges first), which "
+                      "lands with no 'unverified' key and reads back, through find_geometry, as a "
+                      "dome: no planar face and more area than the flat patch; again through one "
+                      "interior RAIL whose landed count is read off the input; rails paired with "
+                      "the multi-loop form refused"),
     "sketch_project": ("project the machining boundary; then section the cap on a datum plane with per-source attribution naming the parallel face that contributed nothing, project the cap sketch's line onto the top face reading the reference linkage back, and meet the same-sketch and missing-direction refusals. SKIPPED(rig): the cross-document to_surface identity fixture is not scripted"),
     "surface_trim": ("trim a sheet with a cylinder cutter while a COPLANAR decoy sheet the same "
                      "cutter crosses stays visible - the decoy's cells named as another body's, "
@@ -696,6 +719,18 @@ STORY = {
     "model_unstitch": "unstitch a scratch box's faces",
     "model_stitch": "re-stitch two faces",
     "model_base_feature": "open and close a base-feature scope",
+    "form_create": ("build a 20 mm T-spline box Form whose reported volume model_inspect reads "
+                    "back at the pinned figure, then "
+                    "the same cage re-created with its top rim creased into four sharp edges a "
+                    "fillet takes, handed back as find_geometry's own handles; a face naming a "
+                    "vertex the cage lacks and both inputs at once refused with the timeline "
+                    "unchanged; a "
+                    "capped cylinder built behind the rolled-back marker, naming the box Form after "
+                    "it, and an uncapped one published as an open surface by its area"),
+    "form_get": ("list the Forms with their creation records, read the box Form's cage back in "
+                 "form_create's shape, and tell the filleted Form from the untouched one; read "
+                 "the cylinder's cage by its address while a collapsed group hides it from the "
+                 "timeline, and the tube as modified after a downstream move"),
     "model_arrange": ("nest a square pad, a bar, a disc and a second pad inside a HEXAGON boundary, "
                       "then scale the boundary and solve again - the same four parts re-nest, which "
                       "is the arrangement being a function of the boundary rather than a one-time "
@@ -740,7 +775,13 @@ STORY = {
                              "the design-wide count are read back both ways, and a second delete is "
                              "refused; then the 'name@index' form a FeatureRef refusal hands back, "
                              "resolved against each object's OWN .index (the index design_get "
-                             "publishes), with the neighbouring index refused as a miss. "
+                             "publishes), with the neighbouring index refused as a miss. In the "
+                             "Cascade document, suppressing the sketch names the extrude and shell "
+                             "it switched off and unsuppressing names them back, checked against "
+                             "the timeline and the restored volume; with the two grouped, the "
+                             "suppress carries a census_caveat naming 1 collapsed group while "
+                             "design_get's group= listing shows both members suppressed. The "
+                             "creased Form's suppress and unsuppress name exactly its fillet. "
                              "SKIPPED(rig): the AMBIGUOUS-name refusal itself needs two same-named "
                              "timeline features, and no tool on this surface renames a feature, so "
                              "the sweep cannot mint the pair"),

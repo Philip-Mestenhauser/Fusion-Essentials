@@ -644,9 +644,9 @@ class TestCaptureOptionsPath:
 # document's ROOT component reads the SAME byte-identical entityToken while the documents' lineage
 # ids differ. A token-only key collapses all of them onto one entry.
 _ROOT_TOKEN = "/v4BAAEAAwAAAAAAAAAAAAAA"
-_JOB_URNS = ("urn:adsk.wipprod:dm.lineage:K3I2nkywRlaWPHJexysOdA",
-             "urn:adsk.wipprod:dm.lineage:N_QoPrrrSJmF__f9BZV86A",
-             "urn:adsk.wipprod:dm.lineage:Qb7yTHkCTVSp6t9V9YQKuw")
+_JOB_URNS = ("urn:adsk.wipprod:dm.lineage:FixtureLineageA000000A",
+             "urn:adsk.wipprod:dm.lineage:FixtureLineageB000000B",
+             "urn:adsk.wipprod:dm.lineage:FixtureLineageC000000C")
 
 
 def _root_of_document(name, urn, token=_ROOT_TOKEN):

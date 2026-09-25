@@ -23,7 +23,7 @@ It is **off by default** and runs only on your own machine (loopback).
 4. The endpoint is `http://127.0.0.1:27182/mcp`. Open `http://127.0.0.1:27182/health` in a browser
    and check both `"status": "healthy"` and `"server": "Fusion-Essentials MCP Server"`.
 
-Optional tool **families** (`appearance`, `cam`, `data`, `drawing`, `mesh`, `save`, `surface`) can each
+Optional tool **families** (`appearance`, `cam`, `data`, `drawing`, `form`, `mesh`, `save`, `surface`) can each
 be disabled with a checkbox under **Settings → MCP Server**, to shrink the tool surface an agent has
 to load when you don't need that domain. All families are enabled by default. Like the other MCP
 settings, a disabled family takes effect on reload — its tools are not registered, and
@@ -133,6 +133,7 @@ are predictable: `<family>_<verb>`, so the family prefix tells you the area —
 | `cam_` | manufacturing (setups, operations, toolpaths) | `cam_get`, `cam_generate`, `cam_get_status` |
 | `pmi_` | model-based annotations (notes, leaders, GD&T) | `pmi_get`, `pmi_create`, `pmi_edit` |
 | `appearance_` / `mesh_` / `surface_` | colour, mesh bodies, surface modelling | `appearance_set`, `mesh_export`, `surface_thicken` |
+| `form_` | T-spline form bodies | `form_create`, `form_get` |
 | `drawing_` / `workspace_` / `save_` | 2D drawings, orientation, save-as-mesh | `drawing_create`, `workspace_orient`, `save_as_mesh` |
 
 Tool definitions expose `readOnlyHint` and, for destructive tools, `destructiveHint` annotations.

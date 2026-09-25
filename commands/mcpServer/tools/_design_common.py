@@ -11,11 +11,31 @@ from . import _inputs
 from ._common import timeline_health as _timeline_health
 
 MAP_BLURB = (
-    "DESIGN MODE: get_mode_handler - the designType + capability can{} map design_get's 'mode' "
-    "slice returns, derived from the mode so it agrees with ModeGuards; health_handler - the "
-    "timeline error/warning rollup of its default slice; run_in_base_feature - a mutation "
-    "needing a base-feature scope in a PARAMETRIC design, run direct in a DIRECT one; "
-    "base_feature_run_wrapper - its always-finish wrapper")
+    "DESIGN MODE: get_mode_handler - design_get's 'mode' slice, a can{} map agreeing with "
+    "ModeGuards; health_handler - its timeline error/warning rollup; run_in_base_feature/"
+    "base_feature_run_wrapper - a mutation needing a base-feature scope, always finished; "
+    "timeline_census/timeline_item_key/census_caveat - the token-keyed census a delete or "
+    "suppress diffs; no_timeline_reason - the no-timeline refusal")
+
+# A delete or suppress reply appends this when its before/after census could not be diffed.
+CENSUS_UNREAD = ("The timeline could not be listed the same way before and after this call, so "
+                 "what else it changed is not named - design_get(include=['timeline']) lists what "
+                 "is there now.")
+
+# MEASURED: deleting a Form's body while its edit is open deletes the whole Form and strips the
+# B-Rep from every later Form, all still reading healthy.
+FORM_EDIT_OPEN = ("A Form edit is open, which hides the timeline. Ask the user to click Finish "
+                  "Form. Do not delete bodies while it is open.")
+# The mode read and design_set_mode's refusal while an open Form edit makes the design read direct.
+FORM_EDIT_OPEN_MODE = ("A Form edit is open, so the design reads direct until it ends - ask the "
+                       "user to click Finish Form, then retry.")
+
+
+def no_timeline_reason(design, direct_text, form_edit=None):
+    """The no-timeline refusal: FORM_EDIT_OPEN when form_edit (read here if None), else direct_text."""
+    if form_edit is None:
+        form_edit = _inputs.in_form_edit(design)
+    return FORM_EDIT_OPEN if form_edit else direct_text
 
 
 def health_handler() -> dict:
@@ -27,6 +47,47 @@ def health_handler() -> dict:
     return ok({"timeline_features": total, "error_count": len(errors),
         "warning_count": len(warnings), "errors": errors, "warnings": warnings,
         "healthy": len(errors) == 0})
+
+
+# ── the timeline census a delete or suppress diffs ──────────────────────────
+
+def timeline_item_key(obj):
+    """A timeline item's census key: its entity's entityToken, or None where none reads."""
+    token = safe(lambda: obj.entity.entityToken)
+    return token if isinstance(token, str) and token else None
+
+
+def timeline_census(design):
+    """{'items': [{key, name, index, suppressed, collapsed_group}], 'collapsed_groups': n} in
+    timeline order, or None when the timeline cannot be counted."""
+    timeline = safe(lambda: design.timeline)
+    count = _common.counted(lambda: timeline.count) if timeline is not None else None
+    if count is None:
+        return None
+    items = []
+    for i in range(count):
+        obj = safe(lambda i=i: timeline.item(i))
+        # An EXPANDED group is absent from timeline.item() (its members are listed instead), so a
+        # group row here hides its members; an unreadable isCollapsed counts as hiding them.
+        group = (obj is not None and _common.read_flag(lambda: obj.isGroup) is True
+                 and _common.read_flag(lambda: obj.isCollapsed) is not False)
+        items.append({"key": timeline_item_key(obj) if obj is not None else None,
+                      "name": safe(lambda: obj.name) if obj is not None else None,
+                      "index": safe(lambda: obj.index) if obj is not None else None,
+                      "suppressed": (_common.read_flag(lambda: obj.isSuppressed)
+                                     if obj is not None else None),
+                      "collapsed_group": group})
+    return {"items": items, "collapsed_groups": sum(1 for it in items if it["collapsed_group"])}
+
+
+def census_caveat(census):
+    """The sentence a census reply carries when collapsed groups hide members from it, or None."""
+    n = (census or {}).get("collapsed_groups") or 0
+    if not n:
+        return None
+    return (f"{n} collapsed timeline group(s) hide their members from this check, so a member this "
+            "call changed is not named - design_get(include=['timeline'], group='<name>') lists "
+            "them.")
 
 
 # ── shared mode reads (all via the ONE true reader) ─────────────────────────
@@ -82,15 +143,20 @@ def get_mode_handler() -> dict:
         return error("No active design. Create or open a document first (see doc_new).")
     mode = _inputs.current_design_type(design)
     tl_count = _timeline_feature_count(design)
+    form_edit = _inputs.in_form_edit(design)
+    can = _capability_map(mode)
     return ok({
         "design_type": mode,
         "has_timeline": tl_count is not None,
         "timeline_feature_count": tl_count,
     "base_feature_count": _base_feature_count(design),
     "in_base_feature_edit": _inputs._in_base_feature_scope(design),
-    "can": _capability_map(mode),
-    "note": ("Capability map is keyed by mode requirement; call design_set_mode to convert, or "
-            "model_base_feature to open a base-feature scope."),
+    "in_form_edit": form_edit,
+    # The open edit is what reads direct, so no capability is keyed off that read.
+    "can": {k: None for k in can} if form_edit else can,
+    "note": (FORM_EDIT_OPEN_MODE if form_edit else
+             "Capability map is keyed by mode requirement; call design_set_mode to convert, or "
+             "model_base_feature to open a base-feature scope."),
     })
 
 

@@ -21,7 +21,8 @@ import pytest
 
 from conftest import FakeTimeline as _SharedTimeline
 from conftest import FakeTimelineObject as _SharedTimelineObject
-from conftest import _NamedCollection, error_message, load_tool, make_design, payload
+from conftest import (FakeApplication, FakeUserInterface, _NamedCollection, error_message,
+                      load_tool, make_design, payload)
 
 et = load_tool("design_edit_timeline")
 
@@ -476,6 +477,7 @@ class TestSuppress:
         assert tl._items[2].isSuppressed is True
         assert out["is_suppressed"] is True and out["was_suppressed"] is False
         assert out["index"] == 2
+        assert out["also_suppressed"] == []       # the target, token-less here, is not its own echo
 
     def test_unsuppresses(self, wire):
         items = [FakeTimelineObject("Fillet1", 0, suppressed=True)]
@@ -520,6 +522,125 @@ class TestSuppress:
     def test_missing_feature_argument(self, wire):
         wire(_timeline())
         assert "needs 'feature'" in error_message(et.handler(action="suppress"))
+
+
+class _Cascading(FakeTimelineObject):
+    """Setting isSuppressed here sets it on `dependents` too - the chain Fusion switches off with a
+    sketch or a loft. `_armed` arms the hook after construction, past the base's seeding write."""
+    _armed = False
+
+    @FakeTimelineObject.isSuppressed.setter
+    def isSuppressed(self, value):
+        self._suppressed = bool(value)
+        for d in (self.dependents if self._armed else ()):
+            d._suppressed = bool(value)
+
+
+class _GoesUnread(FakeTimelineObject):
+    """A dependent whose isSuppressed stops reading once a cascade switches it off."""
+
+    @FakeTimelineObject.isSuppressed.getter
+    def isSuppressed(self):
+        return None if self._suppressed else False
+
+
+def _chain(suppressed=False, extra=()):
+    """Sketch1 -> Extrude1 (keyed) and Fillet1 (no entity token); `extra` sits after them."""
+    extrude = FakeTimelineObject("Extrude1", 1, suppressed=suppressed,
+                                 entity=types.SimpleNamespace(entityToken="tok-e"))
+    fillet = FakeTimelineObject("Fillet1", 2, suppressed=suppressed)
+    sketch = _Cascading("Sketch1", 0, suppressed=suppressed,
+                        entity=types.SimpleNamespace(entityToken="tok-s"))
+    sketch.dependents, sketch._armed = (extrude, fillet), True
+    return FakeTimeline([sketch, extrude, fillet] + list(extra))
+
+
+class TestSuppressCascade:
+    def test_a_suppress_that_switches_off_its_dependents_names_them(self, wire):
+        wire(_chain())
+        out = payload(et.handler(action="suppress", feature="Sketch1"))
+        assert out["also_suppressed"] == ["Extrude1", "Fillet1"]
+        assert out["note"].startswith("Suppressing 'Sketch1' also suppressed Extrude1, Fillet1; "
+                                      "suppressed=false on 'Sketch1' restores them.")
+        assert "census_caveat" not in out
+
+    def test_a_target_whose_index_does_not_read_is_left_out_by_its_token(self, wire):
+        tl = wire(_chain())
+        tl._items[0]._holder = FakeTimelineGroup("Hidden", 7, collapsed=True)   # .index raises
+        out = payload(et.handler(action="suppress", feature="Sketch1"))
+        assert out["also_suppressed"] == ["Extrude1", "Fillet1"]
+
+    def test_a_row_sharing_the_targets_token_is_named_when_the_index_reads(self, wire):
+        tl = wire(_chain())
+        tl._items[1].entity = types.SimpleNamespace(entityToken="tok-s")   # Sketch1's token
+        out = payload(et.handler(action="suppress", feature="Sketch1"))
+        assert out["also_suppressed"] == ["Extrude1", "Fillet1"]
+
+    def test_a_target_with_neither_index_nor_token_names_nothing(self, wire):
+        tl = wire(_chain())
+        tl._items[0].entity = None
+        tl._items[0]._holder = FakeTimelineGroup("Hidden", 7, collapsed=True)   # .index raises
+        out = payload(et.handler(action="suppress", feature="Sketch1"))
+        assert out["also_suppressed"] is None
+        assert "could not be listed the same way before and after" in out["note"]
+
+    def test_a_dependent_whose_flag_stops_reading_names_nothing(self, wire):
+        tl = wire(_chain())
+        goes = _GoesUnread("Fillet2", 3)
+        tl._items.append(goes)
+        tl._items[0].dependents += (goes,)
+        out = payload(et.handler(action="suppress", feature="Sketch1"))
+        assert out["also_suppressed"] is None
+
+    def test_the_unsuppress_names_what_came_back(self, wire):
+        wire(_chain(suppressed=True))
+        out = payload(et.handler(action="suppress", feature="Sketch1", suppressed=False))
+        assert out["also_unsuppressed"] == ["Extrude1", "Fillet1"]
+        assert "also_suppressed" not in out
+
+    def test_an_item_already_suppressed_is_not_reported(self, wire):
+        tl = wire(_chain())
+        tl._items[1]._suppressed = True                   # Extrude1 was off before the call
+        out = payload(et.handler(action="suppress", feature="Sketch1"))
+        assert out["also_suppressed"] == ["Fillet1"]
+
+    def test_a_collapsed_group_adds_the_caveat(self, wire):
+        group = FakeTimelineGroup("Base", 3, collapsed=True)
+        wire(_chain(extra=[group]))
+        out = payload(et.handler(action="suppress", feature="Sketch1"))
+        assert out["census_caveat"].startswith("1 collapsed timeline group(s)")
+
+    def test_a_census_that_does_not_pair_up_names_nothing(self, wire):
+        # the item list changed across the call, so position i is not one item on both sides
+        tl = wire(_chain())
+        sketch = tl._items[0]
+        sketch.dependents = sketch.dependents + (_Joining(tl),)
+        out = payload(et.handler(action="suppress", feature="Sketch1"))
+        assert out["also_suppressed"] is None
+        assert "could not be listed the same way before and after" in out["note"]
+
+    @pytest.mark.parametrize("over", [0, 1])
+    def test_the_named_list_stops_at_the_cap_and_counts_the_rest(self, wire, over):
+        cap = et._common._MAX_NAMED_CANDIDATES
+        deps = [FakeTimelineObject(f"Fillet{i}", i + 1) for i in range(cap + over)]
+        sketch = _Cascading("Sketch1", 0)
+        sketch.dependents, sketch._armed = tuple(deps), True
+        wire(FakeTimeline([sketch] + deps))
+        out = payload(et.handler(action="suppress", feature="Sketch1"))
+        assert out["also_suppressed"] == [f"Fillet{i}" for i in range(cap)]
+        assert out.get("also_suppressed_count") == (cap + 1 if over else None)
+
+
+class _Joining:
+    """A 'dependent' whose suppress write appends a new item to the timeline."""
+
+    def __init__(self, timeline):
+        self._timeline = timeline
+
+    def __setattr__(self, name, value):
+        if name == "_suppressed":
+            self._timeline._items.append(FakeTimelineObject("Late1", 9))
+        object.__setattr__(self, name, value)
 
 
 # ── name resolution ──────────────────────────────────────────────────────────
@@ -1019,6 +1140,14 @@ class TestGuards:
     def test_direct_modelling_design_has_no_timeline(self, wire):
         wire(None)
         assert "no timeline" in error_message(et.handler(action="roll", to="end"))
+
+    def test_an_open_form_edit_is_named_not_called_direct(self, monkeypatch):
+        design = make_design(design_type=0)
+        monkeypatch.setattr(et._common, "design", lambda: design)
+        monkeypatch.setattr(et._common, "app", FakeApplication(user_interface=FakeUserInterface(
+            active_workspace=types.SimpleNamespace(id="TSplineEnvironment"))))
+        msg = error_message(et.handler(action="suppress", feature="Form1"))
+        assert "A Form edit is open" in msg and "direct-modelling" not in msg
 
     def test_unknown_action_is_refused(self, wire):
         wire(_timeline())

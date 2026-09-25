@@ -21,6 +21,7 @@ _FAMILY = {
     "model":     ("Solid feature modeling: extrude/revolve/fillet/hole/pattern/combine + inspect/measure.", "model_extrude"),
     "surface":   ("Open (non-solid) surface modeling: extrude/revolve/patch/trim/thicken.", "surface_extrude"),
     "mesh":      ("Mesh bodies (STL/OBJ/3MF): import, edit, reduce/remesh, convert to BRep.", "mesh_insert"),
+    "form":      ("T-spline Forms: create one from a control cage, list them, read a Form's cage back.", "form_get"),
     "assembly":  ("Assembly kinematics: joints, grounding, move/capture, interference, probe.", "assembly_get"),
     "joint":     ("Joints between components: create/edit/drive joints and joint origins.", "joint_create"),
     "cam":       ("Manufacture (CAM): setups, operations, templates, tool libraries, generate toolpaths.", "cam_create_setup"),

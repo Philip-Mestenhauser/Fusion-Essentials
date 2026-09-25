@@ -203,8 +203,8 @@ class TestXrefBodiesAreNotTheSameBody:
     a legitimate combine of two different bodies - and the caller cannot act on that refusal, since
     neither body's token is theirs to change from the host document."""
 
-    _URN_A = "urn:adsk.wipprod:dm.lineage:K3I2nkywRlaWPHJexysOdA"
-    _URN_B = "urn:adsk.wipprod:dm.lineage:N_QoPrrrSJmF__f9BZV86A"
+    _URN_A = "urn:adsk.wipprod:dm.lineage:FixtureLineageA000000A"
+    _URN_B = "urn:adsk.wipprod:dm.lineage:FixtureLineageB000000B"
     _SHARED_TOKEN = "/vB+AAEAAwAAAAAAAAAAAAAA"
 
     def _in_document(self, name, urn):

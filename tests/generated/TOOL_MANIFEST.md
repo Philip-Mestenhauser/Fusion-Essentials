@@ -2,7 +2,7 @@
 
 _Auto-generated from the live registry by `tests/gen_manifest.py`. Do not edit by hand — re-run the generator after adding/renaming a tool or kind. `--check` fails the suite if this is stale. This is the batch form of the `sys_find_tool` live lookup: the one place to see what already exists before building it._
 
-**Tools:** 193  |  **Input-kinds:** 22  |  write-status: `·` read · `✎` write · `⚠` destructive
+**Tools:** 196  |  **Input-kinds:** 24  |  write-status: `·` read · `✎` write · `⚠` destructive
 
 ## Input kinds — reference EXISTING geometry/structure with these (don't hand-roll a name/index)
 
@@ -15,12 +15,14 @@ Before adding a tool input that points at a face/edge/body/plane/axis/profile/oc
 | `BodyRefList` | A LIST of body references (handles or names) - for tools that act on several bodies. Kind-checks |
 | `Choice` | One of a fixed set of string options. Emits a JSON-schema `enum` so the legal values are |
 | `Distance` | A length value in display 'units', resolved to Fusion's internal cm. The companion 'units' |
-| `EdgeLoopRef` | A boundary defined by edge handles from find_geometry. |
+| `EdgeLoopRef` | A boundary of find_geometry edge handles: closed=True a CLOSED loop, a one-body set checked |
 | `FeatureRef` | A reference to ONE timeline FEATURE by name, '<component>/<name>', or timeline index, as |
 | `FeatureRefList` | A LIST of timeline features, resolving to (entities, labels) - the entity list plus the |
 | `GeometryHandle` | A reference to EXISTING geometry, as a SHORT-LIVED handle from find_geometry (an entityToken). |
 | `GeometryHandleList` | A LIST of geometry handles (e.g. the specific edges to fillet, the bodies to mirror). Accepts a |
 | `JointOriginRef` | A reference to a Joint Origin (a reusable WCS coordinate frame), as EITHER a 'handle' (the |
+| `LoftEndCondition` | One loft end's condition; legal_on() refuses one its section cannot take, before Fusion. |
+| `LoftSectionList` | ORDERED loft sections, each as (what LoftSections.add takes, its kind, the entity named). |
 | `OccurrenceRef` | A reference to an assembly OCCURRENCE (a component instance): a `handle` - its entityToken, which |
 | `OccurrenceRefList` | A list of occurrence references (JSON list or comma-separated), each resolved via OccurrenceRef's |
 | `PlaneRef` | A reference to a PLANE to act on, resolved from ANY of three shapes a user might supply: |
@@ -54,8 +56,9 @@ Produces: feature -> design_delete_feature. |
 | ✎ | `model_fillet` | Round (fillet) edges; model_chamfer bevels |
 | ✎ | `model_hole` | Drill holes with the Hole feature, so it carries hole and thread metadata; several 'points' make ONE patterned feature. |
 | · | `model_inspect` | Measure a target: the bounding box by default, mass or mesh stats through 'include'. |
-| ✎ | `model_loft` | Loft through an ordered list of profiles; model_stitch closes a surface loft. |
+| ✎ | `model_loft` | Loft through ordered sections; model_stitch closes a surface loft. |
 | · | `model_measure_between` | Measure the distance or angle between two targets; a distance of 0 is touching. |
+| · | `model_measure_continuity` | Measure the gap, normal angle and curvature jump across each edge's seam; an edge on one face reads against the 'against' body. |
 | · | `model_measure_relation` | Judge a geometric relation between two entities.
 Produces: passed. |
 | ✎ | `model_mirror` | Mirror bodies or timeline features across a plane. |
@@ -107,6 +110,13 @@ Produces: feature, reversed_confirmed. |
 | ✎ | `surface_trim` | Trim a surface body with an intersecting tool; only the target loses cells. |
 | ✎ | `surface_untrim` | Restore trimmed faces to their natural extent, or remove an internal hole loop.
 Produces: feature, area_after. |
+
+### form
+
+| | Tool | Summary |
+|---|---|---|
+| ✎ | `form_create` | Create a T-spline Form's B-Rep body from a box [x,y,z] or 8-sided cylinder [diameter, height] primitive centred on origin, or a quad cage; form_get(include=['ca... |
+| · | `form_get` | List the T-spline Forms and their creation records; include=['cage'] returns the named Form's cage for form_create. |
 
 ### mesh
 

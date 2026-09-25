@@ -23,7 +23,7 @@ def family_of(name):
 # Only these: the hub families (doc/find/view/design/model/sketch/joint/assembly/param) are
 # cross-referenced from everywhere, and sys/workspace hold the orientation tools named in the
 # server's initialize instructions - so those stay always-on.
-GATEABLE_FAMILIES = ("appearance", "cam", "data", "drawing", "mesh", "save", "surface")
+GATEABLE_FAMILIES = ("appearance", "cam", "data", "drawing", "form", "mesh", "save", "surface")
 
 # Tools the auto-discovery sweep SKIPS ENTIRELY unless a specific settings checkbox allows them
 # (see entry.py's _GATED_TOOL_MODULES / _collect_items - the module is never even imported by the

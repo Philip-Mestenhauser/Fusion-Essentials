@@ -8,7 +8,7 @@ import pytest
 
 from conftest import (BRepBody, BRepEdge, FakeFeature as _SharedFeature,
                       FakeFeatures as _SharedFeatures, MakeComp, MakeDesign,
-                      _FakeObjectCollection, install, load_tool, payload)
+                      _FakeObjectCollection, entity_proxy, install, load_tool, payload)
 
 sc = load_tool("surface_patch")
 
@@ -23,6 +23,38 @@ def _edge():
     edge = BRepEdge(curve=None)
     edge.body = None
     return edge
+
+
+def _connected():
+    """The seeded connected member - None where a test has swapped the enum class out."""
+    return getattr(adsk.fusion.SurfaceContinuityTypes, "ConnectedSurfaceContinuityType", None)
+
+
+class _FreshVertex:
+    """A BRepVertex wrapper: == by the vertex it wraps, never `is`, as live B-Rep wrappers read."""
+    __hash__ = None
+
+    def __init__(self, key):
+        self._key = key
+
+    def __eq__(self, other):
+        return isinstance(other, _FreshVertex) and other._key == self._key
+
+
+class _RimEdge(BRepEdge):
+    """A B-Rep edge whose end vertices read as a FRESH wrapper on every access."""
+    startVertex = property(lambda self: _FreshVertex(self._ends[0]), lambda self, _v: None)
+    endVertex = property(lambda self: _FreshVertex(self._ends[1]), lambda self, _v: None)
+
+
+def _rim(*pairs):
+    """Edges of ONE body, each running between two named vertices: 'ab' runs a -> b."""
+    body, edges = BRepBody("Rim", entity_token="Rim"), []
+    for pair in pairs:
+        edge = _RimEdge(curve=None)
+        edge.body, edge._ends = entity_proxy(body), pair
+        edges.append(edge)
+    return edges
 
 
 def _comp(features, name="Root"):
@@ -46,9 +78,11 @@ class _RailsColl(_FakeObjectCollection):
 
 
 class FakeFeature(_SharedFeature):
-    """The shared feature plus the extent a depth read-back reads."""
-    def __init__(self, name="Surface1", bodies=None, extent_cm=None):
+    """The shared feature plus the extent a depth read-back reads and a patch's group pair."""
+    def __init__(self, name="Surface1", bodies=None, extent_cm=None, group_continuity=None):
         super().__init__(name=name, bodies=bodies if bodies is not None else [_body()])
+        self.groupContinuity = group_continuity
+        self.groupWeight = 0.5
         if extent_cm is not None:
             # ExtrudeFeature.extentOne is a DistanceExtentDefinition (a SymmetricExtentDefinition
             # for a symmetric extrude) whose .distance is a ModelParameter reading CM, signed as
@@ -58,10 +92,12 @@ class FakeFeature(_SharedFeature):
 
 
 class FakePatchInput:
+    """PatchFeatureInput: the group pair at its defaults (group edges, connected); no shape dump."""
     def __init__(self, boundary, op, rails_dropped=0):
         self.boundary = boundary
         self.operation = op
-        self.continuity = None
+        self.isGroupEdges = True
+        self.groupContinuity = _connected()
         self._rails = []
         self._rails_dropped = rails_dropped
 
@@ -76,29 +112,32 @@ class FakePatchInput:
 
 
 class _ContinuityRejectingPatchInput:
-    """A patch input whose .continuity setter raises - models the API rejecting the value. The set
-    must NOT be wrapped in safe(): a failed patch surfaces as an error, never a silent no-op that
-    reports success."""
+    """A patch input whose .groupContinuity setter raises - models the API rejecting the value. The
+    set must NOT be wrapped in safe(): a failed patch surfaces as an error, never a silent no-op
+    that reports success."""
     def __init__(self, boundary, op):
         self.boundary = boundary
         self.operation = op
     def __setattr__(self, name, value):
-        if name == "continuity":
+        if name == "groupContinuity":
             raise RuntimeError("continuity rejected by the API")
         object.__setattr__(self, name, value)
 
 
 class FakePatchFeatures:
-    def __init__(self, result_bodies=None, feature=True, raises=None, rails_dropped=0):
+    def __init__(self, result_bodies=None, feature=True, raises=None, rails_dropped=0,
+                 ignores_continuity=False):
         # raises: add() raises this message - models the kernel refusing the patch
         # (e.g. a tangent saddle opening the single-seed auto-complete cannot chain).
         # rails_dropped: how many assigned rails the input fails to keep, so the count read-back
         # disagrees with what was assigned.
+        # ignores_continuity: the built feature reads groupContinuity connected whatever was set.
         self.last_input = None
         self._result = result_bodies
         self._feature = feature
         self._raises = raises
         self._rails_dropped = rails_dropped
+        self._ignores = ignores_continuity
     def createInput(self, boundary, op):
         self.last_input = FakePatchInput(boundary, op, rails_dropped=self._rails_dropped)
         return self.last_input
@@ -107,7 +146,8 @@ class FakePatchFeatures:
             raise RuntimeError(self._raises)
         if not self._feature:
             return None
-        return FakeFeature(name="Patch1", bodies=self._result)
+        landed = _connected() if self._ignores else getattr(inp, "groupContinuity", None)
+        return FakeFeature(name="Patch1", bodies=self._result, group_continuity=landed)
 
 
 class FakePatchFeaturesRejectContinuity(FakePatchFeatures):
@@ -143,7 +183,7 @@ def wire(monkeypatch):
 class TestSurfacePatch:
 
     def test_patch_over_closed_edge_loop(self, wire):
-        e1, e2, e3 = _edge(), _edge(), _edge()
+        e1, e2, e3 = _rim("ab", "bc", "ca")
         pf = FakePatchFeatures(result_bodies=[_body("Patch1")])
         wire(_comp(FakeFeatures(pf=pf)), handle_map={"E1": e1, "E2": e2, "E3": e3})
         out = payload(sc.handler(boundary=["E1", "E2", "E3"]))
@@ -169,11 +209,11 @@ class TestSurfacePatch:
         res = sc.handler(boundary="E1")
         assert res["isError"] is True and "no feature" in res["message"]
 
-    def test_chain_failure_names_both_known_causes_not_just_tangent_saddle(self, wire):
-        # a single-seed patch failure ('invalid argument chainOptions', live-verified) has TWO known
-        # causes that read identically from the exception string alone: a degenerate TANGENT saddle
+    def test_chain_failure_names_both_seen_causes_not_just_tangent_saddle(self, wire):
+        # a single-seed patch failure ('invalid argument chainOptions', live-verified) has been seen
+        # with two causes the exception string cannot tell apart: a degenerate TANGENT saddle
         # opening, OR an edge loop SPLIT into more segments by a later feature (e.g. a rim fillet).
-        # The message must name BOTH causes and both recipes, never assert tangent-saddle alone.
+        # The message names BOTH causes and both recipes, never tangent-saddle alone.
         e1 = _edge()
         pf = FakePatchFeatures(raises="3 : invalid argument chainOptions")
         wire(_comp(FakeFeatures(pf=pf)), handle_map={"E1": e1})
@@ -184,20 +224,20 @@ class TestSurfacePatch:
         assert "TANGENT" in msg and "two half-edges" in msg
         # cause 2: a fillet-split loop + its all-edges recipe
         assert "SPLIT" in msg and "fillet" in msg and "ALL of the loop's edges" in msg
-        # the discriminating probe: find_geometry's edge count
-        assert "find_geometry" in msg and "exactly 2 means case (1), more means case (2)" in msg
+        # the edge count find_geometry reads fits one case or the other, and decides neither
+        assert "find_geometry" in msg and "2 fits case (1), more fits case (2)" in msg
 
-    def test_chain_failure_message_does_not_assert_tangent_as_sole_cause(self, wire):
-        # regression guard for the exact misdiagnosis: the message must not present the tangent-saddle
-        # story as the ONLY explanation ("this looks like a TANGENT saddle opening") - it must frame
-        # it as one of two possibilities.
-        e1 = _edge()
-        pf = FakePatchFeatures(raises="3 : invalid argument chainOptions")
-        wire(_comp(FakeFeatures(pf=pf)), handle_map={"E1": e1})
-        res = sc.handler(boundary="E1")
-        msg = res["message"]
+    def test_chain_failure_does_not_present_its_causes_as_the_whole_list(self, wire):
+        # PATCH_NO_TOOLBODY also comes back for rim edges out of loop order, which neither named
+        # cause covers - so the causes are candidates, and the message says what this call passed.
+        edges = _rim("ab", "bc", "cd", "da")
+        pf = FakePatchFeatures(raises="3 : PATCH_NO_TOOLBODY - Modeling Error")
+        wire(_comp(FakeFeatures(pf=pf)), handle_map={f"E{i}": e for i, e in enumerate(edges)})
+        msg = sc.handler(boundary=["E0", "E1", "E2", "E3"])["message"]
         assert "this looks like a tangent saddle opening" not in msg.lower()
-        assert "two known causes" in msg
+        assert "two known causes" not in msg
+        assert "not a complete list" in msg
+        assert "4 edges were checked to close and passed in loop order" in msg
 
     def test_generic_patch_failure_keeps_the_plain_closed_loop_hint(self, wire):
         # a non-tangency failure keeps the existing closed-loop hint, not the tangency teaching.
@@ -207,6 +247,16 @@ class TestSurfacePatch:
         res = sc.handler(boundary="E1")
         assert res["isError"] is True
         assert "CLOSED loop" in res["message"] and "TANGENT" not in res["message"]
+
+    @pytest.mark.parametrize("raises", ["some other kernel error", None])
+    def test_a_boundary_checked_to_close_is_not_blamed_on_an_open_loop(self, wire, raises):
+        # the four edges were walked end to end and closed before add(), so neither the generic
+        # failure nor the no-feature reply may point at an open loop as the cause.
+        edges = _rim("ab", "bc", "cd", "da")
+        pf = FakePatchFeatures(raises=raises, feature=raises is not None)
+        wire(_comp(FakeFeatures(pf=pf)), handle_map={f"E{i}": e for i, e in enumerate(edges)})
+        msg = sc.handler(boundary=["E0", "E1", "E2", "E3"])["message"]
+        assert "4 edges were checked to close" in msg and "closed loop" not in msg.lower()
 
     def test_unknown_operation_rejected(self, wire):
         e1 = _edge()
@@ -255,17 +305,81 @@ class TestSurfacePatch:
         assert res["isError"] is True
         assert "continuity rejected" in res["message"]
 
-    def test_continuity_tangent_set_on_input(self, wire):
-        # continuity resolves through SurfaceContinuityTypes - the PLURAL class is the one that
-        # exists; a singular SurfaceContinuityType resolves to nothing, so the value the input
-        # carries must come from the plural class or the patch runs on its default.
+    def test_continuity_tangent_set_on_the_group_pair_not_the_retired_property(self, wire):
+        # continuity resolves through SurfaceContinuityTypes (the PLURAL class) onto the group pair;
+        # the retired PatchFeatureInput.continuity reads back and is ignored by the build, so
+        # writing it is the false 'tangent' this reply must never carry.
+        class _Ungrouped(FakePatchFeatures):
+            def createInput(self, boundary, op):
+                super().createInput(boundary, op).isGroupEdges = False   # so only a write sets it
+                return self.last_input
+
         e1 = _edge()
-        pf = FakePatchFeatures(result_bodies=[_body("Patch1")])
+        pf = _Ungrouped(result_bodies=[_body("Patch1")])
         wire(_comp(FakeFeatures(pf=pf)), handle_map={"E1": e1})
         out = payload(sc.handler(boundary="E1", continuity="tangent"))
-        assert out["continuity"] == "tangent"
-        assert (pf.last_input.continuity
-                is adsk.fusion.SurfaceContinuityTypes.TangentSurfaceContinuityType)
+        assert out["continuity"] == "tangent" and out["group_weight"] == 0.5
+        assert (pf.last_input.groupContinuity
+                == adsk.fusion.SurfaceContinuityTypes.TangentSurfaceContinuityType)
+        assert pf.last_input.isGroupEdges is True
+        assert not hasattr(pf.last_input, "continuity")
+
+    def test_tangent_the_feature_does_not_read_back_is_an_error(self, wire):
+        # the input takes the value and the built feature reads groupContinuity connected: the
+        # patch exists, flat, and a reply of 'tangent' would be the false ok - an error that
+        # leaves the feature for the caller to remove.
+        e1 = _edge()
+        pf = FakePatchFeatures(result_bodies=[_body("Patch1")], ignores_continuity=True)
+        wire(_comp(FakeFeatures(pf=pf)), handle_map={"E1": e1})
+        res = sc.handler(boundary="E1", continuity="tangent")
+        assert res["isError"] is True
+        assert "reads groupContinuity connected, not tangent" in res["message"]
+        assert "design_delete_feature" in res["message"]
+
+    def test_a_continuity_the_feature_does_not_answer_is_null_never_the_request(self, wire):
+        class _Blind(FakePatchFeatures):
+            def add(self, inp):
+                feature = super().add(inp)
+                feature.groupContinuity = None
+                return feature
+
+        pf = _Blind(result_bodies=[_body("Patch1")])
+        wire(_comp(FakeFeatures(pf=pf)), handle_map={"E1": _edge()})
+        out = payload(sc.handler(boundary="E1", continuity="tangent"))
+        assert out["continuity"] is None and out["unverified"] == ["continuity"]
+
+    def test_one_loop_whose_continuity_does_not_answer_nulls_the_multi_loop_reply(self, wire):
+        class _SecondBlind(FakePatchFeatures):
+            def add(self, inp):
+                feature = super().add(inp)
+                self.adds = getattr(self, "adds", 0) + 1
+                if self.adds == 2:
+                    feature.groupContinuity = None
+                return feature
+
+        pf = _SecondBlind(result_bodies=[_body("P")])
+        wire(_comp(FakeFeatures(pf=pf)), handle_map={"E1": _edge(), "E2": _edge()})
+        out = payload(sc.handler(boundaries=["E1", "E2"], continuity="tangent"))
+        assert out["patched"] == 2 and out["continuity"] is None
+        assert "continuity" in out["unverified"]
+
+    def test_scrambled_edges_reach_create_input_in_loop_order(self, wire):
+        # the same four rim edges fail out of loop order and build in order, so the boundary is
+        # ordered here: two OPPOSITE edges first is the scrambled case.
+        e0, e1, e2, e3 = _rim("ab", "bc", "cd", "da")
+        pf = FakePatchFeatures(result_bodies=[_body("Patch1")])
+        wire(_comp(FakeFeatures(pf=pf)), handle_map={"A": e0, "B": e1, "C": e2, "D": e3})
+        payload(sc.handler(boundary=["A", "C", "B", "D"], continuity="tangent"))
+        assert list(pf.last_input.boundary) == [e0, e1, e2, e3]
+
+    def test_a_list_already_in_loop_order_reaches_create_input_unchanged(self, wire):
+        # listed b -> a -> d -> c -> b, against edge [0]'s own a -> b and with edges either way
+        # round: a walk from edge [0]'s end vertex would hand Fusion the reverse.
+        e0, e1, e2, e3 = _rim("ab", "ad", "cd", "bc")
+        pf = FakePatchFeatures(result_bodies=[_body("Patch1")])
+        wire(_comp(FakeFeatures(pf=pf)), handle_map={"A": e0, "B": e1, "C": e2, "D": e3})
+        payload(sc.handler(boundary=["A", "B", "C", "D"], continuity="tangent"))
+        assert list(pf.last_input.boundary) == [e0, e1, e2, e3]
 
     def test_continuity_unavailable_member_is_refused_not_run_on_the_default(self, wire,
                                                                              monkeypatch):
@@ -286,8 +400,8 @@ class TestSurfacePatch:
 
         class _SwallowingPatchInput(FakePatchInput):
             def __setattr__(self, name, value):
-                if name == "continuity":
-                    object.__setattr__(self, "continuity", "connected-default")
+                if name == "groupContinuity":
+                    object.__setattr__(self, "groupContinuity", "connected-default")
                     return
                 object.__setattr__(self, name, value)
 
@@ -368,7 +482,7 @@ class TestSurfacePatch:
         wire(_comp(FakeFeatures(pf=pf)), handle_map={})   # nothing resolves
         out = payload(sc.handler(boundaries=["R0", "R1"]))
         assert out["patched"] == 0 and out["requested"] == 2 and out["failed"] == 2
-        assert out["result_bodies"] == []
+        assert out["result_bodies"] == [] and out["continuity"] is None   # no patch, no read-back
         assert "Some loops failed" in out["note"]
 
     def test_boundaries_accepts_composite_handles_without_comma_shredding(self, wire):

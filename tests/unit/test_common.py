@@ -1466,8 +1466,8 @@ class TestSameComponent:
 # The x-ref shape, measured on a host holding two x-refs of one design: 'Frame's body reads ONE
 # entityToken through both x-refs while the two source documents' lineage ids differ.
 
-_URN_A = "urn:adsk.wipprod:dm.lineage:K3I2nkywRlaWPHJexysOdA"
-_URN_B = "urn:adsk.wipprod:dm.lineage:N_QoPrrrSJmF__f9BZV86A"
+_URN_A = "urn:adsk.wipprod:dm.lineage:FixtureLineageA000000A"
+_URN_B = "urn:adsk.wipprod:dm.lineage:FixtureLineageB000000B"
 _COLLIDING_TOKEN = "/vB+AAEAAwAAAAAAAAAAAAAA"
 
 

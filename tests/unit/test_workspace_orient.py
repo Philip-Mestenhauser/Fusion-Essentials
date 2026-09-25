@@ -272,13 +272,13 @@ _DESIGN_WORKSPACE = types.SimpleNamespace(name="Design")
 
 
 def _install(active_product=None, doc=None, cam=None, design_for_cast=None,
-             camera=None, selection=()):
+             camera=None, selection=(), workspace=_DESIGN_WORKSPACE):
     """Wire the module's app + adsk casts. active_product is what app.activeProduct returns (a design,
     a CAM product, or None); design_for_cast is what Design.cast resolves to (default: active_product
     if it's a design). camera/selection feed the new view + selection echo."""
     cam_obj = camera if camera is not None else Camera()
     ui = FakeUserInterface(FakeSelections([FakeSelection(entity=e) for e in selection]),
-                           active_workspace=_DESIGN_WORKSPACE)
+                           active_workspace=workspace)
     wo.app = FakeApplication(active_document=doc, active_product=active_product,
                              user_interface=ui, version="TEST.0",
                              active_viewport=Viewport(camera=cam_obj))
@@ -363,6 +363,39 @@ class TestOrientation:
         out = _payload(wo.handler())
         assert out["design"]["parameters"] == 0            # count still reported (like bodies/sketches)
         assert "parameters" not in out["pointers"]         # but no pointer when there's nothing to point at
+
+    def test_parameters_read_null_when_the_read_raises(self):
+        des = self._small_design()
+        des.userParameters = _NamedCollection(raises="3 : this is not a parametric design")
+        _install(active_product=des, doc=_doc(design=des))
+        out = _payload(wo.handler())
+        assert out["design"]["parameters"] is None and "parameters" not in out["pointers"]
+
+    def test_an_open_form_edit_is_named_and_its_unread_health_is_null(self):
+        des = self._small_design(design_type=0)
+        des.userParameters = _NamedCollection(raises="3 : this is not a parametric design")
+        _install(active_product=des, doc=_doc(design=des),
+                 workspace=types.SimpleNamespace(id="TSplineEnvironment", name="Form"))
+        out = _payload(wo.handler())
+        assert out["design"]["in_form_edit"] is True
+        assert out["health"]["is_healthy"] is None and out["health"]["timeline_features"] is None
+        assert out["health"]["timeline_rolled_back"] is None
+        assert "Finish Form" in out["note"] and "No compute errors" not in out["note"]
+
+    def test_the_workspace_is_read_after_the_form_switch_lands(self, monkeypatch):
+        des = self._small_design(design_type=0)
+        _install(active_product=des, doc=_doc(design=des))
+        pumps = []
+
+        def pump():
+            pumps.append(1)
+            if len(pumps) == 3:
+                wo.app.userInterface.activeWorkspace = types.SimpleNamespace(
+                    id="TSplineEnvironment", name="Form")
+        monkeypatch.setattr(wo._inputs._pump_until.__globals__["adsk"], "doEvents", pump,
+                            raising=False)
+        out = _payload(wo.handler())
+        assert out["design"]["in_form_edit"] is True and out["workspace"] == "Form"
 
     def test_healthy_rollup(self):
         des = self._small_design()

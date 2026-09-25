@@ -101,6 +101,15 @@ class TestSetMode:
         assert out["now"] == "unknown"
         assert "UNCONFIRMED" in out["note"]
 
+    def test_an_open_form_edit_refuses_before_any_mode_verdict(self, monkeypatch):
+        # the edit is what reads direct, so 'Already direct.' would be false and no assignment runs
+        des = install(dm, _ModeDesign(design_type=_DIRECT))
+        monkeypatch.setattr(dm._inputs, "in_form_edit", lambda d: True)
+        for target in dm._TARGETS:
+            assert "Finish Form" in error_message(
+                dm.handler(target=target, confirm_history_loss=True))
+        assert des.designType == _DIRECT
+
     def test_a_conversion_that_took_still_reports_the_discard(self):
         # the other side of the same gate: a PROVEN parametric->direct did discard the timeline.
         install(dm, _ModeDesign())

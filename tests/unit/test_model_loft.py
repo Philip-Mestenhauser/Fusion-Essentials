@@ -1,14 +1,16 @@
-"""Unit tests for model_loft.py - the ordered sections, rails/centerline and the cut evidence."""
+"""Unit tests for model_loft.py - ordered sections of every kind, guides, ends and cut evidence."""
 
 import json
 import re
+import types
 
 import adsk.core
 import adsk.fusion
 import pytest
 
 from conftest import (load_tool, make_design, install, register_all_tools, MakeComp, BRepBody,
-                      BRepFace, FakeFeature, FakeFeatures, Profile, make_sketch)
+                      BRepEdge, BRepFace, FakeFeature, FakeFeatures, FakeSketchPoint, Profile,
+                      _NamedCollection, error_message, make_sketch, make_sketch_curve, payload)
 
 so = load_tool("model_loft")
 
@@ -188,7 +190,7 @@ class TestLoft:
         self._profiles_design()
         res = so.handler(profiles=["H0"])
         assert res["isError"] is True
-        assert "at least 2 profiles" in res["message"]
+        assert "at least 2 sections" in res["message"]
 
     def test_is_closed_set_on_input_and_reported(self):
         lf, _ = self._profiles_design()
@@ -511,3 +513,248 @@ class TestLoft:
         monkeypatch.setattr(so._LOFT_PROFILES, "resolve", _resolve)
         so.handler(profiles=["H0", "H1"], component="Frame")
         assert seen == {"component": "Frame"}
+
+
+# ── edge, point and open-curve sections; end and rail conditions ──────────────────────────────
+
+class _Paths:
+    """Path.create with isClosed looked up in `closed` - a local double: Path has no shape dump."""
+    def __init__(self, closed):
+        self.closed, self.made = closed, []
+
+    def create(self, ent, option):
+        self.made.append((ent, option))
+        return types.SimpleNamespace(entity=ent, count=1, isClosed=self.closed.get(id(ent), True))
+
+
+class _Section:
+    """An input LoftSection recording its end setters - a local double: no shape dump."""
+    def __init__(self, entity, answer=True):
+        self.entity, self.calls, self._answer = entity, [], answer
+
+    def __getattr__(self, name):
+        if name.startswith("set") and name.endswith("EndCondition"):
+            return lambda *args: (self.calls.append((name, args)), self._answer)[1]
+        raise AttributeError(name)
+
+
+class _EndInput:
+    """A LoftFeatureInput whose sections are _Sections and whose rails keep their edgeCondition."""
+    def __init__(self, op, answer=True):
+        self.operation = op
+        self.isSolid = True
+        self._answer = answer
+        self.loftSections = types.SimpleNamespace(added=[])
+        self.loftSections.add = lambda ent: self._add(ent)
+        self.centerLineOrRails = types.SimpleNamespace(rails=[], addCenterLine=lambda c: None)
+        self.centerLineOrRails.addRail = lambda r: self._rail(r)
+
+    def _add(self, ent):
+        self.loftSections.added.append(_Section(ent, self._answer))
+        return self.loftSections.added[-1]
+
+    def _rail(self, r):
+        self.centerLineOrRails.rails.append(types.SimpleNamespace(entity=r, edgeCondition=None))
+        return self.centerLineOrRails.rails[-1]
+
+
+def _built_end(cls, weight=None):
+    """A built section whose endCondition reads the class `cls` and, when given, a weight parameter."""
+    cond = types.SimpleNamespace(objectType="adsk::fusion::" + cls)
+    if weight:
+        cond.weight = types.SimpleNamespace(name=weight)
+    return types.SimpleNamespace(endCondition=cond)
+
+
+class _EndLofts:
+    """loftFeatures whose built loft reads `ends` and `rails` back (rails default to the input's)."""
+    def __init__(self, ends=None, rails=None, answer=True):
+        self.last_input, self._ends, self._rails, self._answer = None, ends, rails, answer
+
+    def createInput(self, op):
+        self.last_input = _EndInput(op, self._answer)
+        return self.last_input
+
+    def add(self, inp):
+        feature = FakeFeature(name="Loft1", bodies=[BRepBody("Blend1", is_solid=False)])
+        feature.isSolid = False
+        feature.loftSections = _NamedCollection(list(self._ends))
+        rails = self._rails if self._rails is not None else [
+            r.edgeCondition for r in inp.centerLineOrRails.rails]
+        feature.centerLineOrRails = _NamedCollection(
+            [types.SimpleNamespace(edgeCondition=v) for v in rails])
+        return feature
+
+
+class TestSectionsAndEnds:
+
+    @pytest.fixture
+    def rig(self, monkeypatch):
+        """Closed rims E0/E1, open edge OPEN, profile P, a 'Nose' point and 'Sec' splines."""
+        monkeypatch.setattr(adsk.fusion, "BRepEdge", BRepEdge, raising=False)
+        monkeypatch.setattr(adsk.core.ValueInput, "createByString",
+                            staticmethod(lambda s: ("string", s)), raising=False)
+        edges = {n: BRepEdge(None) for n in ("E0", "E1", "OPEN")}
+        open_curve, closed_curve = make_sketch_curve("s0"), make_sketch_curve("s1", is_closed=True)
+        paths = _Paths({id(edges["OPEN"]): False, id(open_curve): False, id(closed_curve): True})
+        monkeypatch.setattr(adsk.fusion, "Path", paths, raising=False)
+
+        def build(lofts, tokens=None):
+            comp = MakeComp(name="Blend", bodies=(), mesh_bodies=(), sketches=[
+                make_sketch(name="Nose", points=[FakeSketchPoint()]),
+                make_sketch(name="Sec", splines=[open_curve, closed_curve])])
+            comp.features = _FakeFeatures(loft=lofts)
+            install(so, make_design(comp=comp, tokens={**edges, "P": Profile("0"),
+                                                       **(tokens or {})}))
+            return lofts
+        return types.SimpleNamespace(build=build, edges=edges, paths=paths,
+                                     open_curve=open_curve)
+
+    def test_edge_sections_take_smooth_and_tangent_ends_read_back_off_the_feature(self, rig):
+        lofts = rig.build(_EndLofts([_built_end("LoftSmoothEndCondition", "d17"),
+                                     _built_end("LoftTangentEndCondition", "d18")]))
+        out = payload(so.handler(profiles=["E0", "E1"], as_surface=True, start="smooth",
+                                 end="tangent"))
+        assert [s.entity.entity for s in lofts.last_input.loftSections.added] == [
+            rig.edges["E0"], rig.edges["E1"]]
+        assert rig.paths.made[0][1] == adsk.fusion.ChainedCurveOptions.noChainedCurves
+        first, last = lofts.last_input.loftSections.added
+        assert first.calls == [("setSmoothEndCondition", (("real", 1.0),))]
+        assert last.calls == [("setTangentEndCondition", (("real", 1.0),))]
+        assert out["ends"] == {"start": "smooth", "end": "tangent"}
+        assert out["section_kinds"] == ["edge", "edge"]
+        assert out["model_parameters"] == {"start_weight": "d17", "end_weight": "d18"}
+
+    def test_a_smooth_end_the_feature_reads_free_is_an_error(self, rig):
+        rig.build(_EndLofts([_built_end("LoftFreeEndCondition"), _built_end("LoftFreeEndCondition")]))
+        msg = error_message(so.handler(profiles=["E0", "E1"], start="smooth"))
+        assert "start section reads a free end, not the smooth end asked for" in msg
+        assert "design_delete_feature" in msg
+
+    def test_an_end_that_does_not_read_is_unverified_not_confirmed(self, rig):
+        rig.build(_EndLofts([types.SimpleNamespace(), _built_end("LoftFreeEndCondition")]))
+        out = payload(so.handler(profiles=["E0", "E1"], start="smooth"))
+        assert out["ends"]["start"] is None and out["unverified"] == ["start_end"]
+
+    def test_a_tangent_end_on_a_profile_is_refused_before_the_loft_starts(self, rig):
+        lofts = rig.build(_EndLofts([]))
+        msg = error_message(so.handler(profiles=["P", "E1"], start="tangent"))
+        assert "a tangent end needs a closed edge section, but section 0 is a profile" in msg
+        assert lofts.last_input is None
+
+    def test_an_open_edge_is_refused_as_a_section(self, rig):
+        lofts = rig.build(_EndLofts([]))
+        msg = error_message(so.handler(profiles=["E0", "OPEN"]))
+        assert "'profiles'[1]: an edge section is ONE closed edge" in msg
+        assert lofts.last_input is None
+
+    def test_a_section_that_resolves_to_nothing_names_both_remedies(self, rig):
+        lofts = rig.build(_EndLofts([]), tokens={"SPLIT": [BRepEdge(None), BRepEdge(None)]})
+        msg = error_message(so.handler(profiles=["E0", "GONE"]))
+        assert "'profiles'[1]: 'GONE' did not resolve" in msg
+        assert "find_geometry" in msg and "{sketch, profile_index}" in msg
+        msg = error_message(so.handler(profiles=["E0", "SPLIT"]))
+        assert "resolved to 2 entities" in msg and "find_geometry" in msg
+        assert lofts.last_input is None
+
+    def test_a_sketch_point_is_a_first_or_last_section_only(self, rig):
+        lofts = rig.build(_EndLofts([_built_end("LoftTangentEndCondition", "d17"),
+                                     _built_end("LoftPointTangentEndCondition", "d18")]))
+        msg = error_message(so.handler(profiles=["E0", "Nose/point:0", "E1"]))
+        assert "'profiles'[1]: a sketch point is a loft's first or last section" in msg
+        out = payload(so.handler(profiles=["E0", "Nose/point:0"], start="tangent",
+                                 end="point_tangent"))
+        assert out["section_kinds"] == ["edge", "point"]
+        assert out["ends"] == {"start": "tangent", "end": "point_tangent"}
+
+    def test_an_open_curve_takes_a_direction_end_and_a_closed_one_is_refused(self, rig):
+        lofts = rig.build(_EndLofts([_built_end("LoftDirectionEndCondition", "d20"),
+                                     _built_end("LoftFreeEndCondition")]))
+        out = payload(so.handler(profiles=["Sec/spline:0", "E1"], start="direction"))
+        first = lofts.last_input.loftSections.added[0]
+        assert first.entity.entity is rig.open_curve
+        assert first.calls == [("setDirectionEndCondition", (("string", "0 deg"), ("real", 1.0)))]
+        assert out["ends"]["start"] == "direction"
+        msg = error_message(so.handler(profiles=["Sec/spline:1", "E1"]))
+        assert "'Sec/spline:1' is a closed curve" in msg
+
+    def test_a_curve_section_lofts_on_its_sketchs_component(self, rig):
+        # the Path handed to the loft carries no sketch of its own, so the host is read off the
+        # curve it was built over - the owner, as for a profile, not the active component
+        owner_lofts, active_lofts = _EndLofts([_built_end("LoftFreeEndCondition")] * 2), _EndLofts([])
+        owner = MakeComp(name="Rails", bodies=(), mesh_bodies=())
+        owner.features = _FakeFeatures(loft=owner_lofts)
+        made = []
+        owner.features.createPath = lambda ent, chain: (
+            made.append((ent, chain)), types.SimpleNamespace(entity=ent, count=1, isClosed=False))[1]
+        sketch = make_sketch(name="Sec", splines=[rig.open_curve], parent_component=owner)
+        rig.open_curve.parentSketch = sketch
+        active = MakeComp(name="Blend", bodies=(), mesh_bodies=(), sketches=[])
+        active.features = _FakeFeatures(loft=active_lofts)
+        owner.sketches = _NamedCollection([sketch])
+        install(so, make_design(comp=active, tokens=dict(rig.edges),
+                                all_components=[active, owner]))
+        payload(so.handler(profiles=["Sec/spline:0", "E1"]))
+        assert owner_lofts.last_input is not None and active_lofts.last_input is None
+        # Path.create raises on a component's native sketch curve, so its owner builds the path
+        assert made == [(rig.open_curve, False)]
+        assert [ent for ent, _opt in rig.paths.made] == [rig.edges["E1"]]
+
+    def test_an_end_setter_answering_false_is_an_error(self, rig):
+        lofts = rig.build(_EndLofts([], answer=False))
+        msg = error_message(so.handler(profiles=["E0", "E1"], end="smooth"))
+        assert "The end section's smooth end setter answered False" in msg
+        assert lofts.last_input is not None
+
+    def test_ends_on_a_closed_loft_are_refused(self, rig):
+        rig.build(_EndLofts([]))
+        msg = error_message(so.handler(profiles=["E0", "E1"], is_closed=True, end="tangent"))
+        assert "is_closed=true leaves this one no end" in msg
+
+    def test_rail_continuity_is_written_on_edge_rails_and_read_back(self, rig):
+        rail = BRepEdge(None)
+        g1 = adsk.fusion.LoftRailEdgeConditions.G1LoftRailEdgeCondition
+        lofts = rig.build(_EndLofts([_built_end("LoftFreeEndCondition")] * 2), tokens={"R": rail})
+        out = payload(so.handler(profiles=["E0", "E1"], rails=["R"], rail_continuity="g1"))
+        assert lofts.last_input.centerLineOrRails.rails[0].edgeCondition is g1
+        assert out["rail_continuity"] == "g1"
+
+    def test_a_rail_the_feature_reads_at_another_continuity_is_an_error(self, rig):
+        other = adsk.fusion.LoftRailEdgeConditions.G0LoftRailEdgeCondition
+        rig.build(_EndLofts([_built_end("LoftFreeEndCondition")] * 2, rails=[other]),
+                  tokens={"R": BRepEdge(None)})
+        msg = error_message(so.handler(profiles=["E0", "E1"], rails=["R"], rail_continuity="g2"))
+        assert "rail 0 reads edgeCondition" in msg and "not the g2 asked for" in msg
+
+    def test_a_rail_whose_continuity_does_not_read_is_null_and_unverified(self, rig):
+        rig.build(_EndLofts([_built_end("LoftFreeEndCondition")] * 2, rails=[None]),
+                  tokens={"R": BRepEdge(None)})
+        out = payload(so.handler(profiles=["E0", "E1"], rails=["R"], rail_continuity="g1"))
+        assert out["rail_continuity"] is None and out["unverified"] == ["rail_continuity"]
+
+    def test_rail_continuity_on_a_sketch_curve_rail_is_refused(self, rig):
+        lofts = rig.build(_EndLofts([]))
+        msg = error_message(so.handler(profiles=["E0", "E1"], rails=["Sec/spline:0"],
+                                       rail_continuity="g1"))
+        assert "rails[0] is a" in msg and "find_geometry edge handles" in msg
+        assert lofts.last_input is None
+
+
+class TestLoftEndCondition:
+    def test_each_condition_is_offered_only_on_its_measured_section_kind(self):
+        kind = so._LOFT_END
+        assert kind.legal_on("point_sharp", "point", 1) == ""
+        assert "needs a sketch point section, but section 1 is a closed edge" in kind.legal_on(
+            "point_tangent", "edge", 1)
+        assert kind.legal_on("direction", "profile", 1) == ""
+        assert "needs a profile or an open sketch curve section" in kind.legal_on(
+            "direction", "edge", 1)
+        assert kind.legal_on("free", "point", 1) != ""
+
+    def test_a_sketch_entity_ref_parses_at_any_length_and_a_handle_never_does(self):
+        ref = so._inputs.sketch_entity_ref
+        long_name = "Seat stay master curves (left side)/spline:3"
+        assert ref(long_name) == ("Seat stay master curves (left side)", "spline:3")
+        assert ref("Sec/spline:x") is None
+        assert ref("abc/def+ghi" * 5) is None
+        assert ref("tok|@vertex:1,2/point:1") is None

@@ -11,6 +11,7 @@ from ..mcp_primitives.registry import register
 from ._common import ok, error
 from . import _common
 from . import _inputs
+from . import _design_common
 
 _TARGETS = (_inputs.MODE_PARAMETRIC, _inputs.MODE_DIRECT)
 
@@ -27,6 +28,8 @@ def handler(target: str = "", confirm_history_loss: bool = False) -> dict:
         return error(f"'target' must be one of: {', '.join(_TARGETS)} (got "
                      f"'{target}').")
 
+    if _inputs.in_form_edit(design):
+        return error(_design_common.FORM_EDIT_OPEN_MODE)
     current = _inputs.current_design_type(design)
     if current == tgt:
         # idempotent no-op, NOT an error

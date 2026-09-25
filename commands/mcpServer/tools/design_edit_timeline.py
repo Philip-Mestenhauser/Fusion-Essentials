@@ -10,6 +10,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from . import _common
+from . import _design_common
 from . import _inputs
 from ._common import error, ok, safe, short_ref, timeline_health
 
@@ -196,6 +197,29 @@ def _do_roll(timeline, feature, to):
     return ok(out)
 
 
+def _flipped(before, after, target, suppressed):
+    """Items whose isSuppressed turned to `suppressed`, target left out; None if a read cannot pair."""
+    rows = lambda c: [(it["index"], it["name"]) for it in c["items"]]
+    if (before is None or after is None or rows(before) != rows(after)
+            or target == (None, None)):
+        return None
+    # The same rows in the same order, so position i is one item on both sides: a suppress adds,
+    # removes and reorders nothing, and a token need not read alike twice for the pairing to hold.
+    # The token stands in for the target only when its index does not read.
+    out = []
+    for was, now in zip(before["items"], after["items"]):
+        if target[0] is not None:
+            if was["index"] == target[0]:
+                continue
+        elif was["key"] and was["key"] == target[1]:
+            continue
+        if (was["suppressed"] is None) != (now["suppressed"] is None):
+            return None
+        if was["suppressed"] is (not suppressed) and now["suppressed"] is suppressed:
+            out.append(was["name"] or f"#{was['index']}")
+    return out
+
+
 def _do_suppress(design, timeline, feature, suppressed):
     if not feature:
         return error("action='suppress' needs 'feature' - the timeline object to suppress or "
@@ -203,8 +227,11 @@ def _do_suppress(design, timeline, feature, suppressed):
     obj, rerr = _resolve_object(timeline, feature, "the object to suppress")
     if rerr:
         return error(rerr)
+    suppressed = bool(suppressed)
     was = safe(lambda: obj.isSuppressed)
     errors_before, _warn, _total = timeline_health(design)
+    census_before = _design_common.timeline_census(design)
+    target = (safe(lambda: obj.index), _design_common.timeline_item_key(obj))
     try:
         obj.isSuppressed = bool(suppressed)
     except Exception as e:
@@ -226,6 +253,21 @@ def _do_suppress(design, timeline, feature, suppressed):
                        "produced - set suppressed=false to restore it.")
     elif warnings_after:
         out["timeline_warnings"] = warnings_after
+    also = _flipped(census_before, _design_common.timeline_census(design), target, suppressed)
+    key = "also_suppressed" if suppressed else "also_unsuppressed"
+    out[key] = also if also is None else also[:_common._MAX_NAMED_CANDIDATES]
+    if also and len(also) > len(out[key]):
+        out[key + "_count"] = len(also)
+    if also is None:
+        out["note"] += " " + _design_common.CENSUS_UNREAD
+    elif also:
+        named, label = _common.named_with_remainder(also), out["feature"]
+        out["note"] = ((f"Suppressing '{label}' also suppressed {named}; suppressed=false on "
+                        f"'{label}' restores them. ") if suppressed else
+                       f"Unsuppressing '{label}' also unsuppressed {named}. ") + out["note"]
+    caveat = _design_common.census_caveat(census_before)
+    if caveat:
+        out["census_caveat"] = caveat
     return ok(out)
 
 
@@ -529,8 +571,9 @@ def handler(action: str = "roll", feature: str = "", to: str = "before", end_fea
     timeline = safe(lambda: design.timeline)
     # Timeline defines __len__, so an EMPTY one reads falsy - test it against None, never for truth.
     if timeline is None:
-        return error("This design has no timeline (a direct-modelling design keeps no history), so "
-                     "there is no marker to move and nothing to group.")
+        return error(_design_common.no_timeline_reason(
+            design, "This design has no timeline (a direct-modelling design keeps no history), so "
+                    "there is no marker to move and nothing to group."))
 
     feature = (feature or "").strip()
     if action == "roll":

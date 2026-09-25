@@ -1022,6 +1022,16 @@ PROPERTIES = {
         "bendLines", "classType", "isUseCornerRelief", "isValid", "objectType",
         "stationaryFace", "thisown",
     ),
+    "fusion.FormFeature": (
+        "assemblyContext", "attributes", "baseFeature", "bodies", "classType", "deleteMe",
+        "dissolve", "entityToken", "errorOrWarningMessage", "faces", "finishEdit",
+        "healthState", "isParametric", "isSuppressed", "isValid", "linkedFeatures", "name",
+        "objectType", "parentComponent", "startEdit", "tSplineBodies", "thisown",
+        "timelineObject",
+    ),
+    "fusion.FormFeatures": (
+        "add", "classType", "count", "isValid", "item", "itemByName", "objectType", "thisown",
+    ),
     "fusion.FullRoundFilletFeatureInput": (
         "classType", "faceSets", "isValid", "objectType", "targetBaseFeature", "thisown",
     ),
@@ -2172,6 +2182,14 @@ PROPERTIES = {
         "assemblyContext", "attributes", "classType", "createForAssemblyContext", "deleteMe",
         "entityOne", "entityToken", "entityTwo", "isDeletable", "isValid", "nativeObject",
         "objectType", "parentSketch", "symmetryLine", "thisown",
+    ),
+    "fusion.TSplineBodies": (
+        "addByTSMDescription", "addByTSMFile", "classType", "count", "isValid", "item",
+        "itemByName", "objectType", "thisown",
+    ),
+    "fusion.TSplineBody": (
+        "classType", "entityToken", "getTSMDescription", "isValid", "name", "objectType",
+        "parentFormFeature", "saveAsTSMFile", "textureMapControl", "thisown",
     ),
     "fusion.TangentConstraint": (
         "assemblyContext", "attributes", "classType", "createForAssemblyContext", "curveOne",

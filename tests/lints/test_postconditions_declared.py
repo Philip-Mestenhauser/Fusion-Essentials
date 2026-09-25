@@ -94,8 +94,8 @@ class TestPostconditionsDeclared:
 # names, creates or deletes a thing is held to VALUE (the right thing read back); the rest to EXISTS.
 # A name matches on its longest listed prefix; a write verb listed nowhere is held to EXISTS.
 _MINIMUM_RUNG = {
-    "geometry": ("model_", "surface_", "mesh_", "sketch_add", "sketch_move", "sketch_copy",
-                 "sketch_project", "sketch_edit", "sketch_insert", "sketch_dimension",
+    "geometry": ("model_", "surface_", "form_", "mesh_", "sketch_add", "sketch_move",
+                 "sketch_copy", "sketch_project", "sketch_edit", "sketch_insert", "sketch_dimension",
                  "joint_drive", "assembly_move", "design_move_occurrence"),
     "value": ("cam_", "data_", "doc_", "design_", "drawing_", "joint_", "param_", "pmi_",
               "appearance_", "assembly_", "save_", "sketch_create", "sketch_add_3d_line",

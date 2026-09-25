@@ -424,8 +424,8 @@ class TestXrefMeshesAreNotTheSameBody:
     a legitimate combine of two different meshes - and from the host document the caller can do
     nothing about either token."""
 
-    _URN_A = "urn:adsk.wipprod:dm.lineage:K3I2nkywRlaWPHJexysOdA"
-    _URN_B = "urn:adsk.wipprod:dm.lineage:N_QoPrrrSJmF__f9BZV86A"
+    _URN_A = "urn:adsk.wipprod:dm.lineage:FixtureLineageA000000A"
+    _URN_B = "urn:adsk.wipprod:dm.lineage:FixtureLineageB000000B"
     _SHARED_TOKEN = "/vB+AAEAAwAAAAAAAAAAAAAA"
 
     def _component_in_document(self, name, urn, feats):

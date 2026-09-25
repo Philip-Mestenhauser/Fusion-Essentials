@@ -7,11 +7,14 @@ Pinned (the definition of done):
     corrupt later calls), and run_in_base_feature opens no scope at all in a direct design.
 """
 
+import types
+
 import pytest
 
 import live_api_facts as _api_facts
-from conftest import (FakeBaseFeature, FakeBaseFeatures, FakeFeatures, MakeComp, install,
-                      load_tool, make_design, make_timeline, payload)
+from conftest import (FakeApplication, FakeBaseFeature, FakeBaseFeatures, FakeFeatures,
+                      FakeUserInterface, MakeComp, install, load_tool, make_design, make_timeline,
+                      payload)
 
 dm = load_tool("_design_common")
 
@@ -88,6 +91,21 @@ class TestGetMode:
         _wire(monkeypatch, _design(edit_object=FakeBaseFeature()))
         out = payload(dm.get_mode_handler())
         assert out["in_base_feature_edit"] is True
+
+    def test_an_open_form_edit_reads_in_form_edit_beside_the_direct_type(self, monkeypatch):
+        _wire(monkeypatch, _design(design_type=_DIRECT))
+        monkeypatch.setattr(dm._common, "app", FakeApplication(user_interface=FakeUserInterface(
+            active_workspace=types.SimpleNamespace(id="TSplineEnvironment"))))
+        out = payload(dm.get_mode_handler())
+        assert out["design_type"] == "direct" and out["in_form_edit"] is True
+        # the direct read is the edit's, so no capability and no design_set_mode pointer ride it
+        assert set(out["can"].values()) == {None}
+        assert "Finish Form" in out["note"] and "design_set_mode" not in out["note"]
+
+    def test_a_handler_that_read_the_form_edit_is_not_read_again(self, monkeypatch):
+        monkeypatch.setattr(dm._inputs, "in_form_edit", lambda d: pytest.fail("read twice"))
+        assert dm.no_timeline_reason(object(), "direct", form_edit=True) == dm.FORM_EDIT_OPEN
+        assert dm.no_timeline_reason(object(), "direct", form_edit=False) == "direct"
 
 
 # ── the leak-proof wrapper: finish-in-finally even when the inner op raises ──────────────────────

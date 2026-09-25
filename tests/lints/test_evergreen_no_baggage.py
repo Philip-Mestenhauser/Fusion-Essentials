@@ -68,6 +68,9 @@ _ALLOWLIST = {
     "tests/lints/test_postconditions_declared.py:backlog":
         "the defect ledger's filename is the path that lint OPENS to resolve a gap declaration's "
         "id - a functional constant, not a pointer into a planning narrative",
+    "tests/lints/test_doc_citations.py:backlog":
+        "the private ledger's filename is exempted there so a doc citing it passes on a clone "
+        "that lacks plans/ - a functional constant, not a pointer into a planning narrative",
     "tests/unit/test_joint_create_origin.py:Phase <n> label":
         "'Phase 2' names a step of the shipped insert-into-template skill, not a transient plan",
 }

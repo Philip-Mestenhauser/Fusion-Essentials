@@ -60,6 +60,10 @@ _EXTRA_CLASSES = (
     "fusion.PMIDatumModifier",
     "fusion.PMIDatumTarget",
     "fusion.PMIRoughness",
+    "fusion.FormFeatures",
+    "fusion.FormFeature",
+    "fusion.TSplineBodies",
+    "fusion.TSplineBody",
 )
 
 

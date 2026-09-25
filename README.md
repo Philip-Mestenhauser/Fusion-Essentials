@@ -64,6 +64,9 @@ Licensed under either of
 
 at your option.
 
+Files adapted from Autodesk samples keep their original notices, listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 ### Contribution
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the

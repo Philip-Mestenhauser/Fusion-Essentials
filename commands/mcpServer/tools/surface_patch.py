@@ -2,7 +2,7 @@
 # Dual-licensed under the MIT and Apache-2.0 licenses; see LICENSE-MIT and LICENSE-APACHE.
 
 """MCP building block: fill CLOSED loop(s) of edges with surface face(s) - cap a hole, bridge a gap.
-WRITES; the patch body's isSolid is read back, never assumed to be false.
+WRITES; the patch body's isSolid and the feature's groupContinuity are read back, never assumed.
 """
 
 import adsk.core
@@ -62,6 +62,24 @@ def _patch_note(is_solid):
             "whether the patch is an open surface is UNVERIFIED.")
 
 
+def _boundary_passed(n, checked):
+    """The sentence a failure states what this call handed the patch with."""
+    if n == 1:
+        return "The boundary was one edge for Fusion to complete into a loop."
+    if checked:
+        return f"The boundary's {n} edges were checked to close and passed in loop order."
+    return f"The boundary's {n} edges were passed in the order given, their loop not checked."
+
+
+def _continuity_word(value):
+    """The continuity key a SurfaceContinuityTypes value reads as, or None."""
+    for key, member in _CONTINUITY.items():
+        if value is not None and value == safe(
+                lambda m=member: getattr(adsk.fusion.SurfaceContinuityTypes, m)):
+            return key
+    return None
+
+
 def _patch_one_loop(comp, boundary, op, cont, cont_key, rails=()):
     """Patch ONE closed loop. boundary = a single edge handle or a list of edge handles forming one
     loop. Returns (result_dict, error_str). On success result_dict has the feature/body info; the
@@ -73,17 +91,22 @@ def _patch_one_loop(comp, boundary, op, cont, cont_key, rails=()):
     ents = meta["entities"]
     if not ents:
         return None, "boundary resolved to no edges. Pass edge handle(s) forming a closed loop."
+    passed = _boundary_passed(len(ents), meta["loop_checked"])
+    # Only a set checked to close has ruled that cause out; one edge or an unchecked set keeps it.
+    loop_hint = (passed if meta["loop_checked"] else "(The boundary must form a CLOSED loop - pass "
+                 "the loop's edges, or a single edge Fusion can auto-complete.)")
     # A single edge -> pass the edge itself (Fusion auto-finds the connected loop); else the collection.
     boundary_arg = ents[0] if len(ents) == 1 else coll
     try:
         patch_input = comp.features.patchFeatures.createInput(boundary_arg, op)
-        # The enum class is SurfaceContinuityTypes (PLURAL) - measured live, the singular does not
-        # exist. set_verified reads the value back off the input, so an unavailable member is
-        # refused instead of running the patch on the API default.
-        cerr = _common.set_verified(patch_input, "continuity", cont,
-                                    f"continuity={cont_key}", "PatchFeatureInput")
-        if cerr:
-            return None, cerr
+        # PatchFeatureInput.continuity is retired: it reads back on the input and the build ignores
+        # it (measured). The group pair carries the request, and the FEATURE's groupContinuity is
+        # what the reply reports. The enum class is SurfaceContinuityTypes (PLURAL).
+        for prop, value, label in (("isGroupEdges", True, "isGroupEdges=true"),
+                                   ("groupContinuity", cont, f"continuity={cont_key}")):
+            cerr = _common.set_verified(patch_input, prop, value, label, "PatchFeatureInput")
+            if cerr:
+                return None, cerr
         rail_count = None
         if rails:
             rail_coll = adsk.core.ObjectCollection.create()
@@ -97,39 +120,52 @@ def _patch_one_loop(comp, boundary, op, cont, cont_key, rails=()):
     except Exception as e:
         msg = str(e).lower()
         # These strings ('invalid argument chainOptions', ASM_BL_NON_MAN_EDVERT, PATCH_NO_TOOLBODY)
-        # are one single-seed auto-complete failure with two causes the string cannot tell apart,
-        # so the error names both and points at the probe that does.
+        # have more than one cause, and the string tells none of them apart - so the error says
+        # what this call passed and names the two causes seen as candidates only.
         if any(s in msg for s in ("chainoptions", "non_man", "non-man", "toolbody")):
-            return None, (f"Patch failed: {e} - two known causes: (1) a degenerate TANGENT saddle "
-                "opening whose rim is two half-edges - pass both as the boundary list; (2) an "
-                "edge loop SPLIT by a later feature (a fillet, say) into 3+ segments - pass ALL "
-                "of the loop's edges, or patch the opening before the feature that splits it. "
-                "Count the opening's edges with find_geometry: exactly 2 means case (1), more "
-                "means case (2).")
+            return None, (f"Patch failed: {e}. {passed} Candidate causes, not a complete list: (1) a "
+                "degenerate TANGENT saddle opening whose rim is two half-edges - pass both as the "
+                "boundary list; (2) an edge loop SPLIT by a later feature (a fillet, say) into 3+ "
+                "segments - pass ALL of the loop's edges, or patch the opening before the feature "
+                "that splits it. find_geometry counts the opening's edges: 2 fits case (1), more "
+                "fits case (2).")
         if rails:
             return None, (f"Patch failed: {e}. With interior_rails there are two candidate causes and "
                 "this message asserts neither: the boundary does not form a CLOSED loop, or a rail "
                 "edge does not lie on the surface the boundary spans (a rail must be interior to the "
                 "patch). Retry WITHOUT interior_rails to tell them apart: if it succeeds, the rails "
                 "are the cause.")
-        return None, (f"Patch failed: {e}. (The boundary must form a CLOSED loop - pass the loop's "
-    "edges, or a single edge Fusion can auto-complete.)")
+        return None, f"Patch failed: {e}. {loop_hint}"
     if not feature:
-        return None, _common.no_feature_error(_common.design(), "Patch",
-                                             "(The boundary may not form a closed loop.)")
+        return None, _common.no_feature_error(_common.design(), "Patch", loop_hint)
     names, is_solid = _body_names_and_solid(feature)
     if not names:
         return None, ("Patch reported success but the feature owns no result body - the loop was "
                       "not filled. "
+                      + _common.failed_effect_remedy(_common.design(), feature))
+    landed = safe(lambda: feature.groupContinuity)
+    word = _continuity_word(landed)
+    if landed is not None and word != cont_key:
+        return None, (f"Patch '{safe(lambda: feature.name)}' was built, but the feature reads "
+                      f"groupContinuity {word or landed}, not {cont_key}, so it does not carry the "
+                      "continuity asked for. "
                       + _common.failed_effect_remedy(_common.design(), feature))
     return {
     "feature": safe(lambda: feature.name),
     "result_body": names[0] if names else None,
     "result_bodies": names,
     "is_solid": is_solid,
+    "continuity": word,
+    "group_weight": (_common.measured(lambda: feature.groupWeight)
+                     if cont_key != "connected" else None),
     "boundary_edge_count": len(ents),
     "interior_rail_count": rail_count,
     }, None
+
+
+def _unverified(**reads):
+    """The names of the reads that came back None, or None when every one read."""
+    return [k for k, v in reads.items() if v is None] or None
 
 
 def handler(boundary=None, boundaries=None, continuity: str = "connected",
@@ -187,15 +223,18 @@ def handler(boundary=None, boundaries=None, continuity: str = "connected",
         "patched": True,
         "feature": r["feature"],
         "operation": op_key,
-        "continuity": cont_key,
+        "continuity": r["continuity"],  # the feature's own groupContinuity, not the request
         "result_body": r["result_body"],
         "result_bodies": r["result_bodies"],
         "is_solid": r["is_solid"],      # read off the patch body, not the module's expectation
         "boundary_edge_count": r["boundary_edge_count"],
         "note": _patch_note(r["is_solid"]),
         }
-        if r["is_solid"] is None:
-            payload["unverified"] = ["is_solid"]
+        unverified = _unverified(is_solid=r["is_solid"], continuity=r["continuity"])
+        if unverified:
+            payload["unverified"] = unverified
+        if r["group_weight"] is not None:
+            payload["group_weight"] = r["group_weight"]
         if r["interior_rail_count"] is not None:
             # the count PatchFeatureInput.interiorRailsAndPoints reads back, not the number asked for
             payload["interior_rail_count"] = r["interior_rail_count"]
@@ -205,12 +244,15 @@ def handler(boundary=None, boundaries=None, continuity: str = "connected",
     all_bodies = [n for r in results for n in r["result_bodies"]]
     flags = [r["is_solid"] for r in results]
     agg = True if True in flags else (False if False in flags else None)
+    # A patch whose continuity read back otherwise is an error above, so every landed one reads
+    # the request or nothing.
+    landed = cont_key if all(r["continuity"] == cont_key for r in results) else None
     payload = {
         "patched": len(results),
         "requested": len(loops),
         "failed": len(errors),
         "operation": op_key,
-        "continuity": cont_key,
+        "continuity": landed if results else None,
         "result_bodies": all_bodies,
         "patches": [{"feature": r["feature"], "bodies": r["result_bodies"],
                      "is_solid": r["is_solid"]} for r in results],
@@ -220,8 +262,9 @@ def handler(boundary=None, boundaries=None, continuity: str = "connected",
                  + (" " + _patch_note(agg) if results else "")
                  + (" Some loops failed - see 'errors'." if errors else "")),
     }
-    if results and agg is None:
-        payload["unverified"] = ["is_solid"]
+    unverified = _unverified(is_solid=agg, continuity=landed) if results else None
+    if unverified:
+        payload["unverified"] = unverified
     return ok(payload)
 
 
@@ -244,10 +287,11 @@ item = Item.create_tool_item(tool=tool, write="write", handler=handler,
                              run_on_main_thread=True,
                              postconditions=[_assert.FeatureHealthy(), _assert.SurfaceAreaAdded()],
                              verification=Verification(
-                                 kind="inline", rung="exists",
+                                 kind="inline", rung="value",
                                  evidence_test="tests/unit/test_surface_patch.py"
                                                "::TestSurfacePatch"
-                                               "::test_patch_with_no_result_body_is_an_error"))
+                                               "::test_tangent_the_feature_does_not_read_back"
+                                               "_is_an_error"))
 
 
 def register_tool():
