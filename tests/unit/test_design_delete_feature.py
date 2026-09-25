@@ -116,6 +116,18 @@ class TestFindByName:
         assert obj is None
         assert "no timeline feature named 'Fillet'" in err and "Fillet12" in err
 
+    def test_a_collapsed_groups_member_is_refused_naming_the_group_and_the_ungroup_call(self):
+        # timeline.item() lists a collapsed group as one item, so its member reads as a miss.
+        members = [_tl("Sketch1", 0), _tl("Extrude1", 1)]
+        group = _tl("CascadeG", 0, is_group=True)
+        group.isCollapsed, group.count, group.item = True, 2, lambda i: members[i]
+        tl = _install([group, _tl("Fillet1", 1)])
+        tl.timelineGroups = _NamedCollection([group])
+        msg = error_message(df.handler(feature="Extrude1"))
+        assert "'CascadeG'" in msg
+        assert "design_edit_timeline(action='ungroup', feature='CascadeG')" in msg
+        assert members[1].entity._deletes == 0
+
     def test_surrounding_whitespace_is_not_a_distinguishing_feature(self):
         # Fusion names an occurrence-create timeline object with a LEADING SPACE (measured); no
         # caller retypes that, and no listing shows it.

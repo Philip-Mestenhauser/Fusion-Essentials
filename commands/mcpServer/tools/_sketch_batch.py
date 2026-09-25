@@ -55,11 +55,13 @@ def run_batch(entries, one, name, verb, sketch_name):
         res["index"] = i
         results.append(res)
     requested = len(entries)
-    if failed and not results and not retained and not retention_unknown:
+    if failed and not results and not retained:
         rest = requested - 1
         tail = (f" {rest} later entr{'y was' if rest == 1 else 'ies were'} not attempted."
                 if rest else "")
-        return error(f"{name}[{failed['index']}]: {failed['error']} Nothing landed.{tail}")
+        landed = ("Nothing completed; whether the failed entry retained an effect in the sketch "
+                  "could not be read." if retention_unknown else "Nothing landed.")
+        return error(f"{name}[{failed['index']}]: {failed['error']} {landed}{tail}")
     payload = {verb: len(results), "requested": requested, "sketch": sketch_name,
                "results": results}
     note = f"{len(results)} of {requested} {name} landed."

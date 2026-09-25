@@ -118,6 +118,12 @@ refresh or edit generated facts or receipts to make that checkout appear live-ve
 changes invalidate the receipt until the maintainer loads and exercises that code. `--offline` is
 not a workaround for absent binding files or a stale receipt.
 
+Two lints and the API-facts stamp read red on every checkout until a full live measurement run
+is made on an install that holds the Manufacturing Extension: `test_fake_shapes_exist` (the
+FormFeature shape) and `test_enum_families_measured` (the LoftRailEdgeConditions family) wait on
+that run, and `measure_api --check` refuses to restamp while three gated rows cannot pass without
+the extension. Every other check is green; these three are the known state, not a regression.
+
 Windows is the validated development platform. The manifest also targets macOS; that declaration
 does not establish an equivalent tested contributor or native execution path. Keep production code
 under `commands/mcpServer/` modular and dual-licensed (MIT/Apache headers). Read

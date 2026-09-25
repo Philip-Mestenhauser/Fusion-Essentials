@@ -160,6 +160,11 @@ class FakeSetup(FakeCAMFolder):
                  has_error=_UNSET, error=_UNSET, operation_type=_UNSET, models=_UNSET,
                  stock_solids=_UNSET):
         super().__init__(name, ops=ops, folders=folders, patterns=patterns, others=others)
+        # Operation.parentSetup names the owning Setup; an op already carrying one keeps it, and a
+        # bare sentinel standing in for an op takes no attribute.
+        for op in FakeCAMFolder.allOperations.fget(self):
+            if getattr(op, "parentSetup", None) is None and hasattr(op, "__dict__"):
+                op.parentSetup = self
         self.parameters = parameters
         if machine is not FakeSetup._UNSET:
             self.machine = machine

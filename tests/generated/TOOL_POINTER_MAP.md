@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 196  |  **description breadcrumbs:** 300  |  **note/error breadcrumbs:** 628
+**Tools:** 196  |  **description breadcrumbs:** 300  |  **note/error breadcrumbs:** 631
   |  **guidance smells flagged:** 8
 ## Blindspots to engineer
 
@@ -38,12 +38,12 @@ close orphans, factor duplicated guards into shared helpers.
 ### Hubs (most breadcrumbs lead here - the connective tissue)
 - `doc_new`  <- 87  (desc 0, note 87)
 - `find_geometry`  <- 52  (desc 14, note 38)
-- `design_get`  <- 49  (desc 10, note 39)
+- `design_get`  <- 50  (desc 10, note 40)
 - `design_delete_feature`  <- 40  (desc 16, note 24)
 - `view_screenshot`  <- 34  (desc 5, note 29)
 - `cam_get`  <- 32  (desc 15, note 17)
 - `data_get`  <- 25  (desc 10, note 15)
-- `model_inspect`  <- 24  (desc 3, note 21)
+- `model_inspect`  <- 25  (desc 3, note 22)
 - `sketch_create`  <- 24  (desc 7, note 17)
 - `doc_open`  <- 23  (desc 5, note 18)
 - `sketch_get`  <- 23  (desc 5, note 18)
@@ -1472,7 +1472,6 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - ' as absent is the attribute being gone.
 - but itemByName still returns it (value '
 - ') - it was not deleted.
-- '' is inside the collapsed timeline group '', so the timeline does not expose it directly. Expand the group in Fusion, or target '' itself - rolling to a collapsed group works.
 - action='roll' without a 'feature' takes to='beginning'/'end'/'next'/'previous' (got '' - that one names a position relative to a 'feature').
 - The change left  feature(s) in error: . A downstream feature consumed what this one produced - set suppressed=false to restore it.
 - A timeline group cannot hold another group, and  lies in ... Remove it with action='ungroup' first, or pick a range without it.
@@ -1536,6 +1535,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - The active design is not a Configured Design (it has no configuration table) - e.g. a design with Variant A/Variant B style options.
 - include=['attributes'] needs 'attribute_group' - the group to read (the same group design_edit_timeline(action='set_attribute') wrote with). Leave 'attribute_key' empty to get every key in that group.
 - Light nodes: name, component, body_count, child_count. Narrow: name_filter, component=<name>, max_depth, max_results. tree_handles=true adds handle/full_path/source ids. children_truncated = a leve...
+- lists at most  (per_body_truncated past that); one component has no narrower scope, so read the rest with model_inspect(target='<body>').
 - Bodies directly in the root component (not occurrences). A root body can't be jointed - model_create_component then move it in to joint it.
 - Each params[].value is in Fusion internal units (cm / radians) - params[].expression carries the authored unit. Full records: param_get(include_model_parameters=true).
 - A group is ONE row here, carrying member_count and is_collapsed; a COLLAPSED group's members are not listed, though summary.states counts them (an exception from one carries index null - address it...
@@ -2773,6 +2773,8 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - This datum landed OFF the path: 'along_path' vs 'path_length', in 'units'. An absolute distance is not clamped at either end - Fusion extrapolates along the tangent and reports the feature healthy.
 - An absolute distance is measured from the path start and is not clamped at either end - a value outside the path places the datum off the curve instead of failing, so check 'geometry' and 'landed'.
 - mode='': 'at' must be between 0 and 1 when distance_type='proportional' (0 = the path's start, 1 = its end), got  - Fusion raises on a value outside that range. For a length along the path use dist...
+- 'angle' expression '' did not evaluate - use an angle like '4.5 deg' or 'Tilt/2' and confirm the parameter names exist (param_get):
+- mode='': Fusion reported success but the plane it created reads back an angle of  ( deg), not the requested  ( deg). The datum '' was added and is still in the design - remove it with design_delete...
 - mode='offset': Fusion reported success but the plane it created reads back an offset of  , not the requested . The datum '' was added and is still in the design - remove it with design_delete_feature.
 - mode='offset_through_point': Fusion reported success but the plane it created misses the point by  cm - an offset-through-point plane passes through it exactly. The datum '' was added and is still ...
 - mode='on_path': 'to_object' places the plane AT that point (shifted by 'offset'), so it cannot be combined with 'at' or 'distance_type' - pass one or the other.
@@ -2784,6 +2786,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - mode='three_planes': Fusion rejected these planes (setByThreePlanes returned false) - they must intersect at a single point.
 - mode='edge_plane': Fusion rejected these inputs (setByEdgePlane returned false) - the edge (extended if needed) must meet the plane.
 - mode='on_path' with kind='point': 'to_object' is plane-only - ConstructionPointInput has no setByPathToObject. Use kind='plane', or place the point with 'at' and distance_type='absolute'.
+- angle_deg is null: the created plane's angle parameter did not read back, so the landed angle was not compared to the request.
 - The names in 'model_parameters' are this datum's own model parameters - param_set one to an expression to drive the datum parametrically.
 
 ### `model_create_component`
@@ -2857,8 +2860,9 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Extrude reported success but this
 - changed nothing: no solid body lost material and none was consumed, so the scoped bodies (
 - ) are untouched. A cut/intersect can only affect bodies named in 'target_bodies' - check the profile overlaps them in the extrude direction (a negative 'distance' reverses it).
-- Sketch text extruded into a solid. To stamp text onto an existing face instead, use model_emboss.
-- Profile extruded into a solid. Pair with view_screenshot (iso) to view it.
+- A surface was requested but '
+- ' reads back isSolid=true.
+- Closed profile extruded into a SURFACE wall (no end caps) - pair with model_stitch to close several surfaces into a solid.
 - extent='two_side' needs non-zero 'distance' and 'distance2' (one per side).
 - extent='two_side' does not use 'symmetric' - pass equal 'distance' and 'distance2' for a symmetric two-sided extrude, or use extent='distance' with symmetric=true.
 - profile_index resolved a profile whose parent sketch could not be read.
@@ -2866,6 +2870,8 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Could not start extrude:
 - Could not set extrude extent:
 - 'target_bodies' only applies to cut/join/intersect (a 'new' body has no participants). Remove it, or change the operation.
+- Sketch text extruded into a solid. To stamp text onto an existing face instead, use model_emboss.
+- Profile extruded into a solid. Pair with view_screenshot (iso) to view it.
 - Use sketch_get or sketch_create.
 - taper_deg is not supported with extent=to_object/to_face - a to-entity extrude takes no taper. Use a distance extent, or drop the taper.
 - Fusion refused the to_object extent (setOneSideExtent returned false), so nothing was extruded. Check the target face is reachable from the profile in the extrude direction.
@@ -2884,6 +2890,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Fusion refused a one-sided tapered extent (
 - , so nothing was extruded.
 - profile_index '' is not an int, list, 'all', or '0,1,2'. To target a specific region, pass a profile handle from sketch_get instead.
+- profile_index list holds the profile handle : a list takes integer indices. Pass one handle alone, or the regions' indices from sketch_get.
 - Extrude built '' but its  reads back  , not the requested . '' REMAINS in the timeline - inspect it with design_get and remove it with design_delete_feature.
 - This extrude already goes BOTH ways from the sketch plane, so no 'distance' sign reaches a body it missed - the profile overlaps no participant body. Check where the profile sits, and 'target_bodie...
 - extent=through_all follows the sketch-plane normal; a sketch ON a body's face points AWAY from the material, so this direction hits only air. Pass a  'distance' to cut the other way into the body.
@@ -3036,7 +3043,6 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Could not start loft:
 - Could not add loft sections:
 - Could not set loft centerline/rails:
-- . The API answers 'No target body' for a cut/intersect whose path meets no body.
 - Loft reported success but this
 - changed nothing - every solid body in '
 - ' measures the volume it had before and none was consumed, so the lofted shape does not overlap any of them. Check the profiles bracket the target body (an 'intersect' whose target lies entirely IN...
@@ -3442,6 +3448,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Creating user parameter '
 - . (Model/feature parameters may be read-only or require a valid expression; text parameters need quotes, e.g. "'text'".)
 - Could not create user parameter '
+- The value took, and the recompute left  new timeline error(s) and  new warning(s): . Nothing was rolled back; read design_get(include=['timeline']) for the messages, or set the previous value again.
 - Could not set '' to '': . (Model/feature parameters may be read-only or require a valid expression; text parameters need quotes, e.g. "'text'".)
 
 ### `param_set_favorite`
@@ -3624,6 +3631,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - center_point_arc_slot 'arc_radius' must be > 0. Got arc_radius=; omit it to take the arc radius from the start point's distance to the centre.
 - center_point_arc_slot 'angle_deg' () needs 'arc_radius' too - the angle sits AFTER the radius in the API's argument list, so there is no form that takes an angle on its own.
 - center_point_arc_slot  needs both 'arc_radius' and 'angle_deg' - the dimension flags sit after them in the API's argument list. Missing: .
+- is_construction does not apply to kind='point' - it is set on sketch curves only, so the point would land as a normal point. Omit it.
 - Drawing  returned an entity but the sketch's own  collection count did not change ( -> ) - nothing was added. Re-read sketch_get.
 - Rectangle drawn with  horizontal/vertical constraint(s) applied to its sides, as the UI does - the constructor itself lands none. Its corners already share points; what remains free is position and...
 - Degree  was requested but the spline was built at degree : the API silently clamps the degree to the control-point count minus one. Pass more 'points' to get the degree asked for.
@@ -3715,6 +3723,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - The wedge dimensioned is the one FACING THE SKETCH ORIGIN (the dimension's text point sits at the origin, and the dimensioned wedge is the one containing it) - a value near 180 minus the angle want...
 - A second line that is NOT parallel to the first is ROTATED parallel by this dimension: the constraint MOVES geometry rather than refusing, so re-read sketch_get to confirm the shape is still what w...
 - The solver moved , but satisfying this dimension demanded only  mm of change ( mm measured before it, driven to  mm) - a move far beyond that is what a dimension attached to the UNINTENDED entity l...
+- already stand(s) at the same  ( mm) as . If one of them is already dimensioned in , tie the two with sketch_constrain '' instead of a second , or move one point off that  first.
 - is_driving=false creates a DRIVEN (reference) dimension - the geometry controls it, so value '' cannot drive it. Drop 'value', or leave is_driving true.
 - entity_one '' did not resolve. Use '<type>:<index>' (), optionally with an anchor ':start'/':end'/':mid'/':center', e.g. 'line:0:end'.
 - This distance evaluated NEGATIVE - the solver does not mirror it. It placed the point at the signed offset, flipping it across its reference; if that spot coincides with another point the two merge...
@@ -4020,8 +4029,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - 'curves' resolved to no edges/curves.
 - No sketch or 'curves' to revolve. Draw an OPEN chain first, or pass curves.
 - deg, so no surface was revolved.
-- Surface revolve failed:
-- . (The profile must be coplanar with the axis.)
+- - the surface revolve built nothing.
 - '. Use sketch_get or sketch_create.
 
 ### `surface_thicken`
@@ -4309,6 +4317,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Could not read the viewport size while framing ''; camera target reads  and projection reads '', so the focus was not applied.
 - Camera target reads the focus '' and projection reads '', but its projected bounds could not be read; framing is unverified.
 - Camera target reads the focus '' and projection reads '', but framing did not verify after  attempt (); the camera remains at that read-back state.
+- 'focus': sketch '' has no world frame (frame.space reads ), so its box cannot be placed. Frame the occurrence that places it by fullPathName instead.
 - 'perspective_angle_deg'= needs a perspective camera, but the camera's cameraType could not be read - pass projection='perspective' in the same call to set it explicitly.
 - 'perspective_angle_deg'= needs a perspective camera, but the projection in effect is ''. Pass projection='perspective' in the same call.
 - After staging projection '', camera target reads , isFitView reads '', and cameraType could not be read back - projection and focus are unverified.

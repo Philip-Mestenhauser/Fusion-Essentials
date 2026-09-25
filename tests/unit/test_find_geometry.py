@@ -339,6 +339,14 @@ class TestFind:
         kinds = {m["kind"] for m in out["matches"]}
         assert kinds == {"cylinder_face"}
 
+    def test_kind_filter_selects_a_nurbs_face(self):
+        nurbs = FakeFace("N", type("G", (), {"surfaceType": _SURFACES.NurbsSurfaceType})(),
+                         (0, 0, 0))
+        body = FakeBody(faces=[nurbs, _plane("P", (1, 0, 0))])
+        _install([FakeOcc("X:1", "X", [body])])
+        out = _payload(fg.handler(target="X:1", kind="nurbs_face"))
+        assert out["match_count"] == 1 and out["matches"][0]["kind"] == "nurbs_face"
+
     def test_radius_filter(self):
         body = FakeBody(faces=[_cyl("PIN", 0.8, (0, 0, 0)), _cyl("JRN", 1.0, (1, 0, 0))])
         _install([FakeOcc("X:1", "X", [body])])
@@ -682,6 +690,16 @@ class TestNestedAssembly:
         out = _payload(fg.handler())
         handles = {m["handle"].split("|@")[0] for m in out["matches"]}
         assert "ROOT_FACE" in handles and "NESTED" in handles
+
+    def test_each_match_names_the_occurrence_it_was_read_through(self):
+        # Two instances of one part answer one query; without the occurrence per row the twin
+        # matches cannot be told apart. A root-owned native reads through no occurrence.
+        occs = [FakeOcc(f"Peg:{i}", "Peg", [FakeBody(faces=[_cyl(f"P{i}", 0.5, (i, 0, 0))])],
+                        full_path=f"Peg:{i}") for i in (1, 2)]
+        _install(occs, root_bodies=[FakeBody(faces=[_cyl("R", 0.5, (9, 0, 0))])])
+        out = _payload(fg.handler(kind="cylinder_face"))
+        got = {m["handle"].split("|@")[0]: m["occurrence"] for m in out["matches"]}
+        assert got == {"P1": "Peg:1", "P2": "Peg:2", "R": None}
 
 
 # ── BODY-NAME targets: a body inside ANY component, ambiguity refused, qualified form accepted ──

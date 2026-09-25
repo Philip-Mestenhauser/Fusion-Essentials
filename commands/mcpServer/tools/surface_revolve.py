@@ -89,7 +89,7 @@ def handler(sketch_name: str = "", curves=None, axis: str = "z",
                          f"{angle_deg} deg, so no surface was revolved.")
         feature = host.features.revolveFeatures.add(rev_input)
     except Exception as e:
-        return error(f"Surface revolve failed: {e}. (The profile must be coplanar with the axis.)")
+        return error(f"{e} - the surface revolve built nothing.")
     if not feature:
         return error(_common.no_feature_error(design, "Surface revolve"))
 

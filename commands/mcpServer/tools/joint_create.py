@@ -25,9 +25,16 @@ from ._joints import (
 )
 from . import _joints
 from ._joint_inputs import (
-    _JOINT_TYPES, _MOTIONS, _REST_LIMIT_NOTE, _apply_limits, _resolve_input, _slide_index,
-    _slide_name, _unverified_limits_note,
+    MOVED_NOTE as _MOVED_NOTE, MOVED_UNREAD_NOTE as _MOVED_UNREAD_NOTE, _JOINT_TYPES, _MOTIONS,
+    _REST_LIMIT_NOTE, _apply_limits, _resolve_input, _slide_index, _slide_name,
+    _unverified_limits_note, input_occurrence as _input_occurrence, pose_before as _pose_before,
+    pose_moved as _pose_moved,
 )
+
+# The ChildGeometryMoved postcondition fills repositioned_occurrences from the ROOT's top-level
+# occurrences, gating on translation only.
+_REPOSITIONED_SCOPE_NOTE = (" 'repositioned_occurrences' lists only top-level occurrences whose "
+                            "translation changed.")
 
 
 def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str = "rigid",
@@ -105,6 +112,7 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
     except Exception as e:
         return error(f"Could not apply offset/angle/flip: {e}")
 
+    targets, poses = _pose_before([_input_occurrence(jo1), _input_occurrence(jo2)])
     try:
         joint = joints.add(ji)
     except Exception as e:
@@ -183,8 +191,13 @@ def handler(occurrence_one: str = "", occurrence_two: str = "", joint_type: str 
         "angle_deg": angle if angle else None,
         "flipped": bool(flip),
         **limits_out,
+        "moved": _pose_moved(targets, poses),
         "note": "Joint created as a timeline feature. View it with view_screenshot.",
     }
+    if payload["moved"] is None:
+        payload["note"] += _MOVED_UNREAD_NOTE
+    elif payload["moved"]:
+        payload["note"] += _MOVED_NOTE + _REPOSITIONED_SCOPE_NOTE
     if rename_warning:
         payload["rename_warning"] = rename_warning
     if healthy is None:

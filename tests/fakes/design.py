@@ -47,7 +47,7 @@ class BRepBody:
                  light_bulb=True, hidden_by_ancestor=False, vertices=(), parent_component=None,
                  face_count=0, faces=(), area=None, mesh_manager=None, solid_readable=True,
                  is_derived=False, appearance=_UNSET, opacity=1.0, visible_opacity=_UNSET,
-                 edges=None):
+                 edges=None, precise_bbox=None):
         self.appearance = FakeAppearance() if appearance is BRepBody._UNSET else appearance
         self.opacity = opacity
         self._visible_opacity = visible_opacity
@@ -58,6 +58,9 @@ class BRepBody:
         self.nativeObject = None
         self.assemblyContext = None
         self.boundingBox = bbox
+        # Set only when given, so a body whose precise box does not read stays a testable state.
+        if precise_bbox is not None:
+            self.preciseBoundingBox = precise_bbox
         self.vertices = _NamedCollection([_Vertex(p) for p in vertices])
         self.faces = _NamedCollection(list(faces) or [None] * face_count)
         self.volume = volume

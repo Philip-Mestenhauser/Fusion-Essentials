@@ -488,9 +488,8 @@ def handler(operation: str = "", parameters=None, suppressed=None, preset: str =
     if oerr:
         return error(oerr)
     op = node.obj
-    # Read ONCE, before any write below - MEASURED: a write during generation is not refused (one
-    # run left the op empty until a relaunch; two isolated repro attempts generated it clean either
-    # way), so this is disclosed, never blocked.
+    # Read ONCE, before any write below: a write during a generation is accepted and disclosed,
+    # never refused.
     was_generating = read_flag(lambda: op.isGenerating) is True
 
     # The name clash is checked with the other pre-flights, before ANY write: the rename itself runs

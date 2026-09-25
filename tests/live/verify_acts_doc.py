@@ -159,6 +159,54 @@ def _camera_focus_read(projection, *keys, differs_from=()):
     return check
 
 
+def _sketch_placed(p):
+    """sketch_get(include_entities, cm): a world frame and line endpoints to place the sketch by."""
+    frame = p.get("frame") or {}
+    lines = [e for e in (p.get("entities") or []) if e.get("type") == "line"]
+    return _measured("the sketch reads a world frame and its lines", {"frame": frame,
+                                                                     "lines": len(lines)},
+                     frame.get("space") == "world" and bool(lines) and p.get("units") == "cm")
+
+
+def _camera_on_sketch(sketch_key, box_key):
+    """workspace_orient: the camera target lies ON the recalled sketch's world plane, inside its
+    drawn lines in-plane, and inside the occurrence box model_inspect read independently."""
+    def check(p):
+        target = _camera_target(p)
+        sk, box = _RECALL.get(sketch_key) or {}, _RECALL.get(box_key) or {}
+        frame = sk.get("frame") or {}
+        pts = [e.get(end) or {} for e in (sk.get("entities") or []) if e.get("type") == "line"
+               for end in ("start", "end")]
+        lo, hi = box.get("min_point") or {}, box.get("max_point") or {}
+        tol = 0.01
+        got = {"target_cm": target, "frame": frame, "box": [lo, hi]}
+        if target is None or not pts or not all(
+                frame.get(k) for k in ("origin_mm", "x_world", "y_world", "normal")):
+            return _measured("camera target placed on the sketch", got, False)
+        d = [t - o / 10.0 for t, o in zip(target, frame["origin_mm"])]
+        u, v, w = (sum(a * b for a, b in zip(d, frame[k])) for k in ("x_world", "y_world", "normal"))
+        xs, ys = [q.get("x") for q in pts], [q.get("y") for q in pts]
+        in_box = all(_num(lo.get(a)) and lo[a] - tol <= t <= hi[a] + tol
+                     for a, t in zip("xyz", target))
+        got.update({"plane_offset_cm": w, "in_plane_cm": (u, v), "in_occurrence_box": in_box})
+        return _measured("camera target placed on the sketch", got,
+                         abs(w) <= tol and min(xs) - tol <= u <= max(xs) + tol
+                         and min(ys) - tol <= v <= max(ys) + tol and in_box)
+    return check
+
+
+def _outframes(blank_path, shot_path, factor=2):
+    """The named shot's PNG is at least `factor` times the parked, subject-less 'current' PNG - a
+    frame holding only backdrop compresses to a few KB, a framed part to tens."""
+    def check(payload):
+        sizes = [os.path.getsize(f) if os.path.isfile(f) else None for f in (blank_path, shot_path)]
+        return _measured("the named view framed the visible subject",
+                         {"blank_bytes": sizes[0], "shot_bytes": sizes[1], "factor": factor},
+                         f"file_path={shot_path}" in str(payload)
+                         and all(_num(s) for s in sizes) and sizes[1] >= factor * sizes[0])
+    return check
+
+
 def _distinct_saved_cameras(names):
     """Return a predicate requiring list_views' rows for `names` to publish READABLE, DIFFERING
     eye_cm points - FSAE-0922-LIST-VIEWS-CAMERA-1: two saved views naming the same executor-visible
@@ -384,6 +432,17 @@ _SHOWCASE = [
     ("view_screenshot", {"view": "current", "width": 500, "height": 400,
                          "file_path": EXPORT_DIR + "/view-focus-" + _VIEW_FOCUS_RUN + "-refocus.png"},
      _retained_png(EXPORT_DIR + "/view-focus-" + _VIEW_FOCUS_RUN + "-refocus.png"), None),
+    # HandleS sits on an XZ datum 125 mm off the origin inside the
+    # LeadScrew component, so its sketch-space box and its world box differ in both rotation and
+    # offset. The target must land on that plane, inside the drawn lines, inside the placed part.
+    ("model_inspect", {"target": "LeadScrew:1", "units": "cm"}, _world_box("LeadScrew:1"),
+     ("view_focus_screw_box", _recall("view_focus_screw_box", lambda p: p))),
+    ("sketch_get", {"sketch_name": "HandleS", "include_entities": True, "units": "cm"},
+     _sketch_placed, ("view_focus_handle", _recall("view_focus_handle", lambda p: p))),
+    ("view_set", {"action": "orient", "focus": "HandleS"},
+     lambda p: (p.get("applied", {}).get("sketch_frames") or {}).get("HandleS", {}).get("space")
+     == "world", None),
+    ("workspace_orient", {}, _camera_on_sketch("view_focus_handle", "view_focus_screw_box"), None),
     ("view_set", {"action": "orient", "orientation": "front",
                   "focus": ["ViseBase:1", "STOCK:1"], "projection": "orthographic"},
      "ok", None),
@@ -441,6 +500,20 @@ _SHOWCASE = [
     ("view_set", {"action": "clear_isolation"},
      lambda p: _measured("fit_to left no isolation behind", {"cleared_count": p.get("cleared_count")},
                          p.get("cleared_count") == 0), None),
+    # With the jaw isolated and the camera parked on MateArm, two metres off,
+    # 'current' shoots backdrop; a plain view='front' (no fit asked) has to frame the jaw anyway.
+    ("view_set", {"action": "isolate", "target": "JawMoving:1"}, "ok", None),
+    ("view_set", {"action": "orient", "focus": "MateArm:1"}, "ok", None),
+    ("view_screenshot", {"view": "current", "width": 500, "height": 400,
+                         "file_path": EXPORT_DIR + "/view-frame-" + _VIEW_FOCUS_RUN + "-parked.png"},
+     _retained_png(EXPORT_DIR + "/view-frame-" + _VIEW_FOCUS_RUN + "-parked.png"), None),
+    ("view_screenshot", {"view": "front", "width": 500, "height": 400,
+                         "file_path": EXPORT_DIR + "/view-frame-" + _VIEW_FOCUS_RUN + "-unparked.png"},
+     _outframes(EXPORT_DIR + "/view-frame-" + _VIEW_FOCUS_RUN + "-parked.png",
+                EXPORT_DIR + "/view-frame-" + _VIEW_FOCUS_RUN + "-unparked.png"), None),
+    ("view_set", {"action": "clear_isolation"},
+     lambda p: _measured("the parked-shot isolation cleared",
+                         {"cleared_count": p.get("cleared_count")}, p.get("cleared_count") == 1), None),
     ("view_set", {"action": "isolate", "target": "JawMoving:1"}, "ok", None),
     ("view_screenshot", {"fit_to": "JawMoving:1", "width": 300, "height": 240}, "ok", None),
     ("design_get", {"include": ["tree"], "component": "JawMoving:1", "tree_bodies": True},
@@ -553,6 +626,18 @@ _SHOWCASE = [
     # such key - it never touched the design.)
     ("design_get", {},
      lambda p: bool((p.get("active_document") or {}).get("name")), None),
+    # The default read's joint count is the design-wide walk
+    # assembly_get counts, whichever component is active.
+    ("assembly_get", {}, lambda p: _num(p.get("joint_count")) and p["joint_count"] > 0,
+     ("joint_total", _recall("joint_total", lambda p: p["joint_count"]))),
+    ("design_activate_component", {"occurrence": "LeadScrew:1"}, "ok", None),
+    ("design_get", {},
+     lambda p: _measured("design_get joints equal assembly_get joint_count, a child active",
+                         {"joints": (p.get("contents") or {}).get("joints"),
+                          "joint_count": _RECALL.get("joint_total")},
+                         (p.get("contents") or {}).get("joints") == _RECALL.get("joint_total")),
+     None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
     # the assignable catalog, at both zoom levels: the document's own entries plus a count-only
     # census of every loaded library, then ONE library paged by name_filter/max_results. A library
     # name that is not loaded is refused with the loaded names listed.

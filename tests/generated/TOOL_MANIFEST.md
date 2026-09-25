@@ -58,7 +58,7 @@ Produces: feature -> design_delete_feature. |
 | · | `model_inspect` | Measure a target: the bounding box by default, mass or mesh stats through 'include'. |
 | ✎ | `model_loft` | Loft through ordered sections; model_stitch closes a surface loft. |
 | · | `model_measure_between` | Measure the distance or angle between two targets; a distance of 0 is touching. |
-| · | `model_measure_continuity` | Measure the gap, normal angle and curvature jump across each edge's seam; an edge on one face reads against the 'against' body. |
+| · | `model_measure_continuity` | Measure gap, normal angle and curvature jump across each edge's seam; a one-faced edge reads against the 'against' body. |
 | · | `model_measure_relation` | Judge a geometric relation between two entities.
 Produces: passed. |
 | ✎ | `model_mirror` | Mirror bodies or timeline features across a plane. |
@@ -116,7 +116,7 @@ Produces: feature, area_after. |
 | | Tool | Summary |
 |---|---|---|
 | ✎ | `form_create` | Create a T-spline Form's B-Rep body from a box [x,y,z] or 8-sided cylinder [diameter, height] primitive centred on origin, or a quad cage; form_get(include=['ca... |
-| · | `form_get` | List the T-spline Forms and their creation records; include=['cage'] returns the named Form's cage for form_create. |
+| · | `form_get` | List T-spline Forms with their creation records; include=['cage'] returns one Form's cage for form_create. |
 
 ### mesh
 
@@ -307,7 +307,7 @@ Produces: document_modified. |
 | ✎ | `param_add` | Add ONE user parameter (name + expression), or MANY with 'params' |
 | ⚠ | `param_delete` | Delete a USER parameter |
 | · | `param_get` | Read the active design's parameters - name, expression, value, unit, comment |
-| ✎ | `param_set` | Set a design parameter's expression, returning the before/after and driven_joints_reset |
+| ✎ | `param_set` | Set a design parameter's expression, returning before/after and driven_joints_reset |
 | ✎ | `param_set_favorite` | Toggle a user parameter's 'favorite' flag (whether it appears in the favorites list). |
 
 ### pmi

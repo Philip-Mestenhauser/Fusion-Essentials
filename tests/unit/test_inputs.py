@@ -2654,6 +2654,13 @@ class TestProfileRef:
         val, err = inp.ProfileRef("profile").resolve({"profile_index": 0})
         assert err is None and val is b          # most-recent sketch
 
+    def test_a_selector_key_it_does_not_read_is_refused_not_index_zero(self):
+        p0, p1 = Profile("p0"), Profile("p1")
+        _install_profiles(sketches=[("S", [p0, p1])])
+        val, err = inp.ProfileRef("profile").resolve({"sketch": "S", "curve": "ellipse:0"})
+        assert val is None and "'curve' is not read" in err
+        assert "<sketch>/<type>:<index>" not in err      # a plain profile input takes no curve
+
     def test_legacy_index_out_of_range(self):
         _install_profiles(sketches=[("S", [Profile("p0")])])
         val, err = inp.ProfileRef("profile").resolve({"sketch": "S", "profile_index": 5})

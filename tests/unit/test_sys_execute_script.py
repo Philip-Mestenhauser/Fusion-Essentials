@@ -16,6 +16,7 @@ import pytest
 from conftest import FakeApplication, FakeFusionDocument, load_tool
 
 ses = load_tool("sys_execute_script")
+_guard = load_tool("_write_guard")
 
 _OUTER = '''Traceback (most recent call last):
   File "C:/source/tools/sys_execute_script.py", line 79, in handler
@@ -393,3 +394,9 @@ class TestNoOutputTeachesPrint:
         _, res = run_script(reply=json.dumps({"message": "", "success": True}))
         assert res["isError"] is False
         assert "print()" in res["content"][0]["text"]
+
+    def test_a_printed_empty_object_survives_the_acted_on_stamp(self, run_script):
+        _, res = run_script(reply=json.dumps({"message": "{}\n", "success": True}))
+        out = json.loads(_guard._stamp_acted_on(res, "Scratch", "urn:x")["content"][0]["text"])
+        assert out["printed"] == {} and "empty JSON object" in out["note"]
+        assert out["acted_on"]["name"] == "Scratch"

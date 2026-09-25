@@ -8,6 +8,7 @@ from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
 from ._common import error, ok, safe
+from . import _assert
 from . import _common
 from . import _inputs
 from ._joints import (
@@ -26,8 +27,10 @@ from ._joints import (
     motion_param_names as _motion_param_names,
 )
 from ._joint_inputs import (
-    _DEG_PER_RAD, _JOINT_TYPES, _LIMIT_BAND, _MOTIONS, _REST_LIMIT_NOTE, _apply_limits,
-    _resolve_input, _slide_index, _slide_name, _unverified_limits_note,
+    MOVED_NOTE as _MOVED_NOTE, MOVED_UNREAD_NOTE as _MOVED_UNREAD_NOTE, _DEG_PER_RAD,
+    _JOINT_TYPES, _LIMIT_BAND, _MOTIONS, _REST_LIMIT_NOTE, _apply_limits, _resolve_input,
+    _slide_index, _slide_name, _unverified_limits_note, input_occurrence as _input_occurrence,
+    pose_before as _pose_before, pose_moved as _pose_moved,
 )
 
 
@@ -271,6 +274,10 @@ def handler(joint_name: str = "", input_one: str = "", input_two: str = "",
     limits_unverified = []
     edits_unverified = []
     rolled = False
+    targets, poses = _pose_before([safe(lambda: joint.occurrenceOne),
+                                   safe(lambda: joint.occurrenceTwo),
+                                   _input_occurrence(new1) if new1 is not None else None,
+                                   _input_occurrence(new2) if new2 is not None else None])
     try:
         # The marker MUST be before the joint to edit geometry/flip/motion.
         safe(lambda: joint.timelineObject.rollTo(True))
@@ -402,13 +409,16 @@ def handler(joint_name: str = "", input_one: str = "", input_two: str = "",
     except Exception:
         pass
 
-    out = {"edited": True, "joint_name": safe(lambda: joint.name), "changes": changed}
+    state, failure = _assert.compute_state(joint)
+    out = {"edited": True, "healthy": {"healthy": True, "broken": False}.get(state),
+           "joint_name": safe(lambda: joint.name), "changes": changed}
     # surface the most-asked fields at top level for convenience
     for key in ("input_one", "input_two", "joint_type", "axis", "slide_axis", "world_axis", "flipped",
                        "offset", "angle", "min_deg", "max_deg", "rest_deg", "min_mm", "max_mm", "rest_mm"):
         if key in changed:
             out[key] = changed[key]
     out["recomputed"] = recomputed
+    out["moved"] = _pose_moved(targets, poses)
     if recompute_errors:
         out["timeline_errors_after"] = recompute_errors
         out["note"] = ("Joint edited + recomputed, but the timeline still has errored feature(s) "
@@ -422,6 +432,18 @@ def handler(joint_name: str = "", input_one: str = "", input_two: str = "",
         out["note"] = ("Joint edited in place, but the full recompute RAISED - downstream features "
                        "may be unsettled and their health unread. Run design_recompute and check "
                        "workspace_orient before trusting the model state.")
+    if failure:
+        out["health_error"] = failure[1] or None
+        out["note"] += (f" The joint's compute state reads {failure[0]} after the edit"
+                        + (f": {failure[1]}" if failure[1] else " (no message)")
+                        + ". Fix its inputs with joint_edit or read assembly_get.")
+    elif out["healthy"] is None:
+        out["note"] += (" 'healthy' is null - the joint's compute state did not read after the "
+                        "edit. Check it with assembly_get.")
+    if out["moved"] is None:
+        out["note"] += _MOVED_UNREAD_NOTE
+    elif out["moved"]:
+        out["note"] += _MOVED_NOTE
     if axis_kept:
         out["axis_kept"] = True
         out["note"] += (" 'axis' was not given, so the direction the joint was already aimed at "

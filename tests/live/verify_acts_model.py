@@ -24,7 +24,7 @@ from verify_core import (
     _param_traced, _path_count, _patterned, _piped, _pocket_boss, _pockets_recognized, _prof,
     _recall, _recognized_cbore_walls, _recognized_pocket_floor, _refused, _relation_measured,
     _relation_passes, _relation_read, _replaced_on_its_pivot, _revolved, _shelled,
-    _sits_on_a_face, _swept, _unless, _watch)
+    _sits_on_a_face, _split_bodies, _swept, _unless, _watch)
 from verify_acts_cam import MACHINING_EXTENSION
 from verify_layout import _px, _py
 
@@ -95,6 +95,43 @@ def _section_camera_unchanged(key):
         return _measured("section clear camera preservation",
                          {"before": before, "after": current}, current == before)
     return check
+
+
+_FINE_ANGLE_DEG = 4.0909090909
+
+
+def _fine_angle_plane(p):
+    """model_construction at a long-decimal angle publishes the angle its own parameter landed."""
+    return _datum("plane")(p) and _measured(
+        "at_angle plane lands the long-decimal angle",
+        {"angle_deg": p.get("angle_deg"), "expression": p.get("angle_expression"),
+         "model_parameters": p.get("model_parameters")},
+        _near(p.get("angle_deg"), _FINE_ANGLE_DEG, 1e-8)
+        and bool((p.get("model_parameters") or {}).get("angle")))
+
+
+def _fine_angle_param(p):
+    """param_get of that plane's angle parameter reads every digit asked for, in degrees."""
+    par = p.get("parameter") or {}
+    return _measured("the fine plane's angle parameter read back",
+                     {"name": par.get("name"), "expression": par.get("expression"),
+                      "value": par.get("value"), "value_units": par.get("value_units")},
+                     par.get("name") == _RECALL.get("db_fine_param")
+                     and par.get("value_units") == "deg"
+                     and _near(par.get("value"), _FINE_ANGLE_DEG, 1e-8))
+
+
+def _addr_planes_own_their_params(p):
+    """Both components' AddrPlane rows carry parameters, and no parameter name sits on both."""
+    rows = [r for r in (p.get("timeline") or {}).get("timeline") or []
+            if r.get("name") == "AddrPlane"]
+    names = [sorted(q.get("name") for q in r.get("params") or []) for r in rows]
+    # A construction plane's timeline row reads component None (measured rel6), so the two rows are
+    # told apart by their parameters alone here.
+    return _measured(
+        "same-named planes in two components carry their own parameters",
+        {"components": [r.get("component") for r in rows], "params": names},
+        len(rows) == 2 and all(names) and not set(names[0]) & set(names[1]))
 
 
 def _placed_xyz(component, xyz):
@@ -356,6 +393,13 @@ def _interference_pin(ctx, args):
     """Add the exact owned-document pin to one interference-fixture write."""
     return {**args, "expect_document": _ctx_get(
         ctx, "interference_scratch", "the interference scratch document")}
+
+
+def _peg_faces_per_instance(p):
+    """find_geometry over both Peg instances: one cylinder face per instance, each naming its own."""
+    got = sorted(str(m.get("occurrence")) for m in p.get("matches") or [])
+    return _measured("each Peg cylinder names the instance it was read through",
+                     {"occurrences": got}, got == ["Peg:1", "Peg:2"])
 
 
 def _interference_pair_named(p):
@@ -1483,6 +1527,14 @@ _SOLIDS = [
      lambda p: _datum("plane")(p) and _measured("swung off the base plane's normal",
                                                 {"normal_changed": p.get("normal_changed")},
                                                 p.get("normal_changed") is True), None),
+    # a long-decimal angle: the plane's own parameter must hold every digit, read back separately.
+    ("model_construction", lambda c: {"kind": "plane", "mode": "at_angle", "plane": "xy",
+                                      "edges": [_ctx_get(c, "db_front", "bench front top edge")],
+                                      "angle": _FINE_ANGLE_DEG, "name": "DBAngleFine"},
+     _fine_angle_plane,
+     ("db_fine_param", _recall("db_fine_param", lambda p: p["model_parameters"]["angle"]))),
+    ("param_get", lambda c: {"name": _ctx_get(c, "db_fine_param", "the fine plane's parameter")},
+     _fine_angle_param, None),
     ("model_construction", lambda c: {"kind": "plane", "mode": "three_points",
                                       "points": [_ctx_get(c, "db_c1", "bench corner 1"),
                                                  _ctx_get(c, "db_c2", "bench corner 2"),
@@ -2088,6 +2140,74 @@ _SOLIDS = [
     ("find_geometry", {"target": "RadiusFilterBench", "kind": "circular_edge",
                        "radius": 0.1005511811023622, "units": "in"},
      _matched(0, "circular_edge"), None),
+    # AS_SURFACE OVER A CLOSED ELLIPSE: the sketch also holds the ellipse's two construction axes.
+    # The extrude must land a surface wall, read off the feature AND off the body's own flag. Each
+    # of these three benches sits out at x 1410..1540 through its component placement.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "EllipseWall", "activate": True, "x": 1410},
+     _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "EllipseWallS"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "ellipse", "cx": 0, "cy": 0, "radius": 15,
+                                           "minor": 8}],
+                             "sketch_name": "EllipseWallS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "EllipseWallS", "profile_index": 0, "distance": 10,
+                       "as_surface": True},
+     lambda p: _measured("an ellipse extruded as_surface lands a surface",
+                         {"as_surface": p.get("as_surface"), "is_solid": p.get("is_solid")},
+                         p.get("as_surface") is True and p.get("is_solid") is False), None),
+    ("model_inspect", {"target": "EllipseWall:1", "include": ["default", "mass"],
+                       "per_body": True},
+     lambda p: _measured("the ellipse wall's one body reads is_solid false",
+                         [(r.get("body"), r.get("is_solid"))
+                          for r in (p.get("mass") or {}).get("per_body") or []],
+                         [r.get("is_solid") for r in (p.get("mass") or {}).get("per_body") or []]
+                         == [False]), None),
+    # TO_FACE DEPTH: a to-face extent has no distance parameter, so the landed depth is read off
+    # the new body. The circle on z=0 runs up to the roof block's underside at z=30.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "ToFaceCap", "activate": True, "x": 1470},
+     _made_component, None),
+    ("model_construction", {"kind": "plane", "plane": "xy", "offset": 30, "name": "ToFaceRoof"},
+     _datum_plane("xy"), None),
+    ("sketch_create", {"plane": "ToFaceRoof", "name": "ToFaceRoofS"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": -20, "y1": -20,
+                                           "x2": 20, "y2": 20}],
+                             "sketch_name": "ToFaceRoofS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "ToFaceRoofS", "profile_index": 0, "distance": 10},
+     _extruded, None),
+    # a callable, so the layout reads no world point off it: the bench is placed by its component
+    ("find_geometry", lambda c: {"target": "ToFaceCap", "kind": "planar_face",
+                                 "nearest_to": [1470, 0, 30], "max_results": 1},
+     _matched(1, "planar_face"), _fg("to_face_floor")),
+    ("sketch_create", {"plane": "xy", "name": "ToFaceS"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "circle", "cx": 0, "cy": 0, "radius": 5}],
+                             "sketch_name": "ToFaceS"}, "ok", None),
+    ("model_extrude", lambda c: {"sketch_name": "ToFaceS", "profile_index": 0,
+                                 "extent": "to_face",
+                                 "to_object": _ctx_get(c, "to_face_floor", "the roof's underside")},
+     lambda p: _measured("to_face publishes the landed depth",
+                         {"extent": p.get("extent"), "depth_mm": p.get("depth_mm")},
+                         p.get("extent") == "to_object" and _near(p.get("depth_mm"), 30.0, 0.05)),
+     None),
+    # A ROTATED OCCURRENCE'S BOX: a 40 mm disc turned 45 deg about its own axis still spans 40 mm.
+    # Measured on a 200 mm disc: the proxy's plain boundingBox read 200 x sqrt 2 after the turn.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "RotDisc", "activate": True, "x": 1540},
+     _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "RotDiscS"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "circle", "cx": 0, "cy": 0, "radius": 20}],
+                             "sketch_name": "RotDiscS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "RotDiscS", "profile_index": 0, "distance": 5},
+     _extruded, None),
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("assembly_move", {"occurrence": "RotDisc:1", "rotate_deg": 45, "rotate_axis": "z"},
+     _moved_occurrence(), None),
+    ("assembly_capture_position", {"action": "capture"}, _captured, None),
+    ("model_inspect", {"target": "RotDisc:1", "units": "mm"},
+     lambda p: _measured("a 45 deg turned disc keeps its tight 40 mm box",
+                         {"x": p.get("x"), "y": p.get("y"), "box_read": p.get("box_read")},
+                         _near(p.get("x"), 40.0, 0.05) and _near(p.get("y"), 40.0, 0.05)
+                         and p.get("box_read") == "preciseBoundingBox"), None),
     ("design_activate_component", {"occurrence": "root"}, "ok", None),
 ]
 
@@ -2790,6 +2910,14 @@ _DETAILS = [
                          p.get("is_healthy") is True and p.get("timeline_problems") == []
                          and any("Pipe" in (w.get("name") or "")
                                 for w in (p.get("timeline_warnings") or []))), None),
+    # the same warning's own message on the timeline row reads as plain text, no markup
+    ("design_get", {"include": ["timeline"], "max_results": 2000},
+     lambda p: (lambda warned: _measured(
+         "the retained pipe's warning message carries no markup",
+         {"warned": [(r.get("name"), r.get("message")) for r in warned]},
+         bool(warned) and all(r.get("message") and "<" not in r["message"] for r in warned)))(
+         [r for r in ((p.get("timeline") or {}).get("timeline") or [])
+          if r.get("health") == "warning" and "Pipe" in (r.get("name") or "")]), None),
     # the SAME state through workspace_orient's health counts (uncapped, unlike the timeline
     # slice's row list) - a warning, no error, is_healthy true: the severity must agree.
     ("workspace_orient", {},
@@ -2818,6 +2946,46 @@ _DETAILS = [
                          {"body_split": p.get("body_split"), "note": (p.get("note") or "")[:200]},
                          isinstance(p.get("body_split"), list) and len(p["body_split"]) == 2
                          and "DISCONNECTED" in (p.get("note") or "")), None),
+    # A parameter change that breaks a downstream feature: the split plane rides a user parameter,
+    # and moving it off the box leaves the split with nothing to cut. param_set names the split
+    # among the errors it newly raised; putting the value back clears it.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    # placed at x=1300 mm like AxisFrameRig, drawn at the component's own origin: the split plane's
+    # offset is a parameter, which a re-packed literal sketch would leave behind.
+    ("model_create_component", {"name": "ParamBreak", "activate": True, "x": 1300},
+     _made_component, None),
+    ("param_add", {"name": "BrkSplitX", "expression": "20 mm"},
+     _param_added("BrkSplitX", 20), None),
+    ("sketch_create", {"plane": "xy", "name": "ParamBreakS"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "rectangle", "x1": 0, "y1": 0,
+                                           "x2": 40, "y2": 20}],
+                             "sketch_name": "ParamBreakS"}, "ok", None),
+    ("model_extrude", {"sketch_name": "ParamBreakS", "profile_index": 0, "distance": 10},
+     _extruded, None),
+    ("model_construction", {"kind": "plane", "plane": "yz", "offset": "BrkSplitX",
+                            "name": "BrkSplitPlane"}, _datum_plane("yz"), None),
+    ("find_geometry", {"target": "ParamBreak", "kind": "planar_face",
+                       "nearest_to": [1310, 10, 10], "max_results": 1}, "ok", _fg("brk_body")),
+    ("model_split", lambda c: {"split": "body", "target": _ctx_get(c, "brk_body", "the box"),
+                               "split_plane": "BrkSplitPlane"},
+     _split_bodies, ("brk_split", _recall("brk_split", lambda p: p["feature"]))),
+    ("param_set", {"name": "BrkSplitX", "expression": "200 mm"},
+     lambda p: _param_set_to("BrkSplitX", 200)(p) and _measured(
+         "param_set names the split its value broke",
+         {"split": _RECALL.get("brk_split"), "new_timeline_errors": p.get("new_timeline_errors"),
+          "note": p.get("note")},
+         _RECALL.get("brk_split") in (p.get("new_timeline_errors") or [])), None),
+    ("param_set", {"name": "BrkSplitX", "expression": "20 mm"},
+     lambda p: _param_set_to("BrkSplitX", 20)(p) and _measured(
+         "restoring the value raised no new error",
+         {"new_timeline_errors": p.get("new_timeline_errors")},
+         not p.get("new_timeline_errors")), None),
+    ("assembly_get", {},
+     lambda p: _measured("the split reads healthy again after the restore",
+                         {"split": _RECALL.get("brk_split"),
+                          "timeline_problems": p.get("timeline_problems")},
+                         _RECALL.get("brk_split") not in
+                         [r.get("name") for r in (p.get("timeline_problems") or [])]), None),
     # sketch_add_3d_spline: a 2-turn helix (r20 mm, pitch30 mm) as a FITTED spline pipes at d4 to
     # the analytic tube volume (pi*r_section^2*helix_length = 3.2477 cm3, measured within 0.04%);
     # the SAME helix as a CONTROL-POINT spline mints construction lines beside it (one per
@@ -3258,6 +3426,7 @@ _RESIZE = [
      lambda c: _interference_pin(c, {"component": "Peg", "x": 50}),
      lambda p: p.get("created") is True, None),
     ("assembly_inspect_interference", {}, _interference_pair_named, None),
+    ("find_geometry", {"target": "Peg", "kind": "cylinder_face"}, _peg_faces_per_instance, None),
     ("model_create_component",
      lambda c: _interference_pin(c, {"name": "OverlapPart", "activate": True, "x": 200}),
      _made_component, None),
@@ -3496,6 +3665,10 @@ _RESIZE = [
     ("model_create_component", {"name": "AddrCompB", "activate": True}, _made_component, None),
     ("model_construction", {"kind": "plane", "plane": "xy", "offset": 5, "name": "AddrPlane"},
      _datum_plane("xy"), None),
+    # the two same-named planes each own an offset parameter: a row resolved by name hands one
+    # plane's parameters to the other.
+    ("design_get", {"include": ["timeline"], "timeline_params": True, "max_results": 5000},
+     _addr_planes_own_their_params, None),
     ("design_delete_feature", {"feature": "AddrPlane"},
      _refused("AddrCompA/AddrPlane", "AddrCompB/AddrPlane", "matches 2 timeline objects"), None),
     ("design_delete_feature", {"feature": "AddrCompA/AddrPlane"},

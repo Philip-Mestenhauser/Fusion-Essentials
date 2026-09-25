@@ -264,10 +264,10 @@ _GENERATE_REQUIRES = {"tool": "cam_generate", "workspace": "Manufacture"}
 _UNREAD_REQUIRES = {"tool": "cam_get", "workspace": "Manufacture"}
 
 
-def _op_blocked_by(summary, additive=False):
+def _op_blocked_by(summary, facts=None):
     """(blocked_by, requires) for one op - reason codes (present-and-empty when nothing blocks),
-    read off the row's own state bucket, and the tool/workspace that unblocks them. `additive`
-    excludes tool_unselected the way _MANUAL_NC_STRATEGY does - neither takes a cutting tool."""
+    read off the row's own state bucket, and the tool/workspace that unblocks them. An additive
+    op (`facts`) skips tool_unselected the way _MANUAL_NC_STRATEGY does - neither takes a tool."""
     if summary.get("state") == "suppressed":
         return [], None                    # suppressed = excluded from posting; blocks nothing
     blocked = []
@@ -280,7 +280,7 @@ def _op_blocked_by(summary, additive=False):
         # It reads IsValid with a toolpath, so every other flag on this row says it is postable.
         blocked.append("toolpath_nonfinite")
     if (summary.get("tool") is None and summary.get("strategy") != _MANUAL_NC_STRATEGY
-            and not additive):
+            and not (facts or {}).get("additive")):
         blocked.append("tool_unselected")  # real refusal: "Toolpath requires tool to be selected"
     if summary.get("is_out_of_date"):
         blocked.append("toolpath_out_of_date")
@@ -421,6 +421,7 @@ def _operations_summary(op_records, setup_blocked=None) -> dict:
     warned = 0
     over_spindle = 0
     empty_toolpaths = 0
+    generating = 0
     warning_sample = None
     for r in op_records:
         st = r.get("state")
@@ -440,9 +441,11 @@ def _operations_summary(op_records, setup_blocked=None) -> dict:
             if warning_sample is None:
                 warning_sample = {"name": r.get("name"), "warning": first_line(r.get("warning"))}
         has_err = bool(r.get("has_error"))
-        # A toolpath reads valid while its op carries an error - and while its own motion is not a
-        # number - so good-to-post needs the flags AND the bucket.
-        if r.get("toolpath_valid") and not has_err and st != "nonfinite":
+        if st == "generating":
+            generating += 1
+        # A toolpath reads valid while its op carries an error, while its own motion is not a
+        # number, and while its generation is still landing - so good-to-post needs the bucket too.
+        if r.get("toolpath_valid") and not has_err and st not in ("nonfinite", "generating"):
             valid_active += 1
         blocked = list(r.get("blocked_by") or [])
         if has_err and "operation_error" not in blocked:
@@ -458,7 +461,11 @@ def _operations_summary(op_records, setup_blocked=None) -> dict:
     if empty_toolpaths:
         summary["empty_toolpath_count"] = empty_toolpaths          # active rows only; absent = none
     if basis == "manufacture_verified":
-        if active_total and valid_active == active_total and not exceptions:
+        if generating:
+            summary["readiness"] = (f"{valid_active} of {active_total} active ops have valid "
+                                    f"toolpaths - {generating} operation(s) still generating; poll "
+                                    "cam_get_status before posting.")
+        elif active_total and valid_active == active_total and not exceptions:
             summary["readiness"] = ready_verdict(
                 f"{active_total} of {active_total} active ops have valid toolpaths",
                 warned, warning_sample, setup_blocked)
@@ -492,7 +499,6 @@ def _operations_in(setup_obj, machine_max=None, cam=None) -> tuple:
     means INCOMPLETE (cap hit or the walk raised)."""
     ops = []
     truncated = False
-    additive = is_additive_setup(setup_obj)
     root = _setup_node(setup_obj)
     nodes = [root]
     try:
@@ -514,7 +520,7 @@ def _operations_in(setup_obj, machine_max=None, cam=None) -> tuple:
             operation = adsk.cam.Operation.cast(node.obj)
             if not operation:
                 continue
-            ops.append(_operation_summary(operation, machine_max, node, cam, additive=additive))
+            ops.append(_operation_summary(operation, machine_max, node, cam))
     except Exception:
         # A row read that dies left an INCOMPLETE list - flagged, never passed off as the full read.
         truncated = True
@@ -535,7 +541,7 @@ def _parent_key(node):
     return (key, _segment(node.parent.name)) if key else (None, None)
 
 
-def _operation_summary(op, machine_max=None, node=None, cam=None, additive=False) -> dict:
+def _operation_summary(op, machine_max=None, node=None, cam=None) -> dict:
     tool_desc = None
     try:
         t = op.tool
@@ -565,7 +571,7 @@ def _operation_summary(op, machine_max=None, node=None, cam=None, additive=False
     }
     # An op that generated EMPTY still reads state 'valid' beside has_toolpath true. An additive
     # build op carries no toolpath by construction and joins the manual-NC exclusion instead.
-    if is_empty_toolpath(facts, additive=additive):
+    if is_empty_toolpath(facts):
         summary["empty_toolpath"] = True
     if has_warn:
         summary["warning"] = (safe(lambda: op.warning) or "").strip()
@@ -583,7 +589,7 @@ def _operation_summary(op, machine_max=None, node=None, cam=None, additive=False
             summary["invalidation_param_changes"] = param_changes
         if machine_changed:
             summary["machine_changed"] = True
-    blocked, requires = _op_blocked_by(summary, additive=additive)
+    blocked, requires = _op_blocked_by(summary, facts)
     summary["blocked_by"] = blocked
     if requires:
         summary["requires"] = requires
@@ -599,7 +605,7 @@ def _operation_summary(op, machine_max=None, node=None, cam=None, additive=False
     if summary["state"] == "suppressed":
         summary["spindle_check"] = _SUPPRESSED_NOT_COMPARED
         return summary
-    if additive:
+    if facts["additive"]:
         # An additive operation takes no cutting tool and no spindle by design - the comparison is
         # not made at all, rather than answered unreadable.
         return summary
@@ -1040,10 +1046,7 @@ def _program_held_ops(nc, cam=None) -> dict:
         if op is None:
             continue
         facts = op_state_facts(op, cam)
-        # A held list can draw from several setups, so each op's OWN owner decides the exclusion -
-        # not the program's.
-        additive = is_additive_setup(safe(lambda op=op: op.parentSetup))
-        if is_empty_toolpath(facts, additive=additive):
+        if is_empty_toolpath(facts):
             empty_count += 1
             empty_rows.append((facts["name"], _held_row_label(facts["name"], position)))
     out["empty_toolpath_count"] = empty_count

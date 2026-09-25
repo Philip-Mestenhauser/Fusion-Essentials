@@ -592,6 +592,9 @@ def _one(sketch, entry, k, units):
     if kind not in _KINDS:
         return None, f"Unknown kind '{kind}'. Valid: {', '.join(_KINDS)}."
     is_construction = bool(entry.get("is_construction"))
+    if is_construction and kind == "point":
+        return None, ("is_construction does not apply to kind='point' - it is set on sketch "
+                      "curves only, so the point would land as a normal point. Omit it.")
 
     # polyline / closed_path / spline / cv_spline: a chain/curve from a 'points' list.
     if kind in _POINT_LIST_KINDS:

@@ -11,11 +11,11 @@ from . import _inputs
 from ._common import timeline_health as _timeline_health
 
 MAP_BLURB = (
-    "DESIGN MODE: get_mode_handler - design_get's 'mode' slice, a can{} map agreeing with "
-    "ModeGuards; health_handler - its timeline error/warning rollup; run_in_base_feature/"
-    "base_feature_run_wrapper - a mutation needing a base-feature scope, always finished; "
-    "timeline_census/timeline_item_key/census_caveat - the token-keyed census a delete or "
-    "suppress diffs; no_timeline_reason - the no-timeline refusal")
+    "DESIGN MODE: get_mode_handler - the 'mode' slice (can{} agreeing with ModeGuards); "
+    "health_handler - the timeline error/warning rollup; run_in_base_feature/"
+    "base_feature_run_wrapper - a mutation in an always-finished base-feature scope; "
+    "timeline_census/timeline_item_key/census_caveat - the census a delete or suppress diffs; "
+    "collapsed_group_hint - a grouped member's miss; no_timeline_reason")
 
 # A delete or suppress reply appends this when its before/after census could not be diffed.
 CENSUS_UNREAD = ("The timeline could not be listed the same way before and after this call, so "
@@ -88,6 +88,35 @@ def census_caveat(census):
     return (f"{n} collapsed timeline group(s) hide their members from this check, so a member this "
             "call changed is not named - design_get(include=['timeline'], group='<name>') lists "
             "them.")
+
+
+def collapsed_group_holding(timeline, want):
+    """The name of the COLLAPSED timeline group holding a member `want` names (bare or
+    '<component>/<name>'), or None - timeline.item() lists such a member only as its group."""
+    comp, feat = _inputs._split_qualified(want)
+    low = (feat or want).strip().lower()
+    for g in _common.iter_collection(safe(lambda: timeline.timelineGroups)):
+        if safe(lambda g=g: g.isCollapsed) is not True:
+            continue
+        for m in _common.iter_collection(g):
+            if (safe(lambda m=m: m.name) or "").lower() != low:
+                continue
+            if comp is None or (_inputs._owner_component_name(m) or "").lower() == comp.lower():
+                return safe(lambda g=g: g.name) or "(unnamed group)"
+    return None
+
+
+def collapsed_group_hint(timeline, want, roll=False):
+    """The miss sentence for a collapsed group's member (target the group for a roll, else ungroup)."""
+    holder = collapsed_group_holding(timeline, want)
+    if not holder:
+        return None
+    head = (f"'{want}' is inside the collapsed timeline group '{holder}', which the timeline lists "
+            "as one item.")
+    if roll:
+        return head + f" Target '{holder}' itself - rolling to a collapsed group works."
+    return head + (f" Run design_edit_timeline(action='ungroup', feature='{holder}') - its items "
+                   "are kept - then retry.")
 
 
 # ── shared mode reads (all via the ONE true reader) ─────────────────────────

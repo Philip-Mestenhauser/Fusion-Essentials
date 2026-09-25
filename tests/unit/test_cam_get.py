@@ -863,6 +863,15 @@ class TestAdditiveOperationRows:
         assert out["empty_toolpath_count"] == 1
         assert out["empty_toolpaths"] == ["Face1"]
 
+    def test_a_first_generation_still_landing_does_not_read_ready(self):
+        landing = FakeOperation("Face1", has_toolpath=False, valid=True, operation_state=0,
+                                tool=SimpleNamespace(description="flat 10mm"), strategy="face")
+        landing.isGenerating = True
+        self._install(FakeSetup("Mill", [landing], machine=SimpleNamespace(description="M")))
+        summary = _payload(cg._cr.get_cam_operations_handler())["setups"][0]["summary"]
+        assert "ready to post" not in summary["readiness"]
+        assert "1 operation(s) still generating" in summary["readiness"]
+
 
 class TestLibrarySlice:
     """include=['library'] = a tool-library catalog (the tools you can ADD), delegated to

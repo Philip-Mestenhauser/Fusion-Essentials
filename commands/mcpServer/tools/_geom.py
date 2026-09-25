@@ -56,36 +56,60 @@ def placed_meshes(occ):
     return [] if vec is None else [b for b in (safe(lambda: list(vec), []) or []) if b is not None]
 
 
-def _subtree_body_boxes(occ, depth):
+def _body_box(body):
+    """(box, the read that answered) for one body: preciseBoundingBox, else boundingBox."""
+    # MEASURED: a proxy's boundingBox runs loose once its occurrence is rotated (a 200 mm disc
+    # turned 45 deg read 282.843) while its preciseBoundingBox stays tight.
+    box = safe(lambda: body.preciseBoundingBox)
+    if box is not None:
+        return box, "preciseBoundingBox"
+    box = safe(lambda: body.boundingBox)
+    return (box, "boundingBox") if box is not None else (None, None)
+
+
+def _subtree_body_boxes(occ, depth, reads=None):
     """Every readable body box under one occurrence: its own body proxies plus each child
-    occurrence's, `depth` levels down."""
+    occurrence's, `depth` levels down. `reads`, when given, collects which read answered each."""
     boxes = []
     bodies = list(_common.iter_collection(safe(lambda: occ.bRepBodies))) + placed_meshes(occ)
     for body in bodies:
-        box = safe(lambda b=body: b.boundingBox)
+        box, read = _body_box(body)
         if box is not None:
             boxes.append(box)
+            if reads is not None:
+                reads.add(read)
     if depth > 0:
         for child in _common.iter_collection(safe(lambda: occ.childOccurrences)):
-            boxes.extend(_subtree_body_boxes(child, depth - 1))
+            boxes.extend(_subtree_body_boxes(child, depth - 1, reads))
     return boxes
+
+
+def body_aabb_read(entity):
+    """(the world AABB of an entity's BODIES (solid+surface+mesh), the read(s) it came from), or
+    (None, None)."""
+    # An Occurrence/Component exposes boundingBox2(entityTypes); a BRepBody has none, and its own
+    # box is already body-only.
+    bb2 = safe(lambda: entity.boundingBox2)   # a bound method on Occurrence/Component; absent on a body
+    if not callable(bb2):
+        return _body_box(entity)
+    # childOccurrences is the member a COMPONENT does not carry, and its box stays the platform's.
+    if safe(lambda: entity.childOccurrences) is None:
+        box = safe(lambda: bb2(_BODY_BBOX_TYPES))
+        return (box, "boundingBox2") if box is not None else (None, None)
+    # MEASURED: an OCCURRENCE's boundingBox2 runs loose on curved parts (80.331 mm for an 80 mm
+    # shaft), while its body proxies read the nominal in ROOT space - the same space - at every
+    # nesting level; a container occurrence places no body of its own, so the union walks down.
+    reads = set()
+    union = union_box(_subtree_body_boxes(entity, _SUBTREE_DEPTH, reads))
+    if union is not None:
+        return union, "+".join(sorted(reads))
+    box = safe(lambda: bb2(_BODY_BBOX_TYPES))
+    return (box, "boundingBox2") if box is not None else (None, None)
 
 
 def body_aabb(entity):
     """The world AABB of an entity counting only its BODIES (solid+surface+mesh), or None."""
-    # An Occurrence/Component exposes boundingBox2(entityTypes); a BRepBody has none, and its own
-    # .boundingBox is already body-only.
-    bb2 = safe(lambda: entity.boundingBox2)   # a bound method on Occurrence/Component; absent on a body
-    if not callable(bb2):
-        return safe(lambda: entity.boundingBox)
-    # childOccurrences is the member a COMPONENT does not carry, and its box stays the platform's.
-    if safe(lambda: entity.childOccurrences) is None:
-        return safe(lambda: bb2(_BODY_BBOX_TYPES))
-    # MEASURED: an OCCURRENCE's boundingBox2 runs loose on curved parts (80.331 mm for an 80 mm
-    # shaft), while its body proxies read the nominal in ROOT space - the same space - at every
-    # nesting level; a container occurrence places no body of its own, so the union walks down.
-    union = union_box(_subtree_body_boxes(entity, _SUBTREE_DEPTH))
-    return union if union is not None else safe(lambda: bb2(_BODY_BBOX_TYPES))
+    return body_aabb_read(entity)[0]
 
 
 def _coords(p):

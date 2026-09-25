@@ -443,10 +443,12 @@ class _Group:
     """One MachineAvoidSelectionBase as the compare reads it - no measured SHAPE dump names this
     type, so it is a local double. A fresh direct group reads machineMode Machine (measured)."""
 
-    def __init__(self, entities=0, over_holes=False, mode="Machine_MachiningMode"):
+    def __init__(self, entities=0, over_holes=False, mode="Machine_MachiningMode", axial_mm=None):
         self.value = _entities(entities, "grp")
         self.machineOverHoles = over_holes
         self.machineMode = getattr(cc.adsk.cam.MachiningMode, mode)
+        if axial_mm is not None:
+            self.axialOffset = axial_mm
 
 
 class _GroupsParam(FakeCAMParameter):
@@ -815,3 +817,11 @@ class TestSurfaceGroupDiff:
         row = next(r for r in out["geometry_differences"]
                    if r["parameter"] == cc.AVOID_GROUPS_PARAM)
         assert row["operation_b"] == "(not present)"
+
+    def test_a_group_offset_reads_in_the_compare_units(self, install):
+        install([_geo_op("A", [_GroupsParam([_Group(1, axial_mm=2.54)])]), _geo_op("B", [])])
+        out = _payload(cc.handler(operation_a="A", operation_b="B", units="in"))
+        row = next(r for r in out["geometry_differences"]
+                   if r["parameter"] == cc.AVOID_GROUPS_PARAM)
+        assert out["geometry_units"] == "in"
+        assert row["operation_a"]["rows"][0]["axial_offset"] == 0.1

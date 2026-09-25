@@ -32,7 +32,7 @@ _MAX_RESULTS_CEILING = 100   # hard cap on returned match rows (each crosses the
 
 # friendly 'kind' -> what it matches. Faces by surfaceType, edges by curveType, plus vertex.
 _FACE_KINDS = {"cylinder_face": "Cylinder", "planar_face": "Plane",
-    "cone_face": "Cone", "sphere_face": "Sphere", "torus_face": "Torus"}
+    "cone_face": "Cone", "sphere_face": "Sphere", "torus_face": "Torus", "nurbs_face": "Nurbs"}
 _EDGE_KINDS = {"circular_edge": "Circle3D", "line_edge": "Line3D", "arc_edge": "Arc3D",
     "ellipse_edge": "Ellipse3D", "elliptical_arc_edge": "EllipticalArc3D",
     "spline_edge": "NurbsCurve3D"}
@@ -159,7 +159,8 @@ def _face_record(face, inv_k):
             adsk.core.SurfaceTypes.PlaneSurfaceType: "planar_face",
             adsk.core.SurfaceTypes.ConeSurfaceType: "cone_face",
             adsk.core.SurfaceTypes.SphereSurfaceType: "sphere_face",
-            adsk.core.SurfaceTypes.TorusSurfaceType: "torus_face"}.get(st, "face")
+            adsk.core.SurfaceTypes.TorusSurfaceType: "torus_face",
+            adsk.core.SurfaceTypes.NurbsSurfaceType: "nurbs_face"}.get(st, "face")
     c = safe(lambda: face.centroid)
     # Composite handle: token + a kind+position locator in cm, so a stale token re-resolves by geometry.
     handle = _inputs.make_handle(face, kind, (c.x, c.y, c.z)) if c else safe(lambda: face.entityToken)
@@ -246,6 +247,9 @@ def handler(target: str = "", kind: str = "", radius: float = None,
         # BRepBody.isVisible is the EFFECTIVE state, rolling up every ancestor occurrence's bulb;
         # isLightBulbOn alone does not.
         hidden = safe(lambda body=body: body.isVisible, True) is False
+        # The occurrence this body's geometry was read through; null for a root-owned body.
+        ctx = safe(lambda body=body: body.assemblyContext) or occ
+        occ_path = safe(lambda ctx=ctx: ctx.fullPathName) if ctx is not None else None
         recs = []
         if want_faces:
             for f in (safe(lambda body=body: list(body.faces)) or []):
@@ -274,8 +278,9 @@ def handler(target: str = "", kind: str = "", radius: float = None,
                 recs.append({"handle": vh, "kind": "vertex",
         "position": [round(p.x * inv_k, 3), round(p.y * inv_k, 3),
                                              round(p.z * inv_k, 3)] if p else None})
-        if hidden:
-            for rec in recs:
+        for rec in recs:
+            rec["occurrence"] = occ_path
+            if hidden:
                 rec["hidden"] = True
         matches.extend(recs)
 
@@ -319,7 +324,7 @@ find_tool = (
     .add_input_property("target", {"type": "string", "description":
             "Occurrence/component/body; a shared name scans every match. '' = whole design."})
     .add_input_property(*_inputs.Choice("kind",
-        ["cylinder_face", "planar_face", "cone_face", "sphere_face", "torus_face",
+        ["cylinder_face", "planar_face", "cone_face", "sphere_face", "torus_face", "nurbs_face",
          "circular_edge", "line_edge", "arc_edge", "ellipse_edge", "elliptical_arc_edge",
          "spline_edge", "vertex"]).as_property())
     .add_input_property("radius", {"type": "number",

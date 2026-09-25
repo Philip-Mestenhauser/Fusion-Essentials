@@ -259,6 +259,43 @@ def _moved_warning(moves, value_cm, gap_before_cm):
             "'solved' holds each referenced entity's post-solve position.")
 
 
+# The solver's refusal token for a dimension the sketch cannot take. MEASURED: a horizontal
+# distance to a point already standing at a dimensioned point's x raises it with no geometric
+# constraint in the sketch, on the raw API too.
+_OVER_CONSTRAINED = "OVER_CONSTRAINT"
+_SAME_COORD_TOL_CM = 1e-6
+# dim_type -> (the coordinate it measures, its index, the two-point constraint that shares it)
+_SHARED_COORD = {"horizontal_distance": ("x", 0, "vertical_points"),
+                 "vertical_distance": ("y", 1, "horizontal_points")}
+
+
+def _shared_coordinate_clause(sketch, dt, operands):
+    """The remedy for an over-constrained horizontal/vertical distance: the OTHER sketch points
+    standing at an operand's measured coordinate, or '' when none does."""
+    axis, i, constraint = _SHARED_COORD[dt]
+    pts = safe(lambda: sketch.sketchPoints)
+    n = safe(lambda: pts.count, 0) if pts is not None else 0
+    points = [p for _ref, p in operands]
+    for label, p in operands:
+        at = _xyz(safe(lambda p=p: p.geometry))
+        if at is None:
+            continue
+        hits = []
+        for j in range(n):
+            q = safe(lambda j=j: pts.item(j))
+            if q is None or any(safe(lambda q=q, o=o: q == o) is True for o in points):
+                continue
+            g = _xyz(safe(lambda q=q: q.geometry))
+            if g is not None and abs(g[i] - at[i]) <= _SAME_COORD_TOL_CM:
+                hits.append(f"point:{j}")
+        if hits:
+            return (f" {', '.join(hits)} already stand(s) at the same {axis} "
+                    f"({round(at[i] * _MM, 4)} mm) as {label}. If one of them is already "
+                    f"dimensioned in {axis}, tie the two with sketch_constrain '{constraint}' "
+                    f"instead of a second {dt}, or move one point off that {axis} first.")
+    return ""
+
+
 # The fields one 'dimensions' entry takes - the wire schema and the entry guard read this one table.
 _ENTRY_FIELDS = ("dim_type", "entity_one", "entity_two", "value", "surface", "is_driving",
                  "tangent_side_one", "tangent_side_two")
@@ -436,6 +473,12 @@ def _one(sketch, entry):
         else:  # line_to_surface
             dim = dims.addDistanceBetweenLineAndPlanarSurfaceDimension(e1, surf, is_driving)
     except Exception as e:
+        if dt in _SHARED_COORD and _OVER_CONSTRAINED in str(e).upper():
+            one, two = ((entity_one, entity_two) if not lone_line
+                        else (f"{entity_one}:start", f"{entity_one}:end"))
+            clause = _shared_coordinate_clause(sketch, dt, [(f"'{two}'", p2), (f"'{one}'", p1)])
+            if clause:
+                return None, f"Could not add the {dt} dimension: {e}.{clause}"
         if dt in _SELF_NAMING_FAILURE:
             return None, (f"Could not add the {dt} dimension: {e}")
         if kinds1:

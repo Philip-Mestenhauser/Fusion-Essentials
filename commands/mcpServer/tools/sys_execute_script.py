@@ -149,7 +149,16 @@ def _clean_output(res: str) -> str:
 
 def _ok_result(cleaned: str) -> dict:
     result = {"isError": False, "message": "Script executed successfully"}
-    result["content"] = [{"type": "text", "text": cleaned or _NO_OUTPUT}]
+    # The write guard merges acted_on into a printed JSON object, which buries an empty one.
+    try:
+        empty_object = json.loads(cleaned) == {}
+    except Exception:
+        empty_object = False
+    if empty_object:
+        text = json.dumps({"printed": {}, "note": _EMPTY_OBJECT})
+    else:
+        text = cleaned or _NO_OUTPUT
+    result["content"] = [{"type": "text", "text": text}]
     return result
 
 
@@ -215,6 +224,7 @@ _DESIGN_ROLLBACK_ADVICE = (
 )
 
 _NO_OUTPUT = "The script printed nothing - print() is what returns a value."
+_EMPTY_OBJECT = "The script printed an empty JSON object; 'printed' holds it."
 
 
 def _refusal(text: str) -> dict:

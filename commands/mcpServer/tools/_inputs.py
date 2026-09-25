@@ -3057,11 +3057,30 @@ def profile_host_component(profile, sketch, fallback):
     return _common.safe(lambda: (sk or sketch).parentComponent) or fallback
 
 
+_SELECTOR_KEYS = ("sketch", "sketch_name", "profile_index")
+
+
+def _selector_key_refusal(name, raw, curve_form=False):
+    """The refusal for a {sketch, profile_index} selector carrying a key it does not read, or None -
+    an unread key would otherwise leave the selector resolving profile_index 0."""
+    extra = sorted(str(k) for k in raw if k not in _SELECTOR_KEYS)
+    if not extra:
+        return None
+    msg = (f"'{name}': the selector takes only 'sketch' and 'profile_index'; "
+           f"{', '.join(repr(k) for k in extra)} is not read.")
+    if curve_form:
+        msg += " Address a sketch curve as the string '<sketch>/<type>:<index>'."
+    return msg
+
+
 def _resolve_one_profile(name, raw, allow_text=False, component="", scope_input=None):
     """(profile, err) for a stable handle, a 'text:<i>' address (only where allow_text), or a
     {sketch, profile_index} selector dict - handle-first. `component` narrows the two forms that
     address a sketch BY NAME; a handle names one entity outright."""
     if isinstance(raw, dict):
+        refusal = _selector_key_refusal(name, raw)
+        if refusal:
+            return None, refusal
         sk = raw.get("sketch", raw.get("sketch_name", ""))
         return _resolve_profile_legacy(name, sk, raw.get("profile_index", 0), allow_text,
                                        component, scope_input)
@@ -3241,6 +3260,10 @@ class LoftSectionList(ProfileRefList):
 
     def _section(self, item, scope):
         """((entity, kind, the entity named), error) for one section."""
+        if isinstance(item, dict):
+            refusal = _selector_key_refusal(self.name, item, curve_form=True)
+            if refusal:
+                return None, refusal
         des = _common.design()
         ref = sketch_entity_ref(item)
         if ref is not None:

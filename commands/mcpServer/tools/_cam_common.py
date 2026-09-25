@@ -925,7 +925,8 @@ def _machining_time(cam, op, state, has_toolpath):
 def op_state_facts(op, cam=None) -> dict:
     """ONE safe read of an operation's raw lifecycle state, every classifier here reads from.
     operation_state carries an adsk.cam.OperationStates member: IsValid 0, IsInvalid 1,
-    Suppressed 2, NoToolpath 3. `cam` adds machining_time; omitted, it reads None."""
+    Suppressed 2, NoToolpath 3. `cam` adds machining_time; omitted, it reads None. `additive` is
+    the owning setup's is_additive_setup."""
     state = safe(lambda: op.operationState)
     # read_flag keeps True/False/None apart: a coerced False on an unreadable flag would invent
     # the generated-but-empty state is_empty_toolpath reads off this pair.
@@ -934,6 +935,7 @@ def op_state_facts(op, cam=None) -> dict:
     return {
         "name": safe(lambda: op.name),
         "strategy": safe(lambda: op.strategy),
+        "additive": is_additive_setup(safe(lambda: op.parentSetup)),
         "has_error": bool(safe(lambda: op.hasError, False)),
         "has_warning": bool(safe(lambda: op.hasWarning, False)),
         "is_suppressed": bool(safe(lambda: op.isSuppressed, False)),
@@ -947,14 +949,13 @@ def op_state_facts(op, cam=None) -> dict:
     }
 
 
-def is_empty_toolpath(facts: dict, additive: bool = False) -> bool:
+def is_empty_toolpath(facts: dict) -> bool:
     """True for the EMPTY class: an operation that generated, is not suppressed, and cuts nothing.
-    `additive` joins the manual-NC exclusion - an additive build op carries no toolpath by
-    construction too, the caller's own read of is_additive_setup on its owning setup."""
+    An additive build op joins the manual-NC exclusion - it carries no toolpath by construction."""
     # 'valid' is answered off operationState IsValid (0) only, so the empty claim rests on a state
     # that was READ; a state that raised buckets _UNREAD_STATE and stops here.
     if (facts.get("strategy") == _MANUAL_NC_STRATEGY
-            or additive
+            or facts.get("additive")
             or op_primary_state(facts) != "valid"
             or facts.get("is_toolpath_valid") is not True):
         return False
@@ -2220,13 +2221,19 @@ def machine_mode_key(value):
     return next((k for k in MACHINE_MODE_MEMBERS if machine_mode_value(k) == value), value)
 
 
+def offset_mm_per_unit(units):
+    """Millimetres per one `units` for a surface-group offset, which is stored in mm whatever the
+    display units; an unrecognized unit reads as mm."""
+    return (scale(units) or 0.1) * 10
+
+
 def group_record(group, units="mm"):
     """{entities, machine_over_holes, machine_mode, radial_offset, axial_offset, combined_offset}
     off ONE surface group in 'units' - the three offsets are stored in mm regardless of display
     units, converted back on read. None where the group did not read back."""
     if group is None:
         return None
-    mm_per_unit = (scale(units) or 0.1) * 10
+    mm_per_unit = offset_mm_per_unit(units)
 
     def _off(prop):
         raw = safe(lambda: getattr(group, prop))

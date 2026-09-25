@@ -393,6 +393,58 @@ def _offset_value_cm(obj):
     return None
 
 
+_ANGLE_MATCH_TOL_RAD = 1e-9
+
+
+def _angle_value_input(raw, design):
+    """(ValueInput, radians, error) for 'angle' in degrees or as an angle expression, passed as an
+    expression string either way."""
+    # createByReal rounds the landed expression (4.0909090909 deg reads '4.1 deg'); an expression
+    # string keeps every digit.
+    if _inputs.looks_like_expression(raw):
+        expr = raw.strip()
+        um = safe(lambda: design.unitsManager)
+        try:
+            rad = um.evaluateExpression(expr, "deg")
+        except Exception as e:
+            return None, None, (f"'angle' expression '{expr}' did not evaluate - use an angle like "
+                                f"'4.5 deg' or 'Tilt/2' and confirm the parameter names exist "
+                                f"(param_get): {e}")
+        ok_num = isinstance(rad, (int, float)) and not isinstance(rad, bool)
+        return adsk.core.ValueInput.createByString(expr), (float(rad) if ok_num else None), None
+    try:
+        deg = float(raw)
+    except (TypeError, ValueError):
+        return None, None, f"'angle' must be a number of degrees or an angle expression, got {raw!r}."
+    if not math.isfinite(deg):
+        return None, None, f"'angle' must be finite, got {deg}."
+    return adsk.core.ValueInput.createByString(f"{deg!r} deg"), math.radians(deg), None
+
+
+def _landed_angle(obj, want_rad, asked, m):
+    """(payload, error): the angle read off the created plane's own angle parameter; a value off the
+    request by more than _ANGLE_MATCH_TOL_RAD is the error."""
+    p = safe(lambda: obj.definition.angle)
+    got = safe(lambda: p.value) if p is not None else None
+    if not isinstance(got, (int, float)) or isinstance(got, bool) or not math.isfinite(got):
+        got = None
+    expr = safe(lambda: p.expression) if p is not None else None
+    out = {"angle_expression": expr,
+           "angle_deg": round(math.degrees(got), 10) if got is not None else None}
+    pname = safe(lambda: p.name) if p is not None else None
+    if pname:
+        out["model_parameters"] = {"angle": pname}
+    if got is None:
+        out["angle_unread"] = True
+    if got is not None and want_rad is not None and abs(got - want_rad) > _ANGLE_MATCH_TOL_RAD:
+        return None, (f"mode='{m}': Fusion reported success but the plane it created reads back an "
+                      f"angle of {expr} ({math.degrees(got)} deg), not the requested "
+                      f"{_inputs.expression_report(asked)} ({math.degrees(want_rad)} deg). The "
+                      f"datum '{safe(lambda: obj.name)}' was added and is still in the design - "
+                      f"remove it with design_delete_feature.")
+    return out, None
+
+
 def _geometry_readback(knd, design, obj, inv_k):
     """The CREATED datum's real geometry (not an echo of the input), read through _datum_geometry so
     it sits in the same space as the caller's handles. Construction geometry carries no healthState,
@@ -455,14 +507,19 @@ def _plane_datum(m, comp, design, k, units, plane_raw, plane2_raw, offset, edges
         cerr = _need(eds, 1, "edges", m)
         if cerr:
             return None, None, cerr
+        val, want_rad, verr = _angle_value_input(angle, design)
+        if verr:
+            return None, None, verr
         cpi = comp.constructionPlanes.createInput()
-        # setByAngle(linearEntity, angle radians, planarEntity) rotates planarEntity about
-        # linearEntity by angle (live API doc).
-        if not cpi.setByAngle(eds[0], adsk.core.ValueInput.createByReal(math.radians(float(angle))), base):
+        # setByAngle(linearEntity, angle, planarEntity) rotates planarEntity about linearEntity by
+        # angle (live API doc).
+        if not cpi.setByAngle(eds[0], val, base):
             return None, None, (f"mode='at_angle': Fusion rejected these inputs (setByAngle returned "
                                 "false).")
         obj = comp.constructionPlanes.add(cpi)
-        extra = {"angle_deg": float(angle)}
+        extra, merr = _landed_angle(obj, want_rad, angle, m)
+        if merr:
+            return None, None, merr
         # Both normals through _datum_geometry: 'plane' resolves either to a NATIVE construction
         # plane (component-local, lifted here) or to a proxy-resolved face (already world), so the
         # dot compares one space against itself.
@@ -489,19 +546,24 @@ def _plane_datum(m, comp, design, k, units, plane_raw, plane2_raw, offset, edges
         cerr = _require_curved_face(face, m)
         if cerr:
             return None, None, cerr
+        val, want_rad, verr = _angle_value_input(angle, design)
+        if verr:
+            return None, None, verr
         cpi = comp.constructionPlanes.createInput()
         # setByAngleOnCurvedFace(curvedFace, angle, planarEntity) rotates about the axis INFERRED
-        # from the curved face - there is no axis argument. createByReal takes RADIANS, and angle=0
-        # lands the plane parallel to planarEntity (both measured).
-        if not cpi.setByAngleOnCurvedFace(
-                face, adsk.core.ValueInput.createByReal(math.radians(float(angle))), base):
+        # from the curved face - there is no axis argument. angle=0 lands the plane parallel to
+        # planarEntity (measured).
+        if not cpi.setByAngleOnCurvedFace(face, val, base):
             return None, None, ("mode='at_angle_on_face': Fusion rejected these inputs "
                                 "(setByAngleOnCurvedFace returned false).")
         # A 'plane' whose NORMAL is parallel to the inferred axis leaves the angle undefined:
         # setByAngleOnCurvedFace returns true and add() then raises '3 : reference planarEntity must
         # not be perpendicular with axis input', which names its own offender, so no pre-guard.
         obj = comp.constructionPlanes.add(cpi)
-        extra = {"angle_deg": float(angle), "angle_from": _inputs.surface_ref_label(base)}
+        extra, merr = _landed_angle(obj, want_rad, angle, m)
+        if merr:
+            return None, None, merr
+        extra["angle_from"] = _inputs.surface_ref_label(base)
         g = _datum_geometry(design, obj)
         dot = _geom.dot(_geom.unit_vector(safe(lambda: g.normal), decimals=_GATE_DECIMALS),
                     _geom.unit_vector(safe(lambda: face.geometry.axis), decimals=_GATE_DECIMALS))
@@ -909,7 +971,7 @@ def _point_datum(m, comp, design, k, x, y, z, plane_raw, plane2_raw, plane3_raw,
 
 def handler(kind: str = "point", mode: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
             axis: str = "z", plane: str = "xy", plane2: str = "", plane3: str = "",
-            edges=None, points=None, face: str = "", angle: float = 0.0,
+            edges=None, points=None, face: str = "", angle=0.0,
             path=None, at=None, distance_type: str = "", to_object: str = "",
             offset: float = 0.0, units: str = "mm", name: str = "") -> dict:
     """See TOOL_DESCRIPTION."""
@@ -975,6 +1037,9 @@ def handler(kind: str = "point", mode: str = "", x: float = 0.0, y: float = 0.0,
         out["note"] += _UNREAD_SPACE_NOTE
     if out.pop("axis_frame_unresolved", False):
         out["note"] += _AXIS_FRAME_UNRESOLVED_NOTE
+    if out.pop("angle_unread", False):
+        out["note"] += (" angle_deg is null: the created plane's angle parameter did not read back, "
+                        "so the landed angle was not compared to the request.")
     # An absolute placement measured to be INSIDE the path needs no warning at all - 'path_length'
     # and 'along_path' already say where it sits. The warning is for the one that landed outside,
     # and the generic form for the path whose length could not be measured.
@@ -1008,7 +1073,7 @@ construction_tool = (
     .add_input_property(*_EDGES.as_property())
     .add_input_property(*_POINTS.as_property())
     .add_input_property(*_FACE.as_property())
-    .add_input_property("angle", {"type": "number", "description": "In degrees."})
+    .add_input_property("angle", {"type": ["number", "string"], "description": "Degrees."})
     .add_input_property("path", {"type": ["string", "array"], "items": {"type": "string"},
             "description": "An edge 'handle' (chains across TANGENT connections only; the 'path' "
                            "count is the truth), or 'sketch:<name>'."})

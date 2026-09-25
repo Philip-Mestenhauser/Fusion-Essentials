@@ -94,8 +94,8 @@ def handler(edges=None, against: str = "", samples: int = 9, units: str = "mm") 
 
 
 TOOL_DESCRIPTION = (
-    "Measure the gap, normal angle and curvature jump across each edge's seam; an edge on one "
-    "face reads against the 'against' body."
+    "Measure gap, normal angle and curvature jump across each edge's seam; a one-faced edge "
+    "reads against the 'against' body."
 )
 
 tool = (

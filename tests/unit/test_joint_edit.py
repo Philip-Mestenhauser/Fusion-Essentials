@@ -23,10 +23,10 @@ from types import SimpleNamespace
 
 import adsk.fusion
 
-from conftest import (FakeJoint, FakeModelParameter, FakeMotionLink, FakeTimeline,
+from conftest import (FakeJoint, FakeMatrix3D, FakeModelParameter, FakeMotionLink, FakeTimeline,
                       FakeTimelineObject, MakeComp, PinSlotJointMotion, PlanarJointMotion,
                       RigidJointMotion, RevoluteJointMotion, SliderJointMotion, _MotionLimits,
-                      _NamedCollection, install, load_tool, make_design)
+                      _NamedCollection, install, load_tool, make_design, make_occurrence)
 from conftest import payload as _payload
 
 jt = load_tool("joint_edit")
@@ -162,6 +162,15 @@ class TestFlip:
         joint.isFlipped = True
         _payload(jt.handler(joint_name="BoomPivot", flip=False))
         assert joint.isFlipped is False
+
+    def test_a_flip_that_turns_the_child_in_place_is_published_as_moved(self):
+        pad = make_occurrence("Pad:1", transform2=FakeMatrix3D())
+        frame = make_occurrence("Frame:1", transform2=FakeMatrix3D())
+        joint = _joint(occurrence_one=pad, occurrence_two=frame)
+        design = _install_joints([joint])
+        design.computeAll = lambda: setattr(pad, "transform2", FakeMatrix3D(deg=180.0))
+        out = _payload(jt.handler(joint_name="BoomPivot", flip=True))
+        assert [(m["occurrence"], m["rotation_deg"]) for m in out["moved"]] == [("Pad:1", 180.0)]
 
     def test_a_second_flip_true_leaves_it_flipped_rather_than_toggling_back(self):
         # 'flip' is a SET, so repeating a value is a no-op - a toggle would swing it back and the
@@ -822,6 +831,20 @@ class TestAutoRecompute:
         # timeline's health flags, never any feature's own message
         assert "no cause is read here" in out["note"]
         assert "over-constrain" not in out["note"]
+
+    def test_a_joint_still_failed_after_the_edit_reads_unhealthy_with_its_message(self):
+        joint = _joint(health=_HEALTH.ErrorFeatureHealthState,
+                       message="The joint cannot be solved.")
+        _install_joints([joint])
+        out = _payload(jt.handler(joint_name="BoomPivot", flip=True))
+        assert out["edited"] is True and out["healthy"] is False
+        assert out["health_error"] == "The joint cannot be solved."
+        assert "reads error after the edit" in out["note"]
+
+    def test_a_healthy_joint_reads_healthy_after_the_edit(self):
+        _install(["BoomPivot"])
+        out = _payload(jt.handler(joint_name="BoomPivot", flip=True))
+        assert out["healthy"] is True and "health_error" not in out
 
 
 class TestEditIsNotPendingGuarded:

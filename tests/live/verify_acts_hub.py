@@ -1388,6 +1388,14 @@ def _additive_op_created(setup, strategy, expect_stale=None):
     return check
 
 
+def _additive_names_absent(tool, labels):
+    """No empty-toolpath label from `tool` names one of the three additive operations created."""
+    names = [_RECALL.get(k) for k in ("add_arrange_op", "add_orient_op", "add_support_op")]
+    hits = [lab for lab in (labels or []) for n in names if n and n in str(lab)]
+    return _measured(f"{tool} names no additive operation among its empty toolpaths",
+                     {"empty_toolpaths": labels, "additive": names}, all(names) and not hits)
+
+
 _HUB_ADDITIVE = [
     _watch(HUB_COMP + ":1"),
     # The catalog reads first: the names the setup below is built from are READ, not assumed.
@@ -1472,6 +1480,13 @@ _HUB_ADDITIVE = [
                          not ({_RECALL["add_arrange_op"], _RECALL["add_orient_op"],
                                _RECALL["add_support_op"]}
                               & set(p.get("empty_toolpaths") or []))), None),
+    # The same exclusion on the validity check and on the orientation census.
+    ("cam_inspect_toolpaths", {"scope": _ADD_SETUP},
+     lambda p: _additive_names_absent("cam_inspect_toolpaths",
+                                      (p.get("measured") or {}).get("empty_toolpaths")), None),
+    ("workspace_orient", {},
+     lambda p: _additive_names_absent("workspace_orient",
+                                      (p.get("cam") or {}).get("empty_toolpaths")), None),
     # and the address that reaches one: the support operation deleted BY ITS OWN NAME.
     ("cam_delete",
      lambda c: {"entity": _ctx_get(c, "add_support_op", "the support operation")},

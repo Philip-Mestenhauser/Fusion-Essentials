@@ -185,11 +185,13 @@ class TestBodyAabb:
         seen = []
         def fake_aabb(entity):
             seen.append(entity)
-            return FakeBoundingBox3D(FakePoint(0, 0, 0), FakePoint(1, 2, 3))   # cm
-        monkeypatch.setattr(mi._geom, "body_aabb", fake_aabb)
+            return (FakeBoundingBox3D(FakePoint(0, 0, 0), FakePoint(1, 2, 3)),   # cm
+                    "preciseBoundingBox")
+        monkeypatch.setattr(mi._geom, "body_aabb_read", fake_aabb)
         out = _payload(mi.handler(target="Occ:1", units="mm"))
         assert len(seen) == 1                    # the box came from the bodies-only helper
         assert out["x"] == 10.0 and out["y"] == 20.0 and out["z"] == 30.0
+        assert out["box_read"] == "preciseBoundingBox"
 
 
 class TestBodyLumpCount:
@@ -857,7 +859,7 @@ class TestWorldAlignedExtentsAreMeasurements:
             raise AttributeError(name)
 
     def _entity(self, monkeypatch, box):
-        monkeypatch.setattr(mi._geom, "body_aabb", lambda ent: box)
+        monkeypatch.setattr(mi._geom, "body_aabb_read", lambda ent: (box, "boundingBox"))
         return object()
 
     def test_readable_corners_give_the_extents_and_the_centre(self, monkeypatch):

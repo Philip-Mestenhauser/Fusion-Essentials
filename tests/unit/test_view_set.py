@@ -300,9 +300,18 @@ def _body(name, bulb=True, hidden_by_ancestor=False):
     return BRepBody(name=name, light_bulb=bulb, hidden_by_ancestor=hidden_by_ancestor)
 
 
+def _frame(origin_mm=(0, 0, 0), x=(1, 0, 0), y=(0, 1, 0), normal=(0, 0, 1), space="world"):
+    """A sketch_world_frame record; the default is a root sketch on the world XY plane."""
+    axes = ({"x_world": list(x), "y_world": list(y)} if space == "world"
+            else {"x_local": list(x), "y_local": list(y)})
+    return {"origin_mm": list(origin_mm), "normal": list(normal), "space": space, **axes}
+
+
 def _install(monkeypatch, occurrences=(), named_views=None, doc_name="Doc", doc_id=None, bodies=(),
              design_bbox=None, all_components=None):
     design = FakeDesign(list(occurrences), named_views, bodies, design_bbox, all_components)
+    monkeypatch.setattr(iv._sketch_detail, "sketch_world_frame",
+                        lambda s, d, occurrence=None: _frame())
     app = _app(design, doc_name, doc_id=doc_id)
     monkeypatch.setattr(iv, "app", app)
     monkeypatch.setattr(iv._common, "app", app)
@@ -850,6 +859,38 @@ class TestFocusFraming:
         assert out["applied"]["focus"] == "SlotBand"
         # 50 across a 200-wide frame, 50 down a 100-tall one -> the DOWN axis wins at 0.5
         assert out["applied"]["frame_ratio"] == pytest.approx(0.5 * iv._FRAME_MARGIN)
+        # the identity-plane control: sketch space IS world, so the target is the local centre
+        tgt = iv.app.activeViewport.camera.target
+        assert (tgt.x, tgt.y, tgt.z) == pytest.approx((25, 25, 0))
+        assert out["applied"]["sketch_frames"]["SlotBand"]["space"] == "world"
+
+    def test_a_sketch_on_a_moved_rotated_plane_frames_its_world_box(self, monkeypatch):
+        # The local box centre (-31.559, 0, 0) cm is not world; through the frame it lands at
+        # origin + (-31.559) * x_world.
+        sketch = types.SimpleNamespace(name="HeadWin",
+                                       boundingBox=make_bbox((-63.118, -10, 0), (0, 10, 0)))
+        _install(monkeypatch, [FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))])
+        tilted = _frame(origin_mm=(619.5, 0, 295.5), x=(0.6, 0, -0.8), normal=(0.8, 0, 0.6))
+        monkeypatch.setattr(iv._sketch_detail, "sketch_world_frame",
+                            lambda s, d, occurrence=None: tilted)
+        monkeypatch.setattr(iv._common, "find_sketch", lambda d, n, remedy=None: (sketch, None))
+        out = _payload(iv.handler(action="orient", orientation="front", focus="HeadWin"))
+        tgt = iv.app.activeViewport.camera.target
+        assert (tgt.x, tgt.y, tgt.z) == pytest.approx((61.95 - 31.559 * 0.6, 0,
+                                                       29.55 + 31.559 * 0.8))
+        assert out["applied"]["sketch_frames"]["HeadWin"]["origin_mm"] == [619.5, 0, 295.5]
+
+    def test_a_sketch_with_no_world_frame_is_refused_not_framed_in_local_space(self, monkeypatch):
+        sketch = types.SimpleNamespace(name="Twice", boundingBox=make_bbox((0, 0, 0), (5, 5, 0)))
+        _install(monkeypatch, [FakeOcc("Part", bbox=make_bbox((0, 0, 0), (2, 2, 2)))])
+        monkeypatch.setattr(iv._sketch_detail, "sketch_world_frame",
+                            lambda s, d, occurrence=None: _frame(space="component_local"))
+        monkeypatch.setattr(iv._common, "find_sketch", lambda d, n, remedy=None: (sketch, None))
+        before = iv.app.activeViewport.camera.target
+        res = iv.handler(action="orient", orientation="top", focus="Twice")
+        assert res["isError"] is True and "'component_local'" in res["message"]
+        after = iv.app.activeViewport.camera.target
+        assert (after.x, after.y, after.z) == (before.x, before.y, before.z)
 
     def test_an_occurrence_wins_over_a_sketch_of_the_same_name(self, monkeypatch):
         # The occurrence is tried first: a name carried by both must not silently frame the sketch.

@@ -405,6 +405,16 @@ class TestRollToFeature:
         msg = error_message(et.handler(action="roll", feature="Extrude1"))
         assert "inside the collapsed timeline group 'Base'" in msg
         assert "No timeline object named" not in msg
+        assert "Target 'Base' itself" in msg and "ungroup" not in msg
+
+    def test_a_suppress_of_a_collapsed_groups_member_names_the_ungroup_call(self, wire):
+        members = [FakeTimelineObject("Sketch1", 0), FakeTimelineObject("Extrude1", 1)]
+        group = FakeTimelineGroup("CascadeG", 0, members=members, collapsed=True)
+        wire(FakeTimeline([group, FakeTimelineObject("Fillet1", 1)], groups=[group]))
+        msg = error_message(et.handler(action="suppress", feature="Extrude1", suppressed=True))
+        assert "'CascadeG'" in msg
+        assert "design_edit_timeline(action='ungroup', feature='CascadeG')" in msg
+        assert members[1].isSuppressed is False
 
     def test_a_genuinely_absent_name_still_lists_the_timeline(self, wire):
         members = [FakeTimelineObject("Sketch1", 0)]

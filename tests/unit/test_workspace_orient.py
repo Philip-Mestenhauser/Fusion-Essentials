@@ -634,6 +634,13 @@ class TestCam:
         assert cam["empty_toolpath_operations"] == 2
         assert sorted(cam["empty_toolpaths"]) == ["NoPath", "Swarf1"]
 
+    def test_an_additive_build_op_is_not_counted_empty(self, monkeypatch):
+        build = _SharedSetup("Build", ops=[FakeOp(False, name="Body Preset1")],
+                             operation_type=adsk.cam.OperationTypes.AdditiveOperation)
+        out = self._orient_setups(monkeypatch, [build, FakeSetup([FakeOp(False, name="NoPath")])])
+        assert out["cam"]["empty_toolpath_operations"] == 1
+        assert out["cam"]["empty_toolpaths"] == ["NoPath"]
+
     def test_an_op_whose_state_did_not_read_is_not_named_an_empty_toolpath(self, monkeypatch):
         # both the count and the named row gate on _cam_common.is_empty_toolpath, and this op's
         # operationState RAISED - it has no lifecycle to publish, so the row that says it cut

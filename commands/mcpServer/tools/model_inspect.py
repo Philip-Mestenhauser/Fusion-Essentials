@@ -294,7 +294,7 @@ def _bbox(design, entity, desc, frame, units):
                     "one.",
         })
 
-    bb = _geom.body_aabb(entity)
+    bb, box_read = _geom.body_aabb_read(entity)
     if not bb:
         return error(f"No bounding box available for {desc} (it may have no solid geometry).")
     mn = safe(lambda: bb.minPoint)
@@ -313,6 +313,7 @@ def _bbox(design, entity, desc, frame, units):
     return ok({
         "target": desc,
         "frame": "world axes (axis-aligned)",
+        "box_read": box_read,
         "oriented": False,
         "units": units,
         "x": dx, "y": dy, "z": dz,

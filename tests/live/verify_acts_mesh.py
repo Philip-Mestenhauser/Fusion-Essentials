@@ -535,6 +535,23 @@ _MACHINING = [
     # body whose flag would not read at all (named in 'unverified'), both return ok.
     ("surface_revolve", {"sketch_name": "SRevS", "axis": "z", "angle_deg": 360},
      lambda p: p["is_solid"] is False and bool(p["result_bodies"]) and "unverified" not in p, None),
+    # ONE open fitted spline beside a construction line on the axis: the construction line stays
+    # out of the profile, so the spline alone revolves into a sheet whose area is measured. The
+    # bench sits out at x=1360 through its component placement.
+    ("design_activate_component", {"occurrence": "root"}, "ok", None),
+    ("model_create_component", {"name": "SRevSpline", "activate": True, "x": 1360},
+     _made_component, None),
+    ("sketch_create", {"plane": "xy", "name": "SRevSplineS"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "line", "x1": 0, "y1": 0, "x2": 0, "y2": 30,
+                                           "is_construction": True},
+                                          {"kind": "spline", "points": [[6, 0], [12, 15], [6, 30]]}],
+                             "sketch_name": "SRevSplineS"}, "ok", None),
+    ("surface_revolve", {"sketch_name": "SRevSplineS", "axis": "y", "angle_deg": 360},
+     lambda p: _measured("an open spline revolves alone into a measured sheet",
+                         {"is_solid": p.get("is_solid"), "area_added_cm2": p.get("area_added_cm2")},
+                         p.get("is_solid") is False and _num(p.get("area_added_cm2"))
+                         and p["area_added_cm2"] > 0), None),
+    ("design_activate_component", {"occurrence": "SRev:1"}, "ok", None),
     # a CLOSED revolved sphere surface encloses one cell; surface_fill must seal it to a SOLID at
     # the enclosed volume (r=6mm -> 904.78 mm3) MEASURED off the result, never predicted.
     ("model_create_component", {"name": "FillDemo", "activate": True}, _made_component, None),
@@ -743,6 +760,17 @@ _MACHINING = [
      lambda p: p.get("is_suppressed") is False, None),
     ("model_inspect", {"target": "Cascade:1", "include": ["default", "mass"], "units": "mm"},
      _same_volume("cascade_volume"), None),
+    # a member of the collapsed group is one timeline item with it: a write naming the member is
+    # refused naming the group and the ungroup call, and nothing is suppressed or deleted.
+    ("design_edit_timeline",
+     lambda c: {"action": "suppress",
+                "feature": _ctx_get(c, "cascade_shell", "the cascade shell")},
+     _refused("'CascadeG'", "design_edit_timeline(action='ungroup', feature='CascadeG')"), None),
+    ("design_delete_feature",
+     lambda c: {"feature": _ctx_get(c, "cascade_shell", "the cascade shell")},
+     _refused("'CascadeG'", "design_edit_timeline(action='ungroup', feature='CascadeG')"), None),
+    ("model_inspect", {"target": "Cascade:1", "include": ["default", "mass"], "units": "mm"},
+     _same_volume("cascade_volume"), None),
     ("design_edit_timeline", {"action": "ungroup", "feature": "CascadeG"},
      lambda p: p.get("ungrouped") is True, None),
     ("design_get", {"include": ["timeline"], "max_results": 2000}, "ok",
@@ -774,6 +802,10 @@ _MACHINING = [
     ("model_inspect", {"target": "FormBox", "include": ["default", "mass"], "units": "mm"},
      _inspected_mm3("FormBox volume", _FORM_BOX_CM3), None),
     ("design_get", {"include": ["timeline"], "max_results": 2000}, _form_row_added, None),
+    # the Form's faces are NURBS surfaces, which kind='nurbs_face' selects.
+    ("find_geometry", {"target": "FormBox", "kind": "nurbs_face"},
+     lambda p: _measured("the box Form's NURBS faces", {"match_count": p.get("match_count")},
+                         p.get("match_count") == 6), None),
     # every seam of the uncreased box reads smooth, measured apart from form_create's own gate.
     ("find_geometry", {"target": "FormBox", "max_results": 50},
      lambda p: _measured("the box Form's edges", {"edges": len(_edges_of(p))},
@@ -992,6 +1024,11 @@ _MACHINING = [
      lambda p: p.get("set") is True, None),
     ("model_inspect", lambda c: {"target": _RECALL["blend_open"]["body"]},
      _box_x(105.0, 130.0), None),
+    # a section OBJECT carrying a key the selector does not read is refused, naming the string
+    # form a sketch curve takes - never resolved as that sketch's profile 0.
+    ("model_loft", {"profiles": [{"sketch": "BlendOpenA", "curve": "spline:0"},
+                                 "BlendOpenB/spline:0"], "as_surface": True},
+     _refused("'curve' is not read", "'<sketch>/<type>:<index>'"), None),
     # the same direction start on two PROFILES: 32 x 28 mm over the rims at 0 deg, wider at 30.
     ("model_loft", {"profiles": [{"sketch": "BlendA", "profile_index": 0},
                                  {"sketch": "BlendB", "profile_index": 0}],
@@ -1394,12 +1431,15 @@ _NESTING = _box("ArrP1", ox=200, oy=350) + [
     # Every solver runs on the base licence with a boundary or an envelope and a spacing (measured
     # on the lapsed install: this nest placed 4, the sheet 3, the box 3); the platform's "Cannot
     # set extension value" is an OPTION the extension owns, which none of these rows pass.
+    # The spacing is 1/64 in: 0.0396875 cm carries more decimals than the 6-place read-back.
     ("model_arrange", lambda c: {"boundary_sketch": "ArrB",
                                  "shapes": ["ArrP1:1", "ArrP2:1",
                                             _ctx_get(c, "arr_bar2", "the second bar"), "ArrP3:1"],
-                                 "solver": "true_shape", "spacing": 5},
-     _arranged(4), ("nest_disc", lambda p: next(o for o in p["new_occurrences"]
-                                                if "+ArrP3:" in o))),
+                                 "solver": "true_shape", "spacing": 0.015625, "units": "in"},
+     lambda p: _arranged(4)(p) and _measured(
+         "the 1/64 in spacing read back", {"settings": p.get("settings"), "units": p.get("units")},
+         p.get("units") == "in" and (p.get("settings") or {}).get("spacing") == 0.015625),
+     ("nest_disc", lambda p: next(o for o in p["new_occurrences"] if "+ArrP3:" in o))),
     ("model_inspect", lambda c: {"target": _ctx_get(c, "nest_disc", "the nested disc")},
      _extent_measured, ("nest_y0", _recall("nest_y0", lambda p: p["center"]["y"]))),
     _dwell(2.0),

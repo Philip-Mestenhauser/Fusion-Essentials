@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import adsk.core
 import adsk.fusion
+import pytest
 from conftest import (BRepFace, Cylinder, FakeSketchPoint as _SharedSketchPoint, MakeComp, Sketch,
                       SketchCurves, _NamedCollection, install, load_tool, make_design)
 
@@ -529,6 +530,44 @@ class _RichArc(_RichCircle):
         super().__init__(x, y, r)
         self.startSketchPoint = _MovablePoint(x + r, y)
         self.endSketchPoint = _MovablePoint(x, y + r)
+
+
+class TestOverConstrainedCoordinate:
+    """A horizontal/vertical distance the solver refuses as over-constrained names the other point
+    already standing at the coordinate it measures, and the two-point constraint that ties them."""
+
+    _REFUSAL = "3 : VCS_SKETCH_OVER_CONSTRAINTS"
+
+    def _sketch(self, monkeypatch, second_x=1.0):
+        s = _install(monkeypatch)
+        s.sketchPoints = _NamedCollection([_MovablePoint(0.0, 0.0), _MovablePoint(1.0, 0.5),
+                                           _MovablePoint(second_x, 1.5)])
+        s.sketchDimensions.addDistanceDimension = _raiser(self._REFUSAL)
+        return s
+
+    def test_the_refusal_names_the_point_sharing_the_x_and_the_constraint(self, monkeypatch):
+        self._sketch(monkeypatch)
+        res = sd.handler(dimensions=[{"dim_type": "horizontal_distance", "entity_one": "point:0",
+                                      "entity_two": "point:2"}], sketch_name="S")
+        assert res["isError"] is True
+        assert "VCS_SKETCH_OVER_CONSTRAINTS" in res["message"]
+        assert "point:1 already stand(s) at the same x (10.0 mm) as 'point:2'" in res["message"]
+        assert "'vertical_points'" in res["message"]
+
+    @pytest.mark.parametrize("offset_cm, named", [(1e-6, True), (2e-6, False)])
+    def test_the_same_coordinate_tolerance_is_inclusive(self, monkeypatch, offset_cm, named):
+        s = self._sketch(monkeypatch, second_x=0.0)
+        s.sketchPoints.item(1).geometry = _Geo(offset_cm, 0.5)
+        res = sd.handler(dimensions=[{"dim_type": "horizontal_distance", "entity_one": "point:0",
+                                      "entity_two": "point:2"}], sketch_name="S")
+        assert ("point:1 already stand(s)" in res["message"]) is named
+
+    def test_no_point_at_that_x_leaves_the_plain_refusal(self, monkeypatch):
+        self._sketch(monkeypatch, second_x=2.0)
+        res = sd.handler(dimensions=[{"dim_type": "horizontal_distance", "entity_one": "point:0",
+                                      "entity_two": "point:2"}], sketch_name="S")
+        assert res["isError"] is True and "VCS_SKETCH_OVER_CONSTRAINTS" in res["message"]
+        assert "already stand" not in res["message"]
 
 
 class TestSolvedReadBack:
@@ -1218,7 +1257,7 @@ class TestGuards:
         # not driven -> value echoes the dimension's auto-measured expression
         assert first["value"] == "10 mm"
 
-    def test_an_unreadable_retained_identity_stays_unknown(self, monkeypatch):
+    def test_an_unreadable_retained_identity_on_the_first_entry_is_an_error(self, monkeypatch):
         s = _install(monkeypatch)
 
         class _UnreadableDim:
@@ -1229,12 +1268,36 @@ class TestGuards:
                 raise RuntimeError("parameter unreadable")
 
         s.sketchDimensions.addRadialDimension = lambda c, tp, isDriving=True: _UnreadableDim()
-        out = _payload(sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0",
-                                               "value": "oops"}]))
-        assert out["retained"] is None
+        res = sd.handler(dimensions=[{"dim_type": "radius", "entity_one": "circle:0",
+                                      "value": "oops"}])
+        assert res["isError"] is True
+        assert "dimensions[0]" in res["message"] and "could not be read" in res["message"]
+        assert "Nothing landed" not in res["message"]
+
+    def test_an_unreadable_retained_identity_after_a_landed_entry_stays_unknown(
+            self, monkeypatch):
+        s = _install(monkeypatch)
+
+        class _UnreadableDim:
+            isDriving = True
+
+            @property
+            def parameter(self):
+                raise RuntimeError("parameter unreadable")
+
+        real_add = s.sketchDimensions.addRadialDimension
+        adds = []
+
+        def _add(c, tp, isDriving=True):
+            adds.append(c)
+            return real_add(c, tp, isDriving=isDriving) if len(adds) == 1 else _UnreadableDim()
+
+        s.sketchDimensions.addRadialDimension = _add
+        out = _payload(sd.handler(dimensions=[
+            {"dim_type": "radius", "entity_one": "circle:0"},
+            {"dim_type": "radius", "entity_one": "circle:1", "value": "oops"}]))
+        assert out["dimensioned"] == 1 and out["retained"] is None
         assert "could not be read" in out["note"]
-        assert "left 1 retained effect" not in out["note"]
-        assert "Nothing landed" not in out["note"]
 
     def test_dimension_returning_nothing_is_error(self, monkeypatch):
         s = _install(monkeypatch)

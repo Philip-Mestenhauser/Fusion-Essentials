@@ -18,6 +18,27 @@ from verify_core import (
     _rigid_grouped, _watch)
 
 
+def _turned_over(occurrence):
+    """joint_edit(flip=...): 'moved' names the arm turned half a revolution by the flip."""
+    def check(p):
+        rows = [m for m in p.get("moved") or [] if m.get("occurrence") == occurrence]
+        turn = rows[0].get("rotation_deg") if rows else None
+        return _measured(f"{occurrence} turned over by the flip", {"moved": p.get("moved")},
+                         _num(turn) and 170.0 <= turn <= 180.0)
+    return check
+
+
+def _center_z_vs(key, moved):
+    """model_inspect: the arm's box centre z against the one recalled before the flip."""
+    def check(p):
+        now, was = (p.get("center") or {}).get("z"), _RECALL.get(key)
+        return _measured(f"arm box centre z {'moved off' if moved else 'back at'} {was}",
+                         {"center_z": now},
+                         _num(now) and _num(was) and (abs(now - was) > 2.0) is moved
+                         and (moved or abs(now - was) <= 0.05))
+    return check
+
+
 # --- ACT 7b: THE MOTION BENCH - every joint and assembly verb on rigs of its own ---------------
 # The vise act ahead of this one is the STORY's mechanism; these rows are the rest of the
 # vocabulary, each on a scratch rig so nothing here can disturb the part in its fixture.
@@ -292,6 +313,14 @@ _MOTION = (
      _refused("not axis-based"), None),
     ("joint_edit", {"joint_name": "JRig", "joint_type": "rigid"}, "ok", None),
     ("assembly_get", {}, _joint_is("JRig", "rigid"), None),
+    # A FLIP turns the arm over in place: 'moved' names the turn a translation-only census misses,
+    # and the arm's own box, read separately, leaves its centre and comes back with the second flip.
+    ("model_inspect", {"target": "IndRig:1"}, "ok",
+     ("rig_center_z", _recall("rig_center_z", lambda p: p["center"]["z"]))),
+    ("joint_edit", {"joint_name": "JRig", "flip": False}, _turned_over("IndRig:1"), None),
+    ("model_inspect", {"target": "IndRig:1"}, _center_z_vs("rig_center_z", True), None),
+    ("joint_edit", {"joint_name": "JRig", "flip": True}, _turned_over("IndRig:1"), None),
+    ("model_inspect", {"target": "IndRig:1"}, _center_z_vs("rig_center_z", False), None),
 ] + _box("LnkA", ox=1400, oy=120, tint="#E5533C") + _box(
     "LnkB", ox=1400, oy=120, tint="#1E88E5", shape="disc") + [
     # A LINK PARTNER THAT HAS NEVER BEEN DRIVEN: the bench's own drive pass has already moved every
@@ -319,7 +348,11 @@ _MOTION = (
      _refused("motion link", "joint_motion_link"), None),
     # the boundary the refusal turns on: a re-set that KEEPS the axis AND the motion type leaves the
     # link healthy, so it lands - and the link read below proves the refusals above wrote nothing.
-    ("joint_edit", {"joint_name": "JRev", "joint_type": "revolute", "axis": "z"}, "ok", None),
+    ("joint_edit", {"joint_name": "JRev", "joint_type": "revolute", "axis": "z"},
+     lambda p: _measured("the re-set joint reads healthy after the edit",
+                         {"edited": p.get("edited"), "healthy": p.get("healthy"),
+                          "health_error": p.get("health_error")},
+                         p.get("edited") is True and p.get("healthy") is True), None),
     ("assembly_get", {"include": ["relations"]}, _link_healthy("bench_link"), None),
     # and the OTHER thing a re-aim costs: the limits set on JRev above are still standing, because
     # this re-set kept the axis. A re-set that changed it would have cleared them.

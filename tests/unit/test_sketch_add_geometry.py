@@ -143,6 +143,13 @@ class TestNewKinds:
                                        "is_construction": True}]))
         assert s.sketchCircles.item(0).isConstruction is True
 
+    def test_a_construction_point_is_refused_before_anything_lands(self, monkeypatch):
+        # the flag is applied to sketch curves only, so a point would land plain under a success
+        s = FakeSketch(); _install_draw(monkeypatch, s)
+        res = sk.handler(geometry=[{"kind": "point", "cx": 5, "cy": 5, "is_construction": True}])
+        assert res["isError"] is True and "kind='point'" in res["message"]
+        assert s.sketchPoints.count == 0
+
     def test_non_construction_default(self, monkeypatch):
         s = FakeSketch(); _install_draw(monkeypatch, s)
         _payload(sk.handler(geometry=[{"kind": "circle", "cx": 0, "cy": 0, "radius": 5}]))

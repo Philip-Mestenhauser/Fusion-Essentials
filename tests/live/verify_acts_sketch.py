@@ -605,6 +605,22 @@ _SKETCHWORK = [
     ("sketch_dimension", {"dimensions": [{"dim_type": "ellipse_minor_radius",
                                           "entity_one": "ellipse:0"}],
                           "sketch_name": "DimBench"}, _dim_measures(16.0), None),
+    # A SECOND COORDINATE DIMENSION AT A SHARED X: point:2 stands at the x point:1 is already
+    # dimensioned to, and the solver refuses the second horizontal distance as over-constrained.
+    # The refusal names point:1 and the two-point constraint that ties them. On XZ, so the sketch
+    # is nailed where it is drawn and deals no new cell.
+    ("sketch_create", {"plane": "xz", "name": "CoordDims"}, "ok", None),
+    ("sketch_add_geometry", {"geometry": [{"kind": "point", "cx": 1450, "cy": 120},
+                                          {"kind": "point", "cx": 1450, "cy": 150}],
+                             "sketch_name": "CoordDims"}, "ok", None),
+    ("sketch_dimension", {"dimensions": [{"dim_type": "horizontal_distance",
+                                          "entity_one": "point:0", "entity_two": "point:1"}],
+                          "sketch_name": "CoordDims"}, _dim_measures(1450.0), None),
+    ("sketch_dimension", {"dimensions": [{"dim_type": "horizontal_distance",
+                                          "entity_one": "point:0", "entity_two": "point:2"}],
+                          "sketch_name": "CoordDims"},
+     _refused("OVER_CONSTRAINT", "point:1 already stand(s) at the same x", "'vertical_points'"),
+     None),
     # A missing first reference is a nonmutation control; the later valid entry stays unattempted.
     ("sketch_create", {"plane": "xy", "name": "RetainedDims"}, "ok", None),
     ("sketch_add_geometry", {"geometry": [

@@ -155,6 +155,30 @@ class TestSurfaceRevolve:
         res = sc.handler(sketch_name="S", angle_deg=90, axis="w")
         assert res["isError"] is True and "x, y, or z" in res["message"]
 
+    def test_a_construction_line_is_not_revolved_with_the_spline(self, wire):
+        rf = FakeRevolveFeatures(result_bodies=[_body("Surf1")])
+        spline = make_sketch_curve("spline")
+        axis_line = types.SimpleNamespace(isConstruction=True)
+        comp = _comp(FakeFeatures(rf=rf),
+                     sketches=[make_sketch("S", lines=[axis_line], splines=[spline])])
+        handed = []
+        comp.createOpenProfile = lambda curves, chained: handed.append(list(curves)) or "open"
+        wire(comp)
+        payload(sc.handler(sketch_name="S", axis="y", angle_deg=360))
+        assert handed == [[spline]]
+
+    def test_a_refused_revolve_leads_with_fusions_own_message(self, wire):
+        rf = FakeRevolveFeatures(result_bodies=[_body("Surf1")])
+
+        def _refuse(inp):
+            raise RuntimeError("3 : The revolve profile is not valid")
+        rf.add = _refuse
+        wire(_comp(FakeFeatures(rf=rf), sketches=[_sketch("S")]))
+        res = sc.handler(sketch_name="S", angle_deg=360)
+        assert res["isError"] is True
+        assert res["message"].startswith("3 : The revolve profile is not valid")
+        assert "coplanar" not in res["message"]
+
     def test_surface_revolve_built_on_the_sketchs_owning_component(self, wire):
         # Named sketch owned by a SUB-component while a different component is active. Both the profile
         # and the origin axis must come from the OWNER (an axis from the wrong component mixes contexts,

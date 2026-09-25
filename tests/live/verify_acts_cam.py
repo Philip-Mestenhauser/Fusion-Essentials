@@ -378,6 +378,20 @@ def _manual_op_untooled(setup, name):
     return check
 
 
+def _generating_withholds_ready(p):
+    """cam_get(include=['operations']) read mid-generation: a setup holding a row in the
+    'generating' bucket carries a readiness that does not say 'ready to post'."""
+    recs = (p.get("operations") or {}).get("setups") or []
+    live = [r for r in recs
+            if any(o.get("state") == "generating" for o in r.get("operations") or [])]
+    readiness = [(r.get("summary") or {}).get("readiness") or "" for r in live]
+    return _measured("no setup still generating reads 'ready to post'",
+                     {"generating_observed": bool(live),
+                      "generating_setups": [r.get("setup") for r in live],
+                      "readiness": readiness},
+                     all("ready to post" not in text for text in readiness))
+
+
 def _op_named(setup, strategy, name):
     """A created operation that landed under the name it ASKED for. 'operation' is a read-back:
     op.name off the operation the platform added, so a deduped name reads back a different string
@@ -1142,10 +1156,14 @@ _CAM_STORY = [
      None),
     # THE SURFACE GROUP AS A DIFFERENCE: this drill now carries a direct group the other does not,
     # and a group's faces and flags live on the group objects - so the two read identical parameter
-    # expressions for it. Taken here, while the group is still on the operation.
+    # expressions for it. Taken here, while the group is still on the operation, in inches: the
+    # 0.5 mm axial offset written above reads 0.019685 in.
     ("cam_compare_operations", lambda c: {"operation_a": _RECOGNIZED_OP,
-                                          "operation_b": _ctx_get(c, "drill_op", "the drill op")},
-     lambda p: _group_census_differs("checkSurfaceSelectionSets")(p), None),
+                                          "operation_b": _ctx_get(c, "drill_op", "the drill op"),
+                                          "units": "in"},
+     lambda p: (_group_census_differs("checkSurfaceSelectionSets")(p)
+                and _group_offset_in_units("checkSurfaceSelectionSets", "in", 0.019685)(p)),
+     None),
     # _op_deleted is defined below this list, so the predicate is built when the step RUNS.
     ("cam_delete", {"entity": _RECOGNIZED_OP}, lambda p: _op_deleted(_RECOGNIZED_OP)(p), None),
     # THE RECOGNIZED POCKET, machined the same way: the FLOOR handle cam_find_pockets minted in the
@@ -1545,6 +1563,11 @@ _CAM_STORY = [
     ("cam_generate", {"target": CAM_SETUP, "skip_valid": False},
      lambda p: p["launched"] is True and p["target"] == f"setup '{CAM_SETUP}'"
      and p["skip_valid"] is False and bool(p["handle"]), None),
+    # the operations summary, read before the status poll: while any row still reads the
+    # 'generating' bucket, the summary's readiness withholds 'ready to post'. A job that settled
+    # before this read proves nothing and is not a failure.
+    ("cam_get", {"include": ["operations"], "setup": CAM_SETUP}, _generating_withholds_ready,
+     None),
     # READ IMMEDIATELY, before the act-boundary poll below settles it: a state-0 op counts 'valid'
     # in the tally while its own generation is still landing, so readiness must not claim 'ready to
     # post' while operations in this real, multi-operation job are still generating.
@@ -3410,6 +3433,18 @@ def _group_census_differs(group_param):
                          {"geometry_difference_count": p.get("geometry_difference_count"),
                           "groups": census, "rows": _side_values(row, "rows")},
                          all(isinstance(n, int) for n in census) and census[0] != census[1])
+    return check
+
+
+def _group_offset_in_units(group_param, units, axial):
+    """cam_compare_operations(units=...): operation_a's surface groups carry the axial offset
+    written in mm, read back in the compare's own units beside geometry_units naming them."""
+    def check(p):
+        rows = _side_values(_geometry_rows(p).get(group_param) or {}, "rows")[0] or []
+        axials = [(r or {}).get("axial_offset") for r in rows]
+        return _measured(f"'{group_param}' reads axial_offset {axial} {units} on operation_a",
+                         {"geometry_units": p.get("geometry_units"), "axial_offsets": axials},
+                         p.get("geometry_units") == units and axial in axials)
     return check
 
 

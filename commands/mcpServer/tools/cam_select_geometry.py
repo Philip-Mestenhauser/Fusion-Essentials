@@ -14,9 +14,9 @@ from ..mcp_primitives.registry import register
 from ._common import CM_TO_UNIT, named_with_remainder, ok, error, safe, scale, set_verified
 from ._cam_common import (MACHINE_MODE_MEMBERS, PARAM_READ, SWARF_CONTOURS_PARAM, avoid_groups,
                           choice_quoting, enumeration_remedy, expression_error, get_cam,
-                          group_record, machine_mode_value, matched_quoting, owning_setup,
-                          resolve_cam_node, register_future, strategy_generation_allowed,
-                          unquote_expression)
+                          group_record, machine_mode_value, matched_quoting, offset_mm_per_unit,
+                          owning_setup, resolve_cam_node, register_future,
+                          strategy_generation_allowed, unquote_expression)
 from . import _inputs
 from . import _sketch_detail
 
@@ -1176,7 +1176,7 @@ def _apply_surface_group(op, faces, over_holes, mode_key, extra, offsets, units_
         except Exception as e:
             return None, (f"machine_mode is not offered on this group: {e}. Nothing was applied - "
                           "drop machine_mode and retry.")
-    mm_per_unit = scale(units_key) * 10        # offsets are stored in mm - see _OFFSET_KNOBS
+    mm_per_unit = offset_mm_per_unit(units_key)
     for key, prop in _OFFSET_KNOBS:
         value = offsets.get(key)
         if value is None:

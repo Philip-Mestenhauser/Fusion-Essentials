@@ -21,6 +21,7 @@ from ._common import ok, error, safe
 from . import _common
 from . import _geom
 from . import _inputs
+from . import _sketch_detail
 from . import _view_common
 from . import _write_guard
 
@@ -430,6 +431,30 @@ def _perspective_frame(vp, cam, focus_bb, target, label):
                   f"({detail}); the camera remains at that read-back state.")
 
 
+def _sketch_world_box(sketch, design, label):
+    """(world box, frame, error) - the sketch's boundingBox corners mapped out of sketch space
+    through its published world frame."""
+    frame = safe(lambda: _sketch_detail.sketch_world_frame(sketch, design))
+    space = (frame or {}).get("space")
+    if space != _sketch_detail.WORLD_SPACE or not (frame or {}).get("normal"):
+        return None, frame, (f"'focus': sketch '{label}' has no world frame (frame.space reads "
+                             f"{space!r}), so its box cannot be placed. Frame the occurrence that "
+                             "places it by fullPathName instead.")
+    bb = safe(lambda: sketch.boundingBox)
+    lo, hi = _point_values(safe(lambda: bb.minPoint)), _point_values(safe(lambda: bb.maxPoint))
+    if lo is None or hi is None:
+        return None, frame, None
+    origin = [c / 10.0 for c in frame["origin_mm"]]
+    ax, ay, an = frame["x_world"], frame["y_world"], frame["normal"]
+    corners = [[origin[i] + x * ax[i] + y * ay[i] + z * an[i] for i in range(3)]
+               for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])]
+    lo_w = [min(c[i] for c in corners) for i in range(3)]
+    hi_w = [max(c[i] for c in corners) for i in range(3)]
+    return types.SimpleNamespace(
+        minPoint=types.SimpleNamespace(x=lo_w[0], y=lo_w[1], z=lo_w[2]),
+        maxPoint=types.SimpleNamespace(x=hi_w[0], y=hi_w[1], z=hi_w[2])), frame, None
+
+
 def _do_orient(design, orientation, focus, fit, projection="", perspective_angle_deg=None):
     vp = app.activeViewport
     applied = {}
@@ -439,7 +464,7 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
     focus_bb = None
     if focus:
         names = [n.strip() for n in (focus if isinstance(focus, list) else [focus]) if str(n).strip()]
-        boxes, labels, kinds = [], [], []
+        boxes, labels, kinds, sketch_frames = [], [], [], {}
         for nm in names:
             o, focus_err = _FOCUS.resolve(nm)
             if o is None:
@@ -450,7 +475,17 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
                     return error(f"'focus': nothing named '{nm}' to frame - no occurrence and no "
                                  f"sketch carries that name."
                                  + (f" Occurrence lookup said: {focus_err}" if focus_err else ""))
-                o, focus_err = sk, None
+                label = safe(lambda: sk.name) or nm
+                labels.append(label)
+                # Sketch.boundingBox reads in SKETCH space, so it is placed through the frame.
+                bx, frame, frame_err = _sketch_world_box(sk, design, label)
+                if frame_err:
+                    return error(frame_err)
+                sketch_frames[label] = frame
+                if bx is not None:
+                    boxes.append(bx)
+                    kinds.append("all_geometry")
+                continue
             if focus_err:
                 return error(focus_err)
             labels.append(safe(lambda o=o: o.name) or nm)
@@ -469,6 +504,8 @@ def _do_orient(design, orientation, focus, fit, projection="", perspective_angle
                                           (bb.minPoint.z + bb.maxPoint.z) / 2)
         applied["focus"] = safe(lambda: o.name)
         applied["extents"] = "solids" if all(k == "solids" for k in kinds) else "all_geometry"
+        if sketch_frames:
+            applied["sketch_frames"] = sketch_frames
 
     orientation_key = ""
     if orientation:

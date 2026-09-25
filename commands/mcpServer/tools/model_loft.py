@@ -305,8 +305,9 @@ def handler(profiles=None, rails=None, centerline="", operation="new",
         feature = root.features.loftFeatures.add(loft_input)
     except Exception as e:
         # Lead with the API's OWN message - a cut through air says "No target body" (measured).
-        return error(f"Loft failed: {e}. The API answers 'No target body' for a cut/intersect "
-                     "whose path meets no body.")
+        clause = (" The API answers 'No target body' for a cut/intersect whose path meets no body."
+                  if op_key in ("cut", "intersect") else "")
+        return error(f"Loft failed: {e}.{clause}")
     if not feature:
         return error(_common.no_feature_error(design, "Loft"))
 

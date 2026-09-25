@@ -1,29 +1,7 @@
 # Third-party notices
 
 Fusion-Essentials is dual-licensed under MIT and Apache-2.0 (see LICENSE-MIT and LICENSE-APACHE).
-The files below are derived from Autodesk code and carry the notices reproduced here.
-
-## Autodesk Fusion add-in template
-
-Files:
-
-- `lib/fusion360utils/general_utils.py`
-- `lib/fusion360utils/event_utils.py`
-
-Notice, as it appears at the top of each file:
-
-```
-Copyright 2022 by Autodesk, Inc.
-Permission to use, copy, modify, and distribute this software in object code form
-for any purpose and without fee is hereby granted, provided that the above copyright
-notice appears in all copies and that both that copyright notice and the limited
-warranty and restricted rights notice below appear in all supporting documentation.
-
-AUTODESK PROVIDES THIS PROGRAM "AS IS" AND WITH ALL FAULTS. AUTODESK SPECIFICALLY
-DISCLAIMS ANY IMPLIED WARRANTY OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR USE.
-AUTODESK, INC. DOES NOT WARRANT THAT THE OPERATION OF THE PROGRAM WILL BE
-UNINTERRUPTED OR ERROR FREE.
-```
+The files below are adapted from Autodesk's MIT-licensed Fusion MCP add-in sample, whose license is reproduced here.
 
 ## Autodesk Fusion MCP add-in sample
 

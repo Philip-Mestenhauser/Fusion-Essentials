@@ -72,8 +72,9 @@ _ENVELOPE_LENGTHS = (("frame_width", "frameWidth"),
                      ("placement_clearance", "placementClearance"),
                      ("ceiling_clearance", "ceilingClearance"))
 _ENVELOPE_CAP = 12
-# A ValueInput read-back is a float round trip of the number written, not an independent measurement.
-_VALUE_TOL = 1e-9
+# The read-back passes through measured(), rounded to 6 places in cm, so it matches the written
+# value to within that rounding.
+_VALUE_TOL = 1e-6
 
 
 def _real(value):

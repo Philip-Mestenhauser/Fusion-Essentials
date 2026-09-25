@@ -20,7 +20,9 @@ from ._common import ok, error, safe, terse
 from . import _common
 from . import _cam_common
 from . import _inputs
+from . import _joints
 from . import _materials
+from .model_inspect import _MAX_PER_BODY_ROWS
 
 app = adsk.core.Application.get()
 
@@ -74,10 +76,14 @@ _TREE_NOTE = ("Light nodes: name, component, body_count, child_count. Narrow: na
 
 
 def _body_cut_note(cut):
-    """The FIRST sentence when a node's bodies were cut: which node, shown vs true count, and the
-    remedy - model_inspect's per_body list (a 'mass' slice) is not capped at the tree's 25."""
-    return (f"'{cut['node']}' bodies: {cut['shown']} of {cut['true']} shown (cap {_TREE_BODY_CAP}). "
-            f"model_inspect(target='{cut['node']}', include=['mass'], per_body=true) has all.")
+    """The FIRST sentence when a node's bodies were cut: shown vs true count, and the remedy that
+    reaches the rest - model_inspect's per_body list, itself capped at _MAX_PER_BODY_ROWS."""
+    head = (f"'{cut['node']}' bodies: {cut['shown']} of {cut['true']} shown (cap {_TREE_BODY_CAP}). "
+            f"model_inspect(target='{cut['node']}', include=['mass'], per_body=true) ")
+    if isinstance(cut["true"], int) and cut["true"] <= _MAX_PER_BODY_ROWS:
+        return head + "has all."
+    return (head + f"lists at most {_MAX_PER_BODY_ROWS} (per_body_truncated past that); one "
+            "component has no narrower scope, so read the rest with model_inspect(target='<body>').")
 
 
 def _body_rows(bodies):
@@ -387,7 +393,7 @@ def _object_summary(obj):
         "health": _HEALTH_LABELS.get(health, health),
         **_owner_fields(obj),
     }
-    msg = safe(lambda: obj.errorOrWarningMessage)
+    msg = _common.timeline_message(safe(lambda: obj.errorOrWarningMessage), out["name"])
     if msg:
         out["message"] = msg
     return out
@@ -399,63 +405,43 @@ def _object_summary(obj):
 _PARAMS_PER_ROW = 16
 
 
-def _owner_keys(entity):
-    """The keys ONE owner is indexed and looked up under: its entityToken when that reads (exact),
-    plus name+type as the fallback for a side whose token does not read. [] when neither reads."""
-    keys = []
+def _token_key(entity):
+    """("token", entityToken) when the owner's token reads, else None."""
     tok = safe(lambda: entity.entityToken)
-    if isinstance(tok, str) and tok:
-        keys.append(("token", tok))
-    name = safe(lambda: entity.name)
-    if isinstance(name, str) and name:
-        keys.append(("name", name, type(entity).__name__))
-    return keys
+    return ("token", tok) if isinstance(tok, str) and tok else None
+
+
+def _timeline_key(tl_index):
+    """("tl", index) for a readable timeline index, else None."""
+    return ("tl", tl_index) if isinstance(tl_index, int) and not isinstance(tl_index, bool) else None
 
 
 def _model_parameters_by_owner(design):
-    """{owner key -> {rows, tokens}} from ONE pass over design.allParameters. A UserParameter has no
-    .createdBy and is skipped; the tokens under a key are what tells a name+type collision (two
-    owners) from one owner, so a colliding key is refused rather than mixed."""
+    """{owner identity -> rows} from ONE pass over design.allParameters, keyed by the owner's
+    entityToken, else its timeline index. A feature name is per-component, so it is never a key; a
+    UserParameter has no .createdBy and an owner with neither identity is skipped."""
     index = {}
     for p in _common.iter_collection(safe(lambda: design.allParameters)):
         owner = safe(lambda p=p: p.createdBy)
         if owner is None:
             continue
-        keys = _owner_keys(owner)
-        if not keys:
+        key = _token_key(owner) or _timeline_key(safe(lambda: owner.timelineObject.index))
+        if key is None:
             continue
-        row = {"name": safe(lambda p=p: p.name),
-               "role": safe(lambda p=p: p.role),
-               "expression": safe(lambda p=p: p.expression),
-               "value": _common.measured(lambda p=p: p.value)}
-        # A tokenless owner needs a DISTINCT identity, and id(owner) is not one: .createdBy mints a
-        # fresh proxy per read and two proxies of different owners can reuse one address. The
-        # timeline index is stable per feature; failing that, a per-parameter sentinel is the key.
-        if keys[0][0] == "token":
-            token = keys[0][1]
-        else:
-            tl_index = safe(lambda: owner.timelineObject.index)
-            # dNN model-parameter names are design-unique, so the sentinel is per-parameter.
-            token = f"tl:{tl_index}" if tl_index is not None else f"anon:{safe(lambda p=p: p.name)}"
-        for key in keys:
-            entry = index.setdefault(key, {"rows": [], "tokens": set()})
-            entry["rows"].append(row)
-            entry["tokens"].add(token)
+        index.setdefault(key, []).append({"name": safe(lambda p=p: p.name),
+                                          "role": safe(lambda p=p: p.role),
+                                          "expression": safe(lambda p=p: p.expression),
+                                          "value": _common.measured(lambda p=p: p.value)})
     return index
 
 
-def _params_for(index, entity):
-    """(rows, truncated) - the model parameters `entity` owns, capped; (None, False) when it owns
-    none. A name+type key that collected two DIFFERENT owner tokens is skipped, not answered with
-    the union of two features' parameters."""
-    for key in _owner_keys(entity):
-        entry = index.get(key)
-        if not entry:
-            continue
-        if len(entry["tokens"]) > 1:
-            continue
-        rows = entry["rows"]
-        return rows[:_PARAMS_PER_ROW], len(rows) > _PARAMS_PER_ROW
+def _params_for(index, entity, tl_index):
+    """(rows, truncated) - the model parameters this row's feature owns, looked up by its token, then
+    its timeline index, capped; (None, False) when it owns none."""
+    for key in (_token_key(entity), _timeline_key(tl_index)):
+        rows = index.get(key) if key is not None else None
+        if rows:
+            return rows[:_PARAMS_PER_ROW], len(rows) > _PARAMS_PER_ROW
     return None, False
 
 
@@ -473,7 +459,8 @@ def _timeline_row(summ, obj, param_index, include_suppressed, noise=_TIMELINE_NO
     if param_index is None:
         return row, False
     entity = safe(lambda: obj.entity)
-    prows, ptrunc = _params_for(param_index, entity) if entity is not None else (None, False)
+    prows, ptrunc = (_params_for(param_index, entity, summ.get("index")) if entity is not None
+                     else (None, False))
     if not prows:
         return row, False
     row["params"] = prows
@@ -757,6 +744,7 @@ def _slice_attributes(design, group, key):
 
 # ── component engineering metadata (part number, description, identity) ───────────────────────────
 _METADATA_MAX_ROWS = 100
+_METADATA_ROWS_CEILING = 500
 
 _METADATA_NOTE = ("part_number and description are writable with design_set_metadata; id and "
                   "revision_id are reads only - no tool here writes them.")
@@ -776,23 +764,48 @@ def _metadata_row(comp):
     return row
 
 
-def _slice_metadata(design, name_filter, max_results):
+def _scoped_components(root, scope):
+    """(components, walk, error) - the component `scope` names first, then each distinct component
+    placed under it, with the occurrence walk that found them."""
+    start, amb = _find_occurrence_by_name(root, scope)
+    if amb:
+        return None, None, error(amb)
+    top = safe(lambda: start.component) if start is not None else None
+    if top is None:
+        return None, None, error(f"Component/occurrence not found: '{scope}'.")
+    walk = _common.component_walk(top)
+    out, seen = [top], {_common.native_identity(top) or id(top)}
+    for occ in walk.occurrences:
+        comp = safe(lambda occ=occ: occ.component)
+        key = (_common.native_identity(comp) or id(comp)) if comp is not None else None
+        if key is not None and key not in seen:
+            seen.add(key)
+            out.append(comp)
+    return out, walk, None
+
+
+def _slice_metadata(design, name_filter, max_results, component=""):
     """Per-component engineering identity, the ROOT first: part number, description, id, revision.
-    name_filter keeps the components whose name carries it; the list is capped."""
+    component= scopes it to one component's subtree; name_filter keeps the components whose name
+    carries it; the list is capped."""
     root = safe(lambda: design.rootComponent)
     if root is None:
         return None, error("No root component.")
-    try:
-        cap = max(1, int(max_results)) if max_results else _METADATA_MAX_ROWS
-    except Exception:
-        cap = _METADATA_MAX_ROWS
+    cap = _cam_common.clamp_rows(max_results, _METADATA_MAX_ROWS, _METADATA_ROWS_CEILING)
     wanted = (name_filter or "").strip().lower()
-    # same_component, never `is`: allComponents holds the root too, and a component wrapper is
-    # never identity-stable, so an unproven match leaves the row in rather than dropping it.
-    others = [c for c in _common.iter_collection(safe(lambda: design.allComponents))
-              if _common.same_component(c, root) is not True]
+    scope = (component or "").strip()
+    walk = None
+    if scope:
+        pool, walk, serr = _scoped_components(root, scope)
+        if serr:
+            return None, serr
+    else:
+        # same_component, never `is`: allComponents holds the root too, and a component wrapper is
+        # never identity-stable, so an unproven match leaves the row in rather than dropping it.
+        pool = [root] + [c for c in _common.iter_collection(safe(lambda: design.allComponents))
+                         if _common.same_component(c, root) is not True]
     rows, matched = [], 0
-    for comp in [root] + others:
+    for comp in pool:
         if wanted and not _matches_filter(comp, wanted):
             continue
         matched += 1
@@ -802,8 +815,18 @@ def _slice_metadata(design, name_filter, max_results):
            "note": _METADATA_NOTE}
     if matched > len(rows):
         out["truncated"] = True
+        out["note"] += (f" {matched - len(rows)} more component(s) not listed - narrow with "
+                        "component='<name>' or name_filter, or raise max_results.")
     if wanted:
         out["name_filter"] = name_filter.strip()
+    if scope:
+        out["component"] = scope
+    if walk is not None and (not walk.complete or walk.broken):
+        out["incomplete"] = True
+        names = ", ".join(walk.names()[:5])
+        out["note"] += (f" The walk under '{scope}' did not enumerate every occurrence"
+                        + (f" (unresolved: {names})" if names else "")
+                        + ", so this list may not hold every component beneath it.")
     return out, None
 
 
@@ -841,8 +864,9 @@ def _fingerprint(design):
         # an unresolved external reference, and safe(read, 0) published that failure as "no
         # occurrences" on a multi-part assembly.
         "occurrences": walk.total,
-        # asBuiltJoints is a separate collection from joints; count both or as-built joints read as 0
-        "joints": safe(lambda: root.joints.count, 0) + safe(lambda: root.asBuiltJoints.count, 0),
+        # Every component's joints AND asBuiltJoints - the walk assembly_get's joint_count reads, so
+        # the two reads agree whichever component is active.
+        "joints": len(_joints.all_joints(design)),
         # userParameters = the ones an agent can drive; modelParameters includes internal ones it can't.
         "parameters": _common.counted(lambda: design.userParameters.count),
     }
@@ -976,7 +1000,7 @@ def handler(include=None, max_depth: int = 3, component: str = "", tree_bodies: 
         if atterr:
             return atterr
     if "metadata" in inc:
-        out["metadata"], mderr = _slice_metadata(design, name_filter, max_results)
+        out["metadata"], mderr = _slice_metadata(design, name_filter, max_results, component)
         if mderr:
             return mderr
 
@@ -988,8 +1012,8 @@ def handler(include=None, max_depth: int = 3, component: str = "", tree_bodies: 
                        "'tree_handles' scope the tree; "
                        "'group'/'include_suppressed'/'timeline_params' the timeline; "
                        "'library'/'name_filter'/'max_results' the catalog; 'attribute_group' "
-                       "(required)/'attribute_key' the attributes; 'name_filter'/'max_results' "
-                       "the metadata rows.")
+                       "(required)/'attribute_key' the attributes; 'component'/'name_filter'/"
+                       "'max_results' the metadata rows.")
     # A census nothing could be read from leaves 'occurrences' out of contents entirely, which reads
     # exactly like a design holding no placed instance. The marker beside it is what tells the two
     # apart, so the unreadable one is stated in words as well.
@@ -1023,7 +1047,7 @@ tool = (
     .add_input_property("max_depth", {"type": "integer",
             "description": f"include=tree. Max {_TREE_MAX_DEPTH}."})
     .add_input_property("component", {"type": "string",
-            "description": "Start the tree at this component/occurrence."})
+            "description": "Tree/metadata root: a component or occurrence."})
     .add_input_property("tree_bodies", {"type": "boolean"})
     .add_input_property("tree_handles", {"type": "boolean",
             "description": "Adds each node's handle + full_path."})

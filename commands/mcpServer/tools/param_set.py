@@ -15,13 +15,35 @@ from ._joints import (driven_joint_snapshot as _driven_joint_snapshot,
                       driven_joints_reset as _driven_joints_reset, driven_reset_note)
 
 
-def _with_reset(out, joints_before, design):
-    """`out`, plus driven_joints_reset + a note when the parameter write's own recompute reverted
-    an uncaptured joint pose - the read-after every param_set return path applies before ok()."""
+def _before(design):
+    """(driven-joint snapshot, timeline health census) read ahead of the write."""
+    return _driven_joint_snapshot(design), _common.timeline_health(design)
+
+
+def _with_reset(out, before, design):
+    """`out`, plus driven_joints_reset and the timeline errors/warnings the write's own recompute
+    newly raised, each with a note - the read-after every param_set return path applies."""
+    joints_before, (errors_before, warnings_before, _total) = before
     reset = _driven_joints_reset(joints_before, _driven_joint_snapshot(design))
+    notes = []
     if reset:
         out["driven_joints_reset"] = reset
-        out["note"] = driven_reset_note(reset)
+        notes.append(driven_reset_note(reset))
+    errors_after, warnings_after, _total = _common.timeline_health(design)
+    new_errors = [n for n in errors_after if n not in errors_before]
+    new_warnings = [n for n in warnings_after if n not in warnings_before]
+    if new_errors:
+        out["new_timeline_errors"] = new_errors
+    if new_warnings:
+        out["new_timeline_warnings"] = new_warnings
+    if new_errors or new_warnings:
+        named = ", ".join(new_errors + new_warnings)
+        notes.append(f"The value took, and the recompute left {len(new_errors)} new timeline "
+                     f"error(s) and {len(new_warnings)} new warning(s): {named}. Nothing was "
+                     "rolled back; read design_get(include=['timeline']) for the messages, or "
+                     "set the previous value again.")
+    if notes:
+        out["note"] = " ".join(notes)
     return out
 
 
@@ -44,7 +66,7 @@ def handler(name: str = "", expression: str = "", create: bool = False,
             return error(f"Parameter not found: '{name}'. Use param_get to list them, or pass "
                           "create=true to make it a new user parameter.")
         # create-or-update: make a new user parameter with the given expression + unit.
-        joints_before = _driven_joint_snapshot(design)
+        reads_before = _before(design)
         try:
             vi = adsk.core.ValueInput.createByString(expression)
             param = design.userParameters.add(name, vi, unit or "", "")
@@ -54,10 +76,10 @@ def handler(name: str = "", expression: str = "", create: bool = False,
         if not param:
             return error(f"Creating user parameter '{name}' returned nothing.")
         return ok(_with_reset({"set": True, "created": True, "name": name,
-        "before": None, "after": _param_summary(param)}, joints_before, design))
+        "before": None, "after": _param_summary(param)}, reads_before, design))
 
     before = _param_summary(param)
-    joints_before = _driven_joint_snapshot(design)
+    reads_before = _before(design)
     try:
         param.expression = expression
     except Exception as e:
@@ -70,15 +92,15 @@ def handler(name: str = "", expression: str = "", create: bool = False,
         if _normalized_expression(expression) == _normalized_expression(before.get("expression")):
             return ok(_with_reset({"set": True, "created": False, "name": name,
                        "already_current": True, "before": before, "after": after},
-                       joints_before, design))
+                       reads_before, design))
         return error(f"Assignment raised no error but '{name}' still reads expression "
                      f"'{before.get('expression')}' - setting '{expression}' did not take.")
     return ok(_with_reset({"set": True, "created": False, "name": name, "before": before,
-              "after": after}, joints_before, design))
+              "after": after}, reads_before, design))
 
 
 TOOL_DESCRIPTION = (
-"Set a design parameter's expression, returning the before/after and driven_joints_reset. "
+"Set a design parameter's expression, returning before/after and driven_joints_reset. "
 "Discover names with param_get."
 )
 

@@ -465,8 +465,9 @@ class TestPlaneAtAngle:
         assert out["kind"] == "plane" and out["mode"] == "at_angle"
         linear, angle_val, planar = comp.constructionPlanes.captured["angle"]
         assert linear is edge and planar is base_plane
-        assert math.isclose(angle_val[1], math.radians(45))    # ValueInput.createByReal(radians)
-        assert out["angle_deg"] == 45.0
+        assert angle_val == ("str", "45.0 deg")
+        # the default fake plane carries no definition: nothing landed was read, so nothing is claimed
+        assert out["angle_deg"] is None and "angle_deg is null" in out["note"]
         # the rotated plane's normal (1,0,0) differs from the base plane's (0,0,1) - proves the
         # rotation actually took, the exact sanity check the write-honesty bar asks for.
         assert out["normal_changed"] is True
@@ -485,6 +486,58 @@ class TestPlaneAtAngle:
         res = cn.handler(kind="plane", mode="at_angle", angle=10)
         assert res["isError"] is True and "setByAngle returned false" in res["message"]
 
+    def _landing(self, comp, value_rad, expression, name="d2158"):
+        """The created plane's angle ModelParameter reading `value_rad` / `expression`."""
+        param = type("MP", (), {"name": name, "value": value_rad, "expression": expression})()
+        defn = type("Def", (), {"angle": param})()
+        comp.constructionPlanes.add = lambda inp: type(
+            "O", (), {"name": "Plane7", "geometry": None, "definition": defn})()
+
+    def test_a_long_decimal_goes_in_whole_and_the_landed_parameter_is_published(self, monkeypatch):
+        comp = _install()
+        _stub_resolve(monkeypatch, cn._EDGES, [_straight_edge()])
+        self._landing(comp, math.radians(4.0909090909), "4.0909090909 deg")
+        out = _payload(cn.handler(kind="plane", mode="at_angle", angle=4.0909090909))
+        assert comp.constructionPlanes.captured["angle"][1] == ("str", "4.0909090909 deg")
+        assert out["angle_expression"] == "4.0909090909 deg"
+        assert out["angle_deg"] == 4.0909090909
+        assert out["model_parameters"] == {"angle": "d2158"}
+
+    def test_a_landed_angle_off_the_request_is_an_error_naming_both(self, monkeypatch):
+        comp = _install()
+        _stub_resolve(monkeypatch, cn._EDGES, [_straight_edge()])
+        self._landing(comp, math.radians(4.1), "4.1 deg")
+        res = cn.handler(kind="plane", mode="at_angle", angle=4.0909090909)
+        assert res["isError"] is True
+        assert "4.1 deg" in res["message"] and "4.0909090909" in res["message"]
+        assert "'Plane7'" in res["message"] and "still in the design" in res["message"]
+
+    def test_the_angle_tolerance_boundary(self, monkeypatch):
+        for landed, is_error in ((1e-9, False), (1.5e-9, True)):
+            comp = _install()
+            _stub_resolve(monkeypatch, cn._EDGES, [_straight_edge()])
+            self._landing(comp, landed, "0 deg")
+            res = cn.handler(kind="plane", mode="at_angle", angle=0)
+            assert res["isError"] is is_error, landed
+
+    def test_an_angle_expression_is_evaluated_and_passed_as_written(self, monkeypatch):
+        comp = _install()
+        _stub_resolve(monkeypatch, cn._EDGES, [_straight_edge()])
+        _with_units_mgr(FakeUnitsManager(valid=("Tilt/2",), value=0.2,
+                                         angle_dimensioned=("Tilt/2",)))
+        self._landing(comp, 0.2, "Tilt/2")
+        out = _payload(cn.handler(kind="plane", mode="at_angle", angle="Tilt/2"))
+        assert comp.constructionPlanes.captured["angle"][1] == ("str", "Tilt/2")
+        assert out["angle_expression"] == "Tilt/2"
+
+    def test_an_unevaluable_angle_expression_is_refused_before_any_input(self, monkeypatch):
+        comp = _install()
+        _stub_resolve(monkeypatch, cn._EDGES, [_straight_edge()])
+        _with_units_mgr()
+        res = cn.handler(kind="plane", mode="at_angle", angle="NoSuch*2")
+        assert res["isError"] is True and "NoSuch*2" in res["message"]
+        assert comp.constructionPlanes.captured is None
+
 
 class TestPlaneAtAngleOnFace:
     """setByAngleOnCurvedFace rotates the plane about the axis INFERRED from a cylindrical/conical
@@ -501,12 +554,22 @@ class TestPlaneAtAngleOnFace:
         out = _payload(cn.handler(kind="plane", mode="at_angle_on_face", plane="xz", angle=90))
         curved, angle_val, planar = comp.constructionPlanes.captured["angle_on_face"]
         assert curved is face and planar is base_plane
-        assert math.isclose(angle_val[1], math.radians(90))     # createByReal(RADIANS)
-        assert out["angle_deg"] == 90.0
+        assert angle_val == ("str", "90.0 deg")
+        # no definition on the fake plane: the request is not echoed as the landed angle
+        assert out["angle_deg"] is None and "angle_deg is null" in out["note"]
         # the zero-angle reference is the planarEntity, so the payload names the RESOLVED plane -
         # a face handle became a BRepFace, and echoing the request token back would say '<face-h>'
         assert out["angle_from"] == "BRepFace"
         assert out["contains_face_axis"] is True
+
+    def test_a_landed_angle_off_the_request_is_an_error(self, monkeypatch):
+        comp = _install()
+        _stub_resolve(monkeypatch, cn._PLANE, _planar_face((0, 1, 0)))
+        _stub_resolve(monkeypatch, cn._FACE, _cylinder_face((0, 0, 1), (0, 0, 0)))
+        param = type("MP", (), {"name": "d9", "value": math.radians(4.1), "expression": "4.1 deg"})()
+        comp.constructionPlanes.result_definition = type("Def", (), {"angle": param})()
+        res = cn.handler(kind="plane", mode="at_angle_on_face", angle=4.0909090909)
+        assert res["isError"] is True and "4.1 deg" in res["message"]
 
     def test_containment_is_false_when_the_normal_runs_along_the_face_axis(self, monkeypatch):
         # ORIENTATION alone is wrong: the plane's origin sits exactly ON the axis, so only the

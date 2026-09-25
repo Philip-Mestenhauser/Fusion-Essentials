@@ -120,10 +120,7 @@ def _collect_op_health(ops, labels=None):
                                     "warning": (safe(lambda o=o: o.warning) or "").strip()})
         if facts["nonfinite_toolpath"]:
             out["nonfinite"].append(name)
-        # An additive build op carries no toolpath by construction - the same exclusion the
-        # operations reader applies, read off this op's OWN setup, not the caller's scope.
-        additive = _cam_common.is_additive_setup(safe(lambda o=o: o.parentSetup))
-        if _cam_common.is_empty_toolpath(facts, additive=additive):
+        if _cam_common.is_empty_toolpath(facts):
             out["empty"].append(name)
             if _cam_common.is_rail_driven(o):
                 out["empty_rail"].append(name)

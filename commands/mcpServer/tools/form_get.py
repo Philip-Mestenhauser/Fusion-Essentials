@@ -161,8 +161,8 @@ def handler(form: str = "", body: str = "", include=None, max_results: int = 0,
 
 
 TOOL_DESCRIPTION = (
-    "List the T-spline Forms and their creation records; include=['cage'] returns the named "
-    "Form's cage for form_create.")
+    "List T-spline Forms with their creation records; include=['cage'] returns one Form's "
+    "cage for form_create.")
 
 tool = (
     Tool.create_simple(name="form_get", description=TOOL_DESCRIPTION)

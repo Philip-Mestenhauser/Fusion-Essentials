@@ -33,8 +33,9 @@ from ._common import timeline_health as _timeline_health
 def _find_object(timeline, want):
     """(TimelineObject, error_text) for the ONE object named `want`, through the shared by-name
     resolver: an EXACT case-insensitive match, a repeated name refused with its candidates."""
-    return _inputs.resolve_timeline_object(_inputs._timeline_objects(timeline), want,
-                                           "the feature to delete")
+    return _inputs.resolve_timeline_object(
+        _inputs._timeline_objects(timeline), want, "the feature to delete",
+        miss_hint=lambda name: _design_common.collapsed_group_hint(timeline, name))
 
 
 def _name_hits(timeline, name):

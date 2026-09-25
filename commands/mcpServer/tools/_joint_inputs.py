@@ -18,9 +18,9 @@ from ._joints import (AXES as _AXES, all_joint_origins, build_joint_geometry as 
 
 MAP_BLURB = (
     "the joint WRITE substrate above _joints: _resolve_input - the ONE joint-input resolve (a "
-    "find_geometry handle, an autonomous '<occurrence>:<snap>', then a Joint Origin by name), with "
-    "_parse_snap/_pick_face behind it; _JOINT_TYPES/_MOTIONS - the motion vocabulary every joint "
-    "write surface offers; _apply_limits - the limit writer reading each value BACK off the joint")
+    "handle, a '<occurrence>:<snap>', then a Joint Origin name), with _parse_snap/_pick_face behind "
+    "it; _JOINT_TYPES/_MOTIONS - the wire motion vocabulary; _apply_limits - limits read BACK off "
+    "the joint; input_occurrence/pose_before/pose_moved - the jointed parts' world-pose change")
 
 # A joint input may be a find_geometry handle (resolved via the shared GeometryHandle kind, require=any
 # since a joint can land on a face/edge/vertex/point). Not required at the kind level - a non-token spec
@@ -56,6 +56,40 @@ _REST_LIMIT_NOTE = (
     " NOTE: rest_mm/rest_deg set the joint LIMIT'S rest value (a motion-study equilibrium), which does "
     "NOT reposition the static model - it stays at the joint's home value. To POSE the mechanism use "
     "joint_drive (a driven pose does not survive recompute).")
+
+
+MOVED_NOTE = (" 'moved' lists each jointed occurrence whose world pose changed across this call "
+              "(distance_mm and direction, plus rotation_deg for a turn).")
+MOVED_UNREAD_NOTE = (" 'moved' is null - no jointed occurrence's transform read on both sides of "
+                     "this call.")
+
+
+def input_occurrence(joint_input):
+    """The occurrence a joint input is read through - a Joint Origin proxy's assemblyContext, else
+    its geometry entity's - or None for a root-level input."""
+    return (safe(lambda: joint_input.assemblyContext)
+            or safe(lambda: joint_input.entityOne.assemblyContext))
+
+
+def pose_before(occs):
+    """(targets, before): {fullPathName-or-name: occurrence} over `occs` and each one's world pose
+    now, for pose_moved after the write."""
+    from ._assembly_common import _constraint_positions
+    targets = {}
+    for occ in occs:
+        label = (safe(lambda o=occ: o.fullPathName) or safe(lambda o=occ: o.name)
+                 if occ is not None else None)
+        if isinstance(label, str) and label:
+            targets.setdefault(label, occ)
+    return targets, (safe(lambda: _constraint_positions(targets)) or {})
+
+
+def pose_moved(targets, before):
+    """The rows of the targets whose world pose changed since `before`; None when none read on
+    both sides."""
+    from ._assembly_common import _constraint_moves
+    rows, measured = safe(lambda: _constraint_moves(before, targets)) or ([], False)
+    return rows if measured else None
 
 
 def _available_joint_origins(design, limit=8):

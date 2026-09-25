@@ -7,15 +7,16 @@ and cm-based unit ``scale``/``UNIT_TO_CM``."""
 
 import json
 import math
+import re
 
 import adsk.core
 import adsk.fusion
 
 MAP_BLURB = (
     "response+resolve: ok/error/safe (per-FIELD, never a MUTATION), "
-    "measured/read_flag/counted (None, never a coerced 0), design/target_component, "
-    "find_sketch/resolve_sketch (shared name REFUSED), timeline_health/set_verified/rolled_to "
-    "(effect reads; the ONE roll-restore), same_component/native_identity/occurrence_walk/"
+    "measured/read_flag/counted (None, not 0), design/target_component, "
+    "find_sketch/resolve_sketch (shared name REFUSED), timeline_health/timeline_message/"
+    "set_verified/rolled_to (effect reads; ONE roll-restore), same_component/native_identity/occurrence_walk/"
     "broken_reference (TRI-STATE), scale/iter_collection/named_with_remainder/told_apart")
 
 app = adsk.core.Application.get()
@@ -516,10 +517,16 @@ def open_profile_from_sketch(comp, sketch, verb, no_curves_error=None):
     if not n:
         return None, (no_curves_error or "Sketch has no curves to build an open profile from.")
     coll = adsk.core.ObjectCollection.create()
+    added = 0
     for i in range(n):
         c = safe(lambda i=i: curves.item(i))
-        if c is not None:
+        # An ellipse's axes and a drawn helper line are construction curves; handed in, they break
+        # the chain and createOpenProfile raises "curves should be connected and in sequence".
+        if c is not None and safe(lambda c=c: c.isConstruction) is not True:
             coll.add(c)
+            added += 1
+    if not added:
+        return None, (no_curves_error or "Sketch has no curves to build an open profile from.")
     try:
         prof = comp.createOpenProfile(coll, True)
     except Exception as e:
@@ -984,6 +991,28 @@ def timeline_health(design, limit=None):
                             safe(lambda it=it: it.entity.entityToken))
         (errors if hs == 2 else warnings).append(label)
     return errors, warnings, total
+
+
+# A timeline row's errorOrWarningMessage carries <b>/<br/> markup, glues its 'Body N missing'
+# items and sentences together, and ends with the row's own name after the last sentence.
+_MESSAGE_MARKUP = re.compile(r"<[^>]*>")
+_MESSAGE_GLUE = re.compile(r"(?<=missing)(?=[A-Z0-9])|(?<=[.!?])(?=[A-Z])")
+_MESSAGE_LIMIT = 400
+
+
+def timeline_message(raw, name=None, limit=_MESSAGE_LIMIT):
+    """A timeline errorOrWarningMessage as '; '-joined plain text, less the row's `name` suffix."""
+    text = raw if isinstance(raw, str) else ""
+    if isinstance(name, str) and name and text.endswith(name):
+        text = text[:-len(name)]
+    items = []
+    for part in _MESSAGE_MARKUP.split(text):
+        for item in _MESSAGE_GLUE.split(part):
+            item = " ".join(item.split()).rstrip(".")
+            if item:
+                items.append(item)
+    text = "; ".join(items)
+    return text[:limit].rstrip() + " ..." if len(text) > limit else text
 
 
 def rolled_to(design, entity, read, subject):

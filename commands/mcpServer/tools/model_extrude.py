@@ -24,8 +24,7 @@ from . import _assert
 app = adsk.core.Application.get()
 
 # to_object: extrude UP TO a face (handle) instead of a blind distance.
-_TO_OBJECT = _inputs.GeometryHandle("to_object", require="face", required=False,
-    description="Extrude up to this face.")
+_TO_OBJECT = _inputs.GeometryHandle("to_object", require="face", required=False)
 # target_bodies: scope a cut/join/intersect to these bodies so it doesn't bleed through others.
 _TARGET_BODIES = _inputs.BodyRefList("target_bodies", required=False)
 
@@ -87,6 +86,10 @@ def _resolve_profile_indices(profile_index, pcount, profiles=None):
             try:
                 idxs.append(int(x))
             except Exception:
+                if _looks_like_handle(x):
+                    return None, (f"profile_index list holds the profile handle {x!r}: a list takes "
+                                  "integer indices. Pass one handle alone, or the regions' indices "
+                                  "from sketch_get.")
                 return None, f"profile_index list has a non-integer entry: {x!r}."
     else:
         try:
@@ -350,6 +353,25 @@ def _feature_parameters(feature) -> dict:
     return out
 
 
+def _to_face_depth_mm(sketch, bodies):
+    """The ONE new body's length along the sketch normal in mm, or None when it does not read."""
+    # Sketch x/yDirection and a native body both read in the owning component's space, which is
+    # the space getOrientedBoundingBox reads its axis arguments in; a proxy on either side is left.
+    if len(bodies) != 1 or safe(lambda: sketch.assemblyContext) is not None:
+        return None
+    body = bodies[0]
+    if safe(lambda: body.assemblyContext) is not None:
+        return None
+    xd = safe(lambda: sketch.xDirection)
+    n = _geom.cross(_geom.unit_vector(xd), _geom.unit_vector(safe(lambda: sketch.yDirection)))
+    normal = safe(lambda: adsk.core.Vector3D.create(*n)) if n is not None else None
+    mgr = safe(lambda: app.measureManager)
+    if normal is None or mgr is None:
+        return None
+    obb = safe(lambda: mgr.getOrientedBoundingBox(body, normal, xd))
+    return _common.measured(lambda: obb.length, 10.0, 4) if obb is not None else None
+
+
 def _depth_mismatch(fname, what, got_cm, want_cm, raw, k, units) -> str:
     """The refusal for a landed depth that disagrees with the request. ONE wording for every side,
     so a two-sided extrude and a blind one cannot describe the same failure differently. `what`
@@ -469,28 +491,24 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
     stale = _inputs.deferred_sketch_refusal("profile_index", sketch)
 
     # SURFACE path: forced via as_surface, OR auto when there is no closed profile but the sketch has
-    # open curves. Build an OPEN profile and set ExtrudeFeatureInput.isSolid = False (no end caps).
+    # open curves. A requested surface over a current closed region extrudes THAT region with
+    # isSolid = False; otherwise an OPEN profile is built from the curves. Never a solid instead.
     want_surface = bool(as_surface) or (pcount == 0 and not text_addr and not stale)
+    closed_surface = bool(as_surface) and (selected_profile is not None
+                                           or (pcount > 0 and not stale))
     open_surface = False
     indices = [0]
     took_all = False
-    if want_surface:
+    if want_surface and not closed_surface:
         profile_arg, perr = _common.open_profile_from_sketch(
             safe(lambda: sketch.parentComponent) or root, sketch, "for a surface extrude",
             no_curves_error=(f"Sketch '{safe(lambda: sketch.name)}' has no curves to extrude as a "
                              "surface. Draw an open path (a line/arc) or a closed region first."))
         if perr:
-            # No closed profile AND no open curves -> the original dead-end, but now points at the
-            # surface path so the agent knows as_surface exists.
-            if pcount == 0:
-                return error(perr)
-            # as_surface was forced but no open curves: fall back to the closed profile path below.
-            profile_arg, perr = None, None
-            want_surface = False
-        else:
-            open_surface = True
+            return error(perr)
+        open_surface = True
 
-    if not want_surface:
+    if not open_surface:
         # Three ways to name what is extruded: a TEXT address, a profile HANDLE (an entityToken from
         # sketch_get - the robust way to pick one of several regions, face ring vs the region you
         # drew), or an index/list/'all' selector. Each predicate says no to the other two's forms.
@@ -536,6 +554,12 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         ext_input = host.features.extrudeFeatures.createInput(profile_arg, op)
         if open_surface:
             ext_input.isSolid = False   # surface: no end caps (confirmed-live ExtrudeFeatureInput.isSolid)
+        elif closed_surface:
+            serr = _common.set_verified(ext_input, "isSolid", False,
+                                        "isSolid=false (as_surface extrudes the region as a surface)",
+                                        "ExtrudeFeatureInput")
+            if serr:
+                return error(serr)
         elif text_addr:
             # as_surface is refused with a text, so the solid this call promises is STATED and read
             # back rather than inherited from a default the code never read.
@@ -799,9 +823,16 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
 
     # Surface the result either way: read isSolid back off the feature (never assumed).
     is_solid = safe(lambda: feature.isSolid)
+    if (open_surface or closed_surface) and is_solid is True:
+        fname = safe(lambda: feature.name) or "the new extrude feature"
+        return error(f"A surface was requested but '{fname}' reads back isSolid=true."
+                     + _roll_back(design, feature, fname))
     if open_surface:
         note = ("Open profile extruded into a SURFACE (no end caps) - pair with model_stitch to "
     "close several surfaces into a solid.")
+    elif closed_surface:
+        note = ("Closed profile extruded into a SURFACE wall (no end caps) - pair with model_stitch "
+                "to close several surfaces into a solid.")
     elif text_addr:
         note = ("Sketch text extruded into a solid. To stamp text onto an existing face instead, "
                 "use model_emboss.")
@@ -832,8 +863,14 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
                      "them with sketch_get (area/centroid per region) and pass a profile 'handle' "
                      "or an index list.")
 
+    depth_mm = None
     if use_to_object:
         extent_report, distance_report = "to_object", None
+        # A to-face extent carries no distance parameter, so the landed depth is read off the body.
+        if op_key == "new":
+            depth_mm = _to_face_depth_mm(sketch, _common.result_bodies(feature))
+        if depth_mm is None:
+            note += " The landed depth was not read."
     elif ext_key == "through_all":
         extent_report, distance_report = "through_all", None
     else:
@@ -861,7 +898,7 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
                           else "handle" if indices == [None]
                           else (indices[0] if len(indices) == 1 else indices)),
         "profiles_extruded": len(indices),
-        "as_surface": bool(open_surface),
+        "as_surface": bool(open_surface or closed_surface),
         "is_solid": is_solid,
         "distance": distance_report,
         "extent": extent_report,
@@ -876,6 +913,8 @@ def handler(sketch_name: str = "", profile_index=0, distance: float = 0.0,
         result["sketch_component"] = sketch_owner
     if model_params:
         result["model_parameters"] = model_params
+    if depth_mm is not None:
+        result["depth_mm"] = depth_mm
     if enclosed:
         result["enclosed_profile_indices"] = enclosed
     if ext_key == "two_side":
@@ -913,11 +952,12 @@ TOOL_DESCRIPTION = (
 extrude_tool = (
     Tool.create_simple(name="model_extrude", description=TOOL_DESCRIPTION)
     .add_input_property("sketch_name", {"type": "string",
-            "description": "Omit for the most recent sketch."})
+            "description": "Omit for the latest sketch."})
     .add_input_property("profile_index", {"type": ["integer", "string", "array"],
-            "description": "An index (default 0), a list, 'all', one profile 'handle', or 'text:<i>'."})
+            "items": {"type": "integer"},
+            "description": "Index or list, 'all', a profile handle, or 'text:<i>'."})
     .add_input_property("distance", {"type": ["number", "string"],
-            "description": "Depth in 'units' (negative reverses), or a parameter expression."})
+            "description": "Depth in 'units' (negative reverses), or an expression."})
     .add_input_property("distance2", {"type": ["number", "string"]})
     .add_input_property(*_inputs.UNITS.as_property())
     .add_input_property(*_inputs.boolean_op(default="new").as_property())
@@ -928,7 +968,7 @@ extrude_tool = (
     .add_input_property("target_bodies", _TARGET_BODIES.schema())
     .add_input_property(*_sketch_detail.COMPONENT_SCOPE)
     .add_input_property("as_surface", {"type": "boolean",
-            "description": "Make a SURFACE wall (no end caps)."})
+            "description": "SURFACE wall (no end caps): a closed region if any, else the open curves."})
     .strict_schema()
 )
 extrude_item = Item.create_tool_item(tool=extrude_tool, write="write", handler=handler, run_on_main_thread=True,

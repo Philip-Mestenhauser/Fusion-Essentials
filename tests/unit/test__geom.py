@@ -236,6 +236,19 @@ class TestOccurrenceBoxIsTheUnionOfItsBodies:
                                 self._body("Hidden", (0, 0, 0), (8, 6, 1), light_bulb=False)])
         assert _corners(geom.body_aabb(occ)) == ((0.0, 0.0, 0.0), (8.0, 6.0, 1.0))
 
+    def test_a_rotated_proxys_precise_box_wins_over_its_loose_box(self):
+        # MEASURED: a 200 mm disc turned 45 deg reads 282.843 off boundingBox, +/-100 precise.
+        disc = BRepBody("Disc", bbox=make_bbox((-14.1421, -14.1421, 0), (14.1421, 14.1421, 1)),
+                        precise_bbox=make_bbox((-10, -10, 0), (10, 10, 1)))
+        box, read = geom.body_aabb_read(self._occ(bodies=[body_proxy(disc)]))
+        assert _corners(box) == ((-10.0, -10.0, 0.0), (10.0, 10.0, 1.0))
+        assert read == "preciseBoundingBox"
+        assert _corners(geom.body_aabb(disc)) == ((-10.0, -10.0, 0.0), (10.0, 10.0, 1.0))
+
+    def test_a_body_with_no_precise_box_names_the_plain_read(self):
+        occ = self._occ(bodies=[self._body("A", (0, 0, 0), (1, 1, 1))])
+        assert geom.body_aabb_read(occ)[1] == "boundingBox"
+
     def test_a_component_keeps_the_platforms_own_box(self):
         # a Component carries no childOccurrences, and its own bRepBodies do not include the bodies
         # its sub-occurrences place - so a union there would UNDER-report the component.

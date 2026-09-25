@@ -449,6 +449,12 @@ class TestSpacing:
         assert out["units"] == "in"
         assert out["settings"]["spacing"] == 2.0
 
+    def test_a_spacing_past_six_cm_decimals_is_accepted_at_the_read_back_rounding(self):
+        _, af = _install([_sketch("B")], ["A:1"])
+        out = _payload(ar.handler(boundary_sketch="B", shapes="A:1", spacing=0.015625,
+                                  units="in"))
+        assert out["settings"]["spacing"] == 0.015625
+
     def test_a_spacing_that_does_not_read_back_is_an_error(self):
         # A dropped set is silent and leaves the platform default in place, so an ok whose
         # 'settings' cannot show the number would report a spacing that never landed.

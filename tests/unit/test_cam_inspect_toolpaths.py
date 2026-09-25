@@ -920,3 +920,11 @@ class TestEmptyToolpathOverlay:
         measured = _payload(mod.handler())["measured"]
         assert measured["empty_toolpath_count"] == 0
         assert measured["suppressed_excluded"] == 1
+
+    def test_an_additive_build_op_is_never_named_empty(self, wire):
+        import adsk.cam
+        build = FakeSetup("Build", ops=[FakeOperation("Body Preset1", has_toolpath=False)],
+                          operation_type=adsk.cam.OperationTypes.AdditiveOperation)
+        mill = FakeSetup("Mill", ops=[FakeOperation("NoPath", has_toolpath=False)])
+        wire(_cam(build, mill))
+        assert _payload(mod.handler())["measured"]["empty_toolpaths"] == ["NoPath"]

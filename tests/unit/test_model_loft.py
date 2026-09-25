@@ -152,6 +152,24 @@ class TestLoft:
         out = _payload(so.handler(profiles=["H0", "H1"], operation="join"))
         assert "NEW body" not in out["note"]
 
+    @pytest.mark.parametrize("operation, told", [("new", False), ("cut", True)])
+    def test_the_no_target_body_clause_rides_only_a_cut_or_intersect(self, operation, told):
+        lf, _profiles = self._profiles_design()
+
+        def _refuse(inp):
+            raise RuntimeError("3 : loft sections are invalid")
+        lf.add = _refuse
+        res = so.handler(profiles=["H0", "H1"], operation=operation)
+        assert res["isError"] is True and "loft sections are invalid" in res["message"]
+        assert ("No target body" in res["message"]) is told
+
+    def test_a_section_object_with_a_curve_key_is_refused_naming_the_curve_form(self):
+        self._profiles_design()
+        res = so.handler(profiles=[{"sketch": "S", "curve": "ellipse:0"}, "H1"], as_surface=True)
+        assert res["isError"] is True
+        assert "'curve' is not read" in res["message"]
+        assert "'<sketch>/<type>:<index>'" in res["message"]
+
     def test_reports_is_solid_read_back(self):
         self._profiles_design(result_is_solid=True)
         out = _payload(so.handler(profiles=["H0", "H1", "H2"]))

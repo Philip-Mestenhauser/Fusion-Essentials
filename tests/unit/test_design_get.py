@@ -67,7 +67,7 @@ def stub_slices(monkeypatch):
     monkeypatch.setattr(dg, "_slice_configurations", lambda d: ({"table_name": "Configs"}, None))
     monkeypatch.setattr(dg, "_slice_attributes", lambda d, group, key: (
         {"group": group, "key": key, "attributes": []}, None))
-    monkeypatch.setattr(dg, "_slice_metadata", lambda d, name_filter, max_results: (
+    monkeypatch.setattr(dg, "_slice_metadata", lambda d, name_filter, max_results, component="": (
         {"component_count": 1, "returned": 1, "components": [], "name_filter": name_filter,
          "max_results": max_results}, None))
     monkeypatch.setattr(dg, "_slice_materials", lambda d, library, name_filter, max_results: (
@@ -292,6 +292,11 @@ def _occurrences(n):
     return [FakeOccurrence(path=f"C{i}:1", component=MakeComp(f"C{i}")) for i in range(n)]
 
 
+def _joints(prefix, n):
+    """N distinct joints, each keyed by its own entityToken."""
+    return _NamedCollection([SimpleNamespace(entityToken=f"{prefix}{i}") for i in range(n)])
+
+
 def _blind_root(joints=0, asbuilt=0):
     """A root whose occurrence census cannot be taken AT ALL: allOccurrences will not enumerate (the
     measured unresolved-external-reference state) and the component-local `occurrences` fallback
@@ -328,7 +333,7 @@ class TestFingerprint:
         # is an unresolved reference, not a countable instance).
         root = SimpleNamespace(bRepBodies=c(bodies), sketches=c(sketches),
                                allOccurrences=_NamedCollection(_occurrences(occs)),
-                               joints=c(joints), asBuiltJoints=c(asbuilt))
+                               joints=_joints("J", joints), asBuiltJoints=_joints("A", asbuilt))
         return SimpleNamespace(rootComponent=root, userParameters=c(params),
                                allComponents=c(defs))
 
@@ -336,6 +341,13 @@ class TestFingerprint:
         # joints and asBuiltJoints are separate collections; the count must include both.
         fp = dg._fingerprint(self._design(joints=2, asbuilt=3))
         assert fp["joints"] == 5
+
+    def test_a_joint_inside_a_child_component_is_counted(self):
+        # The count covers every component's joints, as assembly_get's walk does, not only the root's.
+        design = self._design(joints=1)
+        child = SimpleNamespace(joints=_joints("K", 2), asBuiltJoints=_joints("B", 1))
+        design.allComponents = _NamedCollection([design.rootComponent, child])
+        assert dg._fingerprint(design)["joints"] == 4
 
     def test_as_built_only_still_counts(self):
         # a design whose ONLY joints are as-built must not report 0 joints.
@@ -469,6 +481,11 @@ class TestTimelineSlice:
     def test_object_summary_message_only_when_present(self):
         assert dg._object_summary(self._tlobj(message="x"))["message"] == "x"
         assert "message" not in dg._object_summary(self._tlobj(message=None))
+
+    def test_object_summary_message_carries_no_markup(self):
+        raw = "Body 1 missing<b>1 Reference Failures</b><br/>Lost.Extrude2"
+        msg = dg._object_summary(self._tlobj(name="Extrude2", message=raw))["message"]
+        assert "<" not in msg and msg == "Body 1 missing; 1 Reference Failures; Lost"
 
     def _design_with(self, items, marker=0, groups=(), root_name="Root"):
         from types import SimpleNamespace
@@ -911,26 +928,30 @@ class TestTimelineParams:
         assert "params_note" not in out
         assert params._reads == 0           # the opt-in cost is not paid by the default call
 
-    def test_name_and_type_match_when_no_token_reads(self):
-        # neither side reads a token; the owner is still matched by name+type, which is the only
-        # identity left.
-        owner = self._entity("Extrude1", type_name="ExtrudeFeature")
-        row_entity = self._entity("Extrude1", type_name="ExtrudeFeature")
-        design = self._design([self._row(row_entity)],
-                              [self._model_param("d1", "Distance", "10 mm", 1.0, owner)])
+    def test_a_same_named_feature_in_another_component_does_not_borrow_its_parameters(self):
+        # FrontTriangle/Loft4 owns weights, SSYoke/Loft4 owns none: a lookup that falls back to
+        # name+type hands the second row the first one's parameters.
+        front = self._entity("Loft4", type_name="LoftFeature", token="tok-front")
+        yoke = self._entity("Loft4", type_name="LoftFeature", token="tok-yoke")
+        design = self._design([self._row(front, index=3), self._row(yoke, index=7)],
+                              [self._model_param("d1310", "startWeight", "1", 1.0, front)])
         out, _ = dg._slice_timeline(design, True, "", True)
-        assert [p["name"] for p in out["timeline"][0]["params"]] == ["d1"]
+        assert [p["name"] for p in out["timeline"][0]["params"]] == ["d1310"]
+        assert "params" not in out["timeline"][1]
 
-    def test_two_owners_sharing_a_name_are_refused_not_mixed(self):
-        # two DIFFERENT features (distinct tokens) wear one name+type. The row's own token does not
-        # read, so only the name key is left - and answering it would publish the union of two
-        # features' parameters on one row.
-        a = self._entity("Fillet1", token="tok-a")
-        b = self._entity("Fillet1", token="tok-b")
-        row_entity = self._entity("Fillet1")           # no token
-        design = self._design([self._row(row_entity)],
-                              [self._model_param("d7", "radius", "3 mm", 0.3, a),
-                               self._model_param("d9", "radius", "5 mm", 0.5, b)])
+    def test_two_same_named_owners_each_keep_their_own_parameters(self):
+        a = self._entity("Loft4", type_name="LoftFeature", token="tok-a")
+        b = self._entity("Loft4", type_name="LoftFeature", token="tok-b")
+        design = self._design([self._row(a, index=0), self._row(b, index=1)],
+                              [self._model_param("d7", "startWeight", "1", 1.0, a),
+                               self._model_param("d9", "startWeight", "2", 2.0, b)])
+        out, _ = dg._slice_timeline(design, True, "", True)
+        assert [[p["name"] for p in r["params"]] for r in out["timeline"]] == [["d7"], ["d9"]]
+
+    def test_a_tokenless_row_is_not_matched_by_name(self):
+        owner = self._entity("Fillet1", token="tok-a")
+        design = self._design([self._row(self._entity("Fillet1"), index=5)],
+                              [self._model_param("d7", "radius", "3 mm", 0.3, owner)])
         out, _ = dg._slice_timeline(design, True, "", True)
         assert "params" not in out["timeline"][0]
 
@@ -953,31 +974,18 @@ class TestTimelineParams:
                 return ent
         return _P()
 
-    def test_two_TOKENLESS_owners_sharing_a_name_are_also_refused(self):
-        # neither owner carries a token and .createdBy mints a FRESH proxy per read (measured):
-        # owner identity comes from the timeline index, and two different indices must refuse
-        # the shared name rather than union two features' parameters.
+    def test_tokenless_owners_are_matched_by_timeline_index_only(self):
+        # .createdBy mints a FRESH proxy per read (measured), so the timeline index is the identity
+        # left when no token reads: the row at index 4 gets index 4's parameters and none of 9's.
         design = self._design(
-            [self._row(self._entity("Fillet1"))],
+            [self._row(self._entity("Fillet1"), index=4)],
             [self._fresh_proxy_param("d7", "radius", "3 mm", 0.3, "Fillet1", tl_index=4),
+             self._fresh_proxy_param("d8", "depth", "2 mm", 0.2, "Fillet1", tl_index=4),
              self._fresh_proxy_param("d9", "radius", "5 mm", 0.5, "Fillet1", tl_index=9)])
-        out, _ = dg._slice_timeline(design, True, "", True)
-        assert "params" not in out["timeline"][0]
-
-    def test_one_tokenless_owner_with_two_params_still_answers(self):
-        # the same feature read twice mints two DISTINCT proxy objects - the shared timeline
-        # index is what keeps its two parameters on one row instead of tripping the guard.
-        design = self._design(
-            [self._row(self._entity("Fillet1"))],
-            [self._fresh_proxy_param("d7", "radius", "3 mm", 0.3, "Fillet1", tl_index=4),
-             self._fresh_proxy_param("d8", "depth", "2 mm", 0.2, "Fillet1", tl_index=4)])
         out, _ = dg._slice_timeline(design, True, "", True)
         assert [p["name"] for p in out["timeline"][0]["params"]] == ["d7", "d8"]
 
-    def test_tokenless_owners_with_no_timeline_index_refuse_a_multi_param_name(self):
-        # no token AND no timeline index leaves no readable owner identity: the per-parameter
-        # sentinel refuses the shared name - an absent answer is the safe direction, a union of
-        # possibly-two features' parameters is not.
+    def test_tokenless_owners_with_no_timeline_index_are_not_attached(self):
         design = self._design(
             [self._row(self._entity("Fillet1"))],
             [self._fresh_proxy_param("d7", "radius", "3 mm", 0.3, "Fillet1"),
@@ -1505,7 +1513,19 @@ class TestTreeNameFilter:
         out, _ = dg._slice_tree(design, 3, "", with_bodies=True)
         assert out["note"].startswith("'Gear' bodies: 25 of 30 shown (cap 25).")
         assert "model_inspect(target='Gear'" in out["note"]
+        assert "has all." in out["note"]
         assert out["note"].endswith(dg._TREE_NOTE)
+
+    def test_past_model_inspects_own_cap_the_remedy_names_that_cap(self, monkeypatch):
+        monkeypatch.setattr(dg, "_MAX_PER_BODY_ROWS", 30)
+        at_cap, _ = dg._slice_tree(_tree_design([_tocc("Gear:1", comp="Gear", bodies=30)]), 3, "",
+                                   with_bodies=True)
+        assert "has all." in at_cap["note"]
+        past, _ = dg._slice_tree(_tree_design([_tocc("Gear:1", comp="Gear", bodies=31)]), 3, "",
+                                 with_bodies=True)
+        assert "has all" not in past["note"]
+        assert "lists at most 30 (per_body_truncated past that)" in past["note"]
+        assert "no narrower scope" in past["note"] and "target='<body>'" in past["note"]
 
     def test_no_body_truncation_leaves_the_note_untouched(self):
         design = _tree_design([_tocc("Gear:1", comp="Gear", bodies=25)])
@@ -1860,6 +1880,62 @@ class TestSliceMetadata:
         sub = MakeComp(name="Sub", entity_token="T:1")
         out, _ = dg._slice_metadata(_metadata_design(root, sub), "", 2)
         assert out["returned"] == 2 and "truncated" not in out
+
+    def test_component_scopes_the_rows_to_that_subtree(self, monkeypatch):
+        wheel = MakeComp(name="Wheel", entity_token="T:w")
+        wheels = [FakeOccurrence(path=f"Bike:1+Wheel:{i}", component=wheel) for i in (1, 2)]
+        bike = MakeComp(name="Bike", entity_token="T:bike", occurrences=wheels)
+        bike.allOccurrences = _NamedCollection(wheels)      # live: an OccurrenceList (count/item)
+        other = MakeComp(name="Other", entity_token="T:o")
+        root = MakeComp(name="Assembly", entity_token="T:root", occurrences=[
+            FakeOccurrence(path="Bike:1", component=bike),
+            FakeOccurrence(path="Other:1", component=other)])
+        design = _metadata_design(root, bike, wheel, other)
+        monkeypatch.setattr(dg._common, "design", lambda: design)
+        out, err = dg._slice_metadata(design, "", 0, "Bike")
+        assert err is None and out["component"] == "Bike"
+        assert [r["name"] for r in out["components"]] == ["Bike", "Wheel"]
+
+    def test_a_subtree_whose_walk_raises_reads_incomplete_not_small(self, monkeypatch):
+        class _Unresolved:
+            name = "Hub:1"
+
+            @property
+            def component(self):
+                raise RuntimeError("2 : InternalValidationError : occ")
+
+        wheel = MakeComp(name="Wheel", entity_token="T:w")
+        wheel_occ = FakeOccurrence(path="Bike:1+Wheel:1", component=wheel)
+        bike = MakeComp(name="Bike", entity_token="T:bike", occurrences=[wheel_occ])
+        bike.occurrences = _NamedCollection([wheel_occ, _Unresolved()])
+        bike.allOccurrences = _NamedCollection(raises="2 : InternalValidationError : occ")
+        root = MakeComp(name="Assembly", entity_token="T:root",
+                        occurrences=[FakeOccurrence(path="Bike:1", component=bike)])
+        design = _metadata_design(root, bike, wheel)
+        monkeypatch.setattr(dg._common, "design", lambda: design)
+        out, err = dg._slice_metadata(design, "", 0, "Bike")
+        assert err is None and [r["name"] for r in out["components"]] == ["Bike", "Wheel"]
+        assert out["incomplete"] is True and "Hub:1" in out["note"]
+
+    def test_a_scope_that_names_nothing_is_an_error(self, monkeypatch):
+        root = MakeComp(name="Assembly", entity_token="T:root")
+        design = _metadata_design(root)
+        monkeypatch.setattr(dg._common, "design", lambda: design)
+        out, err = dg._slice_metadata(design, "", 0, "Ghost")
+        assert out is None and "'Ghost'" in error_message(err)
+
+    def test_a_cut_page_names_the_narrowing_inputs(self):
+        root = MakeComp(name="Assembly", entity_token="T:root")
+        subs = [MakeComp(name=f"Sub{i}", entity_token=f"T:{i}") for i in range(3)]
+        out, _ = dg._slice_metadata(_metadata_design(root, *subs), "", 2)
+        assert "2 more component(s)" in out["note"] and "component='<name>'" in out["note"]
+
+    def test_a_cap_past_the_ceiling_is_held_at_the_ceiling(self, monkeypatch):
+        monkeypatch.setattr(dg, "_METADATA_ROWS_CEILING", 2)
+        root = MakeComp(name="Assembly", entity_token="T:root")
+        subs = [MakeComp(name=f"Sub{i}", entity_token=f"T:{i}") for i in range(3)]
+        out, _ = dg._slice_metadata(_metadata_design(root, *subs), "", 3)
+        assert out["returned"] == 2 and out["truncated"] is True
 
     def test_no_root_component_is_an_error(self):
         out, err = dg._slice_metadata(SimpleNamespace(rootComponent=None), "", 0)

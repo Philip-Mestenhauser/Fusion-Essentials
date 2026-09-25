@@ -15,10 +15,10 @@ import adsk.core
 import adsk.fusion
 
 from conftest import (BRepBody, BRepEdge, BRepFace, Circle3D, Cone, CylindricalJointMotion,
-                      Cylinder, FakeJoint, FakeJointInput, FakeJoints, FakeOccurrence,
-                      FakeTimelineObject, Line3D, MakeComp, Plane, RevoluteJointMotion,
-                      SliderJointMotion, _MotionLimits, _NamedCollection, _Vertex, install,
-                      load_tool, make_bbox, make_design)
+                      Cylinder, FakeJoint, FakeJointInput, FakeJoints, FakeMatrix3D,
+                      FakeOccurrence, FakeTimelineObject, Line3D, MakeComp, Plane,
+                      RevoluteJointMotion, SliderJointMotion, _MotionLimits, _NamedCollection,
+                      _Vertex, install, load_tool, make_bbox, make_design, make_occurrence)
 from conftest import payload as _payload
 
 joint = load_tool("joint_create")
@@ -621,6 +621,38 @@ def _added(joints_coll):
         if call[0] == "add":
             return call[1]
     return None
+
+
+class TestJointedPoses:
+    """The two jointed occurrences' world pose is sampled around the add: a flip turns the child in
+    place, which a translation-only census reports as nothing moved."""
+
+    def test_a_child_turned_in_place_is_published_as_moved(self, monkeypatch):
+        _d, coll = _install_create(monkeypatch)
+        coll._new = FakeJoint(name="Joint1", health=_HEALTH.HealthyFeatureHealthState)
+        pad = make_occurrence("Pad:1", transform2=FakeMatrix3D())
+        frame = make_occurrence("Frame:1", transform2=FakeMatrix3D(t=(5.0, 0.0, 0.0)))
+        inputs = {"A": SimpleNamespace(assemblyContext=pad),
+                  "B": SimpleNamespace(assemblyContext=frame)}
+        monkeypatch.setattr(joint, "_resolve_input", lambda d, spec: (inputs[spec], spec, None))
+        real_add = coll.add
+
+        def add(joint_input):
+            pad.transform2 = FakeMatrix3D(deg=180.0)
+            return real_add(joint_input)
+        coll.add = add
+        out = _payload(joint.handler(occurrence_one="A", occurrence_two="B", flip=True))
+        assert out["moved"] == [{"occurrence": "Pad:1", "distance_mm": 0.0, "direction": None,
+                                 "rotation_deg": 180.0}]
+        assert "top-level occurrences whose translation changed" in out["note"]
+
+    def test_moved_is_null_when_no_jointed_occurrence_reads(self, monkeypatch):
+        _d, coll = _install_create(monkeypatch)
+        coll._new = FakeJoint(name="Joint1", health=_HEALTH.HealthyFeatureHealthState)
+        monkeypatch.setattr(joint, "_resolve_input",
+                            lambda d, spec: (SimpleNamespace(), spec, None))
+        out = _payload(joint.handler(occurrence_one="A", occurrence_two="B"))
+        assert out["moved"] is None and "'moved' is null" in out["note"]
 
 
 class TestCreatedJointHealth:

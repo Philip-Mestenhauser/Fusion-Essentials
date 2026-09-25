@@ -190,8 +190,8 @@ def handler(operation_a: str = "", operation_b: str = "",
 
     # The GEOMETRY half: two ops can carry identical parameters and cut different material, because
     # what is selected lives on the selection objects, not in the parameter expressions.
-    geom_a, picks_a = _geometry_facts(op_a, inv)
-    geom_b, picks_b = _geometry_facts(op_b, inv)
+    geom_a, picks_a = _geometry_facts(op_a, inv, units_key)
+    geom_b, picks_b = _geometry_facts(op_b, inv, units_key)
     geometry_differences = []
     geometry_same = 0
     for k in sorted(set(geom_a) | set(geom_b)):
@@ -367,7 +367,7 @@ def _object_set_facts(p, _inv):
     return (None, None) if value is None else ({"entities": len(value)}, value)
 
 
-def _surface_group_facts(op):
+def _surface_group_facts(op, units):
     """What the operation's SURFACE GROUPS hold: how many, whether the set would take a WRITE, and
     per group its face count, over-holes flag and machining mode - the same reader
     cam_select_geometry writes through, with its write gate off. A set refusing a write still
@@ -378,10 +378,11 @@ def _surface_group_facts(op):
         return None
     p = safe(lambda: op.parameters.itemByName(AVOID_GROUPS_PARAM))
     return {"groups": count, "editable": read_flag(lambda: p.isEditable),
-            "rows": [group_record(safe(lambda i=i: groups.item(i))) for i in range(count)]}
+            "rows": [group_record(safe(lambda i=i: groups.item(i)), units)
+                     for i in range(count)]}
 
 
-def _geometry_facts(op, inv):
+def _geometry_facts(op, inv, units):
     """({parameter: what that selection parameter holds}, {parameter: the reading per selected
     entity}) for every geometry-selection parameter this operation carries - read through the same
     properties cam_select_geometry writes. The readings are the cross-operation compare's, and each
@@ -402,7 +403,7 @@ def _geometry_facts(op, inv):
             if len(entities) > _ENTITY_BASES_CAP:
                 record["entity_bases_truncated"] = True   # absent = every entity is read here
             facts[nm], picks[nm] = record, reads
-    groups = _surface_group_facts(op)
+    groups = _surface_group_facts(op, units)
     if groups is not None:
         facts[AVOID_GROUPS_PARAM] = groups
     return facts, picks

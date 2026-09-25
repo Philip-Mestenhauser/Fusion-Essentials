@@ -87,32 +87,12 @@ def _member_count(obj):
     return 1
 
 
-def _resolve_object(timeline, want, role):
+def _resolve_object(timeline, want, role, roll=False):
     """(TimelineObject, error_text) for ONE object named `want`, through the shared by-name resolver;
     `role` is this call's noun for the target, and the miss hint names a collapsed group."""
-    def collapsed_group_hint(name):
-        holder = _group_holding(timeline, name.lower())
-        if not holder:
-            return None
-        return (f"'{name}' is inside the collapsed timeline group '{holder}', so the timeline does "
-                "not expose it directly. Expand the group in Fusion, or target "
-                f"'{holder}' itself - rolling to a collapsed group works.")
-
-    return _inputs.resolve_timeline_object(_objects(timeline), want, role,
-                                           miss_hint=collapsed_group_hint)
-
-
-def _group_holding(timeline, low_name):
-    """The name of the COLLAPSED group holding an item called `low_name` (already lower-cased), or
-    None. A collapsed group's members are reachable through the group but not through
-    timeline.item(), so this is the only way to tell 'hidden' from 'absent'."""
-    for g in _groups(timeline):
-        if safe(lambda g=g: g.isCollapsed) is not True:
-            continue
-        for m in _common.iter_collection(g):
-            if (safe(lambda m=m: m.name) or "").lower() == low_name:
-                return safe(lambda g=g: g.name) or "(unnamed group)"
-    return None
+    return _inputs.resolve_timeline_object(
+        _objects(timeline), want, role,
+        miss_hint=lambda name: _design_common.collapsed_group_hint(timeline, name, roll))
 
 
 def _marker_facts(timeline, count):
@@ -131,7 +111,7 @@ def _do_roll(timeline, feature, to):
     if feature:
         if to not in _PLACES:
             return error(f"action='roll' with a 'feature' takes to='before' or to='after' (got '{to}').")
-        obj, rerr = _resolve_object(timeline, feature, "the object to roll to")
+        obj, rerr = _resolve_object(timeline, feature, "the object to roll to", roll=True)
         if rerr:
             return error(rerr)
         # A COLLAPSED group rolls like any item. An EXPANDED one raises "Associated feature is

@@ -8,8 +8,9 @@ from types import SimpleNamespace
 
 import adsk.core
 
-from conftest import (FakeUserParameter, FakeUserParameters, MakeComp, MakeDesign, load_tool,
-                      make_joint, make_timeline, payload as _payload)
+from conftest import (FakeTimeline, FakeTimelineObject, FakeUserParameter, FakeUserParameters,
+                      MakeComp, MakeDesign, load_tool, make_joint, make_timeline,
+                      payload as _payload)
 
 params = load_tool("param_set")
 
@@ -180,3 +181,41 @@ class TestDrivenJointsReset:
         _stub_design(monkeypatch, _design(up, make_timeline()))
         out = _payload(params.handler(name="PartX", expression="20 mm"))
         assert "driven_joints_reset" not in out
+
+
+class _BreakingParam(FakeUserParameter):
+    """A user parameter whose expression write recomputes the listed rows into new health states."""
+    _breaks = ()
+
+    @property
+    def expression(self):
+        return self._expression
+
+    @expression.setter
+    def expression(self, value):
+        self._expression = value
+        for row, state in self._breaks:
+            row.healthState = state
+
+
+class TestNewTimelineProblems:
+    def test_a_feature_the_set_breaks_is_named_beside_an_old_warning(self, monkeypatch):
+        split = FakeTimelineObject(name="Split1", index=0)
+        loft = FakeTimelineObject(name="Loft1", index=1)
+        old = FakeTimelineObject(name="Old1", index=2, health=1)
+        param = _BreakingParam(name="PartX", expression="10 mm")
+        param._breaks = ((split, 2), (loft, 1))
+        _stub_design(monkeypatch, _design(FakeUserParameters([param]),
+                                          FakeTimeline([split, loft, old])))
+        out = _payload(params.handler(name="PartX", expression="200 mm"))
+        assert out["set"] is True
+        assert out["new_timeline_errors"] == ["Split1"]
+        assert out["new_timeline_warnings"] == ["Loft1"]
+        assert "Split1, Loft1" in out["note"]
+
+    def test_a_clean_set_publishes_no_problem_keys(self, monkeypatch):
+        old = FakeTimelineObject(name="Old1", index=0, health=2)
+        up = FakeUserParameters([FakeUserParameter(name="PartX", expression="10 mm")])
+        _stub_design(monkeypatch, _design(up, FakeTimeline([old])))
+        out = _payload(params.handler(name="PartX", expression="20 mm"))
+        assert "new_timeline_errors" not in out and "note" not in out

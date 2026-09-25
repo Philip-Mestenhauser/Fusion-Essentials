@@ -2307,6 +2307,38 @@ class TestBuildPathFromSketch:
         assert p.count == 5                        # the construction curve never reached the collection
 
 
+class TestOpenProfileFromSketch:
+    """open_profile_from_sketch hands createOpenProfile the sketch's NON-construction curves only."""
+
+    def _comp(self):
+        calls = []
+        return SimpleNamespace(calls=calls,
+                               createOpenProfile=lambda coll, chain: calls.append(coll) or "open")
+
+    def test_an_ellipses_construction_axes_are_not_collected(self, monkeypatch):
+        import adsk.core
+        ellipse = make_sketch_curve("ellipse")
+        axes = [SimpleNamespace(isConstruction=True) for _ in range(2)]
+        coll = _RecordingCollection()
+        monkeypatch.setattr(adsk.core.ObjectCollection, "create", staticmethod(lambda: coll))
+        comp = self._comp()
+        prof, err = common.open_profile_from_sketch(
+            comp, make_sketch("S", lines=axes, ellipses=[ellipse]), "for a test")
+        assert (prof, err) == ("open", None)
+        assert coll.items == [ellipse]
+
+    def test_a_sketch_of_construction_curves_only_is_the_no_curves_error(self, monkeypatch):
+        import adsk.core
+        monkeypatch.setattr(adsk.core.ObjectCollection, "create",
+                            staticmethod(lambda: _RecordingCollection()))
+        comp = self._comp()
+        prof, err = common.open_profile_from_sketch(
+            comp, make_sketch("S", lines=[SimpleNamespace(isConstruction=True)]), "for a test",
+            no_curves_error="nothing to extrude")
+        assert (prof, err) == (None, "nothing to extrude")
+        assert comp.calls == []
+
+
 class TestApplyRename:
     """apply_rename - the ONE create-flow rename-with-disclosure: a declined or deduped rename is
     returned as a warning beside the ACTUAL name, never swallowed and never an error."""
@@ -2487,6 +2519,28 @@ class TestTimelineHealth:
         payload = json.loads(common.ok({"e": errors, "w": warnings})["content"][0]["text"])
         assert payload == {"e": ["Extrude1"], "w": ["Fillet1"]}
         assert ", ".join(errors) == "Extrude1"
+
+
+class TestTimelineMessage:
+    def test_the_measured_warning_loses_its_markup_and_separates_its_items(self):
+        raw = ("Body 1 missing<b>1 Reference Failures</b><br/>The body reference is lost and this "
+               "feature is using cached geometry.<br/>Edit this feature and select new body "
+               "references.Extrude2")
+        assert common.timeline_message(raw, "Extrude2") == (
+            "Body 1 missing; 1 Reference Failures; The body reference is lost and this feature is "
+            "using cached geometry; Edit this feature and select new body references")
+
+    def test_glued_missing_items_are_split(self):
+        raw = "Body 1 missingBody 2 missing<b>2 Reference Failures</b><br/>Lost.Combine1"
+        assert common.timeline_message(raw, "Combine1") == (
+            "Body 1 missing; Body 2 missing; 2 Reference Failures; Lost")
+
+    def test_an_item_after_the_last_sentence_survives(self):
+        raw = "Lost.<br/>Body 3 missingFillet4"
+        assert common.timeline_message(raw, "Fillet4") == "Lost; Body 3 missing"
+
+    def test_a_decimal_in_the_tail_survives(self):
+        assert common.timeline_message("Gap is 2.5 mm", "Cut1") == "Gap is 2.5 mm"
 
 
 # ── the null-feature note WORDING, pinned by literals ────────────────────────────────────────────

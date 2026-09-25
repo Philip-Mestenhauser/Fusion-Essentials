@@ -285,6 +285,16 @@ class TestProfileIndexResolution:
         idxs, err = ex._resolve_profile_indices("xyz", 6)
         assert idxs is None and "not an int" in err
 
+    def test_the_schema_declares_a_list_as_integer_indices(self):
+        # the handler reads a list as indices only, so the wire must not offer a list of strings.
+        prop = ex.extrude_tool.input_schema["properties"]["profile_index"]
+        assert prop["items"] == {"type": "integer"}
+
+    def test_a_handle_in_a_list_is_refused_naming_the_list_form(self):
+        handle = "A" * 48 + "|@profile:0,0,0"
+        idxs, err = ex._resolve_profile_indices([handle, 1], 6)
+        assert idxs is None and "a list takes integer indices" in err and "one handle alone" in err
+
 
 class TestProfileHandle:
     """profile_index may carry a profile HANDLE (entityToken from sketch_get) — _looks_like_handle
@@ -728,6 +738,47 @@ class TestAsSurface:
         assert ef.last_input.isSolid is False
         assert "SURFACE" in out["note"]
 
+    def test_as_surface_on_a_closed_region_extrudes_that_region(self):
+        # an ellipse's construction axes break the open-profile chain, so the closed region itself
+        # goes in, as a surface - never a solid.
+        ef = _install([_sketch("S", profile_count=2, curve_count=3)])
+        out = _payload(ex.handler(sketch_name="S", distance=5, as_surface=True, profile_index=1))
+        assert ef.last_input.profile == ("profile", 1)
+        assert ef.last_input.isSolid is False
+        assert out["as_surface"] is True and out["is_solid"] is False
+
+    def test_an_isSolid_false_the_input_drops_refuses_before_add(self):
+        ef = _install([_sketch("S", profile_count=1)])
+
+        class _StaysSolid(FakeExtrudeInput):
+            @property
+            def isSolid(self):
+                return True
+
+            @isSolid.setter
+            def isSolid(self, value):
+                pass
+
+        def _make(profile, operation):
+            ef.last_input = _StaysSolid(profile, operation)
+            return ef.last_input
+        ef.createInput = _make
+        res = ex.handler(sketch_name="S", distance=5, as_surface=True)
+        assert res["isError"] is True and "isSolid=false" in res["message"]
+        assert ef.added is False
+
+    def test_a_surface_request_that_lands_a_solid_is_an_error(self):
+        ef = _install([_sketch("S", profile_count=1)])
+        tl = types.SimpleNamespace(count=2)
+        ex.app.activeProduct.timeline = tl
+        solid = FakeFeature(is_solid=True)
+        deleted = []
+        solid.deleteMe = lambda: deleted.append(True) or setattr(tl, "count", 1) or True
+        ef.add = lambda inp: solid
+        res = ex.handler(sketch_name="S", distance=5, as_surface=True)
+        assert res["isError"] is True and "isSolid=true" in res["message"]
+        assert deleted == [True] and "rolled back" in res["message"]
+
     def test_open_path_auto_surface_when_no_closed_profile(self):
         # No closed profile but open curves exist -> auto surface, not a dead-end error.
         ef = _install([_sketch("S", profile_count=0, curve_count=2)])
@@ -906,6 +957,31 @@ class TestToObject:
         # a ToEntityExtentDefinition was used (one_side set, distance_extent not)
         assert ef.last_input.one_side is not None
         assert ef.last_input.distance_extent is None
+
+    def test_to_face_publishes_the_bodys_length_along_the_sketch_normal(self, monkeypatch):
+        import adsk.core
+        from conftest import FakeVector3D
+        ef = _install_geom(faces={"F": BRepFace(None)})
+        sk = ex.app.activeProduct.rootComponent.sketches.item(0)
+        sk.xDirection, sk.yDirection = FakeVector3D(1, 0, 0), FakeVector3D(0, 1, 0)
+        seen = []
+
+        def _obb(geom, length_dir, width_dir):
+            seen.append((geom, (length_dir.x, length_dir.y, length_dir.z)))
+            return types.SimpleNamespace(length=2.53)
+        monkeypatch.setattr(adsk.core.Vector3D, "create",
+                            staticmethod(lambda x, y, z: FakeVector3D(x, y, z)))
+        monkeypatch.setattr(ex.app, "measureManager",
+                            types.SimpleNamespace(getOrientedBoundingBox=_obb), raising=False)
+        out = _payload(ex.handler(sketch_name="S", to_object="F"))
+        assert out["depth_mm"] == 25.3
+        assert seen and seen[0][1] == (0.0, 0.0, 1.0)
+        assert ef.last_input.one_side is not None
+
+    def test_a_to_face_depth_that_does_not_read_is_disclosed(self):
+        _install_geom(faces={"F": BRepFace(None)})
+        out = _payload(ex.handler(sketch_name="S", to_object="F"))
+        assert "depth_mm" not in out and "landed depth was not read" in out["note"]
 
     def test_to_object_overrides_distance(self):
         face = BRepFace(None)
