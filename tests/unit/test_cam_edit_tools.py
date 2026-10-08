@@ -1554,12 +1554,15 @@ class TestTargetToolListCache:
 # ── create_library (folded from cam_create_tool_library) ────────────────────
 
 class _NewLib:
+    """A new ToolLibrary: like the live one, its truth is its tool count, so an empty one is falsy."""
     def __init__(self):
         self.tools = []
     def add(self, t):
         self.tools.append(t)
     @property
     def count(self):
+        return len(self.tools)
+    def __len__(self):
         return len(self.tools)
 
 
@@ -1624,6 +1627,29 @@ class TestCreateLibrary:
         res = ct.handler(action="create_library", scope="local", library="Ghost Lib")
         assert res["isError"] is True
         assert "did not land" in res["message"]
+
+    def test_a_seed_the_library_refuses_creates_nothing(self, monkeypatch):
+        libs = _install_create(monkeypatch)
+
+        class _RefusingLib(_NewLib):
+            """A new library whose add declines every tool."""
+            def add(self, t):
+                return False
+        monkeypatch.setattr(ct, "_empty_library", _RefusingLib)
+        res = ct.handler(action="create_library", scope="local", library="X",
+                         add_tools=[{"library_url": "u", "index": 0}])
+        assert res["isError"] is True and "Only 0 of 1 seed tools" in res["message"]
+        assert len(libs.imported) == 0
+
+    def test_tool_count_is_read_off_the_library_that_loads_back(self, monkeypatch):
+        libs = _install_create(monkeypatch)
+        reloaded = _NewLib()
+        reloaded.tools = ["only one"]
+        monkeypatch.setattr(libs, "toolLibraryAtURL", lambda url: reloaded)
+        res = ct.handler(action="create_library", scope="local", library="X",
+                         add_tools=[{"library_url": "u", "index": 0},
+                                    {"library_url": "u", "index": 1}])
+        assert res["isError"] is True and "holding 1 of the 2 seed tools" in res["message"]
 
     def test_hub_descends_to_team_folder(self, monkeypatch):
         libs = _install_create(monkeypatch)

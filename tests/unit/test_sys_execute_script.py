@@ -247,6 +247,40 @@ class TestReadOnlyRouting:
         assert not any(c.startswith("MCP.Execute") for c in app._commands)
 
 
+class _ReWrappingApp(_TextCommandApp):
+    """activeDocument answers a NEW wrapper on every read: equal (==) to the last, never `is` it."""
+
+    @property
+    def activeDocument(self):
+        doc = _EqualDocument(name="Scratch")
+        self._wrappers.append(doc)
+        return doc
+
+    @activeDocument.setter
+    def activeDocument(self, value):
+        self._wrappers = []
+
+
+class _EqualDocument(FakeFusionDocument):
+    """A document wrapper that compares equal by name, as a re-made native wrapper does."""
+
+    def __eq__(self, other):
+        return isinstance(other, _EqualDocument) and other.name == self.name
+
+    __hash__ = None
+
+
+class TestWriteTransaction:
+    def test_a_rewrapped_active_document_commits_without_switching_documents(self, monkeypatch):
+        app = _ReWrappingApp()
+        monkeypatch.setattr(ses, "app", app)
+        monkeypatch.setattr(ses._drawing_common, "active_drawing", lambda: None)
+        res = ses.handler(_SCRIPT, read_only=False)
+        assert res["isError"] is False
+        assert "PTransaction.Commit" in app._commands
+        assert sum(w._activates for w in app._wrappers) == 0
+
+
 class TestReadOnlyResultHonesty:
     def test_success_returns_the_output_after_this_runs_sentinel(self, run_script):
         reply = json.dumps({"message": "MCP calling tool: sys_execute_script\nstale banner\n"

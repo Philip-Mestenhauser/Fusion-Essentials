@@ -84,6 +84,7 @@ def _posted_dump(tmp_path, *motion):
         "program_name": "4002",
         "file_count": 1,
         "files": [{"file_path": str(path), "size_bytes": path.stat().st_size}],
+        "params_applied": {"nc_program_unit": "Millimeters"},
     }
 
 
@@ -412,6 +413,29 @@ class TestArcPaths:
         assert facts["lowest_z"] == -21.0
         assert _dump_reader.floor(dump, -21)[0] is True
 
+    def test_a_two_lap_arc_is_judged_on_its_full_circle(self):
+        # a contour's finish lap, measured: one onCircular row sweeping 725 deg round the wall.
+        dump = _dump("600: onLinear(35, 0, -20, 1000)",
+                     "601: onCircular(false, 0, 0, -20, 34.8560905456543, 3.170647144317627, -20, "
+                     "1000)\n  sweep: 725.197545deg\n  normal: X=0 Y=0 Z=1 (XY)")
+        ok, facts = _dump_reader.envelope(dump)
+        assert facts["unverified_paths"] == []
+        assert _dump_reader.envelope(dump, tol=35.0)[0] is True and ok is False
+
+    def test_a_zero_pitch_arc_in_a_tilted_plane_is_verified_and_reaches_its_end(self):
+        # a lead-out, measured: CCW about a normal off every primary plane, lifting z -20 -> -19.
+        lead_out = ("601: onCircular(false, 32.77372360229492, 3.9853556156158447, -19, "
+                    "31.777835845947266, 3.894765853881836, -19, 1000)\n  sweep: 90deg\n"
+                    "  normal: X=-0.09059 Y=0.995888 Z=0 \n  radius: 0.999999\n  helical pitch: 0")
+        ok, facts = _dump_reader.floor(
+            _dump("600: onLinear(32.77372360229492, 3.9853556156158447, -20, 1000)", lead_out), -20)
+        assert ok is True and facts["unverified_paths"] == []
+        reversed_turn = lead_out.replace("onCircular(false", "onCircular(true")
+        ok, facts = _dump_reader.floor(
+            _dump("600: onLinear(32.77372360229492, 3.9853556156158447, -20, 1000)",
+                  reversed_turn), -20)
+        assert ok is False and "endpoint" in facts["unverified_paths"][0]["reason"]
+
     @pytest.mark.parametrize("prefix, suffix", [
         ([], "  sweep: 90deg\n  normal: X=0 Y=0 Z=1 (XY)"),
         (["600: onRapid(7, 0, -3)"], ""),
@@ -434,6 +458,12 @@ class TestLiveDumpConsumers:
     def test_the_five_axis_consumer_accepts_a_valid_tilted_dump(self, tmp_path):
         payload = _posted_dump(tmp_path, _CUT)
         assert verify_acts_dump._dumped_5d("Tilted", "4002", 80.0)(payload) is True
+
+    def test_the_five_axis_consumer_refuses_a_post_that_read_back_inches(self, tmp_path):
+        payload = _posted_dump(tmp_path, _CUT)
+        payload["params_applied"]["nc_program_unit"] = "Inches"
+        with pytest.raises(AssertionError):
+            verify_acts_dump._dumped_5d("Tilted", "4002", 80.0)(payload)
 
     def test_the_five_axis_consumer_refuses_an_unreadable_known_motion(self, tmp_path):
         payload = _posted_dump(

@@ -129,6 +129,26 @@ class TestMove:
         assert res["isError"] is True
         assert "did not move" in res["message"]
 
+    def test_an_unreadable_current_transform_moves_nothing(self, wire):
+        class BlindPlacement(FakeOccurrence):
+            """An occurrence whose placement will not read; every write to it is recorded."""
+            writes = []
+
+            @property
+            def transform2(self):
+                raise RuntimeError("transform unreadable")
+
+            @transform2.setter
+            def transform2(self, value):
+                self.writes.append(value)
+
+        occ = BlindPlacement(path="Block:1", component=MakeComp(name="Block"),
+                             transform=FakeMatrix3D())
+        wire(occ)
+        res = asm.handler(occurrence="Block:1", dx=10, rotate_deg=90, rotate_axis="z")
+        assert res["isError"] is True and "nothing was moved" in res["message"]
+        assert occ.writes == []
+
     # An UNREADABLE transform is not a confirmation. The compare that proves the move took needs a
     # reading on BOTH sides, so a missing reading on either one is a refusal - publishing moved:true
     # with a null position beside it would assert an effect no read took. Each side is pinned

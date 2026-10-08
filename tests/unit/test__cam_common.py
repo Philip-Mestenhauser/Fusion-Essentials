@@ -6117,6 +6117,27 @@ class TestResolveMachineByDescription:
         assert queried[-1] == _LOC_LOCAL
 
 
+class TestResolveMachineWidenedPool:
+    """The widened query keys on the request's FIRST model token, so its pool can hold a machine the
+    request never named - a Local 'Brother Speedio' answers 'SPEEDIO' before Fusion360 is read."""
+
+    def _pools(self):
+        return {_LOC_LOCAL: [_machine_stub("Brother", "Speedio", "Brother Speedio")],
+                _LOC_F360: [_machine_stub("Brother", "SPEEDIO M300Xd1", "Brother SPEEDIO M300Xd1"),
+                            _machine_stub("Brother", "SPEEDIO M140X1", "Brother SPEEDIO M140X1")]}
+
+    def test_a_full_label_reaches_the_bundled_machine_past_a_local_namesake(self, install_library):
+        install_library(_machine_lib(self._pools()))
+        m, label, err = cc.resolve_machine("Brother SPEEDIO M300Xd1")
+        assert err is None and label == "Brother SPEEDIO M300Xd1" and m.model == "SPEEDIO M300Xd1"
+
+    def test_a_lone_loose_candidate_is_refused_not_returned(self, install_library):
+        install_library(_machine_lib(self._pools()))
+        m, label, err = cc.resolve_machine("Brother SPEEDIO M999")
+        assert m is None and label is None
+        assert "Brother Speedio" in err
+
+
 class TestResolveMachineSharedDescription:
     """MEASURED in the bundled library: SIX machines carry the model 'Generic 3-axis' with
     different descriptions, and the description 'This machine has XYZ axis on the Head' is carried

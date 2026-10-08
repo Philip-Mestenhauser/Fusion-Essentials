@@ -27,8 +27,9 @@ _MX_PROGRAM = "4002"
 # base index that call published.
 _FLAT_MILL_AT = [t for t, _d in _HUB_TOOLS].index("flat end mill")
 
-# What a caller compares before it judges any distance the dump carries.
-_MM = {"operation:metric": 1, "operation:tool_unit": "millimeters"}
+# The output unit the posts ask for and read back off the NC program. The dump's own
+# operation:metric is the DOCUMENT's CAM unit, which follows the machine's Manufacture default.
+_OUTPUT_UNIT = ("nc_program_unit", "Millimeters")
 
 # The event kinds this reader takes no row off, measured on a posted 2D contour. The arcs are not
 # among them: a contour round the flange's round wall posts five of them, and the verdicts below
@@ -73,6 +74,7 @@ def _dumped(setup, program):
              "first_cut": cuts[0] if cuts else None, "first_arc": arcs[0] if arcs else None,
              "first_move": moves[0] if moves else None},
             p.get("posted") is True and p.get("scope") == "setup"
+            and (p.get("params_applied") or {}).get(_OUTPUT_UNIT[0]) == _OUTPUT_UNIT[1]
             and p.get("post_scope") == "fusion" and p.get("program_name") == program
             and _DUMP_POST in str(p.get("post_config") or "")
             and p.get("file_count") == len(files) and len(files) == 1
@@ -88,12 +90,20 @@ def _dumped(setup, program):
     return check
 
 
+def _parked_unit(p):
+    """The posted file's path, with the output unit its NC program read back parked beside it."""
+    _RECALL["hub_dump_unit"] = (p.get("params_applied") or {}).get(_OUTPUT_UNIT[0])
+    return p["files"][0]["file_path"]
+
+
 def _verdicts(p):
     """model_inspect beside the posted dump: the units first, then envelope, floor and tilt."""
     dump = _dump_reader.read_dump(_RECALL["hub_dump_path"])
-    if dump.units() != _MM or p.get("units") != "mm":
+    posted_unit = _RECALL.get("hub_dump_unit")
+    if posted_unit != _OUTPUT_UNIT[1] or p.get("units") != "mm":
         return _measured("both reads state millimetres before a distance is judged",
-                         {"dump_units": dump.units(), "inspect_units": p.get("units")}, False)
+                         {"posted_unit": posted_unit, "dump_units": dump.units(),
+                          "inspect_units": p.get("units")}, False)
     part, top_world = dump.box("part"), (p.get("max_point") or {}).get("z")
     rim_world = _RECALL["hub_dump_rim"]["position"][2]
     if part is None or not _num(top_world):
@@ -146,6 +156,7 @@ def _dumped_5d(setup, program, limit_deg):
              "skipped": dump and dump.skipped, "tilt": tilted,
              "envelope": dump and _dump_reader.envelope(dump)[1]},
             p.get("posted") is True and p.get("program_name") == program
+            and (p.get("params_applied") or {}).get(_OUTPUT_UNIT[0]) == _OUTPUT_UNIT[1]
             and p.get("file_count") == len(files) and len(files) == 1
             and _num(files[0].get("size_bytes")) and files[0]["size_bytes"] > 0
             and dump is not None and upright and tilted.get("axis_rows", 0) > 0
@@ -182,9 +193,9 @@ _HUB_CONTOUR = [
 # rows read back off the file, and the three verdicts over them.
 _HUB_DUMP = [
     ("cam_post", {"scope": HUB_MILL_SETUP, "post": _DUMP_POST, "post_scope": "fusion",
-                  "output_folder": _DUMP_DIR, "program_name": _DUMP_PROGRAM},
+                  "output_folder": _DUMP_DIR, "program_name": _DUMP_PROGRAM, "units": "mm"},
      _dumped(HUB_MILL_SETUP, _DUMP_PROGRAM),
-     ("hub_dump_path", _recall("hub_dump_path", lambda p: p["files"][0]["file_path"]))),
+     ("hub_dump_path", _recall("hub_dump_path", _parked_unit))),
     ("model_inspect", {"target": HUB_COMP + ":1"}, _verdicts, None),
 ]
 
@@ -194,6 +205,6 @@ _HUB_DUMP = [
 # rail act's own setup, so it rides the harness that builds one, behind that act's boundary poll.
 _MX_DUMP = [
     ("cam_post", {"scope": _MX_SETUP, "post": _DUMP_POST, "post_scope": "fusion",
-                  "output_folder": _DUMP_DIR, "program_name": _MX_PROGRAM},
+                  "output_folder": _DUMP_DIR, "program_name": _MX_PROGRAM, "units": "mm"},
      _needs(MACHINING_EXTENSION, _dumped_5d(_MX_SETUP, _MX_PROGRAM, _MX_TILT_LIMIT)), None),
 ]

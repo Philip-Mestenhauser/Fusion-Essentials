@@ -246,13 +246,32 @@ def _screen_span(bb, right, up):
 _FRAME_MARGIN = 2.0
 
 
+def _view_size(vp):
+    """(width, height) of the viewport in the pixel space modelToViewSpace/viewToModelSpace use, or
+    None when the size will not read."""
+    w, h = safe(lambda: float(vp.width)), safe(lambda: float(vp.height))
+    if not w or not h or w <= 0 or h <= 0:
+        return None
+    # vp.width/height are logical points, the view-space mapping is device pixels (2x on a Retina
+    # Mac, measured): the camera target is the view centre, so where it projects gives the scale.
+    centre = safe(lambda: vp.modelToViewSpace(vp.camera.target))
+    cx, cy = safe(lambda: float(centre.x)), safe(lambda: float(centre.y))
+    if cx is None or cy is None or not math.isfinite(cx) or not math.isfinite(cy):
+        return w, h
+    sx, sy = cx / (w / 2.0), cy / (h / 2.0)
+    if sx < 1.0 or abs(sx - sy) > 0.01 * sx:
+        return w, h
+    return w * sx, h * sx
+
+
 def _frame_world_spans(vp):
     """(width, height) of what the viewport currently shows, in MODEL units, off the viewport's own
     view->model mapping - four reads that move no camera. Exact on an orthographic camera; on a
     perspective one it is the span at the depth the mapping picks."""
-    w, h = safe(lambda: vp.width), safe(lambda: vp.height)
-    if not w or not h:
+    size = _view_size(vp)
+    if size is None:
         return None
+    w, h = size
 
     def at(px, py):
         return safe(lambda: vp.viewToModelSpace(adsk.core.Point2D.create(float(px), float(py))))
@@ -349,8 +368,8 @@ _PERSPECTIVE_FILL_TOLERANCE = 0.12
 
 def _perspective_frame(vp, cam, focus_bb, target, label):
     """Frame a perspective focus from projected readbacks or return an honest error."""
-    width, height = safe(lambda: float(vp.width)), safe(lambda: float(vp.height))
-    if not width or not height or width <= 0 or height <= 0:
+    width, height = _view_size(vp) or (None, None)
+    if not width or not height:
         current = safe(lambda: vp.camera)
         current_target = _point_values(safe(lambda: current.target))
         current_type = safe(lambda: current.cameraType)

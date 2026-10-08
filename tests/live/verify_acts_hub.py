@@ -1433,7 +1433,7 @@ _HUB_ADDITIVE = [
     ("cam_create_setup", {"operation_type": "additive", "name": _ADD_SETUP + "NoMachine"},
      _refused("needs 'machine'", "Setup creation failed"), None),
     # And it must be a PRINTER: the mill the hub's own acts use reads isAdditiveSupported false.
-    ("cam_create_setup", {"operation_type": "additive", "machine": "Haas|VF-2",
+    ("cam_create_setup", {"operation_type": "additive", "machine": "Haas VF-2",
                           "name": _ADD_SETUP + "NotAPrinter"},
      _refused("isAdditiveSupported false", "machine_type='additive'"), None),
     # The print setting is addressed by NAME, case-insensitively - its id is not an address, since

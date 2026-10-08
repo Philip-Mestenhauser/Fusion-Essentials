@@ -6,7 +6,7 @@ navigate by: where each tool's text (its **description** = the manual, its runti
 = the situational tip) names ANOTHER tool. Act on the Blindspots below - fix dead references,
 close orphans, factor duplicated guards into shared helpers.
 
-**Tools:** 196  |  **description breadcrumbs:** 300  |  **note/error breadcrumbs:** 631
+**Tools:** 196  |  **description breadcrumbs:** 300  |  **note/error breadcrumbs:** 632
   |  **guidance smells flagged:** 8
 ## Blindspots to engineer
 
@@ -17,8 +17,8 @@ close orphans, factor duplicated guards into shared helpers.
 **Read/Acquire (9)** - higher concern, a check-your-work tool nothing points to:
   `cam_compare_operations`, `cam_find_holes`, `cam_find_pockets`, `cam_inspect_toolpaths`, `drawing_get_status`, `model_compute_holder`, `model_measure_continuity`, `model_measure_relation`, `sys_get_api_doc`
 
-**Edit (48)** - usually leaf actions, scan for genuine gaps:
-  `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `data_move_file`, `design_remove_feature`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_delete_sketch`, `drawing_dimension`, `drawing_insert_image`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_plane_cut`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `model_unstitch`, `param_delete`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_add_3d_spline`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
+**Edit (47)** - usually leaf actions, scan for genuine gaps:
+  `cam_activate_setup`, `cam_delete_template`, `cam_generate_setup_sheet`, `cam_reorder`, `cam_show_toolpath`, `data_create_project`, `data_delete_folder`, `data_move_file`, `design_remove_feature`, `doc_save_milestone`, `drawing_add_sketch`, `drawing_delete_sketch`, `drawing_dimension`, `drawing_insert_image`, `joint_create_as_built`, `mesh_combine`, `mesh_delete`, `mesh_plane_cut`, `mesh_reverse_normal`, `mesh_separate`, `mesh_shell`, `mesh_smooth`, `model_arrange`, `model_base_feature`, `model_draft`, `model_loft`, `model_pattern_path`, `model_pattern_rectangular`, `model_replace_face`, `model_scale`, `model_set_material`, `model_thread`, `model_unstitch`, `param_set_favorite`, `sketch_add_3d_line`, `sketch_add_3d_spline`, `sketch_copy`, `sketch_insert_svg`, `sketch_move`, `surface_create_ruled`, `surface_delete_face`, `surface_extend`, `surface_fill`, `surface_offset`, `surface_revolve`, `surface_untrim`, `sys_reload_addin`
 
 ### Duplicated guard strings (>=4 copies = factor into a shared _common helper)
 - **54x** across 53 module(s): "No active design. Create or open a document first (see doc_new)."
@@ -339,11 +339,13 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Provide a translation (dx/dy/dz), rotate_deg, or rotate_x/y/z - no movement specified.
 - Use EITHER rotate_deg (single axis) OR rotate_x/y/z (multi-axis), not both.
 - No active design with components.
+- ' did not read its current transform, so a relative move has nothing to compose onto - nothing was moved. Re-read it with assembly_get and retry.
 - Move was accepted but '
 - ' reads an unchanged transform - it did not move. A grounded/jointed occurrence can snap back: free it (assembly_ground false) or pose it through its joint (joint_drive).
 - ' was moved but its transform could not be read
 - the change, so the move is UNCONFIRMED - nothing here confirms the occurrence actually moved, and it may have snapped back. Re-read the position with assembly_get (occurrence origin) or model_inspect.
 - ' reads a CHANGED transform but its body geometry did NOT move - the reposition did not reach the part, and the transform it now reads is a claim nothing carried out. A pattern/mirror FEATURE re-de...
+- '' did not read its current transform, so a relative move has nothing to compose onto - nothing was moved. Re-read it with assembly_get and retry.
 - Move was accepted but '' reads an unchanged transform - it did not move. A grounded/jointed occurrence can snap back: free it (assembly_ground false) or pose it through its joint (joint_drive).
 - '' was moved but its transform could not be read  the change, so the move is UNCONFIRMED - nothing here confirms the occurrence actually moved, and it may have snapped back. Re-read the position wi...
 - '' reads a CHANGED transform but its body geometry did NOT move - the reposition did not reach the part, and the transform it now reads is a claim nothing carried out. A pattern/mirror FEATURE re-d...
@@ -672,7 +674,11 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - Tool libraries unavailable.
 - Could not resolve the '
 - Could not create an empty tool library.
+- seed tools went into the new library, so '
+- ' was not created. Check each seed's library_url and index with action='list'.
 - importToolLibrary returned a URL but no library loads back from it - the create did not land.
+- but loads back holding
+- seed tools. Inspect it with action='list' and add the missing ones with action='add'.
 - Library created and persisted. List it with action='list'. (Local=disk, Cloud/Hub=your Autodesk account; a duplicate name gets a numeric suffix.)
 - No hub folder to create the library in.
 - Each seed entry must be {library_url, index}; got
@@ -733,6 +739,8 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - operationsByTool names  operation(s) running this entry - 'invalidated_operations' lists them; regenerate them with cam_generate.
 - , and read back from the document tool library - a document read-back shows the change is present, not that it was stored; doc_save stores the document.
 - operationsByTool did not answer for the tool at index , so which operations run it is UNKNOWN - that is not 'used by none'. Re-read the library with action='list' and retry.
+- Only  of  seed tools went into the new library, so '' was not created. Check each seed's library_url and index with action='list'.
+- Library '' was created at  but loads back holding  of the  seed tools. Inspect it with action='list' and add the missing ones with action='add'.
 
 ### `cam_find_holes`
 - Omitted 'bodies' scans every solid body. Each hole's 'faces' lists handles PER SEGMENT, in the group's 'segments' order - pass handles to cam_select_geometry(selection='holes', handles=[...]), whic...
@@ -1796,7 +1804,7 @@ are omitted; this is the GUIDANCE layer, not input validation.)
 - addByInsert returned nothing (the insert did not produce an occurrence).
 - addByInsert returned an occurrence but it reads isValid=false - the insert did not land.
 - Insert landed but the occurrence is NOT an external reference (isReferencedComponent=false) - the associative link did not form. Confirm the source and host share a project, then retry.
-- Inserted at the requested placement, from the source's last SAVED cloud version. bound_version is the version this reference holds - null where none read it or two disagree; bound_is_tip whether it...
+- , from the source's last SAVED cloud version. bound_version is the version this reference holds - null where none read it or two disagree; bound_is_tip whether it is the source's latest - null if e...
 - ' has no component to insert into.
 - Unknown rotate_axis '
 - ) was refused - the placement rotation could not be built, so nothing was inserted or removed.
@@ -2258,7 +2266,6 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - jointOrigins.add returned nothing.
 - Joint origin landed on component '
 - ', not the requested '
-- '. Rolled it back; nothing changed.
 - 'component': occurrence '
 - ' has no readable component to receive the joint origin.
 - Could not create joint-origin input:
@@ -2266,10 +2273,8 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - Could not set the coordinate offsets on the joint origin:
 - Coordinate offsets did not take: asked
 - cm but the joint origin reports
-- cm. Rolled the origin back; nothing changed.
 - Joint origin landed at
 - but the computed anchor was
-- cm). Rolled the origin back; nothing changed.
 - 'component': anchor='' places the frame from WORLD coordinates, but a joint origin inside a component is positioned in THAT component's own space, and the placement transform of '' . Anchor on geom...
 - The origin's own parentComponent , so which component it belongs to is UNVERIFIED - a joint origin on another component cannot serve as this one's side of a joint. Confirm with assembly_get(include...
 - This origin lives in component '' - its offsets are measured from THAT component's origin, so it can serve as that component's side of a joint.
@@ -2344,6 +2349,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - to that Joint Origin: the Joint Origin is LATER in the timeline (position
 - ) than the joint (position
 - ). Editing a joint rolls the timeline to just before it, where a later feature does not exist yet. Create the Joint Origin before the joint, or delete the joint and recreate it after the Joint Orig...
+- . Edits already applied before the failure:
 - setter returned false
 - Edits already applied before the failure:
 - This joint has no offset parameter (rigid/inferred or already 0-DOF).
@@ -3404,6 +3410,7 @@ A planar face's 'frame' is that plane in world space: the point at local (u, v) 
 - 'params' must be a list of {name, expression, ...} dicts.
 - user parameters added; timeline verified.
 - ] must be a dict with 'name' and 'expression'.
+- adding '' introduced a timeline error () and its rollback did not confirm, so '' may remain - remove it with param_delete.
 
 ### `param_delete`
 - Provide 'name' - the parameter to delete.

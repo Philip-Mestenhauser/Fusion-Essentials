@@ -158,6 +158,7 @@ cython_debug/
 # agent definitions are owner-local working machinery, not part of the product.
 .claude/settings.local.json
 .claude/agents/
+.claude/skills/fe-review-*/
 CLAUDE.local.md
 
 # Local backlog and short-lived plans are private; keep open work in plans/backlog.md.

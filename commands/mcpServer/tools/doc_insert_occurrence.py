@@ -47,6 +47,25 @@ def _bound_version(design, lineage):
     return held[0] if len(set(held)) == 1 else None
 
 
+
+# The band two placement matrices may differ by and still be one placement (cm and cosines alike).
+_PLACEMENT_TOL = 1e-6
+
+
+def _placement_read_back(occ, requested, k, units):
+    """(the translation the new occurrence reads in `units`, whether its whole placement matches the
+    requested matrix) - each None when it did not read."""
+    got = safe(lambda: occ.transform2)
+    tr = safe(lambda: got.translation) if got is not None else None
+    placed = (safe(lambda: {"x": round(tr.x / k, 4), "y": round(tr.y / k, 4),
+                            "z": round(tr.z / k, 4), "units": units})
+              if tr is not None else None)
+    got_arr = safe(lambda: list(got.asArray())) if got is not None else None
+    want_arr = safe(lambda: list(requested.asArray()))
+    if not got_arr or not want_arr or len(got_arr) != len(want_arr):
+        return placed, None
+    return placed, max(abs(a - b) for a, b in zip(got_arr, want_arr)) <= _PLACEMENT_TOL
+
 def handler(document_id: str = "", into_component: str = "",
             remove_existing: str = "", x: float = 0.0, y: float = 0.0, z: float = 0.0,
             units: str = "mm", rotate_deg: float = 0.0, rotate_axis: str = "z") -> dict:
@@ -143,6 +162,15 @@ def handler(document_id: str = "", into_component: str = "",
     lineage = safe(lambda: data_file.id)
     bound = _bound_version(design, lineage)
     latest = safe(lambda: data_file.latestVersionNumber)
+    placed_at, placement_matches = _placement_read_back(new_occ, transform, k, units)
+    if placement_matches is True:
+        where = "Inserted at the requested placement"
+    elif placement_matches is False:
+        where = (f"Inserted, but it reads placed_at {placed_at}, not the requested placement - "
+                 "reposition it with assembly_move")
+    else:
+        where = ("Inserted; its placement did not read back, so where it landed is unconfirmed - "
+                 "read it with assembly_get")
     return ok({
         "inserted": True,
         "document_name": safe(lambda: data_file.name),
@@ -155,9 +183,10 @@ def handler(document_id: str = "", into_component: str = "",
         # null, never false, when either number did not read - an unread pair is not a stale one.
         "bound_is_tip": (bound == latest) if (bound is not None and latest is not None) else None,
         "removed_occurrence": removed,
-        "placed_at": ({"x": x, "y": y, "z": z, "units": units} if (x or y or z) else "origin"),
+        "placed_at": placed_at,
+        "placement_matches": placement_matches,
         "rotate_deg": float(rotate_deg or 0.0),
-        "note": ("Inserted at the requested placement, from the source's last SAVED cloud version. "
+        "note": (f"{where}, from the source's last SAVED cloud version. "
             "bound_version is the version this reference holds - null where none read it or two "
             "disagree; bound_is_tip whether it is the source's latest - null if either is unknown, "
             "false is brought current with doc_update_xref. A removed occurrence leaves features "

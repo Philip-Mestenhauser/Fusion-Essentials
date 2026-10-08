@@ -151,7 +151,8 @@ def attestation_identity(health):
 
 
 def health_gate():
-    with urllib.request.urlopen(BASE + "/health", timeout=5) as resp:
+    # /health recomputes the loaded attestation on every call - seconds - so 5 s reads a live server as absent.
+    with urllib.request.urlopen(BASE + "/health", timeout=10) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     if data.get("server") != SERVER_NAME:
         sys.exit(f"Refusing to run: {BASE} is answering as {data.get('server')!r}, "

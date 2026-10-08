@@ -1924,19 +1924,24 @@ def resolve_machine(machine):
     cands = query_machines(lib, vendor, model)
     # WIDEN when the model as given matches nothing: the query prefix-matches the MODEL field, but a
     # variant's distinguishing text lives in its DESCRIPTION, which is the label callers pass. The
-    # broad token fetches the candidate pool that is LABEL-matched below.
+    # broad token fetches a pool that answers only where a machine matches the WHOLE request.
+    near = []
     if not cands:
-        v2, broad = vendor, model
+        v2, full_model = vendor, model
         if vendor and model.lower().startswith(vendor.lower() + " "):
-            broad = model[len(vendor):].strip()               # 'Haas|Haas VF-2' -> model 'VF-2'
+            full_model = model[len(vendor):].strip()          # 'Haas|Haas VF-2' -> model 'VF-2'
         elif not vendor and " " in machine:
-            v2, broad = machine.split(" ", 1)                 # bare 'Haas VF-2...' -> vendor 'Haas'
-        broad = broad.split(" ", 1)[0].strip() if broad else broad   # first model token ('VF-2')
-        v2 = v2.strip()
+            v2, full_model = machine.split(" ", 1)            # bare 'Haas VF-2...' -> vendor 'Haas'
+        broad = full_model.split(" ", 1)[0].strip() if full_model else full_model  # first token
+        v2, full_model = v2.strip(), full_model.strip()
         if (v2, broad) != (vendor, model) and (v2 or broad):
             widened = query_machines(lib, v2, broad)
-            if widened:
-                cands, vendor, model = widened, v2, broad
+            exact = _exact_machine(widened, machine, v2, full_model) if widened else None
+            if exact is not None:
+                return exact[0], exact[1], None
+            # The pool came from the first location holding the token, so a miss here falls
+            # through to the catalog walk, which reads every location.
+            near = widened
     # LAST: match the DESCRIPTION over one catalog walk, since the query keys on the MODEL field.
     # Two targets: the whole request against the label, and the half after a 'vendor|description'
     # separator against the label of a machine whose vendor is the other half.
@@ -1955,6 +1960,11 @@ def resolve_machine(machine):
                             f"for '{machine}', which the Local and Fusion360 queries did not match. "
                             "Whether a machine carries that name is UNKNOWN - retry, or pass "
                             "'vendor|model', which is queried without the catalog read.")
+    if not cands and near:
+        lines = [f"{lab} [{v}|{mo}]" if (v and mo) else lab for (_m, lab, v, mo) in near if lab]
+        return None, None, (f"No machine answers to '{machine}' exactly; the query on its first "
+                            f"model token found {named_with_remainder(lines, cap=6)}. Pass one of "
+                            "those lines as shown, or cam_get(include=['machines'], vendor=...).")
     if not cands:
         if ident:
             return None, None, (f"No machine matches description '{ident[0]}' with vendor|model "

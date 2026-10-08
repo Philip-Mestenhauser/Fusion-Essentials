@@ -862,6 +862,21 @@ class TestActiveComponentDisclosure:
         assert "landed on component 'Comp1'" in res["message"]
         assert rolled["back"] is True
 
+    def test_a_landing_rollback_that_does_not_delete_is_not_claimed(self, monkeypatch):
+        design, sub, _ = _install_with_sub(monkeypatch)
+        real_add = sub.jointOrigins.add
+
+        def _stuck_add(jo_input):
+            origin = real_add(jo_input)
+            origin.parentComponent = design.rootComponent
+            origin.deleteMe = lambda: False
+            return origin
+        monkeypatch.setattr(sub.jointOrigins, "add", _stuck_add)
+        res = jo.handler(anchor="coordinates", target="origin", component="Sub:1")
+        assert res["isError"] is True
+        assert "nothing changed" not in res["message"]
+        assert "may remain" in res["message"] and "design_delete_feature" in res["message"]
+
     def test_an_unverifiable_landing_is_disclosed_not_claimed(self, monkeypatch):
         # parentComponent unreadable - the WEAKER of the two unknowns, because 'component' then
         # repeats the caller's own ask. The payload must say so in words, not just in a flag: a

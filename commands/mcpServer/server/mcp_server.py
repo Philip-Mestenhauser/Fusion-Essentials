@@ -24,6 +24,7 @@ import hashlib
 import json
 import math
 import os
+import socket
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -110,7 +111,23 @@ class _AfterSendResponse(dict):
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     """HTTP server that handles each request on its own daemon thread."""
     daemon_threads = True
-    allow_reuse_address = False  # we WANT bind to fail loudly if 27182 is taken
+    # POSIX refuses a bind while the last server's closed connections sit in TIME_WAIT (~30 s on
+    # macOS), which a reload hits; Windows SO_REUSEADDR would instead steal a live listener.
+    allow_reuse_address = os.name != 'nt'
+
+    def server_bind(self):
+        """Bind, refusing with EADDRINUSE when anything already accepts on the port."""
+        if self.allow_reuse_address:
+            # Reuse would let this bind sit under a 0.0.0.0 listener, so a live one is refused here.
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.settimeout(0.5)
+            try:
+                listening = probe.connect_ex(self.server_address) == 0
+            finally:
+                probe.close()
+            if listening:
+                raise OSError(errno.EADDRINUSE, f"port {self.server_address[1]} is in use")
+        super().server_bind()
 
 
 # Handler kwargs DELIBERATELY absent from a tool's wire schema: the handler accepts the key and

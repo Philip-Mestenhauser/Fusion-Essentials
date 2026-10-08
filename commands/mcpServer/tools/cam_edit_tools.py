@@ -14,8 +14,8 @@ import adsk.cam
 from ..mcp_primitives.tool import Tool
 from ..mcp_primitives.item import Item, Verification
 from ..mcp_primitives.registry import register
-from ._common import (CM_TO_UNIT, iter_collection, named_with_remainder, ok, error, read_flag,
-                      safe)
+from ._common import (CM_TO_UNIT, counted, iter_collection, named_with_remainder, ok, error,
+                      read_flag, safe)
 from ._cam_common import (assets_named, get_cam, expression_error, library_assets, quote_expression,
                           tool_dimension_value, unquote_expression)
 from ._cam_presets import (_apply_preset_values, _persist_preset_change, _persisted_preset_names,
@@ -212,7 +212,7 @@ def _resolve_target(scope, library):
         return None, (f"No {scope} library '{target}'. Available: "
                       f"{', '.join(str(a) for a in avail)}.{capped}")
     lib = safe(lambda: libs.toolLibraryAtURL(lib_url))
-    if not lib:
+    if lib is None:
         return None, f"Could not load {scope} library '{target}'."
     # A write to this library makes any cached copy of it stale, so persist drops that entry.
     cache_key = safe(lambda: lib_url.toString())
@@ -258,7 +258,7 @@ def _source_tool(library_url, index):
         url = safe(lambda: adsk.core.URL.create(library_url))
         lib = safe(lambda: libs.toolLibraryAtURL(url)) if url else None
         _cache_library(library_url, lib)
-    if not lib:
+    if lib is None:
         return None, f"Could not load source library '{library_url}'."
     n = safe(lambda: lib.count, 0) or 0
     if not (0 <= index < n):
@@ -1193,11 +1193,17 @@ def _do_create_library(scope, name, seed_tools):
         if terr:
             return error(terr)
         resolved.append(t)
+    # A ToolLibrary's truth is its tool count, so a new empty one reads False: test for None.
     lib = safe(lambda: _empty_library())
-    if not lib:
+    if lib is None:
         return error("Could not create an empty tool library.")
     for t in resolved:
         safe(lambda t=t: lib.add(t))
+    seeded = counted(lambda: lib.count)
+    if seeded is not None and seeded != len(resolved):
+        return error(f"Only {seeded} of {len(resolved)} seed tools went into the new library, so "
+                     f"'{name}' was not created. Check each seed's library_url and index with "
+                     "action='list'.")
     try:
         new_url = libs.importToolLibrary(lib, root, name)
     except Exception as e:
@@ -1206,11 +1212,17 @@ def _do_create_library(scope, name, seed_tools):
         return error(f"Creating library '{name}' at {scope} failed: {e}.{hint}")
     if not new_url:
         return error(f"Creating library '{name}' at {scope} returned no URL.")
-    if safe(lambda: libs.toolLibraryAtURL(new_url)) is None:
+    loaded = safe(lambda: libs.toolLibraryAtURL(new_url))
+    if loaded is None:
         return error(f"importToolLibrary returned a URL but no library loads back from it - the "
                      "create did not land.")
+    landed = counted(lambda: loaded.count)
+    if landed is not None and landed != len(resolved):
+        return error(f"Library '{name}' was created at {scope} but loads back holding {landed} of "
+                     f"the {len(resolved)} seed tools. Inspect it with action='list' and add the "
+                     "missing ones with action='add'.")
     return ok({"created_library": name, "scope": scope, "url": safe(lambda: new_url.toString()),
-               "tool_count": safe(lambda: lib.count, len(resolved)),
+               "tool_count": landed,
                "note": "Library created and persisted. List it with action='list'. (Local=disk, "
                        "Cloud/Hub=your Autodesk account; a duplicate name gets a numeric suffix.)"})
 

@@ -191,6 +191,18 @@ class _WrongPerspectiveReadbackViewport(_WholeModelFitViewport):
             self._cam.target = FakePoint(9, 8, 7)
 
 
+class _RetinaViewport(_WholeModelFitViewport):
+    """A 2x display: width/height in points, view space in device pixels, the target at the centre."""
+
+    def modelToViewSpace(self, p):
+        t = self._cam.target
+        return types.SimpleNamespace(x=2 * (self.width / 2 + (p.x - t.x) * self.width / 4),
+                                     y=2 * (self.height / 2 + (p.z - t.z) * self.height / 4))
+
+    def viewToModelSpace(self, pt):
+        return Viewport.viewToModelSpace(self, types.SimpleNamespace(x=pt.x / 2, y=pt.y / 2))
+
+
 def _project_focus_at_requested_fill(vp):
     """Make the assigned focus box read back at the requested viewport fill."""
     vp.modelToViewSpace = lambda p: types.SimpleNamespace(
@@ -1150,6 +1162,19 @@ class TestProjection:
         assert res["isError"] is True
         assert "Unknown projection 'perspective_ortho_faces'" in res["message"]
         assert "orthographic, perspective" in res["message"]
+
+    def test_a_retina_viewport_frames_a_perspective_focus_in_device_pixels(self, monkeypatch):
+        _install(monkeypatch, [self._part()])
+        vp = _RetinaViewport(camera=_camera())
+        monkeypatch.setattr(iv.app, "activeViewport", vp)
+        out = _payload(iv.handler(action="orient", orientation="front", projection="perspective",
+                                  focus="Part"))
+        assert out["applied"]["frame_fill"] == 1.0
+
+    def test_a_retina_viewport_measures_the_whole_visible_frame(self, monkeypatch):
+        _install(monkeypatch, [])
+        vp = _RetinaViewport(camera=_camera(), frame=(200.0, 100.0))
+        assert iv._frame_world_spans(vp) == (200.0, 100.0)
 
     def test_projection_combines_with_an_orientation_in_one_call(self, monkeypatch):
         import adsk.core

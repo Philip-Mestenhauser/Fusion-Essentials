@@ -52,9 +52,11 @@ def _add_one(design, name, expression, unit, comment, favorite):
 
     err_after, warn_after, _ = _timeline_health(design)
     if len(err_after) > len(err_before):
-        safe(lambda: p.deleteMe())
-        return None, (f"adding '{name}' introduced a timeline error ({err_after}); rolled back. "
-                "Check the expression/unit.")
+        if safe(lambda: p.deleteMe()) is True:
+            return None, (f"adding '{name}' introduced a timeline error ({err_after}); rolled "
+                          "back. Check the expression/unit.")
+        return None, (f"adding '{name}' introduced a timeline error ({err_after}) and its rollback "
+                      f"did not confirm, so '{name}' may remain - remove it with param_delete.")
     # Report the ACTUAL favorite state read back from the parameter, not the request - so a silently
     # failed isFavorite set doesn't surface as a false success.
     return {"parameter": _param_summary(p), "favorite": bool(safe(lambda: p.isFavorite, False)),

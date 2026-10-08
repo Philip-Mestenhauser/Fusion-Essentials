@@ -24,6 +24,15 @@ from . import _drawing_common
 app = adsk.core.Application.get()
 
 
+
+def _same_document(a, b):
+    """Whether two Document wrappers name the same document - by ==, since a wrapper is re-made per
+    read and `is` reads False for the same document."""
+    try:
+        return bool(a == b)
+    except Exception:
+        return False
+
 def handler(script: str, read_only: bool = False) -> dict:
     """See TOOL_DESCRIPTION."""
     # Require a `run` function taking a single argument (the Fusion script idiom).
@@ -66,7 +75,7 @@ def handler(script: str, read_only: bool = False) -> dict:
 
         if transaction_started and transacted_doc.isValid:
             current_doc = app.activeDocument
-            if current_doc is transacted_doc:
+            if _same_document(current_doc, transacted_doc):
                 app.executeTextCommand('PTransaction.Commit')
             else:
                 # Active document changed mid-script; commit against the original.
@@ -80,7 +89,7 @@ def handler(script: str, read_only: bool = False) -> dict:
         if transaction_started and transacted_doc and transacted_doc.isValid:
             try:
                 current_doc = app.activeDocument
-                if current_doc is transacted_doc:
+                if _same_document(current_doc, transacted_doc):
                     app.executeTextCommand('PTransaction.Abort')
                 else:
                     transacted_doc.activate()

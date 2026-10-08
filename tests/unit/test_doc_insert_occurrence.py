@@ -31,7 +31,7 @@ class FakeOccurrences(_NamedCollection):
         self.last_transform = transform
         self.last_as_ref = as_ref
         if self.insert_result == "default":
-            return make_occurrence(path="Part:1", referenced=as_ref)
+            return make_occurrence(path="Part:1", referenced=as_ref, transform2=transform)
         return self.insert_result
 
 
@@ -94,7 +94,18 @@ class TestPlacement:
         out = _payload(io.handler(document_id="urn:x", x=10, y=0, z=5, units="mm"))
         t = root_comp.occurrences.last_transform.translation
         assert abs(t.x - 1.0) < 1e-9 and abs(t.z - 0.5) < 1e-9
-        assert out["placed_at"]["x"] == 10
+        assert out["placed_at"] == {"x": 10.0, "y": 0.0, "z": 5.0, "units": "mm"}
+        assert out["placement_matches"] is True
+        assert out["note"].startswith("Inserted at the requested placement")
+
+    def test_a_placement_the_occurrence_does_not_read_is_not_claimed(self, monkeypatch):
+        design, root_comp = _install(monkeypatch)
+        root_comp.occurrences.insert_result = make_occurrence(path="Part:1", referenced=True,
+                                                              transform2=FakeMatrix3D())
+        out = _payload(io.handler(document_id="urn:x", x=10, y=0, z=5, units="mm"))
+        assert out["placed_at"] == {"x": 0.0, "y": 0.0, "z": 0.0, "units": "mm"}
+        assert out["placement_matches"] is False
+        assert "not the requested placement" in out["note"]
 
     def test_rotation_built(self, monkeypatch):
         design, root_comp = _install(monkeypatch)

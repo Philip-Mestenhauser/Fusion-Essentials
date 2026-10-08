@@ -88,6 +88,22 @@ class TestAddHandler:
         assert "rolled back" in res["message"]
         assert up.itemByName("BadP") is None          # removed again
 
+    def test_a_rollback_that_does_not_delete_says_the_parameter_may_remain(self, monkeypatch):
+        tl = make_timeline("A")
+        up = BreakingUserParameters([], timeline=tl)
+        real_add = up.add
+
+        def _undeletable_add(*a):
+            param = real_add(*a)
+            param.deleteMe = lambda: False
+            return param
+        monkeypatch.setattr(up, "add", _undeletable_add)
+        _stub_design(monkeypatch, _design(up, tl))
+        res = params.handler(name="BadP", expression="oops")
+        assert res["isError"] is True
+        assert "rolled back" not in res["message"]
+        assert "'BadP' may remain" in res["message"] and "param_delete" in res["message"]
+
     def test_add_requires_name_and_expression(self, monkeypatch):
         design = _design(FakeUserParameters(), FakeTimeline([]))
         _stub_design(monkeypatch, design)

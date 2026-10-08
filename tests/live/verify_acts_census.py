@@ -569,7 +569,8 @@ _CENSUS_EXT = [
     ("cam_select_geometry",
      lambda c: {"operation": "ProbeGeom", "selection": "probe",
                 "handles": [_ctx_get(c, "ext_top", "the flange top")],
-                "generate": False}, _selected(1), None),
+                "probing_type": "probing-z", "generate": False},
+     lambda p: _selected(1)(p) and p.get("probing_type") == "probing-z", None),
     ("cam_generate", {"target": HUB_MILL_SETUP, "skip_valid": True},
      _launched_on(HUB_MILL_SETUP, skip_valid=True), None),
 ]

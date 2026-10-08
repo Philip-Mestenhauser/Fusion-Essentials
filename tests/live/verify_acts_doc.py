@@ -768,7 +768,7 @@ _FINALE = [
 # comes back describes the pre-teardown state. Attested calls require fresh load/session identities;
 # legacy calls observe /health going down and answering again.
 _RELOAD_PROBE_GAP_S = 0.25
-_RELOAD_PROBE_TIMEOUT_S = 5.0
+_RELOAD_PROBE_TIMEOUT_S = 10.0
 # Attempt budgets, not deadlines, so the beat's cost is bounded the way poll_generation's is: 40
 # probes to catch the teardown and 60 to see the re-import answer, a quarter-second apart, each
 # probe itself capped by the timeout above. A budget that runs out ends the beat, never the wait.

@@ -28,6 +28,7 @@ import re
 import sys
 import tempfile
 import time
+import urllib.error
 
 # Fusion payloads carry non-ASCII (PMI symbols); the Windows console default cannot encode them.
 if hasattr(sys.stdout, "reconfigure"):
@@ -45,6 +46,7 @@ from verify_core import (
 # to one invalidate a receipt its content takes no part in.
 _NOT_THE_SWEEP = ("measure_api.py", "drawing_verify.py")
 _ATTESTATION_TCB = ("Fusion-Essentials.py", "lib/loaded_attestation.py")
+_BUSY_HEALTH_WINDOW_S = 120
 
 
 def source_hash(root=None):
@@ -252,13 +254,18 @@ def load_run_state(run_id):
         return json.load(fh)
 
 
+_NO_ACTIVE_DOCUMENT = "No active document. Open or create one first"
+
+
 def _document_now():
     """Read the active document handle and design count used by resume at a chunk boundary."""
     call = facade("call")
     is_error, doc = call("doc_get", {})
     if is_error or not isinstance(doc, dict):
+        # doc_get's own no-document refusal is the one error that means Fusion holds none.
+        none = is_error and str(doc).startswith(_NO_ACTIVE_DOCUMENT)
         return {"name": None, "document_id": None, "document_handle": None,
-                "feature_count": None, "state": "unknown"}
+                "feature_count": None, "state": "none" if none else "unknown"}
     active = doc.get("active")
     if active is not None and not isinstance(active, dict):
         active = {}
@@ -897,7 +904,16 @@ def run(write_json, keep_open=False, trace=False, shots_dir=None, acts_spec=None
     print(f"server ok: {health.get('server')} v{health.get('version', '?')}")
 
     def current_attestation():
-        return attestation_identity(health_gate())
+        # Fusion's main thread can stay busy past an act's generation launch, so a mid-run /health
+        # that times out is retried for a bounded window before it fails the run.
+        deadline = time.time() + _BUSY_HEALTH_WINDOW_S
+        while True:
+            try:
+                return attestation_identity(health_gate())
+            except (TimeoutError, urllib.error.URLError):
+                if time.time() >= deadline:
+                    raise
+                time.sleep(10)
 
     current_document = _document_now() if run_id and resume else None
     if run_id and resume:

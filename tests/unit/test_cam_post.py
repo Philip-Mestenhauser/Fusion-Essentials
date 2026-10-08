@@ -1178,6 +1178,18 @@ class TestPostLog:
         assert cp._cam_log_root(str(temp)) == str(tmp_path / "Fusion360CAM")
         assert cp._cam_log_root(str(tmp_path)) == str(tmp_path / "Fusion360CAM")
 
+    def test_a_bare_macos_temp_dir_finds_the_logs_under_its_neutron_tree(self, monkeypatch, tmp_path):
+        # macOS: the process temp dir is $TMPDIR itself, and the logs sit in $TMPDIR/Neutron.
+        (tmp_path / "Neutron").mkdir()
+        root = cp._cam_log_root(str(tmp_path))
+        assert root == str(tmp_path / "Neutron" / "Fusion360CAM")
+        self._make_log(tmp_path / "Neutron" / "Fusion360CAM", "1002",
+                       "Error: This postprocessor requires a machine configuration "
+                       "for 5-axis simultaneous toolpath.\n")
+        monkeypatch.setattr(cp, "_CAM_LOG_ROOT", root)
+        assert any("requires a machine configuration" in e
+                   for e in cp._post_log_errors("1002", 0.0))
+
     def test_a_failed_post_reads_its_log_from_the_climbed_root(self, monkeypatch, tmp_path):
         root = tmp_path / "Fusion360CAM"
         self._make_log(root, "1002", "Error: This postprocessor requires a machine configuration "

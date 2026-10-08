@@ -108,7 +108,7 @@ def _tool_at(library_url, index):
     if not url:
         return None, f"Bad tool_library_url '{library_url}'."
     lib = safe(lambda: libs.toolLibraryAtURL(url))
-    if not lib:
+    if lib is None:
         return None, f"Could not load tool library at '{library_url}'."
     n = safe(lambda: lib.count, 0) or 0
     index, ierr = _index_in_range(index, n, "the library")

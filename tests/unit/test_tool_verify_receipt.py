@@ -1492,6 +1492,29 @@ class TestFacadeLateBinding:
         assert rows[0][1] == "blocked"
         assert seen == [("doc_get", {})]
 
+    def test_no_open_document_lets_doc_new_through_without_a_guard(self, monkeypatch):
+        seen, opened = [], []
+
+        def call(tool, args):
+            seen.append((tool, dict(args)))
+            if tool == "doc_new":
+                opened.append("session:new")
+                return False, {"created": True, "document_handle": "session:new"}
+            if tool == "doc_get" and not opened:
+                return True, "No active document. Open or create one first (doc_open / doc_new)."
+            if tool == "doc_get":
+                return False, {"active": {"name": "Untitled", "document_handle": "session:new"}}
+            return False, {}
+        monkeypatch.setattr(tool_verify, "call", call)
+        pin = {"state": "unknown", "handle": None, "snapshot": None,
+               "known_documents": {}}
+        rows = tool_verify.run_steps(
+            [("doc_new", {}, "ok", None), ("model_write", {}, "ok", None)],
+            {}, sleep_s=0, document_pin=pin, guarded_tools={"doc_new", "model_write"})
+        assert [row[1] for row in rows] == ["pass", "pass"]
+        assert ("doc_new", {}) in seen
+        assert ("model_write", {"expect_document": "session:new"}) in seen
+
     def test_failed_initial_pin_blocks_later_doc_get_capture_and_write(self, monkeypatch):
         judged, captured, seen = [], [], []
         doc_reads = iter([

@@ -296,6 +296,15 @@ def _kp_name(kp_value):
     return str(kp_value)
 
 
+
+def _roll_back(joint_origin):
+    """The rollback sentence for a rejected joint origin, true to whether deleteMe removed it."""
+    if safe(lambda: joint_origin.deleteMe()) is True:
+        return "Rolled it back; nothing changed."
+    label = safe(lambda: joint_origin.name) or "the new joint origin"
+    return (f"Its rollback did not confirm, so '{label}' may remain - remove it with "
+            "design_delete_feature.")
+
 def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
             x: float = 0.0, y: float = 0.0, z: float = 0.0,
             sketch_name: str = "", entity_index: int = 0, keypoint: str = "start",
@@ -410,9 +419,8 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
     landed_here = (_common.same_component(landed_comp, comp) if landed_comp is not None else None)
     if landed_here is False:
         got_name = landed_name or "?"
-        safe(lambda: joint_origin.deleteMe())
         return error(f"Joint origin landed on component '{got_name}', not the requested "
-                     f"'{want_name}'. Rolled it back; nothing changed.")
+                     f"'{want_name}'. {_roll_back(joint_origin)}")
 
     jo_name_final, rename_warning = apply_rename(joint_origin, name)
 
@@ -426,11 +434,10 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
         if None not in got:
             dist = ((got[0] - ox) ** 2 + (got[1] - oy) ** 2 + (got[2] - oz) ** 2) ** 0.5
             if dist > 1e-3:                        # > 0.001 cm: the offsets did not take
-                safe(lambda: joint_origin.deleteMe())
                 return error(
                     f"Coordinate offsets did not take: asked "
                     f"{[round(v, 4) for v in (ox, oy, oz)]} cm but the joint origin reports "
-                    f"{[round(v, 4) for v in got]} cm. Rolled the origin back; nothing changed.")
+                    f"{[round(v, 4) for v in got]} cm. {_roll_back(joint_origin)}")
             inv = (1.0 / scale) if scale else 1.0
             offset_params = {"x": round(got[0] * inv, 6), "y": round(got[1] * inv, 6),
                              "z": round(got[2] * inv, 6), "units": units}
@@ -465,10 +472,9 @@ def handler(anchor: str = "coordinates", target: str = "at", units: str = "mm",
                             "z": round(oz * inv, 6), "units": units}
                 dist = ((ox - cx) ** 2 + (oy - cy) ** 2 + (oz - cz) ** 2) ** 0.5
                 if dist > 1e-3:   # > 0.001 cm (0.01 mm): the origin did NOT land on the computed anchor
-                    safe(lambda: joint_origin.deleteMe())
                     return error(
                         f"Joint origin landed at {readback} but the computed anchor was {computed} "
-                        f"(off by {round(dist, 4)} cm). Rolled the origin back; nothing changed.")
+                        f"(off by {round(dist, 4)} cm). {_roll_back(joint_origin)}")
 
     payload = {
     "created": True,

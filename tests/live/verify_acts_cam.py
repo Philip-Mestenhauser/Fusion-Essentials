@@ -1038,6 +1038,13 @@ _CAM_STORY = [
                               "generate": False},
      _op_created(CAM_SETUP, "adaptive"),
      ("adaptive_op", _recall("adaptive_op", lambda p: p["operation"]))),
+    # Fusion's own defaults for this cutter derive a fine stepdown (flute x 0.9 x 0.95) above the
+    # maximum stepdown (flute x 0.75), which errors at generation, so the pass gets one that fits.
+    ("cam_edit_operation", lambda c: {"operation": _ctx_get(c, "adaptive_op",
+                                                            "the created adaptive op"),
+                                      "parameters": {"fineStepdown": "5 mm"}},
+     lambda p: p["edited"] is True and p["changed"][0]["name"] == "fineStepdown"
+     and "5 mm" in str(p["changed"][0]["after"]), None),
     ("cam_create_operation", {"setup": CAM_SETUP, "strategy": "contour2d",
                               "tool_scope": "document", "tool_index": _FLAT_MILL,
                               "generate": False},
@@ -2917,6 +2924,9 @@ def _generation_identity_probe(rows, setup, operation, max_polls=40, document_pi
                   f"{operation!r} retained stepover={expression!r} after setup reconciliation")
 
 
+_UNRUN_READ = "cancelled before it started running"
+
+
 def poll_generation(rows, notes, setup, max_polls=40, valued=None, document_pin=None):
     """Read cam_get_status until completed (bounded). Generation free-runs in the background and a
     status read returns immediately, so real wall-clock sits between reads. An errored op, an EMPTY
@@ -2932,13 +2942,17 @@ def poll_generation(rows, notes, setup, max_polls=40, valued=None, document_pin=
         if i:
             time.sleep(5)
         is_error, payload = call("cam_get_status", {"target": setup})
+        # A read queued behind a busy main thread is cancelled unrun - a missed read, not a verdict.
+        if is_error and _UNRUN_READ in str(payload) and i + 1 < max_polls:
+            continue
         if is_error:
             rows.append(("cam_get_status", "FAIL", str(payload)[:NOTE_MAX]))
             return
         states = payload.get("live_states", {})
         if states.get("errored"):
             rows.append(("cam_get_status", "FAIL",
-                         f"{states['errored']} operation(s) errored during generation"))
+                         f"{states['errored']} operation(s) errored during generation: "
+                         f"{states.get('samples')}"[:NOTE_MAX]))
             return
         if payload.get("completed"):
             empty = payload.get("empty_toolpaths") or []

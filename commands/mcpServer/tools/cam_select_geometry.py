@@ -1019,8 +1019,8 @@ def _apply_probe_stock(op, names, extra, setup=None):
 
 
 def _apply_probing_type(op, probing_type, extra):
-    """The error for writing probingType, or None - it decides the probe STRATEGY variant and gates
-    whether generation can produce a path at all, so it lands WITH the selection, not after."""
+    """The error for writing probingType, or None - written once the selection has landed, since
+    the selection is what decides which probing types are allowed."""
     p = safe(lambda: op.parameters.itemByName(_PROBING_TYPE_PARAM))
     if p is None:
         return (f"Operation '{safe(lambda: op.name)}' has no '{_PROBING_TYPE_PARAM}' parameter, so "
@@ -1036,8 +1036,12 @@ def _apply_probing_type(op, probing_type, extra):
                 + enumeration_remedy(str(e), written, PARAM_READ, p))
     after = safe(lambda: p.expression)
     if after is None or unquote_expression(after) != unquote_expression(str(probing_type)):
-        shown = "UNCONFIRMED" if after is None else f"reads back '{after}'"
-        return f"Setting {_PROBING_TYPE_PARAM}='{probing_type}' did not take - it {shown}."
+        shown = "UNCONFIRMED" if after is None else f"reads back '{unquote_expression(after)}'"
+        gate = "allow_" + unquote_expression(str(probing_type)).replace("-", "_")
+        allowed = safe(lambda: op.parameters.itemByName(gate).expression)
+        why = (f" {gate} reads '{allowed}' for this selection - pick faces that type can probe, "
+               "or a type this selection allows." if allowed is not None else "")
+        return f"Setting {_PROBING_TYPE_PARAM}='{probing_type}' did not take - it {shown}.{why}"
     extra["probing_type"] = unquote_expression(after)
     if quoted:
         extra.setdefault("quoted", []).append(_PROBING_TYPE_PARAM)
@@ -1492,6 +1496,15 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
     # A probe op whose probingType still reads its 'probing-unknown' default cannot generate a
     # path ('No valid probe operations found.') - refused here, before ANYTHING lands, rather than
     # letting the selection through for a launch that cannot succeed.
+    if selection == _PROBE and probing_type is not None:
+        p = safe(lambda: op.parameters.itemByName(_PROBING_TYPE_PARAM))
+        if p is None:
+            return error(f"Operation '{safe(lambda: op.name)}' has no '{_PROBING_TYPE_PARAM}' "
+                         "parameter, so 'probing_type' cannot be set on it. Drop 'probing_type'. "
+                         "Nothing was changed.")
+        _w, _q, cerr = choice_quoting(p, safe(lambda: p.expression), probing_type)
+        if cerr:
+            return error(f"probing_type='{probing_type}' {cerr} Nothing was changed.")
     if selection == _PROBE and probing_type is None:
         p = safe(lambda: op.parameters.itemByName(_PROBING_TYPE_PARAM))
         current = unquote_expression(safe(lambda: p.expression) or "") if p is not None else None
@@ -1524,10 +1537,6 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
     # 'quoted' names every parameter this call WRAPPED to match what it already stored - the mode
     # engage below appends to the same list. Absent means each request was written as it was sent.
     extra = {"quoted": wrapped} if wrapped else {}
-    if selection == _PROBE and probing_type is not None:
-        perr = _apply_probing_type(op, probing_type, extra)
-        if perr:
-            return error(_retained(applied, perr))
     if selection == _SURFACE_GROUP:
         offsets = {k: knobs.get(k) for k in _OFFSET_KNOBS_KEYS}
         count, aerr = _apply_surface_group(op, entities, machine_over_holes,
@@ -1554,6 +1563,14 @@ def handler(operation: str = "", selection: str = "", handles=None, bodies=None,
                      "rejected. Check the geometry matches the strategy (edges for chain, the pocket "
                      "floor face for pocket, bodies for silhouette/pocket_recognition, whole sketches "
                      "for sketch, cylinder faces for holes, the surface set's faces for surfaces)."))
+    # probingType lands AFTER the selection: its allow_probing_* gates are computed from the
+    # selected faces, and before one exists a write is silently dropped (measured, 2705.1.30).
+    if selection == _PROBE and probing_type is not None:
+        perr = _apply_probing_type(op, probing_type, extra)
+        if perr:
+            return error(_retained(applied, f"{perr} The selection ({record['selections']} "
+                                   "item(s)) was applied before this failure and REMAINS on the "
+                                   "operation."))
     result.update(record)
     result.update(extra)
     # Bounded through the shared capped-list renderer: this list is as long as the selection, and a

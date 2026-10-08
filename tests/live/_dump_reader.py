@@ -19,6 +19,8 @@ MAP_BLURB = ("the dump-post reader: read_dump/parse_dump turn a dump.cps .dmp in
 _EVENT = re.compile(r"^\s*(-?\d+):\s*(?:EXPANDED\s+)?([A-Za-z0-9_]+)\((.*)\)\s*$")
 _SWEEP = re.compile(r"^\s*sweep:\s*(\S+)deg\s*$")
 _PLANE = re.compile(r"^\s*normal:.*\((XY|ZX|YZ)\)\s*$")
+_NORMAL = re.compile(r"^\s*normal:\s*X=(\S+)\s+Y=(\S+)\s+Z=(\S+)")
+_PITCH = re.compile(r"^\s*helical pitch:\s*(\S+)\s*$")
 _PLANES = {"XY": ("x", "y", "z"), "ZX": ("z", "x", "y"), "YZ": ("y", "z", "x")}
 
 # wire event -> (kind, xyz start, tool-axis start or None, feed index or None, arc-centre start or
@@ -147,11 +149,15 @@ def parse_dump(text):
         if match is None:
             if arc is not None:
                 sweep, plane = _SWEEP.match(line), _PLANE.match(line)
+                normal, pitch = _NORMAL.match(line), _PITCH.match(line)
                 if sweep:
                     arc["sweep_deg"] = _num(sweep.group(1))
                 if plane:
                     arc["plane"] = plane.group(1)
-                if line.strip() == "spiral" or line.strip().startswith("helical pitch:"):
+                if normal:
+                    arc["normal"] = tuple(_num(v) for v in normal.groups())
+                # A zero pitch is a planar arc in a tilted plane, not a helix.
+                if line.strip() == "spiral" or (pitch and _num(pitch.group(1)) != 0):
                     arc["unsupported_path"] = line.strip()
             continue
         arc = None
@@ -208,10 +214,12 @@ def _arc_points(row):
     start, plane, sweep = row.get("start"), row.get("plane"), row.get("sweep_deg")
     if row.get("unsupported_path"):
         return [], "spiral or helical arc is unsupported"
+    if start is not None and plane not in _PLANES and row.get("normal") and sweep is not None:
+        return _tilted_arc_points(row, start, sweep)
     if start is None or plane not in _PLANES or sweep is None:
         return [], "arc needs a start in this section, a primary plane and a finite sweep"
-    if not 0 < sweep <= 360:
-        return [], "arc sweep must be in (0, 360] degrees"
+    if not 0 < sweep < math.inf:
+        return [], "arc sweep must be a positive finite angle"
     a, b, fixed = _PLANES[plane]
     ca, cb = row["c" + a], row["c" + b]
     radius = math.hypot(start[a] - ca, start[b] - cb)
@@ -234,6 +242,48 @@ def _arc_points(row):
         travel = (direction * (quarter * math.pi / 2 - angle)) % math.tau
         if travel <= math.radians(sweep + 1e-6):
             points.append({a: ca + radius * da, b: cb + radius * db, fixed: row[fixed]})
+    return points, None
+
+
+def _tilted_arc_points(row, start, sweep):
+    """_arc_points for an arc whose stated normal is no primary plane: it turns right-handed about
+    that normal (clockwise reverses it), and the endpoint check below is what holds that to the row."""
+    if not 0 < sweep < math.inf or any(_num(v) is None for v in row["normal"]):
+        return [], "arc needs a finite normal and a positive finite sweep"
+    nlen = math.hypot(*row["normal"])
+    if not nlen:
+        return [], "arc normal has no length"
+    n = [v / nlen for v in row["normal"]]
+    c = [row["c" + k] for k in "xyz"]
+    u0 = [start[k] - c[i] for i, k in enumerate("xyz")]
+    e0 = [row[k] - c[i] for i, k in enumerate("xyz")]
+    radius = math.hypot(*u0)
+    # the normal is printed to six decimals, so planarity is judged in that band.
+    flat = 1e-6 + radius * 1e-5
+    if (not math.isfinite(radius) or not radius
+            or not math.isclose(radius, math.hypot(*e0), rel_tol=1e-9, abs_tol=1e-6)
+            or abs(sum(a * b for a, b in zip(u0, n))) > flat
+            or abs(sum(a * b for a, b in zip(e0, n))) > flat):
+        return [], "arc endpoints and centre do not describe a circle in its stated plane"
+    u = [v / radius for v in u0]
+    w = [n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0]]
+    direction = -1 if row["clockwise"] else 1
+
+    def at(theta):
+        return {k: c[i] + radius * (math.cos(theta) * u[i] + math.sin(theta) * w[i])
+                for i, k in enumerate("xyz")}
+
+    end = at(direction * math.radians(sweep))
+    slack = radius * math.radians(1e-6) + flat
+    if any(abs(row[k] - end[k]) > slack for k in "xyz"):
+        return [], "arc sweep and direction do not reach its endpoint"
+    points = [start, row]
+    for i in range(3):
+        if not (u[i] or w[i]):
+            continue
+        for theta in (math.atan2(w[i], u[i]), math.atan2(w[i], u[i]) + math.pi):
+            if (direction * theta) % math.tau <= math.radians(sweep + 1e-6):
+                points.append(at(theta))
     return points, None
 
 

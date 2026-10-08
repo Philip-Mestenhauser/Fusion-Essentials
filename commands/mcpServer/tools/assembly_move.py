@@ -62,6 +62,14 @@ def handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: float = 
     corner_before = _corner(occ)
 
     import math
+    # Every move is composed onto the CURRENT transform, and a rotation pivots about its origin: an
+    # unreadable one has no stand-in, since identity or the world origin would re-place the part.
+    base = safe(lambda: occ.transform2)
+    origin = safe(lambda: base.translation.asPoint()) if base is not None else None
+    if base is None or origin is None:
+        return error(f"'{safe(lambda: occ.name)}' did not read its current transform, so a relative "
+                     "move has nothing to compose onto - nothing was moved. Re-read it with "
+                     "assembly_get and retry.")
     mat = adsk.core.Matrix3D.create()
     axis_desc = None
     try:
@@ -82,15 +90,11 @@ def handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: float = 
             else:
                 axis_vec = ax[1]
                 # rotate about the world axis through the occurrence's current origin
-                t = safe(lambda: occ.transform2)
-                origin = safe(lambda: t.translation.asPoint()) or adsk.core.Point3D.create(0, 0, 0)
                 mat.setToRotation(math.radians(float(rotate_deg)),
                                   adsk.core.Vector3D.create(*axis_vec), origin)
                 axis_desc = (rotate_axis or "z").strip().lower()
         elif multi:
             # compose X then Y then Z rotations about the occurrence's current origin
-            t = safe(lambda: occ.transform2)
-            origin = safe(lambda: t.translation.asPoint()) or adsk.core.Point3D.create(0, 0, 0)
             for ang, vec in ((rotate_x, (1, 0, 0)), (rotate_y, (0, 1, 0)), (rotate_z, (0, 0, 1))):
                 if ang:
                     r = adsk.core.Matrix3D.create()
@@ -108,7 +112,6 @@ def handler(occurrence: str = "", dx: float = 0.0, dy: float = 0.0, dz: float = 
         # compose onto the existing transform. transform2 (not transform) - it is the property
         # assembly_get's own read path prefers, with a live-verified bbox-correctness comment
         # (_occ_world in assembly_get.py); the read-modify-write here matches that same source of truth.
-        base = safe(lambda: occ.transform2) or adsk.core.Matrix3D.create()
         before_arr = safe(lambda: tuple(base.asArray()))
         base.transformBy(mat)
         occ.transform2 = base

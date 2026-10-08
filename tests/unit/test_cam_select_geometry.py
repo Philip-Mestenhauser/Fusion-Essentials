@@ -1487,6 +1487,20 @@ def _probe_op(name="Probe WCS1", stock=None, mode="selection-model", probing_typ
     return _Op(name, params, **kw)
 
 
+class _SelectionGatedType(FakeCAMParameter):
+    """probingType whose write is dropped while probe_selection is empty - the allow_probing_*
+    gates are computed from the selected faces (measured, 2705.1.30)."""
+
+    def __init__(self, selection_param, **kw):
+        self._selection_param = selection_param
+        super().__init__("probingType", **kw)
+
+    @FakeCAMParameter.expression.setter
+    def expression(self, value):
+        if self._selection_param.value.value:
+            self._expression = value
+
+
 class TestProbeSelection:
     def test_probe_lands_on_the_probe_selection_parameter(self, monkeypatch):
         op = _probe_op()
@@ -1686,6 +1700,17 @@ class TestProbingType:
         assert op.parameters.itemByName("probingType").expression == "'probing-z'"
         assert out["probing_type"] == "probing-z"
         assert out["launched"] is True
+
+    def test_the_type_is_written_after_the_selection_it_is_gated_on(self, monkeypatch):
+        op = _probe_op(probing_type="'probing-unknown'", probing_type_choices=self._CHOICES)
+        params = op.parameters
+        gated = _SelectionGatedType(params.itemByName("probe_selection"),
+                                    expression="'probing-unknown'", choices=self._CHOICES)
+        params.swap("probingType", gated)
+        _install(monkeypatch, _CAM([_Setup([op])]), [_Face()])
+        out = _payload(cg.handler(operation="Probe WCS1", selection="probe", handles=["f"],
+                                  probing_type="probing-z", generate=False))
+        assert gated.expression == "'probing-z'" and out["probing_type"] == "probing-z"
 
     def test_a_probing_type_matching_no_choice_is_refused_naming_the_choices(self, monkeypatch):
         op = _probe_op(probing_type="'probing-unknown'", probing_type_choices=self._CHOICES)

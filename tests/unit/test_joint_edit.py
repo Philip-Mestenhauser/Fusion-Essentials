@@ -688,6 +688,16 @@ class TestSwallowedSets:
         assert "Edits already applied before the failure: flipped=True" in res["message"]
         assert joint.isFlipped is True
 
+    def test_a_failed_motion_names_the_inputs_that_had_landed(self, monkeypatch):
+        _, joint = _install(["BoomPivot"])
+        monkeypatch.setattr(jt, "_resolve_input", lambda d, spec: ("NEW1", spec, None))
+        monkeypatch.setattr(jt, "_apply_motion", lambda *a, **k: (False, "setter refused"))
+        res = jt.handler(joint_name="BoomPivot", input_one="Bracket:1/JO", joint_type="slider",
+                         axis="x")
+        assert res["isError"] is True and "setter refused" in res["message"]
+        assert "Edits already applied before the failure: input_one=Bracket:1/JO" in res["message"]
+        assert joint.geometryOrOriginOne == "NEW1"
+
     def test_an_unreadable_offset_publishes_null_and_the_marker(self):
         joint = _joint()
         joint.offset = _BlindParameter()

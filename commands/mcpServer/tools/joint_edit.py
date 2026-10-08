@@ -294,7 +294,9 @@ def handler(joint_name: str = "", input_one: str = "", input_two: str = "",
             did, err = _apply_motion(joint, jtype, _AXES.get(ax_name, 2), wa_entity,
                                      slide_axis_idx=slide_idx)
             if not did:
-                return error(f"Could not set {jtype} motion: {err or 'setter returned false'}.")
+                return error(f"Could not set {jtype} motion: {err or 'setter returned false'}. "
+                             f"Edits already applied before the failure: "
+                             f"{_applied_so_far(changed)}.")
             changed["joint_type"] = jtype
             if wa_name:
                 changed["world_axis"] = wa_name
@@ -384,6 +386,8 @@ def handler(joint_name: str = "", input_one: str = "", input_two: str = "",
             msg += (" - a re-selected input likely appears LATER in the timeline than the joint; a "
                     "joint can only reference geometry/origins created before it. Recreate the joint "
                     "after that input with joint_create.")
+        if changed:
+            msg += f" Edits already applied before the failure: {_applied_so_far(changed)}."
         return error(msg)
     finally:
         if rolled:
