@@ -646,6 +646,18 @@ class TestSuppressVisibility:
         assert col.getCellByRowName("Small").isSuppressed is True
         assert out["feature"] == "Fillet1"
 
+    def test_suppress_column_is_built_on_the_timeline_object(self, monkeypatch):
+        # Fusion refuses a Sketch, Occurrence or Joint ENTITY with "3 : invalid feature argument";
+        # the timeline object is accepted for every kind, so that is what the column is built on.
+        feat = FakeFeature("Rigid1")
+        feat.timelineObject = object()
+        d = _install(monkeypatch, _Design(configured=True, features={"Rigid1": feat}))
+        self._stub_feature(monkeypatch, d)
+        dc.handler(action="add_configuration", name="Small")
+        res = dc.handler(action="add_suppress", feature="Rigid1", suppressed_in=["Small"])
+        assert not res.get("isError")
+        assert d.configurationTopTable.columns.added[0].feature is feat.timelineObject
+
     def test_an_ambiguous_feature_name_is_refused_before_any_column_lands(self, monkeypatch):
         # timeline names are NOT design-wide unique (two components can each hold an 'Extrude1');
         # the typed kind refuses with the name@index candidates instead of suppressing whichever

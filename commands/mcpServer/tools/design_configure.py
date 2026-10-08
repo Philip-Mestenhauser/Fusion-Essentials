@@ -347,7 +347,12 @@ def _do_add_suppress(design, table, feature, suppressed_in):
     unknown = [r for r in suppressed_in if r not in set(_row_names(table))]
     if unknown:
         return error(f"suppressed_in names unknown configurations: {', '.join(unknown)}.")
-    col = table.columns.addSuppressColumn(feat)  # MUTATION
+    # addSuppressColumn takes the TIMELINE object. A modelling feature (Extrude, Fillet) is also
+    # accepted as its entity, but a Sketch, an Occurrence and a Joint are refused that way with
+    # "3 : invalid feature argument" (measured), so hand over the timeline object whenever the
+    # entity carries one.
+    target = safe(lambda: feat.timelineObject) or feat
+    col = table.columns.addSuppressColumn(target)  # MUTATION
     if not col:
         return error(f"addSuppressColumn for '{feature}' returned null.")
     for rname in suppressed_in:
